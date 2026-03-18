@@ -1887,7 +1887,9 @@ export class ContractTracker {
   }
 
   checkExpiries(): void {
-    const today = new Date().toISOString().split('T')[0];
+    // Use ET local date components to avoid UTC vs ET midnight mismatch
+    const etNow = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+    const today = `${etNow.getFullYear()}-${String(etNow.getMonth() + 1).padStart(2, '0')}-${String(etNow.getDate()).padStart(2, '0')}`;
     const rthCloseEt = this.isAfterRTHClose();
     for (const [symbol, contract] of this.contracts) {
       if (contract.state === 'EXPIRED') continue;
