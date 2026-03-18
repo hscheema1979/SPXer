@@ -7,3 +7,4 @@ data/*.db-wal
 data/archive/
 .worktrees/
 *.parquet
+logs/
