@@ -7,6 +7,9 @@ import { fetchOptionsChain, fetchExpirations } from '../providers/tradier';
 let lastSpxPrice: number | null = null;
 export function setLastSpxPrice(p: number) { lastSpxPrice = p; }
 
+let trackerCountFn: () => number = () => 0;
+export function setTrackerCountFn(fn: () => number) { trackerCountFn = fn; }
+
 const startTime = Date.now();
 
 export function startHttpServer(port: number): { app: Express; httpServer: Server } {
@@ -19,7 +22,7 @@ export function startHttpServer(port: number): { app: Express; httpServer: Serve
     mode: getMarketMode(),
     lastSpxPrice,
     dbSizeMb: getDbSizeMb(),
-    trackedContracts: getAllActiveContracts().length,
+    trackedContracts: trackerCountFn(),
   }));
 
   app.get('/spx/snapshot', (_, res) => {

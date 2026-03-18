@@ -3,12 +3,12 @@ import { getAllActiveContracts, upsertBar, upsertBars, upsertContract, getDbSize
 import { fetchYahooBars } from './providers/yahoo';
 import { fetchSpxQuote, fetchOptionsChain, fetchExpirations, fetchSpxTimesales, fetchBatchQuotes } from './providers/tradier';
 import { fetchScreenerSnapshot } from './providers/tv-screener';
-import { buildBars, fillGaps } from './pipeline/bar-builder';
+import { buildBars, fillGaps, rawToBar } from './pipeline/bar-builder';
 import { aggregate } from './pipeline/aggregator';
 import { computeIndicators, seedState, resetVWAP } from './pipeline/indicator-engine';
 import { ContractTracker } from './pipeline/contract-tracker';
 import { getMarketMode, getActiveExpirations } from './pipeline/scheduler';
-import { startHttpServer } from './server/http';
+import { startHttpServer, setLastSpxPrice, setTrackerCountFn } from './server/http';
 import { startWsServer, broadcast } from './server/ws';
 import { config, STRIKE_BAND, STRIKE_INTERVAL, POLL_UNDERLYING_MS, POLL_OPTIONS_RTH_MS, POLL_OPTIONS_OVERNIGHT_MS, POLL_SCREENER_MS } from './config';
 
@@ -52,6 +52,13 @@ async function pollUnderlying(): Promise<void> {
       const raw = await fetchSpxTimesales(today);
       if (raw.length) {
         bars = buildBars('SPX', '1m', raw.slice(-5));
+      } else {
+        // Timesales may lag on session open — fall back to live quote to prime lastSpxPrice
+        const quote = await fetchSpxQuote();
+        if (quote.last > 0) {
+          const ts = Math.floor(Date.now() / 1000);
+          bars = [rawToBar('SPX', '1m', { ts, open: quote.last, high: quote.ask || quote.last, low: quote.bid || quote.last, close: quote.last, volume: quote.volume ?? 0 })];
+        }
       }
     } else {
       const raw = await fetchYahooBars('ES=F', '1m', '1d');
@@ -63,6 +70,7 @@ async function pollUnderlying(): Promise<void> {
       const enriched = bars.map(b => ({ ...b, indicators: computeIndicators(b, 2) }));
       upsertBars(enriched);
       lastSpxPrice = enriched[enriched.length - 1].close;
+      setLastSpxPrice(lastSpxPrice);
       broadcast({ type: 'spx_bar', data: enriched[enriched.length - 1] });
     }
   } catch (e) {
@@ -80,9 +88,11 @@ async function pollOptions(): Promise<void> {
     // Full chain fetch to discover new contracts entering the band
     for (const expiry of active) {
       const chain = await fetchOptionsChain('SPX', expiry);
-      tracker.updateBand(lastSpxPrice, chain.map(c => ({
+      const added = tracker.updateBand(lastSpxPrice, chain.map(c => ({
         symbol: c.symbol, strike: c.strike, expiry: c.expiry, type: c.type
       })));
+      for (const c of added) upsertContract(c);
+      if (added.length) console.log(`[poll:options] added ${added.length} contracts for ${expiry}`);
       broadcast({ type: 'chain_update', expiry, data: chain });
     }
 
@@ -124,6 +134,7 @@ async function main(): Promise<void> {
 
   const { app, httpServer } = startHttpServer(config.port);
   startWsServer(httpServer); // pass http.Server, not Express app
+  setTrackerCountFn(() => tracker.getActive().length + tracker.getSticky().length);
 
   setInterval(pollUnderlying, POLL_UNDERLYING_MS);
   const optionsInterval = getMarketMode() === 'rth' ? POLL_OPTIONS_RTH_MS : POLL_OPTIONS_OVERNIGHT_MS;
