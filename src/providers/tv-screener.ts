@@ -7,9 +7,13 @@ const COLUMNS = [
   'Volatility.D','Recommend.All','volume',
 ];
 
-async function scan(market: string, names: string[]): Promise<ScreenerSnapshot[]> {
+async function scan(market: string, names: string[], exchangeFilter?: string): Promise<ScreenerSnapshot[]> {
+  const filter: object[] = [{ left: 'name', operation: 'in_range', right: names }];
+  if (exchangeFilter) {
+    filter.push({ left: 'exchange', operation: 'equal', right: exchangeFilter });
+  }
   const body = {
-    filter: [{ left: 'name', operation: 'in_range', right: names }],
+    filter,
     columns: COLUMNS,
     sort: { sortBy: 'name', sortOrder: 'asc' },
     range: [0, names.length],
@@ -28,7 +32,7 @@ async function scan(market: string, names: string[]): Promise<ScreenerSnapshot[]
 
 export async function fetchScreenerSnapshot(): Promise<ScreenerSnapshot[]> {
   const [futures, equities] = await Promise.all([
-    scan('futures', ['ES1!','NQ1!','RTY1!','VX1!','MES1!']),
+    scan('futures', ['ES1!','NQ1!','RTY1!','VX1!','MES1!'], 'CME_MINI'),
     scan('america', ['SPY','QQQ','XLF','XLK','XLE','XLV','XLI','XLY','XLP','GLD','TLT']),
   ]);
   return [...futures, ...equities];
