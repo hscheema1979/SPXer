@@ -47,7 +47,7 @@ async function pollUnderlying(): Promise<void> {
   const today = new Date().toISOString().split('T')[0];
 
   try {
-    let bars;
+    let bars: ReturnType<typeof buildBars> | undefined;
     if (mode === 'rth') {
       const raw = await fetchSpxTimesales(today);
       if (raw.length) {

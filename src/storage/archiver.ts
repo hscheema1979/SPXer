@@ -28,6 +28,8 @@ export async function archiveExpired(): Promise<void> {
 async function exportToParquet(symbols: string[], outPath: string): Promise<void> {
   let duckdb: any;
   try {
+    // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+    // @ts-ignore — duckdb is optional; graceful fallback below if not installed
     duckdb = await import('duckdb');
   } catch {
     console.log('[archiver] duckdb not available, skipping parquet export');
