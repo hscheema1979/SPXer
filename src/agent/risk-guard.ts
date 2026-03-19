@@ -14,8 +14,8 @@ export function defaultRiskConfig(): RiskConfig {
     maxDailyLoss: parseFloat(process.env.AGENT_MAX_DAILY_LOSS || '2000'),
     maxPositions: parseInt(process.env.AGENT_MAX_POSITIONS || '2'),
     maxRiskPerTrade: parseFloat(process.env.AGENT_MAX_RISK_PER_TRADE || '500'),
-    cutoffTimeET: process.env.AGENT_CUTOFF_ET || '15:30',
-    minMinutesToClose: parseInt(process.env.AGENT_MIN_MINS_TO_CLOSE || '60'),
+    cutoffTimeET: process.env.AGENT_CUTOFF_ET || '15:45',
+    minMinutesToClose: parseInt(process.env.AGENT_MIN_MINS_TO_CLOSE || '15'),
     paperMode: process.env.AGENT_PAPER !== 'false',  // paper by default
   };
 }
