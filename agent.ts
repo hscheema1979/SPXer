@@ -1,64 +1,84 @@
 /**
- * SPXer Autonomous Trading Agent
+ * SPXer Autonomous Trading Agent — Multi-Model Consensus
  *
- * Runs continuously in a tmux session, fetching full market state
- * (sub-minute quotes + 1m/3m/5m bars) and asking Claude to review
- * everything every 15-60s. Claude determines what matters today —
- * no hardcoded signal rules.
+ * Architecture:
+ *   Tier 1 (every 15-60s): 3 scanners run in parallel via LiteLLM → Chutes
+ *     - Kimi K2.5   — momentum pattern recognition
+ *     - GLM-5       — technical analysis
+ *     - MiniMax M2.5 — trend assessment
+ *
+ *   Tier 2 (on demand): Claude Opus judge via direct Anthropic API
+ *     - Only fires when a scanner flags confidence >= 0.5
+ *     - Gets full market context + all 3 scanner reads
+ *     - Makes the actual buy/sell decision
+ *
+ * Cost: scanners ~free (Chutes), Opus ~$0.03/call × 5-15/day = ~$0.15-0.45/day
  *
  * Usage:
- *   npm run agent              # paper mode (default, safe)
+ *   npm run agent              # paper mode (default)
  *   npm run agent:live         # live trading (AGENT_PAPER=false)
  *
- * Recommended: run inside tmux so it survives SSH disconnects:
+ * Run in tmux for persistence:
  *   tmux new-session -d -s agent 'cd /home/ubuntu/SPXer && npm run agent'
- *   tmux attach -t agent       # to watch it
- *
- * Models (AGENT_MODEL env):
- *   claude-haiku-4-5-20251001    ~$0.002/call  (default — good for 15-30s polling)
- *   claude-sonnet-4-6            ~$0.006/call  (sharper judgment, use if budget allows)
- *
- * API key: reuses ANTHROPIC_API_KEY from .env (same key Claude Code uses)
- *
- * Required env: ANTHROPIC_API_KEY, TRADIER_TOKEN
- * Live only:    TRADIER_ACCOUNT_ID, AGENT_PAPER=false
+ *   tmux attach -t agent
  */
 import * as dotenv from 'dotenv';
 dotenv.config();
 
 import { fetchMarketSnapshot } from './src/agent/market-feed';
 import { assess } from './src/agent/judgment-engine';
+import type { ScannerResult, Assessment } from './src/agent/judgment-engine';
 import { openPosition, closePosition } from './src/agent/trade-executor';
 import { PositionManager } from './src/agent/position-manager';
 import { RiskGuard, defaultRiskConfig } from './src/agent/risk-guard';
 import { logEntry, logClose, logRejected } from './src/agent/audit-log';
+import { getScanners } from './src/agent/model-clients';
 import type { AgentSignal, AgentDecision } from './src/agent/types';
 
 const guard = new RiskGuard(defaultRiskConfig());
 const positions = new PositionManager(guard.isPaper);
 
 let cycleCount = 0;
-let lastAssessmentTs = 0;
-let nextCheckSecs = 30; // Claude sets this dynamically each cycle
+let nextCheckSecs = 30;
+let judgeCallCount = 0;
 
 function banner(): void {
-  const model = process.env.AGENT_MODEL || 'claude-haiku-4-5-20251001';
-  console.log('\n╔══════════════════════════════════════════════════════╗');
-  console.log('║         SPXer Continuous Trading Agent               ║');
-  console.log(`║  Mode: ${guard.isPaper ? 'PAPER (no real orders)          ' : 'LIVE  ⚠️  REAL MONEY              '}║`);
-  console.log(`║  Model: ${model.padEnd(44)}║`);
-  console.log(`║  Poll: dynamic 15-60s (Claude decides tempo)         ║`);
-  console.log(`║  Risk/trade: $${guard.config.maxRiskPerTrade} | Daily limit: $${guard.config.maxDailyLoss}        ║`);
-  console.log(`║  Max positions: ${guard.config.maxPositions} | Cutoff: ${guard.config.cutoffTimeET} ET              ║`);
-  console.log('╚══════════════════════════════════════════════════════╝\n');
+  const scanners = getScanners();
+  console.log('\n╔══════════════════════════════════════════════════════════╗');
+  console.log('║       SPXer Multi-Model Trading Agent                    ║');
+  console.log(`║  Mode: ${guard.isPaper ? 'PAPER (no real orders)              ' : 'LIVE  ⚠️  REAL MONEY                  '}║`);
+  console.log('║                                                          ║');
+  console.log('║  Scanners (Tier 1, via LiteLLM → Chutes):               ║');
+  for (const s of scanners) {
+    console.log(`║    • ${(s.label + ' (' + s.model + ')').padEnd(50)}║`);
+  }
+  console.log('║  Judge (Tier 2, on escalation only):                     ║');
+  console.log(`║    • Claude Opus (direct Anthropic API)                   ║`);
+  console.log('║                                                          ║');
+  console.log(`║  Poll: dynamic 15-60s (scanners set tempo)               ║`);
+  console.log(`║  Risk/trade: $${guard.config.maxRiskPerTrade} | Daily limit: $${guard.config.maxDailyLoss}            ║`);
+  console.log(`║  Max positions: ${guard.config.maxPositions} | Cutoff: ${guard.config.cutoffTimeET} ET                  ║`);
+  console.log('╚══════════════════════════════════════════════════════════╝\n');
+}
+
+function logScannerResults(results: ScannerResult[]): void {
+  for (const sr of results) {
+    const setupCount = sr.setups.length;
+    const hot = sr.setups.filter(s => s.confidence >= 0.5).length;
+    const icon = sr.error ? '✗' : hot > 0 ? '🔥' : setupCount > 0 ? '•' : '·';
+    console.log(`[scan] ${icon} ${sr.scannerId.padEnd(8)} | ${sr.marketRead.slice(0, 80)}${sr.error ? ` ERR: ${sr.error.slice(0, 40)}` : ''}`);
+    for (const s of sr.setups) {
+      console.log(`[scan]    → ${s.symbol} ${s.setupType} conf=${s.confidence.toFixed(2)} ${s.urgency}`);
+    }
+  }
 }
 
 async function runCycle(): Promise<void> {
   cycleCount++;
   const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
-  console.log(`\n[agent] ── cycle #${cycleCount} @ ${ts} ──`);
+  console.log(`\n[agent] ═══ cycle #${cycleCount} @ ${ts} | judge calls today: ${judgeCallCount} ═══`);
 
-  // 1. Fetch full market state (sub-minute quotes + 1m/3m/5m)
+  // 1. Fetch full market state
   let snap: Awaited<ReturnType<typeof fetchMarketSnapshot>>;
   try {
     snap = await fetchMarketSnapshot();
@@ -70,10 +90,10 @@ async function runCycle(): Promise<void> {
 
   console.log(`[agent] ${snap.contracts.length} contracts | SPX ${snap.spx.price.toFixed(2)} | ${snap.minutesToClose}m to close`);
 
-  // 2. Monitor existing positions (stop-loss / take-profit / time exit)
+  // 2. Monitor existing positions
   await positions.monitor(pnl => guard.recordLoss(pnl));
 
-  // 3. Risk guard check before calling Claude
+  // 3. Risk guard check
   const riskCheck = guard.check(positions.getAll(), snap.minutesToClose);
   if (!riskCheck.allowed) {
     console.log(`[agent] Risk guard: ${riskCheck.reason}`);
@@ -81,18 +101,29 @@ async function runCycle(): Promise<void> {
     return;
   }
 
-  // 4. Ask Claude for full market assessment
-  let assessment: Awaited<ReturnType<typeof assess>>;
+  // 4. Two-tier assessment: scanners → optional judge escalation
+  let result: { scannerResults: ScannerResult[]; assessment: Assessment };
   try {
-    assessment = await assess(snap, positions.getAll(), guard);
-    lastAssessmentTs = Date.now();
+    result = await assess(snap, positions.getAll(), guard);
   } catch (e) {
-    console.error('[agent] Claude assessment failed:', (e as Error).message);
+    console.error('[agent] Assessment failed:', (e as Error).message);
     nextCheckSecs = 30;
     return;
   }
 
-  console.log(`[agent] Market read: ${assessment.marketRead}`);
+  const { scannerResults, assessment } = result;
+
+  // Log scanner results
+  logScannerResults(scannerResults);
+
+  // Log assessment
+  const tierLabel = assessment.tier === 'judge' ? 'OPUS JUDGE' : 'SCANNER ONLY';
+  if (assessment.tier === 'judge') judgeCallCount++;
+  console.log(`[agent] ── ${tierLabel} ──`);
+  console.log(`[agent] Market: ${assessment.marketRead}`);
+  if (assessment.scannerAgreement && assessment.tier === 'judge') {
+    console.log(`[agent] Scanner agreement: ${assessment.scannerAgreement}`);
+  }
   console.log(`[agent] Action: ${assessment.action.toUpperCase()} | Confidence: ${(assessment.confidence * 100).toFixed(0)}%`);
   console.log(`[agent] Reasoning: ${assessment.reasoning}`);
   if (assessment.concerns.length > 0) {
@@ -100,28 +131,24 @@ async function runCycle(): Promise<void> {
   }
   console.log(`[agent] Next check: ${assessment.nextCheckSecs}s`);
 
-  // Update dynamic polling interval
   nextCheckSecs = assessment.nextCheckSecs;
 
-  // 5. Execute if Claude recommends a trade
+  // 5. Execute if judge recommends a trade
   if (assessment.action === 'buy' && assessment.targetSymbol && assessment.positionSize > 0) {
-    // Find contract meta
     const contractState = snap.contracts.find(c => c.meta.symbol === assessment.targetSymbol);
     if (!contractState) {
-      console.warn(`[agent] Target symbol ${assessment.targetSymbol} not in snapshot — skipping`);
+      console.warn(`[agent] Target ${assessment.targetSymbol} not in snapshot — skipping`);
       return;
     }
 
-    // Re-check risk (positions may have changed)
     const recheck = guard.check(positions.getAll(), snap.minutesToClose);
     if (!recheck.allowed) {
       logRejected(recheck.reason!, assessment.targetSymbol, 'buy');
       return;
     }
 
-    // Build synthetic signal/decision objects for the audit log
     const signal: AgentSignal = {
-      type: 'RSI_BREAK_40', // placeholder type — Claude determined the signal
+      type: 'MULTI_MODEL_CONSENSUS',
       symbol: contractState.meta.symbol,
       side: contractState.meta.side,
       strike: contractState.meta.strike,
@@ -163,7 +190,6 @@ async function runCycle(): Promise<void> {
     }
 
   } else if (assessment.action === 'sell_to_close' && assessment.targetSymbol) {
-    // Claude wants to close a position early
     const pos = positions.getAll().find(p => p.symbol === assessment.targetSymbol);
     if (pos) {
       const contractState = snap.contracts.find(c => c.meta.symbol === assessment.targetSymbol);
@@ -180,7 +206,7 @@ async function main(): Promise<void> {
   banner();
 
   if (!process.env.ANTHROPIC_API_KEY) {
-    console.error('[agent] ANTHROPIC_API_KEY not set');
+    console.error('[agent] ANTHROPIC_API_KEY not set (needed for Opus judge)');
     process.exit(1);
   }
   if (!guard.isPaper && !process.env.TRADIER_ACCOUNT_ID) {
@@ -191,7 +217,6 @@ async function main(): Promise<void> {
   console.log('[agent] Starting — first cycle in 5s...');
   await new Promise(r => setTimeout(r, 5000));
 
-  // Continuous dynamic-interval loop (Claude controls the tempo)
   while (true) {
     try {
       await runCycle();
