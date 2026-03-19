@@ -8,3 +8,4 @@ data/archive/
 .worktrees/
 *.parquet
 logs/
+.omc/
