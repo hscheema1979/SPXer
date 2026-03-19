@@ -177,7 +177,8 @@ Your edge is reading flow AND technicals together:
 - Be DECISIVE. If 2+ scanners flag a setup AND flow supports it, ACT. Waiting for
   perfect confirmation on 0DTE means watching the move happen without you.
 - RSI extremes on SPX (<20 = extreme oversold, >80 = extreme overbought) are
-  high-probability mean-reversion signals on 0DTE. RSI <15 is an emergency signal.
+  high-probability mean-reversion signals on 0DTE. RSI <15 is an emergency signal —
+  OTM calls/puts can go 10-50x from these levels in under 30 minutes. ACT.
 
 Respond ONLY with valid JSON — no markdown, no text outside the JSON.
 {
@@ -315,14 +316,15 @@ async function replayMoment(
   // Get entry prices for key contracts
   const contractMap = new Map(contracts.map(c => [`${c.type}_${c.strike}`, c]));
 
-  // Run all judges in parallel
+  // Run judges sequentially to avoid claude session contention
   const judgeConfigs = getJudgeConfigs();
-  console.log(`  Running ${judgeConfigs.length} judges in parallel...`);
+  console.log(`  Running ${judgeConfigs.length} judges sequentially...`);
 
-  const results = await Promise.allSettled(
-    judgeConfigs.map(async (cfg) => {
+  const rawResults: PromiseSettledResult<JudgeDecision>[] = [];
+  for (const cfg of judgeConfigs) {
+    rawResults.push(await (async (): Promise<PromiseSettledResult<JudgeDecision>> => {
       try {
-        const text = await askModel(cfg, JUDGE_SYSTEM, prompt);
+        const text = await askModel(cfg, JUDGE_SYSTEM, prompt, 90000);
         const clean = extractJSON(text);
         const parsed = JSON.parse(clean);
 
@@ -343,7 +345,7 @@ async function replayMoment(
         console.log(`  [${cfg.id}] ${parsed.action?.toUpperCase()} conf=${(parsed.confidence*100).toFixed(0)}% ${parsed.target_symbol ?? ''}`);
         console.log(`     → ${String(parsed.reasoning).slice(0, 150)}`);
 
-        return {
+        return { status: 'fulfilled' as const, value: {
           judgeId: cfg.id,
           action: parsed.action || 'wait',
           targetSymbol: parsed.target_symbol || null,
@@ -352,29 +354,20 @@ async function replayMoment(
           stopLoss: parsed.stop_loss ? parseFloat(parsed.stop_loss) : null,
           takeProfit: parsed.take_profit ? parseFloat(parsed.take_profit) : null,
           reasoning: String(parsed.reasoning || ''),
-        } as JudgeDecision;
+        } as JudgeDecision };
       } catch (e) {
         console.log(`  [${cfg.id}] ERROR: ${(e as Error).message.slice(0, 80)}`);
-        return {
-          judgeId: cfg.id,
-          action: 'wait',
-          targetSymbol: null,
-          confidence: 0,
-          entryPrice: null,
-          stopLoss: null,
-          takeProfit: null,
-          reasoning: '',
-          error: (e as Error).message,
-        } as JudgeDecision;
+        return { status: 'rejected' as const, reason: (e as Error).message };
       }
-    })
-  );
+    })());
+  }
+  const results = rawResults;
 
   const decisions = results.map((r, i) =>
     r.status === 'fulfilled' ? r.value : {
       judgeId: judgeConfigs[i].id, action: 'wait', targetSymbol: null,
       confidence: 0, entryPrice: null, stopLoss: null, takeProfit: null,
-      reasoning: '', error: String(r.reason),
+      reasoning: '', error: String((r as PromiseRejectedResult).reason),
     }
   );
 

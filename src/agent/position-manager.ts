@@ -90,10 +90,12 @@ export class PositionManager {
   }
 
   private minutesToClose(): number {
-    const etOffset = 5 * 60 * 60 * 1000;
-    const nowET = new Date(Date.now() - etOffset);
-    const closeET = new Date(nowET);
-    closeET.setUTCHours(16, 0, 0, 0);
-    return Math.max(0, Math.floor((closeET.getTime() - nowET.getTime()) / 60000));
+    // Use Intl to correctly handle EST/EDT automatically
+    const now = new Date();
+    const etStr = now.toLocaleString('en-US', { timeZone: 'America/New_York', hour12: false });
+    const timePart = etStr.split(', ')[1];
+    const [h, m] = timePart.split(':').map(Number);
+    const minsNow = h * 60 + m;
+    return Math.max(0, 16 * 60 - minsNow);
   }
 }

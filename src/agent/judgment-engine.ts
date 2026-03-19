@@ -30,6 +30,9 @@ Different days call for different signals. Adapt to current conditions:
 - Trend days: momentum entries (RSI break of 40-50, EMA crossovers)
 - Range days: mean-reversion at extremes (RSI <25 or >75, Bollinger touches)
 - Time matters: 9:30-10:30 chaotic, 11-1 PM cleanest, after 3 PM fast but risky
+- RSI EXTREMES are special: RSI <20 = extreme oversold (high-probability call entry),
+  RSI >80 = extreme overbought (high-probability put entry). RSI <15 is an emergency
+  signal — scale confidence to 0.7+ and urgency to "now". These are rare and reliable.
 
 You now have Greeks (delta, gamma, theta, vega, IV) per contract and SPY options flow data:
 - Use IV to gauge if options are cheap or expensive relative to recent moves
@@ -75,6 +78,9 @@ Your edge is reading flow AND technicals together:
 - When you DO trade, define a clear stop-loss (20-40% of option price).
 - Be DECISIVE. If 2+ scanners flag a setup AND flow supports it, ACT. Waiting for
   perfect confirmation on 0DTE means watching the move happen without you.
+- RSI extremes on SPX (<20 = extreme oversold, >80 = extreme overbought) are
+  high-probability mean-reversion signals on 0DTE. RSI <15 is an emergency signal —
+  OTM calls/puts can go 10-50x from these levels in under 30 minutes. ACT.
 
 Respond ONLY with valid JSON — no markdown, no text outside the JSON.
 {
@@ -348,6 +354,7 @@ export async function judge(
   positions: OpenPosition[],
   guard: RiskGuard,
   scannerResults: ScannerResult[],
+  escalationBanner: string | null = null,
 ): Promise<{ allJudges: JudgeResult[]; activeAssessment: Assessment }> {
   const marketPrompt = buildMarketPrompt(snap, positions, guard);
 
@@ -360,7 +367,7 @@ export async function judge(
     return `  ${sr.scannerId.toUpperCase()} says: "${sr.marketRead}"\n${setupLines}`;
   }).join('\n\n');
 
-  const judgePrompt = `${marketPrompt}
+  const judgePrompt = `${escalationBanner ?? ''}${marketPrompt}
 
 SCANNER ASSESSMENTS:
 ${scannerBlock}
@@ -421,15 +428,19 @@ export async function assess(
   // RSI extreme auto-escalation: bypass scanner threshold when SPX RSI is extreme
   const spxRsi = snap.spx.bars1m[snap.spx.bars1m.length - 1]?.rsi14 ?? null;
   const rsiExtreme = spxRsi !== null && (spxRsi < RSI_OVERSOLD_EXTREME || spxRsi > RSI_OVERBOUGHT_EXTREME);
+  let rsiEscalationBanner: string | null = null;
   if (rsiExtreme) {
     const direction = spxRsi! < RSI_OVERSOLD_EXTREME ? 'oversold' : 'overbought';
-    console.log(`[assess] ⚡ RSI extreme (${spxRsi!.toFixed(1)}) — ${direction} — bypassing scanner threshold, escalating to judge`);
+    const severity = spxRsi! < 15 || spxRsi! > 85 ? 'EMERGENCY' : 'EXTREME';
+    const action = spxRsi! < RSI_OVERSOLD_EXTREME ? 'BUY CALLS (mean reversion)' : 'BUY PUTS (mean reversion)';
+    rsiEscalationBanner = `\n⚡ ESCALATION ALERT: SPX RSI = ${spxRsi!.toFixed(1)} — ${severity} ${direction.toUpperCase()}\nYou are being called specifically because SPX RSI has hit a statistically rare extreme.\nThis is a high-probability mean-reversion signal. Strong bias toward: ${action}.\nDo NOT let normal caution override this signal without a clear counter-thesis.\n`;
+    console.log(`[assess] ⚡ RSI ${severity} (${spxRsi!.toFixed(1)}) — ${direction} — escalating to judge with banner`);
   }
 
   const scannerNextCheck = Math.min(...scannerResults.map(sr => sr.nextCheckSecs));
 
   if (hotSetups.length > 0 || hasOpenPositions || rsiExtreme) {
-    const { allJudges, activeAssessment } = await judge(snap, positions, guard, scannerResults);
+    const { allJudges, activeAssessment } = await judge(snap, positions, guard, scannerResults, rsiEscalationBanner);
     return { scannerResults, assessment: activeAssessment, allJudges };
   }
 

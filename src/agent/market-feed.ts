@@ -34,13 +34,14 @@ export interface ContractMeta {
   expiry: string;
 }
 
-/** Aggregate 1m bars into N-minute bars */
+/** Aggregate 1m bars into N-minute bars, aligned from the newest bar backward */
 function aggregate(bars1m: BarSummary[], periodMins: number): BarSummary[] {
   const result: BarSummary[] = [];
-  for (let i = 0; i + periodMins <= bars1m.length; i += periodMins) {
-    const slice = bars1m.slice(i, i + periodMins);
+  // Align from the end so the most recent complete+partial window is always included
+  for (let i = bars1m.length - 1; i >= periodMins - 1; i -= periodMins) {
+    const slice = bars1m.slice(i - periodMins + 1, i + 1);
     const last = slice[slice.length - 1];
-    result.push({
+    result.unshift({
       ts: last.ts,
       close: last.close,
       // Use the last bar's indicators as the aggregated representation
@@ -243,19 +244,8 @@ export async function fetchMarketSnapshot(): Promise<MarketSnapshot> {
   // 2. Active contracts from SPXer — during RTH only show today's 0DTE
   const activeRaw: any[] = await get<any[]>(`${SPXER_BASE}/contracts/active`).catch(() => []);
   const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-  const contracts: ContractMeta[] = activeRaw
-    .filter(c => c.state === 'ACTIVE' || c.state === 'STICKY')
-    // During RTH, show ONLY today's 0DTE contracts — tomorrow's have no gamma and pollute the view
-    .filter(c => !isRth || c.expiry === todayET)
-    .map(c => ({ symbol: c.symbol, side: c.type, strike: c.strike, expiry: c.expiry }))
-    .sort((a, b) => {
-      const a0dte = a.expiry === todayET ? 0 : 1;
-      const b0dte = b.expiry === todayET ? 0 : 1;
-      if (a0dte !== b0dte) return a0dte - b0dte;
-      return a.expiry.localeCompare(b.expiry);
-    });
 
-  // 3. SPX 1m bars from SPXer (last 25 → enough for 3m and 5m aggregation)
+  // 3. SPX 1m bars from SPXer — fetch early so we have the price for ATM sorting
   const spxBars1mRaw: any[] = await get<any[]>(`${SPXER_BASE}/spx/bars?tf=1m&n=25`).catch(() => []);
   const spxBars1m: BarSummary[] = spxBars1mRaw.map(b => ({
     ts: b.ts, close: b.close,
@@ -265,13 +255,25 @@ export async function fetchMarketSnapshot(): Promise<MarketSnapshot> {
     hma5: b.indicators?.hma5 ?? null,
     hma19: b.indicators?.hma19 ?? null,
   }));
+  const latestSpxPrice = spxBars1m.length > 0 ? spxBars1m[spxBars1m.length - 1].close : 0;
+
+  const contracts: ContractMeta[] = activeRaw
+    .filter(c => c.state === 'ACTIVE' || c.state === 'STICKY')
+    // During RTH, show ONLY today's 0DTE contracts — tomorrow's have no gamma and pollute the view
+    .filter(c => !isRth || c.expiry === todayET)
+    .map(c => ({ symbol: c.symbol, side: c.type, strike: c.strike, expiry: c.expiry }))
+    // Sort by distance from ATM so the most relevant contracts are always selected first
+    .sort((a, b) => Math.abs(a.strike - latestSpxPrice) - Math.abs(b.strike - latestSpxPrice));
+
+  // 3. SPX bars — already fetched above for ATM sorting; reuse here
   const spxBars3m = aggregate(spxBars1m, 3);
   const spxBars5m = aggregate(spxBars1m, 5);
 
   const latestSpx = spxBars1m[spxBars1m.length - 1];
-  const prevSpx = spxBars1m.length > 1 ? spxBars1m[spxBars1m.length - 2] : null;
-  const spxChangePct = latestSpx && prevSpx
-    ? ((latestSpx.close - prevSpx.close) / prevSpx.close) * 100 : 0;
+  // Use first bar of the session (index 0) for session change; fallback to 1m diff
+  const sessionOpenSpx = spxBars1m.length > 1 ? spxBars1m[0] : null;
+  const spxChangePct = latestSpx && sessionOpenSpx
+    ? ((latestSpx.close - sessionOpenSpx.close) / sessionOpenSpx.close) * 100 : 0;
 
   // 4a. Fetch SPX Greeks chain + SPY flow in parallel (don't block main flow)
   const [greeksMap, spyFlow] = await Promise.all([
@@ -358,12 +360,11 @@ export async function fetchMarketSnapshot(): Promise<MarketSnapshot> {
     });
   }));
 
-  // Sort by momentum: highest RSI first (active movers at top)
-  contractStates.sort((a, b) => {
-    const ra = a.bars1m[a.bars1m.length - 1]?.rsi14 ?? 0;
-    const rb = b.bars1m[b.bars1m.length - 1]?.rsi14 ?? 0;
-    return rb - ra;
-  });
+  // Sort by distance from ATM so nearest-to-money contracts appear first in the prompt
+  const spxPrice = latestSpx?.close ?? latestSpxPrice;
+  contractStates.sort((a, b) =>
+    Math.abs(a.meta.strike - spxPrice) - Math.abs(b.meta.strike - spxPrice)
+  );
 
   return {
     ts: Date.now(),

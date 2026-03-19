@@ -7,7 +7,7 @@
  * Scanners (Tier 1):
  *   - Kimi K2.5   → api.kimi.com/coding/
  *   - GLM-5       → api.z.ai/api/anthropic
- *   - MiniMax M2.5 → api.minimax.io/anthropic
+ *   - MiniMax M2.7 → api.minimax.io/anthropic
  *
  * Judge (Tier 2):
  *   - Claude Opus  → default Anthropic endpoint (Pro subscription)
@@ -60,12 +60,12 @@ export function getScannerConfigs(): ModelConfig[] {
     });
   }
 
-  // MiniMax M2.5 via Claude Agent SDK
+  // MiniMax M2.7 via Claude Agent SDK
   if (process.env.MINIMAX_API_KEY) {
     configs.push({
       id: 'minimax',
-      label: 'MiniMax M2.5',
-      model: process.env.MINIMAX_MODEL || 'MiniMax-M1',
+      label: 'MiniMax M2.7',
+      model: process.env.MINIMAX_MODEL || 'MiniMax-M2.7',
       env: {
         ANTHROPIC_BASE_URL: process.env.MINIMAX_BASE_URL || 'https://api.minimax.io/anthropic',
         ANTHROPIC_API_KEY: process.env.MINIMAX_API_KEY,
@@ -94,6 +94,13 @@ export function getScannerConfigs(): ModelConfig[] {
 
 export function getJudgeConfigs(): ModelConfig[] {
   const judges: ModelConfig[] = [];
+
+  // Claude Haiku — fast, cheap, acts as a tiebreaker / momentum reader
+  judges.push({
+    id: 'haiku',
+    label: 'Claude Haiku',
+    model: process.env.HAIKU_MODEL || 'claude-haiku-4-5-20251001',
+  });
 
   // Claude Sonnet — fast, decisive, good at structured output
   judges.push({
@@ -135,6 +142,19 @@ export function getJudgeConfigs(): ModelConfig[] {
     });
   }
 
+  // MiniMax as judge — via Claude Agent SDK like the others
+  if (process.env.MINIMAX_API_KEY) {
+    judges.push({
+      id: 'minimax-judge',
+      label: 'MiniMax M2.7 (Judge)',
+      model: process.env.MINIMAX_MODEL || 'MiniMax-M2.7',
+      env: {
+        ANTHROPIC_BASE_URL: process.env.MINIMAX_BASE_URL || 'https://api.minimax.io/anthropic',
+        ANTHROPIC_API_KEY: process.env.MINIMAX_API_KEY,
+      },
+    });
+  }
+
   return judges;
 }
 
@@ -148,7 +168,16 @@ export function getActiveJudgeId(): string {
 // Unified query helper — all models go through Claude Agent SDK
 // ---------------------------------------------------------------------------
 
-export async function askModel(config: ModelConfig, systemPrompt: string, userPrompt: string): Promise<string> {
+export async function askModel(config: ModelConfig, systemPrompt: string, userPrompt: string, timeoutMs = 45000): Promise<string> {
+  return Promise.race([
+    askModelInner(config, systemPrompt, userPrompt),
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(`askModel timeout after ${timeoutMs}ms (${config.id})`)), timeoutMs)
+    ),
+  ]);
+}
+
+async function askModelInner(config: ModelConfig, systemPrompt: string, userPrompt: string): Promise<string> {
   let result = '';
   let lastAssistantText = '';
 
