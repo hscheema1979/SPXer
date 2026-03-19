@@ -1,168 +1,210 @@
 /**
  * SPXer Autonomous Trading Agent
  *
- * Polls SPXer every 60s for fresh bar data, detects candidate signals,
- * calls Claude for judgment, and executes trades via Tradier (or logs in paper mode).
+ * Runs continuously in a tmux session, fetching full market state
+ * (sub-minute quotes + 1m/3m/5m bars) and asking Claude to review
+ * everything every 15-60s. Claude determines what matters today —
+ * no hardcoded signal rules.
  *
  * Usage:
- *   tsx agent.ts                  # paper mode (default)
- *   AGENT_PAPER=false tsx agent.ts  # live trading
+ *   npm run agent              # paper mode (default, safe)
+ *   npm run agent:live         # live trading (AGENT_PAPER=false)
  *
- * Required env:
- *   ANTHROPIC_API_KEY  — Claude API key (judgment engine)
- *   TRADIER_TOKEN      — Tradier API token (data + execution)
- *   TRADIER_ACCOUNT_ID — Tradier account ID (live orders only)
+ * Recommended: run inside tmux so it survives SSH disconnects:
+ *   tmux new-session -d -s agent 'cd /home/ubuntu/SPXer && npm run agent'
+ *   tmux attach -t agent       # to watch it
  *
- * Optional env:
- *   AGENT_PAPER=true             default: true
- *   AGENT_MAX_DAILY_LOSS=2000    default: 2000
- *   AGENT_MAX_POSITIONS=2        default: 2
- *   AGENT_MAX_RISK_PER_TRADE=500 default: 500
- *   AGENT_CUTOFF_ET=15:30        default: 15:30 (no new entries after)
- *   AGENT_MIN_MINS_TO_CLOSE=60   default: 60 (skip signals < 60m to close)
- *   SPXER_URL=http://localhost:3600
+ * Models (AGENT_MODEL env):
+ *   claude-haiku-4-5-20251001    ~$0.002/call  (default — good for 15-30s polling)
+ *   claude-sonnet-4-6            ~$0.006/call  (sharper judgment, use if budget allows)
+ *
+ * API key: reuses ANTHROPIC_API_KEY from .env (same key Claude Code uses)
+ *
+ * Required env: ANTHROPIC_API_KEY, TRADIER_TOKEN
+ * Live only:    TRADIER_ACCOUNT_ID, AGENT_PAPER=false
  */
 import * as dotenv from 'dotenv';
 dotenv.config();
 
-import { fetchSnapshot } from './src/agent/market-feed';
-import { detectSignals } from './src/agent/signal-detector';
-import { getJudgment } from './src/agent/judgment-engine';
-import { openPosition } from './src/agent/trade-executor';
+import { fetchMarketSnapshot } from './src/agent/market-feed';
+import { assess } from './src/agent/judgment-engine';
+import { openPosition, closePosition } from './src/agent/trade-executor';
 import { PositionManager } from './src/agent/position-manager';
 import { RiskGuard, defaultRiskConfig } from './src/agent/risk-guard';
-import { logEntry, logRejected } from './src/agent/audit-log';
-import type { AuditEntry } from './src/agent/types';
-
-const POLL_INTERVAL_MS = 60_000;
-const MONITOR_INTERVAL_MS = 30_000;
+import { logEntry, logClose, logRejected } from './src/agent/audit-log';
+import type { AgentSignal, AgentDecision } from './src/agent/types';
 
 const guard = new RiskGuard(defaultRiskConfig());
 const positions = new PositionManager(guard.isPaper);
 
+let cycleCount = 0;
+let lastAssessmentTs = 0;
+let nextCheckSecs = 30; // Claude sets this dynamically each cycle
+
 function banner(): void {
-  console.log('');
-  console.log('╔══════════════════════════════════════════════╗');
-  console.log('║       SPXer Autonomous Trading Agent         ║');
-  console.log(`║  Mode: ${guard.isPaper ? 'PAPER (no real orders)     ' : 'LIVE  ⚠️  REAL MONEY         '}   ║`);
-  console.log(`║  Max risk/trade: $${guard.config.maxRiskPerTrade.toFixed(0).padEnd(6)} Daily limit: $${guard.config.maxDailyLoss.toFixed(0).padEnd(6)}║`);
-  console.log(`║  Max positions: ${guard.config.maxPositions}  Cutoff: ${guard.config.cutoffTimeET} ET           ║`);
-  console.log('╚══════════════════════════════════════════════╝');
-  console.log('');
+  const model = process.env.AGENT_MODEL || 'claude-haiku-4-5-20251001';
+  console.log('\n╔══════════════════════════════════════════════════════╗');
+  console.log('║         SPXer Continuous Trading Agent               ║');
+  console.log(`║  Mode: ${guard.isPaper ? 'PAPER (no real orders)          ' : 'LIVE  ⚠️  REAL MONEY              '}║`);
+  console.log(`║  Model: ${model.padEnd(44)}║`);
+  console.log(`║  Poll: dynamic 15-60s (Claude decides tempo)         ║`);
+  console.log(`║  Risk/trade: $${guard.config.maxRiskPerTrade} | Daily limit: $${guard.config.maxDailyLoss}        ║`);
+  console.log(`║  Max positions: ${guard.config.maxPositions} | Cutoff: ${guard.config.cutoffTimeET} ET              ║`);
+  console.log('╚══════════════════════════════════════════════════════╝\n');
 }
 
-async function pollCycle(): Promise<void> {
-  const cycleTs = new Date().toISOString();
-  console.log(`\n[agent] ── poll cycle ${cycleTs} ──`);
+async function runCycle(): Promise<void> {
+  cycleCount++;
+  const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
+  console.log(`\n[agent] ── cycle #${cycleCount} @ ${ts} ──`);
 
-  let snapshot: Awaited<ReturnType<typeof fetchSnapshot>>;
+  // 1. Fetch full market state (sub-minute quotes + 1m/3m/5m)
+  let snap: Awaited<ReturnType<typeof fetchMarketSnapshot>>;
   try {
-    snapshot = await fetchSnapshot();
+    snap = await fetchMarketSnapshot();
   } catch (e) {
-    console.error('[agent] Failed to fetch snapshot from SPXer:', e);
+    console.error('[agent] Market fetch failed:', (e as Error).message);
+    nextCheckSecs = 30;
     return;
   }
 
-  const { contracts, barsBySymbol, spxContext } = snapshot;
-  console.log(`[agent] ${contracts.length} contracts tracked | SPX: ${spxContext.price.toFixed(2)} (${spxContext.trend}) | ${spxContext.minutesToClose}m to close`);
+  console.log(`[agent] ${snap.contracts.length} contracts | SPX ${snap.spx.price.toFixed(2)} | ${snap.minutesToClose}m to close`);
 
-  // Check risk guard before signal detection (avoid wasted Claude calls)
-  const riskCheck = guard.check(positions.getAll(), spxContext.minutesToClose);
-  if (!riskCheck.allowed) {
-    console.log(`[agent] Risk guard: ${riskCheck.reason} — no new entries this cycle`);
-    return;
-  }
-
-  // Build quote map from latest bar close prices (SPXer batches quotes separately;
-  // for now use last bar close as proxy — good enough for signal detection)
-  const quotes = new Map(
-    [...barsBySymbol.entries()].map(([sym, bars]) => {
-      const last = bars[bars.length - 1];
-      return [sym, { last: last.close, bid: null, ask: null }];
-    })
-  );
-
-  const signals = detectSignals(contracts, barsBySymbol, quotes, spxContext);
-
-  if (signals.length === 0) {
-    console.log('[agent] No signals detected this cycle');
-    return;
-  }
-
-  console.log(`[agent] ${signals.length} signal(s) detected — sending to judgment engine`);
-
-  // Process signals sequentially (avoid placing duplicate positions on same contract)
-  for (const signal of signals) {
-    // Re-check risk guard for each signal (positions may have changed)
-    const check = guard.check(positions.getAll(), spxContext.minutesToClose);
-    if (!check.allowed) {
-      logRejected(check.reason!, signal.symbol, signal.type);
-      break;
-    }
-
-    console.log(`\n[agent] Signal: ${signal.type} on ${signal.symbol} (${signal.side} ${signal.strike})`);
-
-    let decision;
-    try {
-      decision = await getJudgment(signal, guard);
-    } catch (e) {
-      console.error('[agent] Judgment engine error:', e);
-      continue;
-    }
-
-    const entry: AuditEntry = { ts: Date.now(), signal, decision };
-
-    if (decision.action === 'buy' && decision.positionSize > 0) {
-      try {
-        const { position, execution } = await openPosition(signal, decision, guard.isPaper);
-        entry.execution = execution;
-
-        if (!execution.error) {
-          positions.add(position);
-        }
-      } catch (e) {
-        console.error('[agent] Execution error:', e);
-        entry.execution = { error: String(e), paper: guard.isPaper };
-      }
-    } else {
-      console.log(`[agent] Skipped ${signal.symbol}: ${decision.reasoning}`);
-    }
-
-    logEntry(entry);
-  }
-}
-
-async function monitorCycle(): Promise<void> {
+  // 2. Monitor existing positions (stop-loss / take-profit / time exit)
   await positions.monitor(pnl => guard.recordLoss(pnl));
+
+  // 3. Risk guard check before calling Claude
+  const riskCheck = guard.check(positions.getAll(), snap.minutesToClose);
+  if (!riskCheck.allowed) {
+    console.log(`[agent] Risk guard: ${riskCheck.reason}`);
+    nextCheckSecs = 60;
+    return;
+  }
+
+  // 4. Ask Claude for full market assessment
+  let assessment: Awaited<ReturnType<typeof assess>>;
+  try {
+    assessment = await assess(snap, positions.getAll(), guard);
+    lastAssessmentTs = Date.now();
+  } catch (e) {
+    console.error('[agent] Claude assessment failed:', (e as Error).message);
+    nextCheckSecs = 30;
+    return;
+  }
+
+  console.log(`[agent] Market read: ${assessment.marketRead}`);
+  console.log(`[agent] Action: ${assessment.action.toUpperCase()} | Confidence: ${(assessment.confidence * 100).toFixed(0)}%`);
+  console.log(`[agent] Reasoning: ${assessment.reasoning}`);
+  if (assessment.concerns.length > 0) {
+    console.log(`[agent] Concerns: ${assessment.concerns.join('; ')}`);
+  }
+  console.log(`[agent] Next check: ${assessment.nextCheckSecs}s`);
+
+  // Update dynamic polling interval
+  nextCheckSecs = assessment.nextCheckSecs;
+
+  // 5. Execute if Claude recommends a trade
+  if (assessment.action === 'buy' && assessment.targetSymbol && assessment.positionSize > 0) {
+    // Find contract meta
+    const contractState = snap.contracts.find(c => c.meta.symbol === assessment.targetSymbol);
+    if (!contractState) {
+      console.warn(`[agent] Target symbol ${assessment.targetSymbol} not in snapshot — skipping`);
+      return;
+    }
+
+    // Re-check risk (positions may have changed)
+    const recheck = guard.check(positions.getAll(), snap.minutesToClose);
+    if (!recheck.allowed) {
+      logRejected(recheck.reason!, assessment.targetSymbol, 'buy');
+      return;
+    }
+
+    // Build synthetic signal/decision objects for the audit log
+    const signal: AgentSignal = {
+      type: 'RSI_BREAK_40', // placeholder type — Claude determined the signal
+      symbol: contractState.meta.symbol,
+      side: contractState.meta.side,
+      strike: contractState.meta.strike,
+      expiry: contractState.meta.expiry,
+      currentPrice: contractState.quote.last ?? contractState.quote.mid ?? 0,
+      bid: contractState.quote.bid,
+      ask: contractState.quote.ask,
+      indicators: contractState.bars1m[contractState.bars1m.length - 1] ?? {},
+      recentBars: contractState.bars1m,
+      signalBarLow: assessment.stopLoss ?? (contractState.quote.last ?? 0) * 0.7,
+      spxContext: {
+        price: snap.spx.price,
+        changePercent: snap.spx.changePct,
+        trend: snap.spx.trend1m as any,
+        rsi14: snap.spx.bars1m[snap.spx.bars1m.length - 1]?.rsi14 ?? null,
+        minutesToClose: snap.minutesToClose,
+        mode: snap.mode,
+      },
+      ts: Date.now(),
+    };
+    const decision: AgentDecision = {
+      action: 'buy',
+      confidence: assessment.confidence,
+      positionSize: assessment.positionSize,
+      stopLoss: assessment.stopLoss ?? signal.signalBarLow,
+      takeProfit: assessment.takeProfit,
+      reasoning: assessment.reasoning,
+      concerns: assessment.concerns,
+      ts: Date.now(),
+    };
+
+    try {
+      const { position, execution } = await openPosition(signal, decision, guard.isPaper);
+      if (!execution.error) positions.add(position);
+      logEntry({ ts: Date.now(), signal, decision, execution });
+    } catch (e) {
+      console.error('[agent] Execution error:', e);
+      logEntry({ ts: Date.now(), signal, decision, execution: { error: String(e), paper: guard.isPaper } });
+    }
+
+  } else if (assessment.action === 'sell_to_close' && assessment.targetSymbol) {
+    // Claude wants to close a position early
+    const pos = positions.getAll().find(p => p.symbol === assessment.targetSymbol);
+    if (pos) {
+      const contractState = snap.contracts.find(c => c.meta.symbol === assessment.targetSymbol);
+      const currentPrice = contractState?.quote.last ?? pos.entryPrice;
+      await closePosition(pos, 'manual', currentPrice, guard.isPaper);
+      const pnl = (currentPrice - pos.entryPrice) * pos.quantity * 100;
+      guard.recordLoss(pnl);
+      logClose({ position: pos, closePrice: currentPrice, reason: 'manual', pnl, closedAt: Date.now() });
+    }
+  }
 }
 
 async function main(): Promise<void> {
   banner();
 
   if (!process.env.ANTHROPIC_API_KEY) {
-    console.error('[agent] ANTHROPIC_API_KEY not set — judgment engine requires it');
+    console.error('[agent] ANTHROPIC_API_KEY not set');
     process.exit(1);
   }
-
   if (!guard.isPaper && !process.env.TRADIER_ACCOUNT_ID) {
     console.error('[agent] TRADIER_ACCOUNT_ID required for live trading');
     process.exit(1);
   }
 
-  console.log('[agent] Starting — initial poll in 5s...');
+  console.log('[agent] Starting — first cycle in 5s...');
   await new Promise(r => setTimeout(r, 5000));
 
-  // Run an immediate cycle on startup
-  await pollCycle();
-
-  // Poll for new signals every 60s
-  setInterval(() => { pollCycle().catch(console.error); }, POLL_INTERVAL_MS);
-
-  // Monitor open positions every 30s
-  setInterval(() => { monitorCycle().catch(console.error); }, MONITOR_INTERVAL_MS);
-
-  process.on('SIGTERM', () => { console.log('[agent] Shutting down'); process.exit(0); });
-  process.on('SIGINT',  () => { console.log('[agent] Shutting down'); process.exit(0); });
+  // Continuous dynamic-interval loop (Claude controls the tempo)
+  while (true) {
+    try {
+      await runCycle();
+    } catch (e) {
+      console.error('[agent] Cycle error:', e);
+    }
+    const waitMs = nextCheckSecs * 1000;
+    console.log(`[agent] Sleeping ${nextCheckSecs}s...\n`);
+    await new Promise(r => setTimeout(r, waitMs));
+  }
 }
+
+process.on('SIGTERM', () => { console.log('\n[agent] Shutting down (SIGTERM)'); process.exit(0); });
+process.on('SIGINT',  () => { console.log('\n[agent] Shutting down (SIGINT)');  process.exit(0); });
 
 main().catch(e => { console.error('[agent] Fatal:', e); process.exit(1); });
