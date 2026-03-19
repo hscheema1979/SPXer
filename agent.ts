@@ -32,6 +32,7 @@ import { openPosition, closePosition } from './src/agent/trade-executor';
 import { PositionManager } from './src/agent/position-manager';
 import { RiskGuard, defaultRiskConfig } from './src/agent/risk-guard';
 import { logEntry, logClose, logRejected } from './src/agent/audit-log';
+import { writeStatus, logActivity } from './src/agent/reporter';
 import { getScannerConfigs } from './src/agent/model-clients';
 import type { AgentSignal, AgentDecision } from './src/agent/types';
 
@@ -132,6 +133,33 @@ async function runCycle(): Promise<void> {
   console.log(`[agent] Next check: ${assessment.nextCheckSecs}s`);
 
   nextCheckSecs = assessment.nextCheckSecs;
+
+  // 4b. Report status + activity
+  writeStatus({
+    ts: Date.now(),
+    timeET: snap.timeET,
+    cycle: cycleCount,
+    mode: snap.mode,
+    spxPrice: snap.spx.price,
+    minutesToClose: snap.minutesToClose,
+    contractsTracked: snap.contracts.length,
+    contractsWithBars: snap.contracts.filter(c => c.bars1m.length > 0).length,
+    openPositions: positions.getAll().length,
+    dailyPnL: guard.currentDailyLoss,
+    judgeCallsToday: judgeCallCount,
+    lastAction: assessment.action,
+    lastReasoning: assessment.reasoning,
+    scannerReads: scannerResults.map(sr => ({ id: sr.scannerId, read: sr.marketRead, setups: sr.setups.length })),
+    nextCheckSecs: assessment.nextCheckSecs,
+    upSince: '',
+  });
+
+  const hotSetups = scannerResults.flatMap(sr => sr.setups).filter(s => s.confidence >= 0.5);
+  if (assessment.tier === 'judge') {
+    logActivity({ ts: Date.now(), timeET: snap.timeET, cycle: cycleCount, event: 'escalate', summary: `Opus judge: ${assessment.action} ${assessment.targetSymbol ?? ''} conf=${assessment.confidence.toFixed(2)}`, details: { reasoning: assessment.reasoning } });
+  } else if (hotSetups.length > 0) {
+    logActivity({ ts: Date.now(), timeET: snap.timeET, cycle: cycleCount, event: 'scan', summary: `${hotSetups.length} hot setups detected`, details: { setups: hotSetups } });
+  }
 
   // 5. Execute if judge recommends a trade
   if (assessment.action === 'buy' && assessment.targetSymbol && assessment.positionSize > 0) {
