@@ -1,24 +1,21 @@
 /**
- * JudgmentEngine — two-tier continuous market assessment.
+ * JudgmentEngine — two-tier continuous market assessment via Claude Agent SDK.
  *
- * Tier 1 (Scanner): Kimi K2.5 + GLM-5 run in parallel every 15-30s via
- *   LiteLLM proxy (OpenAI-compatible). They scan all timeframes and flag
- *   setups building. Cheap and fast.
+ * All model calls go through query() from @anthropic-ai/claude-agent-sdk,
+ * using env overrides for third-party providers (Kimi, GLM, MiniMax).
+ * Everything runs on Pro subscription — no per-token billing.
  *
- * Tier 2 (Judge): Claude Opus fires ONLY when a scanner flags something
- *   interesting (confidence >= 0.5). Gets the full market context PLUS
- *   both scanner reads. Makes the actual trade decision.
- *
- * Cost: scanners ~free via Chutes, Opus ~$0.03/call × 5-15 calls/day = ~$0.15-0.45/day
+ * Tier 1 (Scanner): Kimi K2.5 + GLM-5 + MiniMax M2.5 in parallel
+ * Tier 2 (Judge): Claude Opus on escalation only
  */
 import type { MarketSnapshot, ContractState } from './market-feed';
 import type { OpenPosition } from './types';
 import type { RiskGuard } from './risk-guard';
-import { getScanners, getJudge } from './model-clients';
-import type { ScannerClient } from './model-clients';
+import { getScannerConfigs, getJudgeConfig, askModel } from './model-clients';
+import type { ModelConfig } from './model-clients';
 
 // ---------------------------------------------------------------------------
-// Shared prompt building
+// System prompts
 // ---------------------------------------------------------------------------
 
 const SCANNER_SYSTEM = `You are an expert 0DTE SPX options day-trader scanning for setups.
@@ -53,9 +50,8 @@ If nothing is happening, return empty setups array and longer next_check_secs.`;
 
 const JUDGE_SYSTEM = `You are a senior 0DTE SPX options trader making the final call.
 
-Two junior analysts (Kimi K2.5 and GLM-5) have been scanning the market and flagged
-potential setups. You now review their assessments alongside the FULL market data
-to decide whether to act.
+Multiple junior analysts have been scanning the market and flagged potential setups.
+You now review their assessments alongside the FULL market data to decide whether to act.
 
 Your edge is patience and multi-timeframe confirmation:
 - One timeframe alone is weak. Require 2+ timeframes aligning.
@@ -78,6 +74,10 @@ Respond ONLY with valid JSON — no markdown, no text outside the JSON.
   "concerns": ["<concern>"],
   "next_check_secs": <15-60>
 }`;
+
+// ---------------------------------------------------------------------------
+// Prompt formatting helpers
+// ---------------------------------------------------------------------------
 
 function formatBar(b: { close: number; rsi14: number | null; ema9: number | null; ema21: number | null; hma5: number | null } | undefined): string {
   if (!b) return 'n/a';
@@ -138,7 +138,7 @@ ${contractBlock}`;
 }
 
 // ---------------------------------------------------------------------------
-// Scanner output type
+// Scanner types
 // ---------------------------------------------------------------------------
 
 export interface ScannerSetup {
@@ -158,7 +158,7 @@ export interface ScannerResult {
 }
 
 // ---------------------------------------------------------------------------
-// Assessment output type (from judge)
+// Assessment type (from judge)
 // ---------------------------------------------------------------------------
 
 export interface Assessment {
@@ -178,74 +178,50 @@ export interface Assessment {
 }
 
 // ---------------------------------------------------------------------------
-// Tier 1: Scanners (Kimi/GLM direct via Anthropic SDK, MiniMax via OpenAI SDK)
+// JSON parser helper
 // ---------------------------------------------------------------------------
 
-/** Call an Anthropic-compatible scanner (Kimi direct, GLM-5 direct) */
-async function callAnthropicScanner(scanner: ScannerClient, prompt: string): Promise<string> {
-  const isThinkingModel = scanner.id === 'kimi';
-  const response = await scanner.anthropic!.messages.create({
-    model: scanner.model,
-    max_tokens: isThinkingModel ? 4000 : 800,
-    system: SCANNER_SYSTEM,
-    messages: [{ role: 'user', content: prompt }],
-  });
-  return response.content[0]?.type === 'text' ? response.content[0].text : '';
+function extractJSON(text: string): string {
+  return text.replace(/```json?\n?/g, '').replace(/```/g, '').trim();
 }
 
-/** Call an OpenAI-compatible scanner (MiniMax via LiteLLM/Chutes) */
-async function callOpenAIScanner(scanner: ScannerClient, prompt: string): Promise<string> {
-  const response = await scanner.openai!.chat.completions.create({
-    model: scanner.model,
-    max_tokens: 800,
-    messages: [
-      { role: 'system', content: SCANNER_SYSTEM },
-      { role: 'user', content: prompt },
-    ],
-  });
-  return response.choices[0]?.message?.content || '';
-}
+// ---------------------------------------------------------------------------
+// Tier 1: Scanners via askModel (Claude Agent SDK)
+// ---------------------------------------------------------------------------
 
-function parseScannerResponse(scannerId: string, text: string): ScannerResult {
-  const clean = text.replace(/```json?\n?/g, '').replace(/```/g, '').trim();
-
-  let parsed: any;
+async function runScanner(config: ModelConfig, prompt: string): Promise<ScannerResult> {
   try {
-    parsed = JSON.parse(clean);
-  } catch {
+    const text = await askModel(config, SCANNER_SYSTEM, prompt);
+    const clean = extractJSON(text);
+
+    let parsed: any;
+    try {
+      parsed = JSON.parse(clean);
+    } catch {
+      return {
+        scannerId: config.id,
+        marketRead: 'Parse error',
+        setups: [],
+        nextCheckSecs: 30,
+        error: `JSON parse failed: ${text.slice(0, 100)}`,
+      };
+    }
+
     return {
-      scannerId,
-      marketRead: 'Parse error',
-      setups: [],
-      nextCheckSecs: 30,
-      error: `JSON parse failed: ${text.slice(0, 100)}`,
+      scannerId: config.id,
+      marketRead: String(parsed.market_read || ''),
+      setups: (Array.isArray(parsed.setups) ? parsed.setups : []).map((s: any) => ({
+        symbol: String(s.symbol || ''),
+        setupType: String(s.setup_type || ''),
+        confidence: Math.max(0, Math.min(1, parseFloat(s.confidence) || 0)),
+        urgency: ['now', 'building', 'watch'].includes(s.urgency) ? s.urgency : 'watch',
+        notes: String(s.notes || ''),
+      })),
+      nextCheckSecs: Math.max(15, Math.min(120, parseInt(parsed.next_check_secs) || 30)),
     };
-  }
-
-  return {
-    scannerId,
-    marketRead: String(parsed.market_read || ''),
-    setups: (Array.isArray(parsed.setups) ? parsed.setups : []).map((s: any) => ({
-      symbol: String(s.symbol || ''),
-      setupType: String(s.setup_type || ''),
-      confidence: Math.max(0, Math.min(1, parseFloat(s.confidence) || 0)),
-      urgency: ['now', 'building', 'watch'].includes(s.urgency) ? s.urgency : 'watch',
-      notes: String(s.notes || ''),
-    })),
-    nextCheckSecs: Math.max(15, Math.min(120, parseInt(parsed.next_check_secs) || 30)),
-  };
-}
-
-async function runScanner(scanner: ScannerClient, prompt: string): Promise<ScannerResult> {
-  try {
-    const text = scanner.type === 'anthropic'
-      ? await callAnthropicScanner(scanner, prompt)
-      : await callOpenAIScanner(scanner, prompt);
-
-    return parseScannerResponse(scanner.id, text);
   } catch (e) {
     return {
-      scannerId: scanner.id,
+      scannerId: config.id,
       marketRead: '',
       setups: [],
       nextCheckSecs: 30,
@@ -260,11 +236,10 @@ export async function scan(
   guard: RiskGuard,
 ): Promise<ScannerResult[]> {
   const prompt = buildMarketPrompt(snap, positions, guard);
-  const scanners = getScanners();
+  const scanners = getScannerConfigs();
 
-  // Run both scanners in parallel
   const results = await Promise.allSettled(
-    scanners.map(s => runScanner(s, prompt))
+    scanners.map(cfg => runScanner(cfg, prompt))
   );
 
   return results.map((r, i) =>
@@ -275,7 +250,7 @@ export async function scan(
 }
 
 // ---------------------------------------------------------------------------
-// Tier 2: Judge (Opus via Anthropic)
+// Tier 2: Judge (Opus via Claude Agent SDK — Pro subscription)
 // ---------------------------------------------------------------------------
 
 export async function judge(
@@ -286,7 +261,6 @@ export async function judge(
 ): Promise<Assessment> {
   const marketPrompt = buildMarketPrompt(snap, positions, guard);
 
-  // Append scanner reads for the judge
   const scannerBlock = scannerResults.map(sr => {
     const setupLines = sr.setups.length === 0
       ? '    No setups flagged'
@@ -304,18 +278,11 @@ ${scannerBlock}
 ---
 Review the scanner flags alongside the full data. Make the call.`;
 
-  const opus = getJudge();
+  const opusConfig = getJudgeConfig();
 
   try {
-    const response = await opus.client.messages.create({
-      model: opus.model,
-      max_tokens: 800,
-      system: JUDGE_SYSTEM,
-      messages: [{ role: 'user', content: judgePrompt }],
-    });
-
-    const text = response.content[0].type === 'text' ? response.content[0].text : '';
-    const clean = text.replace(/```json?\n?/g, '').replace(/```/g, '').trim();
+    const text = await askModel(opusConfig, JUDGE_SYSTEM, judgePrompt);
+    const clean = extractJSON(text);
 
     let parsed: any;
     try {
@@ -341,7 +308,7 @@ Review the scanner flags alongside the full data. Make the call.`;
       tier: 'judge',
     };
   } catch (e) {
-    console.error('[judge] API error:', (e as Error).message);
+    console.error('[judge] Error:', (e as Error).message);
     return fallbackAssessment((e as Error).message);
   }
 }
@@ -359,31 +326,26 @@ function fallbackAssessment(reason: string): Assessment {
 // Combined: scan → decide if judge is needed → return assessment
 // ---------------------------------------------------------------------------
 
-const ESCALATION_THRESHOLD = 0.5; // scanner confidence to escalate to Opus
+const ESCALATION_THRESHOLD = 0.5;
 
 export async function assess(
   snap: MarketSnapshot,
   positions: OpenPosition[],
   guard: RiskGuard,
 ): Promise<{ scannerResults: ScannerResult[]; assessment: Assessment }> {
-  // Tier 1: parallel scanners
   const scannerResults = await scan(snap, positions, guard);
 
-  // Check if any scanner flagged a high-confidence setup
   const allSetups = scannerResults.flatMap(sr => sr.setups);
   const hotSetups = allSetups.filter(s => s.confidence >= ESCALATION_THRESHOLD);
   const hasOpenPositions = positions.length > 0;
 
-  // Determine next check from scanners (use the shorter interval)
   const scannerNextCheck = Math.min(...scannerResults.map(sr => sr.nextCheckSecs));
 
-  // Escalate to Opus if: (a) hot setup flagged, or (b) we have open positions to manage
   if (hotSetups.length > 0 || hasOpenPositions) {
     const assessment = await judge(snap, positions, guard, scannerResults);
     return { scannerResults, assessment };
   }
 
-  // No escalation — return scanner-only assessment (no trade action)
   const bestRead = scannerResults.find(sr => sr.marketRead)?.marketRead || 'No data';
   return {
     scannerResults,

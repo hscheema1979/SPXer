@@ -32,7 +32,7 @@ import { openPosition, closePosition } from './src/agent/trade-executor';
 import { PositionManager } from './src/agent/position-manager';
 import { RiskGuard, defaultRiskConfig } from './src/agent/risk-guard';
 import { logEntry, logClose, logRejected } from './src/agent/audit-log';
-import { getScanners } from './src/agent/model-clients';
+import { getScannerConfigs } from './src/agent/model-clients';
 import type { AgentSignal, AgentDecision } from './src/agent/types';
 
 const guard = new RiskGuard(defaultRiskConfig());
@@ -43,7 +43,7 @@ let nextCheckSecs = 30;
 let judgeCallCount = 0;
 
 function banner(): void {
-  const scanners = getScanners();
+  const scanners = getScannerConfigs();
   console.log('\n╔══════════════════════════════════════════════════════════╗');
   console.log('║       SPXer Multi-Model Trading Agent                    ║');
   console.log(`║  Mode: ${guard.isPaper ? 'PAPER (no real orders)              ' : 'LIVE  ⚠️  REAL MONEY                  '}║`);

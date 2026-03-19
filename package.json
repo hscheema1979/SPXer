@@ -19,6 +19,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.79",
     "@anthropic-ai/sdk": "^0.80.0",
     "axios": "^1.13.6",
     "better-sqlite3": "^12.8.0",
