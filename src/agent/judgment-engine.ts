@@ -403,6 +403,9 @@ function fallbackAssessment(reason: string): Assessment {
 // ---------------------------------------------------------------------------
 
 const ESCALATION_THRESHOLD = 0.5;
+// RSI extremes bypass the scanner threshold — direct escalation to judge
+const RSI_OVERSOLD_EXTREME = 20;
+const RSI_OVERBOUGHT_EXTREME = 80;
 
 export async function assess(
   snap: MarketSnapshot,
@@ -415,9 +418,17 @@ export async function assess(
   const hotSetups = allSetups.filter(s => s.confidence >= ESCALATION_THRESHOLD);
   const hasOpenPositions = positions.length > 0;
 
+  // RSI extreme auto-escalation: bypass scanner threshold when SPX RSI is extreme
+  const spxRsi = snap.spx.bars1m[snap.spx.bars1m.length - 1]?.rsi14 ?? null;
+  const rsiExtreme = spxRsi !== null && (spxRsi < RSI_OVERSOLD_EXTREME || spxRsi > RSI_OVERBOUGHT_EXTREME);
+  if (rsiExtreme) {
+    const direction = spxRsi! < RSI_OVERSOLD_EXTREME ? 'oversold' : 'overbought';
+    console.log(`[assess] ⚡ RSI extreme (${spxRsi!.toFixed(1)}) — ${direction} — bypassing scanner threshold, escalating to judge`);
+  }
+
   const scannerNextCheck = Math.min(...scannerResults.map(sr => sr.nextCheckSecs));
 
-  if (hotSetups.length > 0 || hasOpenPositions) {
+  if (hotSetups.length > 0 || hasOpenPositions || rsiExtreme) {
     const { allJudges, activeAssessment } = await judge(snap, positions, guard, scannerResults);
     return { scannerResults, assessment: activeAssessment, allJudges };
   }

@@ -236,22 +236,24 @@ async function fetchSpyFlow(spyExpiry: string): Promise<SpyFlow | null> {
 export async function fetchMarketSnapshot(): Promise<MarketSnapshot> {
   const { label: timeET, minutesToClose } = etTime();
 
-  // 1. Active contracts from SPXer — prioritize 0DTE (today's expiry)
+  // 1. Health (mode) — fetch first so we can filter contracts correctly
+  const health: any = await get(`${SPXER_BASE}/health`).catch(() => ({}));
+  const isRth = (health.mode ?? 'rth') === 'rth';
+
+  // 2. Active contracts from SPXer — during RTH only show today's 0DTE
   const activeRaw: any[] = await get<any[]>(`${SPXER_BASE}/contracts/active`).catch(() => []);
   const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
   const contracts: ContractMeta[] = activeRaw
     .filter(c => c.state === 'ACTIVE' || c.state === 'STICKY')
+    // During RTH, show ONLY today's 0DTE contracts — tomorrow's have no gamma and pollute the view
+    .filter(c => !isRth || c.expiry === todayET)
     .map(c => ({ symbol: c.symbol, side: c.type, strike: c.strike, expiry: c.expiry }))
     .sort((a, b) => {
-      // 0DTE first, then by closest expiry, then by strike distance from SPX
       const a0dte = a.expiry === todayET ? 0 : 1;
       const b0dte = b.expiry === todayET ? 0 : 1;
       if (a0dte !== b0dte) return a0dte - b0dte;
       return a.expiry.localeCompare(b.expiry);
     });
-
-  // 2. Health (mode)
-  const health: any = await get(`${SPXER_BASE}/health`).catch(() => ({}));
 
   // 3. SPX 1m bars from SPXer (last 25 → enough for 3m and 5m aggregation)
   const spxBars1mRaw: any[] = await get<any[]>(`${SPXER_BASE}/spx/bars?tf=1m&n=25`).catch(() => []);
