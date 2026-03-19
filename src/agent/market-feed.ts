@@ -110,11 +110,19 @@ function etTime(): { label: string; minutesToClose: number } {
 export async function fetchMarketSnapshot(): Promise<MarketSnapshot> {
   const { label: timeET, minutesToClose } = etTime();
 
-  // 1. Active contracts from SPXer
+  // 1. Active contracts from SPXer — prioritize 0DTE (today's expiry)
   const activeRaw: any[] = await get<any[]>(`${SPXER_BASE}/contracts/active`).catch(() => []);
+  const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
   const contracts: ContractMeta[] = activeRaw
     .filter(c => c.state === 'ACTIVE' || c.state === 'STICKY')
-    .map(c => ({ symbol: c.symbol, side: c.type, strike: c.strike, expiry: c.expiry }));
+    .map(c => ({ symbol: c.symbol, side: c.type, strike: c.strike, expiry: c.expiry }))
+    .sort((a, b) => {
+      // 0DTE first, then by closest expiry, then by strike distance from SPX
+      const a0dte = a.expiry === todayET ? 0 : 1;
+      const b0dte = b.expiry === todayET ? 0 : 1;
+      if (a0dte !== b0dte) return a0dte - b0dte;
+      return a.expiry.localeCompare(b.expiry);
+    });
 
   // 2. Health (mode)
   const health: any = await get(`${SPXER_BASE}/health`).catch(() => ({}));
