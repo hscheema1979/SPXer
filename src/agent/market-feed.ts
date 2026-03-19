@@ -94,14 +94,17 @@ export interface MarketSnapshot {
 }
 
 function etTime(): { label: string; minutesToClose: number } {
-  const etOffset = 5 * 60 * 60 * 1000;
-  const nowET = new Date(Date.now() - etOffset);
-  const h = nowET.getUTCHours().toString().padStart(2, '0');
-  const m = nowET.getUTCMinutes().toString().padStart(2, '0');
-  const closeET = new Date(nowET);
-  closeET.setUTCHours(16, 0, 0, 0);
-  const mins = Math.max(0, Math.floor((closeET.getTime() - nowET.getTime()) / 60000));
-  return { label: `${h}:${m} ET`, minutesToClose: mins };
+  // Use Intl to get correct ET time (handles EST/EDT automatically)
+  const now = new Date();
+  const etStr = now.toLocaleString('en-US', { timeZone: 'America/New_York', hour12: false });
+  const [datePart, timePart] = etStr.split(', ');
+  const [h, m] = timePart.split(':').map(Number);
+  const label = `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')} ET`;
+  // Minutes until 16:00 ET
+  const minsNow = h * 60 + m;
+  const minsClose = 16 * 60;
+  const mins = Math.max(0, minsClose - minsNow);
+  return { label, minutesToClose: mins };
 }
 
 export async function fetchMarketSnapshot(): Promise<MarketSnapshot> {
@@ -165,8 +168,9 @@ export async function fetchMarketSnapshot(): Promise<MarketSnapshot> {
   }
 
   // 5. Per-contract bars from SPXer + live quote merge
+  // Include contracts even without bars (quote-only at market open)
   const contractStates: ContractState[] = [];
-  const subset = contracts.slice(0, 15); // limit to 15 most relevant
+  const subset = contracts.slice(0, 30); // top 30 contracts near the money
 
   await Promise.allSettled(subset.map(async meta => {
     const barsRaw: any[] = await get<any[]>(
@@ -181,17 +185,18 @@ export async function fetchMarketSnapshot(): Promise<MarketSnapshot> {
       hma5: b.indicators?.hma5 ?? null,
       hma19: b.indicators?.hma19 ?? null,
     }));
-    if (bars1m.length === 0) return;
 
     const bars3m = aggregate(bars1m, 3);
     const bars5m = aggregate(bars1m, 5);
 
     const liveQ = quoteMap.get(meta.symbol);
-    const lastClose = bars1m[bars1m.length - 1].close;
+    const lastClose = bars1m.length > 0 ? bars1m[bars1m.length - 1].close : null;
     const quote: LiveQuote = liveQ ?? {
       symbol: meta.symbol, last: lastClose, bid: null, ask: null,
       mid: lastClose, change: null, changePct: null,
     };
+    // Skip if we have neither bars nor a live quote
+    if (bars1m.length === 0 && !liveQ) return;
 
     contractStates.push({
       meta,

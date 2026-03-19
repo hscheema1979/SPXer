@@ -86,18 +86,20 @@ function formatBar(b: { close: number; rsi14: number | null; ema9: number | null
 
 function formatContractBlock(cs: ContractState): string {
   const q = cs.quote;
-  const curr1m = cs.bars1m[cs.bars1m.length - 1];
-  const prev1m = cs.bars1m[cs.bars1m.length - 2];
-  const curr3m = cs.bars3m[cs.bars3m.length - 1];
-  const curr5m = cs.bars5m[cs.bars5m.length - 1];
+  const curr1m = cs.bars1m.length > 0 ? cs.bars1m[cs.bars1m.length - 1] : undefined;
+  const prev1m = cs.bars1m.length > 1 ? cs.bars1m[cs.bars1m.length - 2] : undefined;
+  const curr3m = cs.bars3m.length > 0 ? cs.bars3m[cs.bars3m.length - 1] : undefined;
+  const curr5m = cs.bars5m.length > 0 ? cs.bars5m[cs.bars5m.length - 1] : undefined;
 
-  const rsiDir = curr1m?.rsi14 !== null && prev1m?.rsi14 !== null
-    ? (curr1m!.rsi14! > prev1m!.rsi14! ? '↑' : curr1m!.rsi14! < prev1m!.rsi14! ? '↓' : '→')
+  const rsiDir = curr1m?.rsi14 != null && prev1m?.rsi14 != null
+    ? (curr1m.rsi14! > prev1m.rsi14! ? '↑' : curr1m.rsi14! < prev1m.rsi14! ? '↓' : '→')
     : '';
 
-  return `  ${cs.meta.symbol} (${cs.meta.side.toUpperCase()} ${cs.meta.strike} ${cs.meta.expiry})
+  const barsLabel = cs.bars1m.length === 0 ? ' (quote-only, no bars yet)' : '';
+
+  return `  ${cs.meta.symbol} (${cs.meta.side.toUpperCase()} ${cs.meta.strike} ${cs.meta.expiry})${barsLabel}
     Quote: last=$${q.last?.toFixed(2) ?? 'n/a'} bid=$${q.bid?.toFixed(2) ?? 'n/a'} ask=$${q.ask?.toFixed(2) ?? 'n/a'} mid=$${q.mid?.toFixed(2) ?? 'n/a'}${q.changePct !== null ? ` chg=${q.changePct.toFixed(1)}%` : ''}
-    1m [trend:${cs.trend1m}]: ${formatBar(curr1m)} rsi${rsiDir}
+    1m [trend:${cs.trend1m}]: ${formatBar(curr1m)} ${rsiDir}
     3m [trend:${cs.trend3m}]: ${formatBar(curr3m)}
     5m [trend:${cs.trend5m}]: ${formatBar(curr5m)}`;
 }
