@@ -44,7 +44,7 @@ export async function fetchSpxQuote(): Promise<SpxQuote> {
 export async function fetchExpirations(symbol: string): Promise<string[]> {
   const { data } = await axios.get(`${TRADIER_BASE}/markets/options/expirations`, {
     headers: headers(),
-    params: { symbol },
+    params: { symbol, includeAllRoots: true },
     timeout: 8000,
   });
   const dates = data?.expirations?.date;
