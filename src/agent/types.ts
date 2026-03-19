@@ -1,0 +1,79 @@
+export type SignalType = 'RSI_BREAK_40' | 'RSI_BREAK_50' | 'EMA_CROSS' | 'HMA_CROSS';
+export type OptionSide = 'call' | 'put';
+export type TradeAction = 'buy' | 'skip';
+
+export interface BarSummary {
+  ts: number;
+  close: number;
+  rsi14: number | null;
+  ema9: number | null;
+  ema21: number | null;
+  hma5: number | null;
+  hma19: number | null;
+}
+
+export interface SpxContext {
+  price: number;
+  changePercent: number;
+  trend: 'bullish' | 'bearish' | 'neutral';
+  rsi14: number | null;
+  minutesToClose: number;
+  mode: string;
+}
+
+export interface AgentSignal {
+  type: SignalType;
+  symbol: string;
+  side: OptionSide;
+  strike: number;
+  expiry: string;
+  currentPrice: number;
+  bid: number | null;
+  ask: number | null;
+  indicators: Record<string, number | null>;
+  recentBars: BarSummary[];   // last 10 bars, newest last
+  signalBarLow: number;       // low of bar where signal fired (stop reference)
+  spxContext: SpxContext;
+  ts: number;
+}
+
+export interface AgentDecision {
+  action: TradeAction;
+  confidence: number;          // 0.0 – 1.0
+  positionSize: number;        // contracts (0 if skip)
+  stopLoss: number;
+  takeProfit: number | null;
+  reasoning: string;
+  concerns: string[];
+  ts: number;
+}
+
+export interface OpenPosition {
+  id: string;                  // uuid
+  symbol: string;
+  side: OptionSide;
+  strike: number;
+  expiry: string;
+  entryPrice: number;
+  quantity: number;
+  stopLoss: number;
+  takeProfit: number | null;
+  openedAt: number;
+  tradierOrderId?: number;
+}
+
+export interface PositionClose {
+  position: OpenPosition;
+  closePrice: number;
+  reason: 'stop_loss' | 'take_profit' | 'time_exit' | 'manual';
+  pnl: number;
+  closedAt: number;
+}
+
+export interface AuditEntry {
+  ts: number;
+  signal: AgentSignal;
+  decision: AgentDecision;
+  execution?: { orderId?: number; fillPrice?: number; error?: string };
+  outcome?: PositionClose;
+}

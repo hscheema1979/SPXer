@@ -8,6 +8,8 @@
   },
   "scripts": {
     "dev": "tsx src/index.ts",
+    "agent": "tsx agent.ts",
+    "agent:live": "AGENT_PAPER=false tsx agent.ts",
     "build": "tsc",
     "start": "node dist/index.js",
     "test": "vitest run",
@@ -17,6 +19,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.80.0",
     "axios": "^1.13.6",
     "better-sqlite3": "^12.8.0",
     "dotenv": "^17.3.1",
