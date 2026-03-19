@@ -3,6 +3,7 @@ import { createServer, type Server } from 'http';
 import { getBars, getLatestBar, getAllActiveContracts, getDbSizeMb } from '../storage/queries';
 import { getMarketMode } from '../pipeline/scheduler';
 import { fetchOptionsChain, fetchExpirations } from '../providers/tradier';
+import { readStatus, readRecentActivity } from '../agent/reporter';
 
 let lastSpxPrice: number | null = null;
 export function setLastSpxPrice(p: number) { lastSpxPrice = p; }
@@ -80,6 +81,19 @@ export function startHttpServer(port: number): { app: Express; httpServer: Serve
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
+  });
+
+  // ── Agent endpoints (consumed by SPX-0DTE dashboard) ──
+
+  app.get('/agent/status', (_req, res) => {
+    const status = readStatus();
+    if (!status) return res.json({ status: 'offline' });
+    res.json(status);
+  });
+
+  app.get('/agent/activity', (req, res) => {
+    const n = Math.min(parseInt(req.query.n as string) || 50, 200);
+    res.json(readRecentActivity(n));
   });
 
   const httpServer = createServer(app);
