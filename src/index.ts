@@ -1,7 +1,7 @@
 import { initDb } from './storage/db';
 import { getAllActiveContracts, upsertBar, upsertBars, upsertContract, getDbSizeMb } from './storage/queries';
 import { fetchYahooBars } from './providers/yahoo';
-import { fetchSpxQuote, fetchOptionsChain, fetchExpirations, fetchSpxTimesales, fetchBatchQuotes } from './providers/tradier';
+import { fetchSpxQuote, fetchOptionsChain, fetchExpirations, fetchSpxTimesales, fetchBatchQuotes, fetchTimesales } from './providers/tradier';
 import { fetchScreenerSnapshot } from './providers/tv-screener';
 import { buildBars, fillGaps, rawToBar } from './pipeline/bar-builder';
 import { aggregate } from './pipeline/aggregator';
@@ -23,6 +23,39 @@ function loadContractsFromDb(): void {
     tracker.restoreContract(contract);
   }
   console.log(`[startup] Restored ${persisted.length} active/sticky contracts from DB`);
+}
+
+/** Backfill 1m bars from Tradier timesales for tracked option contracts */
+async function backfillOptionBars(): Promise<void> {
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  const tracked = tracker.getActive().concat(tracker.getSticky());
+  const todayContracts = tracked.filter(c => c.expiry === today || c.expiry > today);
+  if (todayContracts.length === 0) return;
+
+  console.log(`[backfill] Fetching timesales for ${todayContracts.length} contracts...`);
+  let totalBars = 0;
+
+  // Process in batches of 10 to avoid rate limits
+  for (let i = 0; i < todayContracts.length; i += 10) {
+    const batch = todayContracts.slice(i, i + 10);
+    const results = await Promise.allSettled(
+      batch.map(async c => {
+        // Omit date for option contracts — Tradier returns null with explicit dates
+        const raw = await fetchTimesales(c.symbol);
+        if (raw.length === 0) return 0;
+        const bars = raw.map(r => {
+          const bar = rawToBar(c.symbol, '1m', r);
+          return { ...bar, indicators: computeIndicators(bar, 2) };
+        });
+        upsertBars(bars);
+        return bars.length;
+      })
+    );
+    for (const r of results) {
+      if (r.status === 'fulfilled') totalBars += r.value;
+    }
+  }
+  console.log(`[backfill] Persisted ${totalBars} bars across ${todayContracts.length} contracts`);
 }
 
 async function warmup(): Promise<void> {
@@ -96,11 +129,29 @@ async function pollOptions(): Promise<void> {
       broadcast({ type: 'chain_update', expiry, data: chain });
     }
 
-    // Batch-quote update for already-tracked contracts (avoids full chain re-fetch overhead)
+    // Batch-quote update for already-tracked contracts → build bars + persist
     const tracked = tracker.getActive().concat(tracker.getSticky());
     if (tracked.length > 0) {
       const quotes = await fetchBatchQuotes(tracked.map(c => c.symbol));
-      quotes.forEach((q, sym) => broadcast({ type: 'contract_bar', symbol: sym, data: q }));
+      const ts = Math.floor(Date.now() / 1000);
+      const minuteTs = ts - (ts % 60); // align to minute boundary
+      const newBars: ReturnType<typeof rawToBar>[] = [];
+      quotes.forEach((q, sym) => {
+        const price = q.last ?? q.bid ?? q.ask;
+        if (price === null || price <= 0) return;
+        const bar = rawToBar(sym, '1m', {
+          ts: minuteTs,
+          open: price,
+          high: Math.max(price, q.ask ?? price),
+          low: Math.min(price, q.bid ?? price),
+          close: price,
+          volume: 0,
+        });
+        const enriched = { ...bar, indicators: computeIndicators(bar, 2) };
+        newBars.push(enriched);
+        broadcast({ type: 'contract_bar', symbol: sym, data: q });
+      });
+      if (newBars.length > 0) upsertBars(newBars);
     }
 
     tracker.checkExpiries();
@@ -130,6 +181,9 @@ async function main(): Promise<void> {
 
   if (config.tradierToken) {
     await warmup();
+    // Run initial pollOptions to discover today's contracts, then backfill bars
+    await pollOptions();
+    await backfillOptionBars();
   }
 
   const { app, httpServer } = startHttpServer(config.port);

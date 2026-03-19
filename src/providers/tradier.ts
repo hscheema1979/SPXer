@@ -105,9 +105,17 @@ export async function fetchBatchQuotes(symbols: string[]): Promise<Map<string, {
 }
 
 export async function fetchSpxTimesales(date: string): Promise<OHLCVRaw[]> {
+  return fetchTimesales('SPX', date);
+}
+
+/** Generic 1-min timesales for any symbol (SPX, SPXW options, etc.)
+ *  date is optional — omit for option contracts (Tradier returns null with explicit dates for options) */
+export async function fetchTimesales(symbol: string, date?: string): Promise<OHLCVRaw[]> {
+  const params: Record<string, string> = { symbol, interval: '1min' };
+  if (date) { params.start = date; params.end = date; }
   const { data } = await axios.get(`${TRADIER_BASE}/markets/timesales`, {
     headers: headers(),
-    params: { symbol: 'SPX', interval: '1min', start: date, end: date, session_filter: 'all' },
+    params,
     timeout: 10000,
   });
   const series = data?.series?.data;
