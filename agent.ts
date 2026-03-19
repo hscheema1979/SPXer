@@ -149,16 +149,31 @@ async function runCycle(): Promise<void> {
     judgeCallsToday: judgeCallCount,
     lastAction: assessment.action,
     lastReasoning: assessment.reasoning,
-    scannerReads: scannerResults.map(sr => ({ id: sr.scannerId, read: sr.marketRead, setups: sr.setups.length })),
+    scannerReads: scannerResults.map(sr => ({ id: sr.scannerId, read: sr.marketRead, setups: sr.setups.length, setupDetails: sr.setups })),
     nextCheckSecs: assessment.nextCheckSecs,
     upSince: '',
   });
 
-  const hotSetups = scannerResults.flatMap(sr => sr.setups).filter(s => s.confidence >= 0.5);
+  // Always log scanner reads — this is the raw intelligence we need for review
+  const allSetups = scannerResults.flatMap(sr => sr.setups);
+  const hotSetups = allSetups.filter(s => s.confidence >= 0.5);
+  logActivity({
+    ts: Date.now(), timeET: snap.timeET, cycle: cycleCount, event: 'scan',
+    summary: `${scannerResults.length} scanners | ${allSetups.length} setups (${hotSetups.length} hot)`,
+    details: {
+      scanners: scannerResults.map(sr => ({
+        id: sr.scannerId,
+        read: sr.marketRead,
+        setups: sr.setups,
+        nextCheckSecs: sr.nextCheckSecs,
+        error: sr.error,
+      })),
+      spxPrice: snap.spx.price,
+    },
+  });
+
   if (assessment.tier === 'judge') {
-    logActivity({ ts: Date.now(), timeET: snap.timeET, cycle: cycleCount, event: 'escalate', summary: `Opus judge: ${assessment.action} ${assessment.targetSymbol ?? ''} conf=${assessment.confidence.toFixed(2)}`, details: { reasoning: assessment.reasoning } });
-  } else if (hotSetups.length > 0) {
-    logActivity({ ts: Date.now(), timeET: snap.timeET, cycle: cycleCount, event: 'scan', summary: `${hotSetups.length} hot setups detected`, details: { setups: hotSetups } });
+    logActivity({ ts: Date.now(), timeET: snap.timeET, cycle: cycleCount, event: 'judge', summary: `Opus: ${assessment.action} ${assessment.targetSymbol ?? ''} conf=${assessment.confidence.toFixed(2)}`, details: { reasoning: assessment.reasoning, scannerAgreement: assessment.scannerAgreement } });
   }
 
   // 5. Execute if judge recommends a trade
