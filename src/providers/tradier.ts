@@ -83,8 +83,22 @@ export async function fetchOptionsChain(
   }));
 }
 
-export async function fetchBatchQuotes(symbols: string[]): Promise<Map<string, { bid: number | null; ask: number | null; last: number | null }>> {
-  const result = new Map<string, { bid: number | null; ask: number | null; last: number | null }>();
+export interface BatchQuote {
+  bid: number | null;
+  ask: number | null;
+  last: number | null;
+  open: number | null;
+  high: number | null;
+  low: number | null;
+  volume: number;
+  lastVolume: number;
+  openInterest: number;
+  change: number | null;
+  changePct: number | null;
+}
+
+export async function fetchBatchQuotes(symbols: string[]): Promise<Map<string, BatchQuote>> {
+  const result = new Map<string, BatchQuote>();
   for (let i = 0; i < symbols.length; i += 50) {
     const batch = symbols.slice(i, i + 50);
     const { data } = await axios.get(`${TRADIER_BASE}/markets/quotes`, {
@@ -97,7 +111,17 @@ export async function fetchBatchQuotes(symbols: string[]): Promise<Map<string, {
     const list = Array.isArray(quotes) ? quotes : [quotes];
     for (const q of list) {
       result.set(normalizeSymbol(q.symbol), {
-        bid: q.bid ?? null, ask: q.ask ?? null, last: q.last ?? null,
+        bid: q.bid ?? null,
+        ask: q.ask ?? null,
+        last: q.last ?? null,
+        open: q.open ?? null,
+        high: q.high ?? null,
+        low: q.low ?? null,
+        volume: q.volume ?? 0,
+        lastVolume: q.last_volume ?? 0,
+        openInterest: q.open_interest ?? 0,
+        change: q.change ?? null,
+        changePct: q.change_percentage ?? null,
       });
     }
   }

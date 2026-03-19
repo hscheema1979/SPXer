@@ -130,6 +130,7 @@ async function pollOptions(): Promise<void> {
     }
 
     // Batch-quote update for already-tracked contracts → build bars + persist
+    // Uses real OHLCV from Tradier quotes (open/high/low/close/volume are session values)
     const tracked = tracker.getActive().concat(tracker.getSticky());
     if (tracked.length > 0) {
       const quotes = await fetchBatchQuotes(tracked.map(c => c.symbol));
@@ -141,11 +142,11 @@ async function pollOptions(): Promise<void> {
         if (price === null || price <= 0) return;
         const bar = rawToBar(sym, '1m', {
           ts: minuteTs,
-          open: price,
-          high: Math.max(price, q.ask ?? price),
-          low: Math.min(price, q.bid ?? price),
+          open: q.open ?? price,
+          high: q.high ?? Math.max(price, q.ask ?? price),
+          low: q.low ?? Math.min(price, q.bid ?? price),
           close: price,
-          volume: 0,
+          volume: q.volume ?? 0,
         });
         const enriched = { ...bar, indicators: computeIndicators(bar, 2) };
         newBars.push(enriched);
