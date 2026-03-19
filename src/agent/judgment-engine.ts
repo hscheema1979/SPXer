@@ -15,7 +15,7 @@ import type { MarketSnapshot, ContractState } from './market-feed';
 import type { OpenPosition } from './types';
 import type { RiskGuard } from './risk-guard';
 import { getScanners, getJudge } from './model-clients';
-import type { ScannerClient, JudgeClient } from './model-clients';
+import type { ScannerClient } from './model-clients';
 
 // ---------------------------------------------------------------------------
 // Shared prompt building
@@ -178,52 +178,71 @@ export interface Assessment {
 }
 
 // ---------------------------------------------------------------------------
-// Tier 1: Scanners (Kimi + GLM-5 via LiteLLM, OpenAI-compatible)
+// Tier 1: Scanners (Kimi/GLM direct via Anthropic SDK, MiniMax via OpenAI SDK)
 // ---------------------------------------------------------------------------
+
+/** Call an Anthropic-compatible scanner (Kimi direct, GLM-5 direct) */
+async function callAnthropicScanner(scanner: ScannerClient, prompt: string): Promise<string> {
+  const isThinkingModel = scanner.id === 'kimi';
+  const response = await scanner.anthropic!.messages.create({
+    model: scanner.model,
+    max_tokens: isThinkingModel ? 4000 : 800,
+    system: SCANNER_SYSTEM,
+    messages: [{ role: 'user', content: prompt }],
+  });
+  return response.content[0]?.type === 'text' ? response.content[0].text : '';
+}
+
+/** Call an OpenAI-compatible scanner (MiniMax via LiteLLM/Chutes) */
+async function callOpenAIScanner(scanner: ScannerClient, prompt: string): Promise<string> {
+  const response = await scanner.openai!.chat.completions.create({
+    model: scanner.model,
+    max_tokens: 800,
+    messages: [
+      { role: 'system', content: SCANNER_SYSTEM },
+      { role: 'user', content: prompt },
+    ],
+  });
+  return response.choices[0]?.message?.content || '';
+}
+
+function parseScannerResponse(scannerId: string, text: string): ScannerResult {
+  const clean = text.replace(/```json?\n?/g, '').replace(/```/g, '').trim();
+
+  let parsed: any;
+  try {
+    parsed = JSON.parse(clean);
+  } catch {
+    return {
+      scannerId,
+      marketRead: 'Parse error',
+      setups: [],
+      nextCheckSecs: 30,
+      error: `JSON parse failed: ${text.slice(0, 100)}`,
+    };
+  }
+
+  return {
+    scannerId,
+    marketRead: String(parsed.market_read || ''),
+    setups: (Array.isArray(parsed.setups) ? parsed.setups : []).map((s: any) => ({
+      symbol: String(s.symbol || ''),
+      setupType: String(s.setup_type || ''),
+      confidence: Math.max(0, Math.min(1, parseFloat(s.confidence) || 0)),
+      urgency: ['now', 'building', 'watch'].includes(s.urgency) ? s.urgency : 'watch',
+      notes: String(s.notes || ''),
+    })),
+    nextCheckSecs: Math.max(15, Math.min(120, parseInt(parsed.next_check_secs) || 30)),
+  };
+}
 
 async function runScanner(scanner: ScannerClient, prompt: string): Promise<ScannerResult> {
   try {
-    // Kimi is a thinking model — needs higher max_tokens for reasoning + response
-    const isThinkingModel = scanner.id === 'kimi';
-    const response = await scanner.client.chat.completions.create({
-      model: scanner.model,
-      max_tokens: isThinkingModel ? 4000 : 800,
-      messages: [
-        { role: 'system', content: SCANNER_SYSTEM },
-        { role: 'user', content: prompt },
-      ],
-    });
+    const text = scanner.type === 'anthropic'
+      ? await callAnthropicScanner(scanner, prompt)
+      : await callOpenAIScanner(scanner, prompt);
 
-    // Kimi puts reasoning in reasoning_content, actual answer in content
-    const msg = response.choices[0]?.message as any;
-    const text = msg?.content || '';
-    const clean = text.replace(/```json?\n?/g, '').replace(/```/g, '').trim();
-
-    let parsed: any;
-    try {
-      parsed = JSON.parse(clean);
-    } catch {
-      return {
-        scannerId: scanner.id,
-        marketRead: 'Parse error',
-        setups: [],
-        nextCheckSecs: 30,
-        error: `JSON parse failed: ${text.slice(0, 100)}`,
-      };
-    }
-
-    return {
-      scannerId: scanner.id,
-      marketRead: String(parsed.market_read || ''),
-      setups: (Array.isArray(parsed.setups) ? parsed.setups : []).map((s: any) => ({
-        symbol: String(s.symbol || ''),
-        setupType: String(s.setup_type || ''),
-        confidence: Math.max(0, Math.min(1, parseFloat(s.confidence) || 0)),
-        urgency: ['now', 'building', 'watch'].includes(s.urgency) ? s.urgency : 'watch',
-        notes: String(s.notes || ''),
-      })),
-      nextCheckSecs: Math.max(15, Math.min(120, parseInt(parsed.next_check_secs) || 30)),
-    };
+    return parseScannerResponse(scanner.id, text);
   } catch (e) {
     return {
       scannerId: scanner.id,
