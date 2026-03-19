@@ -64,15 +64,40 @@ function trendLabel(bars: BarSummary[]): 'bullish' | 'bearish' | 'neutral' {
   return 'neutral';
 }
 
+export interface Greeks {
+  delta: number | null;
+  gamma: number | null;
+  theta: number | null;
+  vega: number | null;
+  iv: number | null;        // implied volatility
+  volume: number | null;
+  openInterest: number | null;
+}
+
 export interface ContractState {
   meta: ContractMeta;
   quote: LiveQuote;
+  greeks: Greeks;
   bars1m: BarSummary[];   // last 20
   bars3m: BarSummary[];   // last 10 (aggregated)
   bars5m: BarSummary[];   // last 10 (aggregated)
   trend1m: string;
   trend3m: string;
   trend5m: string;
+}
+
+/** SPY options flow summary — used as a sentiment indicator */
+export interface SpyFlow {
+  putVolume: number;
+  callVolume: number;
+  putCallRatio: number;
+  totalVolume: number;
+  topPutStrikes: { strike: number; volume: number; last: number }[];
+  topCallStrikes: { strike: number; volume: number; last: number }[];
+  atmIV: number | null;      // IV of ATM strike
+  putSkewIV: number | null;  // average IV of OTM puts (5 strikes below ATM)
+  callSkewIV: number | null; // average IV of OTM calls (5 strikes above ATM)
+  spyPrice: number | null;
 }
 
 export interface MarketSnapshot {
@@ -91,6 +116,7 @@ export interface MarketSnapshot {
     trend5m: string;
   };
   contracts: ContractState[];
+  spyFlow: SpyFlow | null;
 }
 
 function etTime(): { label: string; minutesToClose: number } {
@@ -105,6 +131,106 @@ function etTime(): { label: string; minutesToClose: number } {
   const minsClose = 16 * 60;
   const mins = Math.max(0, minsClose - minsNow);
   return { label, minutesToClose: mins };
+}
+
+/** Fetch SPX 0DTE options chain with Greeks from Tradier */
+async function fetchGreeksChain(expiry: string): Promise<Map<string, Greeks>> {
+  const map = new Map<string, Greeks>();
+  try {
+    const resp = await axios.get(`${TRADIER_BASE}/markets/options/chains`, {
+      headers: tradierHeaders(),
+      params: { symbol: 'SPX', expiration: expiry, greeks: 'true' },
+      timeout: 10000,
+    });
+    const opts = resp.data?.options?.option;
+    const list: any[] = opts ? (Array.isArray(opts) ? opts : [opts]) : [];
+    for (const o of list) {
+      map.set(o.symbol, {
+        delta: o.greeks?.delta ?? null,
+        gamma: o.greeks?.gamma ?? null,
+        theta: o.greeks?.theta ?? null,
+        vega: o.greeks?.vega ?? null,
+        iv: o.greeks?.mid_iv ?? o.greeks?.ask_iv ?? null,
+        volume: o.volume ?? null,
+        openInterest: o.open_interest ?? null,
+      });
+    }
+  } catch { /* chain unavailable */ }
+  return map;
+}
+
+/** Fetch SPY 0DTE chain for flow/sentiment analysis */
+async function fetchSpyFlow(spyExpiry: string): Promise<SpyFlow | null> {
+  try {
+    // Get SPY price first
+    const qResp = await axios.get(`${TRADIER_BASE}/markets/quotes`, {
+      headers: tradierHeaders(),
+      params: { symbols: 'SPY' },
+      timeout: 6000,
+    });
+    const spyPrice = qResp.data?.quotes?.quote?.last ?? null;
+
+    const resp = await axios.get(`${TRADIER_BASE}/markets/options/chains`, {
+      headers: tradierHeaders(),
+      params: { symbol: 'SPY', expiration: spyExpiry, greeks: 'true' },
+      timeout: 10000,
+    });
+    const opts = resp.data?.options?.option;
+    const list: any[] = opts ? (Array.isArray(opts) ? opts : [opts]) : [];
+    if (list.length === 0) return null;
+
+    const puts = list.filter(o => o.option_type === 'put');
+    const calls = list.filter(o => o.option_type === 'call');
+
+    const putVol = puts.reduce((s, o) => s + (o.volume || 0), 0);
+    const callVol = calls.reduce((s, o) => s + (o.volume || 0), 0);
+
+    // Top 5 put/call strikes by volume
+    const topPuts = [...puts].sort((a, b) => (b.volume || 0) - (a.volume || 0)).slice(0, 5)
+      .map(o => ({ strike: o.strike, volume: o.volume || 0, last: o.last || 0 }));
+    const topCalls = [...calls].sort((a, b) => (b.volume || 0) - (a.volume || 0)).slice(0, 5)
+      .map(o => ({ strike: o.strike, volume: o.volume || 0, last: o.last || 0 }));
+
+    // ATM IV — find strike closest to SPY price
+    let atmIV: number | null = null;
+    let putSkewIV: number | null = null;
+    let callSkewIV: number | null = null;
+
+    if (spyPrice) {
+      const sortedByDist = [...list].sort((a, b) => Math.abs(a.strike - spyPrice) - Math.abs(b.strike - spyPrice));
+      const atmStrike = sortedByDist[0]?.strike;
+      const atmOpts = list.filter(o => o.strike === atmStrike);
+      const ivVals = atmOpts.map(o => o.greeks?.mid_iv).filter((v: any) => v != null);
+      if (ivVals.length > 0) atmIV = ivVals.reduce((a: number, b: number) => a + b, 0) / ivVals.length;
+
+      // OTM put skew: 5 strikes below ATM
+      const otmPuts = puts
+        .filter(o => o.strike < atmStrike && o.strike >= atmStrike - 5)
+        .map(o => o.greeks?.mid_iv).filter((v: any) => v != null);
+      if (otmPuts.length > 0) putSkewIV = otmPuts.reduce((a: number, b: number) => a + b, 0) / otmPuts.length;
+
+      // OTM call skew: 5 strikes above ATM
+      const otmCalls = calls
+        .filter(o => o.strike > atmStrike && o.strike <= atmStrike + 5)
+        .map(o => o.greeks?.mid_iv).filter((v: any) => v != null);
+      if (otmCalls.length > 0) callSkewIV = otmCalls.reduce((a: number, b: number) => a + b, 0) / otmCalls.length;
+    }
+
+    return {
+      putVolume: putVol,
+      callVolume: callVol,
+      putCallRatio: callVol > 0 ? putVol / callVol : 0,
+      totalVolume: putVol + callVol,
+      topPutStrikes: topPuts,
+      topCallStrikes: topCalls,
+      atmIV,
+      putSkewIV,
+      callSkewIV,
+      spyPrice,
+    };
+  } catch {
+    return null;
+  }
 }
 
 export async function fetchMarketSnapshot(): Promise<MarketSnapshot> {
@@ -144,6 +270,12 @@ export async function fetchMarketSnapshot(): Promise<MarketSnapshot> {
   const prevSpx = spxBars1m.length > 1 ? spxBars1m[spxBars1m.length - 2] : null;
   const spxChangePct = latestSpx && prevSpx
     ? ((latestSpx.close - prevSpx.close) / prevSpx.close) * 100 : 0;
+
+  // 4a. Fetch SPX Greeks chain + SPY flow in parallel (don't block main flow)
+  const [greeksMap, spyFlow] = await Promise.all([
+    fetchGreeksChain(todayET),
+    fetchSpyFlow(todayET),
+  ]);
 
   // 4. Live quotes from Tradier for all tracked contracts (sub-minute)
   const quoteMap = new Map<string, LiveQuote>();
@@ -206,9 +338,15 @@ export async function fetchMarketSnapshot(): Promise<MarketSnapshot> {
     // Skip if we have neither bars nor a live quote
     if (bars1m.length === 0 && !liveQ) return;
 
+    const greeks: Greeks = greeksMap.get(meta.symbol) ?? {
+      delta: null, gamma: null, theta: null, vega: null,
+      iv: null, volume: null, openInterest: null,
+    };
+
     contractStates.push({
       meta,
       quote,
+      greeks,
       bars1m: bars1m.slice(-10),
       bars3m: bars3m.slice(-8),
       bars5m: bars5m.slice(-6),
@@ -241,5 +379,6 @@ export async function fetchMarketSnapshot(): Promise<MarketSnapshot> {
       trend5m: trendLabel(spxBars5m),
     },
     contracts: contractStates,
+    spyFlow,
   };
 }

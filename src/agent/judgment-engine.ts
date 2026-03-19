@@ -8,7 +8,7 @@
  * Tier 1 (Scanner): Kimi K2.5 + GLM-5 + MiniMax M2.5 in parallel
  * Tier 2 (Judge): Claude Opus on escalation only
  */
-import type { MarketSnapshot, ContractState } from './market-feed';
+import type { MarketSnapshot, ContractState, SpyFlow } from './market-feed';
 import type { OpenPosition } from './types';
 import type { RiskGuard } from './risk-guard';
 import { getScannerConfigs, getJudgeConfig, askModel } from './model-clients';
@@ -30,6 +30,15 @@ Different days call for different signals. Adapt to current conditions:
 - Trend days: momentum entries (RSI break of 40-50, EMA crossovers)
 - Range days: mean-reversion at extremes (RSI <25 or >75, Bollinger touches)
 - Time matters: 9:30-10:30 chaotic, 11-1 PM cleanest, after 3 PM fast but risky
+
+You now have Greeks (delta, gamma, theta, vega, IV) per contract and SPY options flow data:
+- Use IV to gauge if options are cheap or expensive relative to recent moves
+- High IV + falling price = fear premium, puts may be overpriced
+- SPY put/call ratio > 1.2 = bearish sentiment, < 0.8 = bullish
+- SPY volume flow shows where institutional money is positioned
+- Put skew vs call skew shows directional fear/greed imbalance
+- Delta tells you sensitivity to SPX moves — higher delta = more directional exposure
+- Theta accelerates into close — factor time decay into entry timing
 
 Respond ONLY with valid JSON — no markdown, no text outside the JSON.
 {
@@ -97,11 +106,36 @@ function formatContractBlock(cs: ContractState): string {
 
   const barsLabel = cs.bars1m.length === 0 ? ' (quote-only, no bars yet)' : '';
 
+  const g = cs.greeks;
+  const greeksLine = g.delta != null
+    ? `    Greeks: Δ=${g.delta.toFixed(3)} Γ=${g.gamma?.toFixed(4) ?? '-'} Θ=${g.theta?.toFixed(2) ?? '-'} V=${g.vega?.toFixed(2) ?? '-'} IV=${g.iv ? (g.iv * 100).toFixed(1) + '%' : '-'} vol=${g.volume ?? '-'} OI=${g.openInterest ?? '-'}`
+    : '    Greeks: unavailable';
+
   return `  ${cs.meta.symbol} (${cs.meta.side.toUpperCase()} ${cs.meta.strike} ${cs.meta.expiry})${barsLabel}
     Quote: last=$${q.last?.toFixed(2) ?? 'n/a'} bid=$${q.bid?.toFixed(2) ?? 'n/a'} ask=$${q.ask?.toFixed(2) ?? 'n/a'} mid=$${q.mid?.toFixed(2) ?? 'n/a'}${q.changePct !== null ? ` chg=${q.changePct.toFixed(1)}%` : ''}
+${greeksLine}
     1m [trend:${cs.trend1m}]: ${formatBar(curr1m)} ${rsiDir}
     3m [trend:${cs.trend3m}]: ${formatBar(curr3m)}
     5m [trend:${cs.trend5m}]: ${formatBar(curr5m)}`;
+}
+
+function formatSpyFlow(flow: SpyFlow | null): string {
+  if (!flow) return 'SPY FLOW: unavailable';
+  const ratio = flow.putCallRatio.toFixed(2);
+  const bias = flow.putCallRatio > 1.2 ? 'BEARISH' : flow.putCallRatio < 0.8 ? 'BULLISH' : 'NEUTRAL';
+  const skew = flow.putSkewIV != null && flow.callSkewIV != null
+    ? `put_IV=${(flow.putSkewIV * 100).toFixed(1)}% call_IV=${(flow.callSkewIV * 100).toFixed(1)}% skew=${((flow.putSkewIV - flow.callSkewIV) * 100).toFixed(1)}%`
+    : 'skew=n/a';
+
+  const topPuts = flow.topPutStrikes.map(s => `${s.strike}(${(s.volume / 1000).toFixed(0)}K)`).join(' ');
+  const topCalls = flow.topCallStrikes.map(s => `${s.strike}(${(s.volume / 1000).toFixed(0)}K)`).join(' ');
+
+  return `SPY FLOW (sentiment indicator — SPY at $${flow.spyPrice?.toFixed(2) ?? 'n/a'}):
+  Volume: ${(flow.totalVolume / 1000000).toFixed(1)}M total | puts=${(flow.putVolume / 1000000).toFixed(1)}M calls=${(flow.callVolume / 1000000).toFixed(1)}M
+  P/C ratio: ${ratio} → ${bias}
+  ATM IV: ${flow.atmIV ? (flow.atmIV * 100).toFixed(1) + '%' : 'n/a'} | ${skew}
+  Top put strikes: ${topPuts}
+  Top call strikes: ${topCalls}`;
 }
 
 function buildMarketPrompt(snap: MarketSnapshot, positions: OpenPosition[], guard: RiskGuard): string {
@@ -136,7 +170,9 @@ RISK:
   Max risk/trade: $${guard.config.maxRiskPerTrade} | Paper mode: ${guard.isPaper}
 
 TRACKED CONTRACTS (${snap.contracts.length}, sorted by 1m RSI desc):
-${contractBlock}`;
+${contractBlock}
+
+${formatSpyFlow(snap.spyFlow)}`;
 }
 
 // ---------------------------------------------------------------------------
