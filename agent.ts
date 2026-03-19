@@ -27,7 +27,7 @@ dotenv.config();
 
 import { fetchMarketSnapshot } from './src/agent/market-feed';
 import { assess } from './src/agent/judgment-engine';
-import type { ScannerResult, Assessment } from './src/agent/judgment-engine';
+import type { ScannerResult, Assessment, JudgeResult } from './src/agent/judgment-engine';
 import { openPosition, closePosition } from './src/agent/trade-executor';
 import { PositionManager } from './src/agent/position-manager';
 import { RiskGuard, defaultRiskConfig } from './src/agent/risk-guard';
@@ -103,7 +103,7 @@ async function runCycle(): Promise<void> {
   }
 
   // 4. Two-tier assessment: scanners → optional judge escalation
-  let result: { scannerResults: ScannerResult[]; assessment: Assessment };
+  let result: { scannerResults: ScannerResult[]; assessment: Assessment; allJudges?: JudgeResult[] };
   try {
     result = await assess(snap, positions.getAll(), guard);
   } catch (e) {
@@ -112,21 +112,25 @@ async function runCycle(): Promise<void> {
     return;
   }
 
-  const { scannerResults, assessment } = result;
+  const { scannerResults, assessment, allJudges } = result;
 
   // Log scanner results
   logScannerResults(scannerResults);
 
-  // Log assessment
-  const tierLabel = assessment.tier === 'judge' ? 'OPUS JUDGE' : 'SCANNER ONLY';
-  if (assessment.tier === 'judge') judgeCallCount++;
-  console.log(`[agent] ── ${tierLabel} ──`);
-  console.log(`[agent] Market: ${assessment.marketRead}`);
-  if (assessment.scannerAgreement && assessment.tier === 'judge') {
-    console.log(`[agent] Scanner agreement: ${assessment.scannerAgreement}`);
+  // Log all judge decisions (when escalated)
+  if (allJudges && allJudges.length > 0) {
+    judgeCallCount++;
+    console.log(`[agent] ── JUDGE PANEL (${allJudges.length} judges) ──`);
+    for (const jr of allJudges) {
+      const a = jr.assessment;
+      const active = jr.judgeId === (process.env.AGENT_ACTIVE_JUDGE || 'sonnet') ? ' ★ACTIVE' : '';
+      console.log(`[judge:${jr.judgeId}]${active} ${a.action.toUpperCase()} conf=${(a.confidence * 100).toFixed(0)}% | ${a.reasoning.slice(0, 120)}`);
+    }
+  } else {
+    console.log(`[agent] ── SCANNER ONLY ──`);
   }
-  console.log(`[agent] Action: ${assessment.action.toUpperCase()} | Confidence: ${(assessment.confidence * 100).toFixed(0)}%`);
-  console.log(`[agent] Reasoning: ${assessment.reasoning}`);
+  console.log(`[agent] Active decision: ${assessment.action.toUpperCase()} | Confidence: ${(assessment.confidence * 100).toFixed(0)}%`);
+  console.log(`[agent] Reasoning: ${assessment.reasoning.slice(0, 200)}`);
   if (assessment.concerns.length > 0) {
     console.log(`[agent] Concerns: ${assessment.concerns.join('; ')}`);
   }
@@ -172,8 +176,23 @@ async function runCycle(): Promise<void> {
     },
   });
 
-  if (assessment.tier === 'judge') {
-    logActivity({ ts: Date.now(), timeET: snap.timeET, cycle: cycleCount, event: 'judge', summary: `Opus: ${assessment.action} ${assessment.targetSymbol ?? ''} conf=${assessment.confidence.toFixed(2)}`, details: { reasoning: assessment.reasoning, scannerAgreement: assessment.scannerAgreement } });
+  if (allJudges && allJudges.length > 0) {
+    logActivity({
+      ts: Date.now(), timeET: snap.timeET, cycle: cycleCount, event: 'judge-panel',
+      summary: `${allJudges.length} judges: ${allJudges.map(j => `${j.judgeId}=${j.assessment.action}`).join(' ')}`,
+      details: {
+        activeJudge: process.env.AGENT_ACTIVE_JUDGE || 'sonnet',
+        judges: allJudges.map(j => ({
+          id: j.judgeId,
+          action: j.assessment.action,
+          confidence: j.assessment.confidence,
+          targetSymbol: j.assessment.targetSymbol,
+          reasoning: j.assessment.reasoning,
+          concerns: j.assessment.concerns,
+          error: j.error,
+        })),
+      },
+    });
   }
 
   // 5. Execute if judge recommends a trade

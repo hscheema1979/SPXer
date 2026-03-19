@@ -11,7 +11,7 @@
 import type { MarketSnapshot, ContractState, SpyFlow } from './market-feed';
 import type { OpenPosition } from './types';
 import type { RiskGuard } from './risk-guard';
-import { getScannerConfigs, getJudgeConfig, askModel } from './model-clients';
+import { getScannerConfigs, getJudgeConfigs, getActiveJudgeId, askModel } from './model-clients';
 import type { ModelConfig } from './model-clients';
 
 // ---------------------------------------------------------------------------
@@ -298,12 +298,57 @@ export async function scan(
 // Tier 2: Judge (Opus via Claude Agent SDK — Pro subscription)
 // ---------------------------------------------------------------------------
 
+export interface JudgeResult {
+  judgeId: string;
+  assessment: Assessment;
+  error?: string;
+}
+
+async function runSingleJudge(
+  config: ModelConfig,
+  judgePrompt: string,
+): Promise<JudgeResult> {
+  try {
+    const text = await askModel(config, JUDGE_SYSTEM, judgePrompt);
+    const clean = extractJSON(text);
+
+    let parsed: any;
+    try {
+      parsed = JSON.parse(clean);
+    } catch {
+      return { judgeId: config.id, assessment: fallbackAssessment(`${config.id} parse error`), error: `Parse: ${text.slice(0, 80)}` };
+    }
+
+    return {
+      judgeId: config.id,
+      assessment: {
+        marketRead: String(parsed.market_read || ''),
+        scannerAgreement: String(parsed.scanner_agreement || ''),
+        action: ['buy', 'sell_to_close', 'wait'].includes(parsed.action) ? parsed.action : 'wait',
+        targetSymbol: parsed.target_symbol || null,
+        confidence: Math.max(0, Math.min(1, parseFloat(parsed.confidence) || 0)),
+        positionSize: parseInt(parsed.position_size) || 0,
+        stopLoss: parsed.stop_loss ? parseFloat(parsed.stop_loss) : null,
+        takeProfit: parsed.take_profit ? parseFloat(parsed.take_profit) : null,
+        reasoning: String(parsed.reasoning || ''),
+        concerns: Array.isArray(parsed.concerns) ? parsed.concerns.map(String) : [],
+        nextCheckSecs: Math.max(15, Math.min(120, parseInt(parsed.next_check_secs) || 30)),
+        ts: Date.now(),
+        tier: 'judge',
+      },
+    };
+  } catch (e) {
+    return { judgeId: config.id, assessment: fallbackAssessment((e as Error).message), error: (e as Error).message };
+  }
+}
+
+/** Run ALL judges in parallel. Returns all results + the active judge's assessment. */
 export async function judge(
   snap: MarketSnapshot,
   positions: OpenPosition[],
   guard: RiskGuard,
   scannerResults: ScannerResult[],
-): Promise<Assessment> {
+): Promise<{ allJudges: JudgeResult[]; activeAssessment: Assessment }> {
   const marketPrompt = buildMarketPrompt(snap, positions, guard);
 
   const scannerBlock = scannerResults.map(sr => {
@@ -323,39 +368,25 @@ ${scannerBlock}
 ---
 Review the scanner flags alongside the full data. Make the call.`;
 
-  const opusConfig = getJudgeConfig();
+  const judgeConfigs = getJudgeConfigs();
+  const activeId = getActiveJudgeId();
 
-  try {
-    const text = await askModel(opusConfig, JUDGE_SYSTEM, judgePrompt);
-    const clean = extractJSON(text);
+  // Run all judges in parallel
+  const results = await Promise.allSettled(
+    judgeConfigs.map(cfg => runSingleJudge(cfg, judgePrompt))
+  );
 
-    let parsed: any;
-    try {
-      parsed = JSON.parse(clean);
-    } catch {
-      console.error('[judge] Parse error:', text);
-      return fallbackAssessment('Judge parse error');
-    }
+  const allJudges: JudgeResult[] = results.map((r, i) =>
+    r.status === 'fulfilled'
+      ? r.value
+      : { judgeId: judgeConfigs[i].id, assessment: fallbackAssessment(String(r.reason)), error: String(r.reason) }
+  );
 
-    return {
-      marketRead: String(parsed.market_read || ''),
-      scannerAgreement: String(parsed.scanner_agreement || ''),
-      action: ['buy', 'sell_to_close', 'wait'].includes(parsed.action) ? parsed.action : 'wait',
-      targetSymbol: parsed.target_symbol || null,
-      confidence: Math.max(0, Math.min(1, parseFloat(parsed.confidence) || 0)),
-      positionSize: parseInt(parsed.position_size) || 0,
-      stopLoss: parsed.stop_loss ? parseFloat(parsed.stop_loss) : null,
-      takeProfit: parsed.take_profit ? parseFloat(parsed.take_profit) : null,
-      reasoning: String(parsed.reasoning || ''),
-      concerns: Array.isArray(parsed.concerns) ? parsed.concerns.map(String) : [],
-      nextCheckSecs: Math.max(15, Math.min(120, parseInt(parsed.next_check_secs) || 30)),
-      ts: Date.now(),
-      tier: 'judge',
-    };
-  } catch (e) {
-    console.error('[judge] Error:', (e as Error).message);
-    return fallbackAssessment((e as Error).message);
-  }
+  // Use the active judge's decision for execution
+  const activeResult = allJudges.find(j => j.judgeId === activeId);
+  const activeAssessment = activeResult?.assessment ?? allJudges[0]?.assessment ?? fallbackAssessment('No judges returned');
+
+  return { allJudges, activeAssessment };
 }
 
 function fallbackAssessment(reason: string): Assessment {
@@ -377,7 +408,7 @@ export async function assess(
   snap: MarketSnapshot,
   positions: OpenPosition[],
   guard: RiskGuard,
-): Promise<{ scannerResults: ScannerResult[]; assessment: Assessment }> {
+): Promise<{ scannerResults: ScannerResult[]; assessment: Assessment; allJudges?: JudgeResult[] }> {
   const scannerResults = await scan(snap, positions, guard);
 
   const allSetups = scannerResults.flatMap(sr => sr.setups);
@@ -387,8 +418,8 @@ export async function assess(
   const scannerNextCheck = Math.min(...scannerResults.map(sr => sr.nextCheckSecs));
 
   if (hotSetups.length > 0 || hasOpenPositions) {
-    const assessment = await judge(snap, positions, guard, scannerResults);
-    return { scannerResults, assessment };
+    const { allJudges, activeAssessment } = await judge(snap, positions, guard, scannerResults);
+    return { scannerResults, assessment: activeAssessment, allJudges };
   }
 
   const bestRead = scannerResults.find(sr => sr.marketRead)?.marketRead || 'No data';

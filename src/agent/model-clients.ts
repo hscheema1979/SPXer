@@ -1,50 +1,45 @@
 /**
- * Model Clients — hybrid approach:
+ * Model Clients — ALL models use Claude Agent SDK (query()).
  *
- * Claude Agent SDK (query()) for Anthropic-compatible endpoints:
- *   - Kimi K2.5 (api.kimi.com/coding/) — Pro subscription via SDK
- *   - GLM-5 (api.z.ai/api/anthropic) — Pro subscription via SDK
- *   - Claude Opus (default Anthropic) — Pro subscription via SDK
+ * This gives us session JSONL logs for every single model call,
+ * enabling full post-market review of what each scanner saw.
  *
- * OpenAI SDK for LiteLLM-only models:
- *   - MiniMax M2.5 (localhost:4010 → Chutes) — OpenAI-compatible
+ * Scanners (Tier 1):
+ *   - Kimi K2.5   → api.kimi.com/coding/
+ *   - GLM-5       → api.z.ai/api/anthropic
+ *   - MiniMax M2.5 → api.minimax.io/anthropic
+ *
+ * Judge (Tier 2):
+ *   - Claude Opus  → default Anthropic endpoint (Pro subscription)
  *
  * No per-token billing — everything covered by subscriptions.
  */
 import { query } from '@anthropic-ai/claude-agent-sdk';
-import Anthropic from '@anthropic-ai/sdk';
-import OpenAI from 'openai';
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-export type ClientType = 'sdk' | 'anthropic-direct' | 'openai';
-
 export interface ModelConfig {
   id: string;
   label: string;
   model: string;
-  clientType: ClientType;
-  env?: Record<string, string>;       // for SDK (ANTHROPIC_BASE_URL + ANTHROPIC_API_KEY)
-  anthropic?: Anthropic;              // for direct Anthropic SDK calls
-  openai?: OpenAI;                    // for OpenAI-compatible (LiteLLM)
+  env?: Record<string, string>;  // ANTHROPIC_BASE_URL + ANTHROPIC_API_KEY overrides
 }
 
 // ---------------------------------------------------------------------------
-// Scanner configs (Tier 1)
+// Scanner configs (Tier 1) — all via Claude Agent SDK
 // ---------------------------------------------------------------------------
 
 export function getScannerConfigs(): ModelConfig[] {
   const configs: ModelConfig[] = [];
 
-  // Kimi K2.5 direct via Claude Agent SDK
+  // Kimi K2.5 via Claude Agent SDK
   if (process.env.KIMI_API_KEY) {
     configs.push({
       id: 'kimi',
       label: 'Kimi K2.5',
-      model: 'kimi-k2',
-      clientType: 'sdk',
+      model: process.env.KIMI_MODEL || 'kimi-k2',
       env: {
         ANTHROPIC_BASE_URL: process.env.KIMI_BASE_URL || 'https://api.kimi.com/coding/',
         ANTHROPIC_API_KEY: process.env.KIMI_API_KEY,
@@ -52,60 +47,108 @@ export function getScannerConfigs(): ModelConfig[] {
     });
   }
 
-  // ZAI GLM-5 direct via Anthropic SDK (not Agent SDK — avoids system prompt conflict)
+  // ZAI GLM-5 via Claude Agent SDK
   if (process.env.GLM_API_KEY) {
     configs.push({
       id: 'glm',
       label: 'ZAI GLM-5',
-      model: 'glm-5',
-      clientType: 'anthropic-direct',
-      anthropic: new Anthropic({
-        apiKey: process.env.GLM_API_KEY,
-        baseURL: process.env.GLM_BASE_URL || 'https://api.z.ai/api/anthropic',
-      }),
+      model: process.env.GLM_MODEL || 'glm-5',
+      env: {
+        ANTHROPIC_BASE_URL: process.env.GLM_BASE_URL || 'https://api.z.ai/api/anthropic',
+        ANTHROPIC_API_KEY: process.env.GLM_API_KEY,
+      },
     });
   }
 
-  // MiniMax M2.5 via LiteLLM (OpenAI-compatible, not Anthropic-compatible)
-  if (process.env.LITELLM_KEY) {
+  // MiniMax M2.5 via Claude Agent SDK
+  if (process.env.MINIMAX_API_KEY) {
     configs.push({
       id: 'minimax',
-      label: 'MiniMax M2.5 (Chutes)',
-      model: process.env.MINIMAX_MODEL || 'minimaxai-minimax-m2.5-tee',
-      clientType: 'openai',
-      openai: new OpenAI({
-        apiKey: process.env.LITELLM_KEY,
-        baseURL: process.env.LITELLM_BASE_URL || 'http://localhost:4010/v1',
-      }),
+      label: 'MiniMax M2.5',
+      model: process.env.MINIMAX_MODEL || 'MiniMax-M1',
+      env: {
+        ANTHROPIC_BASE_URL: process.env.MINIMAX_BASE_URL || 'https://api.minimax.io/anthropic',
+        ANTHROPIC_API_KEY: process.env.MINIMAX_API_KEY,
+      },
     });
   }
 
+  // Claude Haiku via Claude Agent SDK (Pro subscription, fast + cheap)
+  configs.push({
+    id: 'haiku',
+    label: 'Claude Haiku',
+    model: process.env.HAIKU_MODEL || 'claude-haiku-4-5-20251001',
+    // No env override — uses default Pro subscription
+  });
+
   if (configs.length === 0) {
-    throw new Error('No scanner credentials configured. Set KIMI_API_KEY, GLM_API_KEY, or LITELLM_KEY in .env');
+    throw new Error('No scanner credentials configured. Set KIMI_API_KEY, GLM_API_KEY, or MINIMAX_API_KEY in .env');
   }
 
   return configs;
 }
 
 // ---------------------------------------------------------------------------
-// Judge config (Opus via Claude Agent SDK — Pro subscription)
+// Judge panel — multiple judges evaluate in parallel, we log all and compare
 // ---------------------------------------------------------------------------
 
-export function getJudgeConfig(): ModelConfig {
-  return {
+export function getJudgeConfigs(): ModelConfig[] {
+  const judges: ModelConfig[] = [];
+
+  // Claude Sonnet — fast, decisive, good at structured output
+  judges.push({
+    id: 'sonnet',
+    label: 'Claude Sonnet',
+    model: process.env.SONNET_MODEL || 'claude-sonnet-4-6',
+  });
+
+  // Claude Opus — deep reasoning, but can be overly cautious
+  judges.push({
     id: 'opus',
     label: 'Claude Opus',
     model: process.env.OPUS_MODEL || 'claude-opus-4-6',
-    clientType: 'sdk',
-    // No env override — uses default Claude Code Pro subscription
-  };
+  });
+
+  // Kimi K2.5 as judge — different perspective from its scanner role
+  if (process.env.KIMI_API_KEY) {
+    judges.push({
+      id: 'kimi-judge',
+      label: 'Kimi K2.5 (Judge)',
+      model: process.env.KIMI_MODEL || 'kimi-k2',
+      env: {
+        ANTHROPIC_BASE_URL: process.env.KIMI_BASE_URL || 'https://api.kimi.com/coding/',
+        ANTHROPIC_API_KEY: process.env.KIMI_API_KEY,
+      },
+    });
+  }
+
+  // GLM-5 as judge
+  if (process.env.GLM_API_KEY) {
+    judges.push({
+      id: 'glm-judge',
+      label: 'ZAI GLM-5 (Judge)',
+      model: process.env.GLM_MODEL || 'glm-5',
+      env: {
+        ANTHROPIC_BASE_URL: process.env.GLM_BASE_URL || 'https://api.z.ai/api/anthropic',
+        ANTHROPIC_API_KEY: process.env.GLM_API_KEY,
+      },
+    });
+  }
+
+  return judges;
+}
+
+/** Get the "active" judge — the one whose decision we actually execute on.
+ *  Configurable via AGENT_ACTIVE_JUDGE env var. Default: sonnet */
+export function getActiveJudgeId(): string {
+  return process.env.AGENT_ACTIVE_JUDGE || 'sonnet';
 }
 
 // ---------------------------------------------------------------------------
-// Unified query helper
+// Unified query helper — all models go through Claude Agent SDK
 // ---------------------------------------------------------------------------
 
-async function askViaSDK(config: ModelConfig, systemPrompt: string, userPrompt: string): Promise<string> {
+export async function askModel(config: ModelConfig, systemPrompt: string, userPrompt: string): Promise<string> {
   let result = '';
   let lastAssistantText = '';
 
@@ -137,34 +180,4 @@ async function askViaSDK(config: ModelConfig, systemPrompt: string, userPrompt: 
   }
 
   return result || lastAssistantText;
-}
-
-async function askViaAnthropicDirect(config: ModelConfig, systemPrompt: string, userPrompt: string): Promise<string> {
-  const response = await config.anthropic!.messages.create({
-    model: config.model,
-    max_tokens: 800,
-    system: systemPrompt,
-    messages: [{ role: 'user', content: userPrompt }],
-  });
-  return response.content[0]?.type === 'text' ? response.content[0].text : '';
-}
-
-async function askViaOpenAI(config: ModelConfig, systemPrompt: string, userPrompt: string): Promise<string> {
-  const response = await config.openai!.chat.completions.create({
-    model: config.model,
-    max_tokens: 800,
-    messages: [
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: userPrompt },
-    ],
-  });
-  return response.choices[0]?.message?.content || '';
-}
-
-export async function askModel(config: ModelConfig, systemPrompt: string, userPrompt: string): Promise<string> {
-  switch (config.clientType) {
-    case 'sdk':              return askViaSDK(config, systemPrompt, userPrompt);
-    case 'anthropic-direct': return askViaAnthropicDirect(config, systemPrompt, userPrompt);
-    case 'openai':           return askViaOpenAI(config, systemPrompt, userPrompt);
-  }
 }
