@@ -13,6 +13,8 @@ import type { OpenPosition } from './types';
 import type { RiskGuard } from './risk-guard';
 import { getScannerConfigs, getJudgeConfigs, getActiveJudgeId, askModel } from './model-clients';
 import type { ModelConfig } from './model-clients';
+import { classify, getSignalGate, formatRegimeContext, getState as getRegimeState } from './regime-classifier';
+import type { RegimeState } from './regime-classifier';
 
 // ---------------------------------------------------------------------------
 // System prompts
@@ -60,39 +62,39 @@ Respond ONLY with valid JSON — no markdown, no text outside the JSON.
 
 If nothing is happening, return empty setups array and longer next_check_secs.`;
 
-const JUDGE_SYSTEM = `You are a senior 0DTE SPX options trader making the final call.
+const JUDGE_SYSTEM = `You are a senior 0DTE SPX options regime advisor.
 
-Multiple junior analysts have been scanning the market and flagged potential setups.
-You now review their assessments alongside the FULL market data to decide whether to act.
+Your role has changed. You NO LONGER pick strikes, set stops, or size positions.
+A deterministic system handles execution. Your job is:
+
+1. VALIDATE the current regime classification (MORNING_MOMENTUM, MEAN_REVERSION,
+   TRENDING_UP, TRENDING_DOWN, GAMMA_EXPIRY, NO_TRADE)
+2. ASSESS whether the trade thesis is sound given the regime
+3. IDENTIFY risks the automated system might miss (gamma walls, news, flow traps)
+4. RECOMMEND direction only: bullish, bearish, or wait
 
 Your edge is reading flow AND technicals together:
-- Multi-timeframe alignment (2+ TFs) is ideal but NOT required when macro flow
-  provides a clear thesis (e.g., delta unwind into close, gamma squeeze, pin risk).
-- SPY put/call ratio, volume flow, and Greeks data tell you WHERE institutions are
-  positioned. When flow says "forced buying/selling ahead", that IS the signal —
-  don't wait for lagging indicators to confirm what flow already tells you.
-- 0DTE's biggest moves happen in the LAST 60 minutes. Do NOT avoid late-day trades.
-  Entries with 15-60 minutes left are valid if the thesis is strong.
-- Theta accelerates into close — but so do gamma moves. A $2 option can go to $10
-  in 20 minutes on a gamma squeeze. Factor both sides.
-- When you DO trade, define a clear stop-loss (20-40% of option price).
-- Be DECISIVE. If 2+ scanners flag a setup AND flow supports it, ACT. Waiting for
-  perfect confirmation on 0DTE means watching the move happen without you.
-- RSI extremes on SPX (<20 = extreme oversold, >80 = extreme overbought) are
-  high-probability mean-reversion signals on 0DTE. RSI <15 is an emergency signal —
-  OTM calls/puts can go 10-50x from these levels in under 30 minutes. ACT.
+- SPY put/call ratio, volume flow, and Greeks data tell you WHERE institutions are.
+- When flow says "forced buying/selling ahead", that IS the signal.
+- 0DTE's biggest moves happen in the LAST 60 minutes. Do NOT flag late-day trades
+  as too risky — gamma acceleration is the entire thesis.
+- RSI extremes on SPX (<15 or >85) are EMERGENCY signals that override regime gates.
+  These are rare and high-probability. Do NOT second-guess them.
+
+CRITICAL: You are an ADVISOR, not the decision-maker. The regime classifier and
+deterministic strike selector handle execution. Your "wait" recommendation can
+block a trade, but your "buy" does NOT pick the strike. Be honest about what
+you see, even if it disagrees with the scanners.
 
 Respond ONLY with valid JSON — no markdown, no text outside the JSON.
 {
   "market_read": "<your senior assessment of current conditions>",
-  "scanner_agreement": "<do the juniors agree? what did they miss?>",
+  "regime_validation": "<agree/disagree with the regime classification and why>",
   "action": "buy" | "sell_to_close" | "wait",
-  "target_symbol": "<full option symbol or null>",
+  "direction": "bullish" | "bearish" | null,
   "confidence": <0.0-1.0>,
-  "position_size": <contracts, 0 if wait>,
-  "stop_loss": <price or null>,
-  "take_profit": <price or null>,
-  "reasoning": "<why this action or why waiting>",
+  "reasoning": "<why this direction or why waiting>",
+  "risks": ["<specific risk the system should know about>"],
   "concerns": ["<concern>"],
   "next_check_secs": <15-60>
 }`;
@@ -329,15 +331,16 @@ async function runSingleJudge(
       judgeId: config.id,
       assessment: {
         marketRead: String(parsed.market_read || ''),
-        scannerAgreement: String(parsed.scanner_agreement || ''),
+        scannerAgreement: String(parsed.regime_validation || parsed.scanner_agreement || ''),
         action: ['buy', 'sell_to_close', 'wait'].includes(parsed.action) ? parsed.action : 'wait',
-        targetSymbol: parsed.target_symbol || null,
+        targetSymbol: parsed.direction || parsed.target_symbol || null,  // direction replaces target_symbol
         confidence: Math.max(0, Math.min(1, parseFloat(parsed.confidence) || 0)),
-        positionSize: parseInt(parsed.position_size) || 0,
+        positionSize: parsed.position_size ? parseInt(parsed.position_size) : 1,
         stopLoss: parsed.stop_loss ? parseFloat(parsed.stop_loss) : null,
         takeProfit: parsed.take_profit ? parseFloat(parsed.take_profit) : null,
         reasoning: String(parsed.reasoning || ''),
-        concerns: Array.isArray(parsed.concerns) ? parsed.concerns.map(String) : [],
+        concerns: Array.isArray(parsed.concerns) ? parsed.concerns.map(String) :
+                  Array.isArray(parsed.risks) ? parsed.risks.map(String) : [],
         nextCheckSecs: Math.max(15, Math.min(120, parseInt(parsed.next_check_secs) || 30)),
         ts: Date.now(),
         tier: 'judge',
@@ -378,22 +381,31 @@ Review the scanner flags alongside the full data. Make the call.`;
   const judgeConfigs = getJudgeConfigs();
   const activeId = getActiveJudgeId();
 
-  // Run all judges in parallel
-  const results = await Promise.allSettled(
-    judgeConfigs.map(cfg => runSingleJudge(cfg, judgePrompt))
-  );
+  // Run ONLY the active judge synchronously for execution speed
+  const activeConfig = judgeConfigs.find(c => c.id === activeId) ?? judgeConfigs[0];
+  const activeResult = await runSingleJudge(activeConfig, judgePrompt);
+  const activeAssessment = activeResult.assessment;
 
-  const allJudges: JudgeResult[] = results.map((r, i) =>
-    r.status === 'fulfilled'
-      ? r.value
-      : { judgeId: judgeConfigs[i].id, assessment: fallbackAssessment(String(r.reason)), error: String(r.reason) }
-  );
+  // Fire remaining judges in background for logging — don't await
+  const otherConfigs = judgeConfigs.filter(c => c.id !== activeConfig.id);
+  const backgroundPromise = Promise.allSettled(
+    otherConfigs.map(cfg => runSingleJudge(cfg, judgePrompt))
+  ).then(results => {
+    const others: JudgeResult[] = results.map((r, i) =>
+      r.status === 'fulfilled'
+        ? r.value
+        : { judgeId: otherConfigs[i].id, assessment: fallbackAssessment(String(r.reason)), error: String(r.reason) }
+    );
+    // Log background judge results for replay analysis
+    for (const j of others) {
+      console.log(`[judge:bg] ${j.judgeId}: ${j.assessment.action} conf=${j.assessment.confidence.toFixed(2)} → ${j.assessment.targetSymbol ?? 'none'}`);
+    }
+  }).catch(() => {}); // swallow — background logging only
 
-  // Use the active judge's decision for execution
-  const activeResult = allJudges.find(j => j.judgeId === activeId);
-  const activeAssessment = activeResult?.assessment ?? allJudges[0]?.assessment ?? fallbackAssessment('No judges returned');
+  // Prevent unhandled rejection warnings
+  void backgroundPromise;
 
-  return { allJudges, activeAssessment };
+  return { allJudges: [activeResult], activeAssessment };
 }
 
 function fallbackAssessment(reason: string): Assessment {
@@ -440,7 +452,41 @@ export async function assess(
   const scannerNextCheck = Math.min(...scannerResults.map(sr => sr.nextCheckSecs));
 
   if (hotSetups.length > 0 || hasOpenPositions || rsiExtreme) {
-    const { allJudges, activeAssessment } = await judge(snap, positions, guard, scannerResults, rsiEscalationBanner);
+    // Classify current regime and inject context into judge prompt
+    const latestBar = snap.spx.bars1m[snap.spx.bars1m.length - 1];
+    const regimeState = latestBar
+      ? classify({ close: latestBar.close, high: latestBar.close, low: latestBar.close, ts: Date.now() / 1000 })
+      : getRegimeState();
+    const regimeContext = formatRegimeContext(regimeState);
+
+    // Prepend regime context to escalation banner
+    const fullBanner = `\n${regimeContext}\n${rsiEscalationBanner ?? ''}`;
+
+    const { allJudges, activeAssessment } = await judge(snap, positions, guard, scannerResults, fullBanner);
+
+    // ── REGIME GATE: block trades that conflict with current regime ──
+    if (activeAssessment.action === 'buy' && activeAssessment.targetSymbol) {
+      const gate = getSignalGate(regimeState.regime, spxRsi);
+      const sym = activeAssessment.targetSymbol.toUpperCase();
+      const isCallTrade = sym.includes('C0') || sym.match(/C\d{4,}/);
+      const isPutTrade = sym.includes('P0') || sym.match(/P\d{4,}/);
+
+      const blocked =
+        (isCallTrade && !gate.allowOversoldFade) ||
+        (isPutTrade && !gate.allowOverboughtFade);
+
+      if (blocked) {
+        console.log(`[assess] 🚫 REGIME GATE BLOCKED: ${regimeState.regime} blocks ${isCallTrade ? 'CALL' : 'PUT'} trade (${activeAssessment.targetSymbol}, conf=${activeAssessment.confidence.toFixed(2)})`);
+        const blockedAssessment: Assessment = {
+          ...activeAssessment,
+          action: 'wait',
+          reasoning: `REGIME BLOCKED: ${regimeState.regime} regime does not allow ${isCallTrade ? 'oversold fade (calls)' : 'overbought fade (puts)'}. Original: ${activeAssessment.reasoning}`,
+          concerns: [...activeAssessment.concerns, `Blocked by ${regimeState.regime} regime gate`],
+        };
+        return { scannerResults, assessment: blockedAssessment, allJudges };
+      }
+    }
+
     return { scannerResults, assessment: activeAssessment, allJudges };
   }
 

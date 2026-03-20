@@ -1,5 +1,5 @@
 import { initDb } from './storage/db';
-import { getAllActiveContracts, upsertBar, upsertBars, upsertContract, getDbSizeMb } from './storage/queries';
+import { getAllActiveContracts, upsertBar, upsertBars, upsertContract, getDbSizeMb, getBars } from './storage/queries';
 import { fetchYahooBars } from './providers/yahoo';
 import { fetchSpxQuote, fetchOptionsChain, fetchExpirations, fetchSpxTimesales, fetchBatchQuotes, fetchTimesales } from './providers/tradier';
 import { fetchScreenerSnapshot } from './providers/tv-screener';
@@ -185,6 +185,19 @@ async function main(): Promise<void> {
     // Run initial pollOptions to discover today's contracts, then backfill bars
     await pollOptions();
     await backfillOptionBars();
+  }
+
+  // Seed indicator state from DB so RSI/EMA are warm immediately (no 14-bar blind spot)
+  for (const sym of ['SPX', 'ES']) {
+    const histBars = getBars(sym, '1m', 50);
+    if (histBars.length > 0) {
+      seedState(sym, '1m', histBars);
+      // Re-compute indicators on seeded bars so EMA/RSI state is primed
+      for (const bar of histBars) {
+        computeIndicators(bar, 2);
+      }
+      console.log(`[startup] Seeded ${sym} 1m indicator state from ${histBars.length} historical bars`);
+    }
   }
 
   const { app, httpServer } = startHttpServer(config.port);
