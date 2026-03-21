@@ -16,7 +16,7 @@
 import * as dotenv from 'dotenv';
 dotenv.config();
 
-import Database from 'better-sqlite3';
+import Database = require('better-sqlite3');
 import * as path from 'path';
 
 const DB_PATH = path.resolve(__dirname, 'data/spxer.db');
@@ -151,10 +151,10 @@ async function backfillDate(date: string, spxApprox: number): Promise<void> {
 
   const db = getDb();
 
-  // Generate strikes: ±50pts from approximate SPX, every 5pts
+  // Generate strikes: ±100pts from approximate SPX, every 5pts
   const strikes: number[] = [];
   const baseStrike = Math.round(spxApprox / 5) * 5;
-  for (let s = baseStrike - 50; s <= baseStrike + 50; s += 5) {
+  for (let s = baseStrike - 100; s <= baseStrike + 100; s += 5) {
     strikes.push(s);
   }
 

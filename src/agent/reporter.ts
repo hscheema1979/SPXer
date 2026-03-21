@@ -44,7 +44,7 @@ export interface ActivityEntry {
   ts: number;
   timeET: string;
   cycle: number;
-  event: 'scan' | 'escalate' | 'trade' | 'close' | 'error' | 'risk_block';
+  event: 'scan' | 'escalate' | 'trade' | 'close' | 'error' | 'risk_block' | 'judge-panel';
   summary: string;
   details?: Record<string, unknown>;
 }

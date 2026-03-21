@@ -1,4 +1,4 @@
-export type SignalType = 'RSI_BREAK_40' | 'RSI_BREAK_50' | 'EMA_CROSS' | 'HMA_CROSS';
+export type SignalType = 'RSI_BREAK_40' | 'RSI_BREAK_50' | 'EMA_CROSS' | 'HMA_CROSS' | 'MULTI_MODEL_CONSENSUS' | 'PRICE_ACTION';
 export type OptionSide = 'call' | 'put';
 export type TradeAction = 'buy' | 'skip';
 
@@ -30,7 +30,7 @@ export interface AgentSignal {
   currentPrice: number;
   bid: number | null;
   ask: number | null;
-  indicators: Record<string, number | null>;
+  indicators: BarSummary | Record<string, number | null | string>;
   recentBars: BarSummary[];   // last 10 bars, newest last
   signalBarLow: number;       // low of bar where signal fired (stop reference)
   spxContext: SpxContext;

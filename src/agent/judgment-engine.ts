@@ -1,20 +1,93 @@
 /**
- * JudgmentEngine — two-tier continuous market assessment via Claude Agent SDK.
- *
- * All model calls go through query() from @anthropic-ai/claude-agent-sdk,
- * using env overrides for third-party providers (Kimi, GLM, MiniMax).
- * Everything runs on Pro subscription — no per-token billing.
- *
- * Tier 1 (Scanner): Kimi K2.5 + GLM-5 + MiniMax M2.5 in parallel
- * Tier 2 (Judge): Claude Opus on escalation only
+ * JudgmentEngine — two-tier market assessment.
+ * Tier 1: direct HTTP scanners (Kimi, GLM, MiniMax) — parallel, no SDK bottleneck
+ * Tier 2: Claude Sonnet via SDK — fires only on escalation
  */
 import type { MarketSnapshot, ContractState, SpyFlow } from './market-feed';
 import type { OpenPosition } from './types';
 import type { RiskGuard } from './risk-guard';
-import { getScannerConfigs, getJudgeConfigs, getActiveJudgeId, askModel } from './model-clients';
+import { getJudgeConfigs, getActiveJudgeId, askModel } from './model-clients';
 import type { ModelConfig } from './model-clients';
 import { classify, getSignalGate, formatRegimeContext, getState as getRegimeState } from './regime-classifier';
 import type { RegimeState } from './regime-classifier';
+import { MarketNarrative } from './market-narrative';
+
+export interface ScannerHttpConfig {
+  id: string;
+  label: string;
+  model: string;
+  apiKey: string;
+  baseUrl: string;
+  timeoutMs: number;
+}
+
+export function getHttpScannerConfigs(): ScannerHttpConfig[] {
+  const configs: ScannerHttpConfig[] = [];
+
+  if (process.env.KIMI_API_KEY) {
+    configs.push({
+      id: 'kimi',
+      label: 'Kimi K2.5',
+      model: process.env.KIMI_MODEL || 'kimi-k2',
+      apiKey: process.env.KIMI_API_KEY,
+      baseUrl: process.env.KIMI_BASE_URL || 'https://api.kimi.com/coding/',
+      timeoutMs: 15000,
+    });
+  }
+
+  if (process.env.GLM_API_KEY) {
+    configs.push({
+      id: 'glm',
+      label: 'ZAI GLM-5',
+      model: process.env.GLM_MODEL || 'glm-5',
+      apiKey: process.env.GLM_API_KEY,
+      baseUrl: process.env.GLM_BASE_URL || 'https://api.z.ai/api/anthropic',
+      timeoutMs: 15000,
+    });
+  }
+
+  if (process.env.MINIMAX_API_KEY) {
+    configs.push({
+      id: 'minimax',
+      label: 'MiniMax M2.7',
+      model: process.env.MINIMAX_MODEL || 'MiniMax-M2.7',
+      apiKey: process.env.MINIMAX_API_KEY,
+      baseUrl: process.env.MINIMAX_BASE_URL || 'https://api.minimax.io/anthropic',
+      timeoutMs: 60000,
+    });
+  }
+
+  return configs;
+}
+
+async function callHttpLLM(
+  config: ScannerHttpConfig,
+  systemPrompt: string,
+  userPrompt: string,
+): Promise<string> {
+  const response = await fetch(`${config.baseUrl}/v1/messages`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${config.apiKey}`,
+      'Content-Type': 'application/json',
+      'anthropic-version': '2023-06-01',
+    },
+    body: JSON.stringify({
+      model: config.model,
+      max_tokens: 1024,
+      system: systemPrompt,
+      messages: [{ role: 'user', content: userPrompt }],
+    }),
+    signal: AbortSignal.timeout(config.timeoutMs),
+  });
+
+  if (!response.ok) {
+    throw new Error(`${config.label} HTTP ${response.status}: ${await response.text()}`);
+  }
+
+  const data = await response.json() as { content?: Array<{ text?: string }> };
+  return data.content?.[0]?.text ?? '';
+}
 
 // ---------------------------------------------------------------------------
 // System prompts
@@ -219,6 +292,7 @@ export interface Assessment {
   scannerAgreement: string;
   action: 'buy' | 'sell_to_close' | 'wait';
   targetSymbol: string | null;
+  direction: 'bullish' | 'bearish' | null;
   confidence: number;
   positionSize: number;
   stopLoss: number | null;
@@ -242,9 +316,9 @@ function extractJSON(text: string): string {
 // Tier 1: Scanners via askModel (Claude Agent SDK)
 // ---------------------------------------------------------------------------
 
-async function runScanner(config: ModelConfig, prompt: string): Promise<ScannerResult> {
+async function runScanner(config: ScannerHttpConfig, prompt: string): Promise<ScannerResult> {
   try {
-    const text = await askModel(config, SCANNER_SYSTEM, prompt);
+    const text = await callHttpLLM(config, SCANNER_SYSTEM, prompt);
     const clean = extractJSON(text);
 
     let parsed: any;
@@ -287,15 +361,45 @@ export async function scan(
   snap: MarketSnapshot,
   positions: OpenPosition[],
   guard: RiskGuard,
+  narratives: Map<string, MarketNarrative>,
 ): Promise<ScannerResult[]> {
-  const prompt = buildMarketPrompt(snap, positions, guard);
-  const scanners = getScannerConfigs();
+  const basePrompt = buildMarketPrompt(snap, positions, guard);
+  const scanners = getHttpScannerConfigs();
+
+  if (scanners.length === 0) return [];
 
   const results = await Promise.allSettled(
-    scanners.map(cfg => runScanner(cfg, prompt))
+    scanners.map(async (cfg: ScannerHttpConfig) => {
+      const narrative = narratives.get(cfg.id);
+      const narrativeContext = narrative ? '\n\nYOUR NARRATIVE SO FAR:\n' + narrative.buildTLDR() : '';
+      const prompt = basePrompt + narrativeContext;
+      const result = await runScanner(cfg, prompt);
+
+      if (narrative) {
+        narrative.addScannerNote(result.marketRead);
+        const spxPrice = snap.spx.price;
+        const latestBar = snap.spx.bars1m[snap.spx.bars1m.length - 1];
+        const rsi = latestBar?.rsi14 ?? null;
+        const regimeState = getRegimeState();
+        const regime = regimeState.regime;
+        const eventSummary = result.setups.length > 0
+          ? `${result.setups[0].setupType} on ${result.setups[0].symbol} conf=${result.setups[0].confidence.toFixed(2)}`
+          : 'no setup';
+        narrative.appendEvent(
+          Math.floor(Date.now() / 1000),
+          snap.timeET,
+          spxPrice,
+          rsi,
+          regime,
+          eventSummary,
+        );
+      }
+
+      return result;
+    })
   );
 
-  return results.map((r, i) =>
+  return results.map((r: PromiseSettledResult<ScannerResult>, i: number) =>
     r.status === 'fulfilled'
       ? r.value
       : { scannerId: scanners[i].id, marketRead: '', setups: [], nextCheckSecs: 30, error: String(r.reason) }
@@ -333,7 +437,8 @@ async function runSingleJudge(
         marketRead: String(parsed.market_read || ''),
         scannerAgreement: String(parsed.regime_validation || parsed.scanner_agreement || ''),
         action: ['buy', 'sell_to_close', 'wait'].includes(parsed.action) ? parsed.action : 'wait',
-        targetSymbol: parsed.direction || parsed.target_symbol || null,  // direction replaces target_symbol
+        direction: ['bullish', 'bearish'].includes(parsed.direction) ? parsed.direction : null,
+        targetSymbol: parsed.target_symbol || null,
         confidence: Math.max(0, Math.min(1, parseFloat(parsed.confidence) || 0)),
         positionSize: parsed.position_size ? parseInt(parsed.position_size) : 1,
         stopLoss: parsed.stop_loss ? parseFloat(parsed.stop_loss) : null,
@@ -411,6 +516,7 @@ Review the scanner flags alongside the full data. Make the call.`;
 function fallbackAssessment(reason: string): Assessment {
   return {
     marketRead: 'Error', scannerAgreement: '', action: 'wait', targetSymbol: null,
+    direction: null,
     confidence: 0, positionSize: 0, stopLoss: null, takeProfit: null,
     reasoning: `Judge error: ${reason}`, concerns: ['judge error'],
     nextCheckSecs: 30, ts: Date.now(), tier: 'judge',
@@ -430,8 +536,9 @@ export async function assess(
   snap: MarketSnapshot,
   positions: OpenPosition[],
   guard: RiskGuard,
+  narratives: Map<string, MarketNarrative>,
 ): Promise<{ scannerResults: ScannerResult[]; assessment: Assessment; allJudges?: JudgeResult[] }> {
-  const scannerResults = await scan(snap, positions, guard);
+  const scannerResults = await scan(snap, positions, guard, narratives);
 
   const allSetups = scannerResults.flatMap(sr => sr.setups);
   const hotSetups = allSetups.filter(s => s.confidence >= ESCALATION_THRESHOLD);
@@ -452,16 +559,32 @@ export async function assess(
   const scannerNextCheck = Math.min(...scannerResults.map(sr => sr.nextCheckSecs));
 
   if (hotSetups.length > 0 || hasOpenPositions || rsiExtreme) {
-    // Classify current regime and inject context into judge prompt
     const latestBar = snap.spx.bars1m[snap.spx.bars1m.length - 1];
     const regimeState = latestBar
       ? classify({ close: latestBar.close, high: latestBar.close, low: latestBar.close, ts: Date.now() / 1000 })
       : getRegimeState();
     const regimeContext = formatRegimeContext(regimeState);
 
-    // Prepend regime context to escalation banner
-    const fullBanner = `\n${regimeContext}\n${rsiEscalationBanner ?? ''}`;
+    let escalationBanner = rsiExtreme ? rsiEscalationBanner! : null;
 
+    if (!escalationBanner) {
+      const escalatingScanner = scannerResults.find(sr => sr.setups.some(s => s.confidence >= ESCALATION_THRESHOLD));
+      if (escalatingScanner) {
+        const narrative = narratives.get(escalatingScanner.scannerId);
+        if (narrative) {
+          const hotSetup = escalatingScanner.setups.find(s => s.confidence >= ESCALATION_THRESHOLD)!;
+          const brief = narrative.buildEscalationBrief(
+            escalatingScanner.marketRead,
+            `${hotSetup.urgency} ${hotSetup.setupType} on ${hotSetup.symbol}`,
+            hotSetup.confidence,
+            buildMarketPrompt(snap, positions, guard),
+          );
+          escalationBanner = brief;
+        }
+      }
+    }
+
+    const fullBanner = `\n${regimeContext}\n${escalationBanner ?? ''}`;
     const { allJudges, activeAssessment } = await judge(snap, positions, guard, scannerResults, fullBanner);
 
     // ── REGIME GATE: block trades that conflict with current regime ──
@@ -498,6 +621,7 @@ export async function assess(
       scannerAgreement: 'N/A (scanners only, no escalation)',
       action: 'wait',
       targetSymbol: null,
+      direction: null,
       confidence: 0,
       positionSize: 0,
       stopLoss: null,

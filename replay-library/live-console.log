@@ -1,0 +1,15 @@
+[dotenv@17.3.1] injecting env (24) from .env -- tip: 🛠️  run anywhere with `dotenvx run -- yourcommand`
+[09:33:24] Live monitor started. 6 judges loaded.
+[09:33:24] Judges: Claude Haiku, Claude Sonnet, Claude Opus, Kimi K2.5 (Judge), ZAI GLM-5 (Judge), MiniMax M2.7 (Judge)
+[09:33:24] Polling every 30s. Ctrl+C to stop.
+[09:44:54] SPX=6586.94 RSI=44.2 Regime=TRENDING_DOWN Bars=15
+[09:49:54] SPX=6585.15 RSI=62.7 Regime=MORNING_MOMENTUM Bars=20
+[09:54:55] SPX=6570.91 RSI=40.5 Regime=TRENDING_DOWN Bars=25
+[09:59:55] SPX=6558.12 RSI=11.7 Regime=TRENDING_DOWN Bars=30
+[09:59:55] 
+════════════════════════════════════════════════════════════
+[09:59:55] SIGNAL: RSI=11.7 OVERSOLD | SPX=6558.12 | Regime=TRENDING_DOWN
+[09:59:55] ════════════════════════════════════════════════════════════
+[09:59:57] Firing 12 parallel judge calls...
+(node:2428309) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 exit listeners added to [process]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+(Use `node --trace-warnings ...` to show where the warning was created)
