@@ -33,7 +33,7 @@ export const DEFAULT_CONFIG: ReplayConfig = {
 
   position: {
     stopLossPercent: 50,
-    takeProfitMultiplier: 6,
+    takeProfitMultiplier: 5,
     maxPositionsOpen: 3,
     positionSizeMultiplier: 1.0,
   },
