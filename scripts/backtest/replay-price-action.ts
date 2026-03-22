@@ -5,8 +5,8 @@
  * No scanner calls, no recompute — pure deterministic.
  */
 import Database from 'better-sqlite3';
-import { initPriceAction, processBar, type ConfluenceResult } from './src/agent/price-action';
-import { selectStrike, type ContractCandidate } from './src/agent/strike-selector';
+import { initPriceAction, processBar, type ConfluenceResult } from '../../src/agent/price-action';
+import { selectStrike, type ContractCandidate } from '../../src/agent/strike-selector';
 
 const DB_PATH = './data/spxer.db';
 const CLOSE_CUTOFF_SECS = 15 * 60;

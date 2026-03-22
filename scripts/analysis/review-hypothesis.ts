@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import { getScannerConfigs, getJudgeConfigs, askModel } from './src/agent/model-clients';
+import { getScannerConfigs, getJudgeConfigs, askModel } from '../../src/agent/model-clients';
 
 const HYPOTHESIS = `You are an expert 0DTE SPX options system architect. A colleague has proposed a FUNDAMENTAL redesign of our trading signal engine. 
 

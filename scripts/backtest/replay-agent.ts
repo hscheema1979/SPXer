@@ -18,11 +18,11 @@ dotenv.config();
 
 import path from 'path';
 import Database from 'better-sqlite3';
-import { createReplayContext, buildCycleSnapshot, runReplayDay, type CycleSnapshot, type ReplayContext, type ReplayResult, type TradeResult } from './src/agent/replay-framework';
-import { initPriceAction, processBar, getRecentSignals, type ConfluenceResult } from './src/agent/price-action';
-import { selectStrike, type ContractCandidate } from './src/agent/strike-selector';
-import { assess } from './src/agent/judgment-engine';
-import type { Assessment } from './src/agent/judgment-engine';
+import { createReplayContext, buildCycleSnapshot, runReplayDay, type CycleSnapshot, type ReplayContext, type ReplayResult, type TradeResult } from '../../src/replay';
+import { initPriceAction, processBar, getRecentSignals, type ConfluenceResult } from '../../src/agent/price-action';
+import { selectStrike, type ContractCandidate } from '../../src/agent/strike-selector';
+import { assess } from '../../src/agent/judgment-engine';
+import type { Assessment } from '../../src/agent/judgment-engine';
 
 const DB_PATH = path.resolve(__dirname, 'data/spxer.db');
 const USE_SCANNERS = process.argv.includes('--scanners');

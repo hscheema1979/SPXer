@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import { getJudgeConfigs, askModel } from './src/agent/model-clients';
+import { getJudgeConfigs, askModel } from '../../src/agent/model-clients';
 import { execSync } from 'child_process';
 
 const EXECUTION_PLAN = `You are a senior quantitative trading systems architect specializing in 0DTE SPX options.

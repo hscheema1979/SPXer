@@ -14,13 +14,20 @@ dotenv.config();
 
 import Database from 'better-sqlite3';
 import * as path from 'path';
-import { getJudgeConfigs, askModel } from './src/agent/model-clients';
-import { initSession as initRegimeSession, classify, getSignalGate, formatRegimeContext } from './src/agent/regime-classifier';
+import { getJudgeConfigs, askModel } from '../../src/agent/model-clients';
+import { initSession as initRegimeSession, classify, getSignalGate, formatRegimeContext } from '../../src/agent/regime-classifier';
 
 const DB_PATH = path.resolve(__dirname, 'data/spxer.db');
 
-const SESSION_START  = 1774013400;
-const SESSION_END    = SESSION_START + 390 * 60;
+// ── Parse target date from command line argument ────────────────────────────
+const TARGET_DATE = process.argv[2] || '2026-03-20';
+const dateObj = new Date(`${TARGET_DATE}T09:30:00-04:00`);
+const SESSION_START = Math.floor(dateObj.getTime() / 1000);
+const SESSION_END = SESSION_START + 390 * 60;
+
+// ── Build dynamic symbol filter from date (e.g., 2026-03-20 → %260320%) ──
+const SYMBOL_FILTER = '%' + TARGET_DATE.slice(2, 4) + TARGET_DATE.slice(5, 7) + TARGET_DATE.slice(8, 10) + '%';
+
 const CLOSE_CUTOFF   = SESSION_END - 15 * 60;
 const PRIOR_CLOSE    = 6606.49;
 
@@ -68,10 +75,10 @@ function get0dteContractBars(db: Database.Database, atTs: number, spxPrice: numb
     SELECT b.symbol, b.ts, b.open, b.high, b.low, b.close, b.volume, b.indicators
     FROM bars b
     JOIN contracts c ON b.symbol = c.symbol
-    WHERE b.symbol LIKE '%260320%' AND b.timeframe = '1m' AND b.ts <= ?
+    WHERE b.symbol LIKE ? AND b.timeframe = '1m' AND b.ts <= ?
       AND c.strike BETWEEN ? AND ?
     ORDER BY b.symbol, b.ts DESC
-  `).all(atTs, spxPrice - 60, spxPrice + 60) as any[];
+  `).all(SYMBOL_FILTER, atTs, spxPrice - 60, spxPrice + 60) as any[];
 
   const bySymbol = new Map<string, Bar[]>();
   for (const r of rows) {
@@ -189,10 +196,10 @@ function getPosPrice(db: Database.Database, side: string, strike: number, atTs: 
   const rows = db.prepare(`
     SELECT b.close FROM bars b
     JOIN contracts c ON b.symbol = c.symbol
-    WHERE c.type = ? AND c.strike = ? AND b.symbol LIKE '%260320%'
+    WHERE c.type = ? AND c.strike = ? AND b.symbol LIKE ?
       AND b.timeframe = '1m' AND b.ts <= ?
     ORDER BY b.ts DESC LIMIT 1
-  `).all(side, strike, atTs) as any[];
+  `).all(side, strike, SYMBOL_FILTER, atTs) as any[];
   return rows.length ? rows[0].close : null;
 }
 
@@ -251,7 +258,7 @@ async function main() {
   const timestamps = getSessionTimestamps(db);
 
   console.log(`\n${'═'.repeat(72)}`);
-  console.log(`  SPXer Full-Day Replay — March 20 2026 (SIGNAL-DETECTOR BASED)`);
+  console.log(`  SPXer Full-Day Replay — ${TARGET_DATE} (SIGNAL-DETECTOR BASED)`);
   console.log(`  ${timestamps.length} bars | Option contract signals PRIMARY`);
   console.log('═'.repeat(72));
 

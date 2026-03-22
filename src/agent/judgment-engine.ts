@@ -60,7 +60,7 @@ export function getHttpScannerConfigs(): ScannerHttpConfig[] {
   return configs;
 }
 
-async function callHttpLLM(
+export async function callHttpLLM(
   config: ScannerHttpConfig,
   systemPrompt: string,
   userPrompt: string,

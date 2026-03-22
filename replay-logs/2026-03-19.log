@@ -1,0 +1,23 @@
+▶ [2026-03-19] Starting...
+---
+
+node:internal/modules/run_main:123
+    triggerUncaughtException(
+    ^
+Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/home/ubuntu/SPXer/replay-full.ts' imported from /home/ubuntu/SPXer/
+    at finalizeResolution (node:internal/modules/esm/resolve:275:11)
+    at moduleResolve (node:internal/modules/esm/resolve:861:10)
+    at defaultResolve (node:internal/modules/esm/resolve:985:11)
+    at nextResolve (node:internal/modules/esm/hooks:748:28)
+    at resolveBase (file:///home/ubuntu/SPXer/node_modules/tsx/dist/esm/index.mjs?1774128080333:2:3744)
+    at resolveDirectory (file:///home/ubuntu/SPXer/node_modules/tsx/dist/esm/index.mjs?1774128080333:2:4243)
+    at resolveTsPaths (file:///home/ubuntu/SPXer/node_modules/tsx/dist/esm/index.mjs?1774128080333:2:4984)
+    at resolve (file:///home/ubuntu/SPXer/node_modules/tsx/dist/esm/index.mjs?1774128080333:2:5361)
+    at nextResolve (node:internal/modules/esm/hooks:748:28)
+    at Hooks.resolve (node:internal/modules/esm/hooks:240:30) {
+  code: 'ERR_MODULE_NOT_FOUND',
+  url: 'file:///home/ubuntu/SPXer/replay-full.ts'
+}
+
+Node.js v22.22.1
+❌ [2026-03-19] FAILED

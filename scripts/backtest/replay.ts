@@ -12,7 +12,7 @@ dotenv.config();
 
 import Database from 'better-sqlite3';
 import * as path from 'path';
-import { getJudgeConfigs, askModel } from './src/agent/model-clients';
+import { getJudgeConfigs, askModel } from '../../src/agent/model-clients';
 
 const DB_PATH = path.resolve(__dirname, 'data/spxer.db');
 

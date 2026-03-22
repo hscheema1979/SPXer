@@ -12,7 +12,7 @@ dotenv.config();
 import Database from 'better-sqlite3';
 import * as path from 'path';
 import * as fs from 'fs';
-import { getJudgeConfigs, askModel, type ModelConfig } from './src/agent/model-clients';
+import { getJudgeConfigs, askModel, type ModelConfig } from '../../src/agent/model-clients';
 
 const DB_PATH = path.resolve(__dirname, 'data/spxer.db');
 const LOG_FILE = path.resolve(__dirname, `replay-library/live-${new Date().toISOString().slice(0,10)}.md`);

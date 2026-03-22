@@ -1,89 +1,16 @@
 /**
  * Replay framework — injects historical data into agent logic without modifying agent code.
- *
- * Key idea: buildCycleSnapshot() returns the same shape as MarketSnapshot, so the
+ * buildCycleSnapshot() returns the same shape as MarketSnapshot, so the
  * agent's assess() and processBar() work unchanged against historical bars.
  */
+
 import Database from 'better-sqlite3';
-import type { BarSummary } from './types';
-import type { ContractState, SpyFlow, LiveQuote, Greeks } from './market-feed';
-
-export interface ReplayBar {
-  ts: number;
-  open: number;
-  high: number;
-  low: number;
-  close: number;
-  volume: number;
-  indicators: string;  // JSON
-}
-
-export interface ReplayContract {
-  symbol: string;
-  type: 'call' | 'put';
-  strike: number;
-  expiry: string;
-}
-
-export interface CycleSnapshot {
-  ts: number;
-  timeET: string;
-  minutesToClose: number;
-  mode: string;
-  spx: {
-    price: number;
-    changePct: number;
-    bars1m: BarSummary[];
-    bars3m: BarSummary[];
-    bars5m: BarSummary[];
-    trend1m: 'bullish' | 'bearish' | 'neutral';
-    trend3m: 'bullish' | 'bearish' | 'neutral';
-    trend5m: 'bullish' | 'bearish' | 'neutral';
-  };
-  contracts: ContractState[];
-  spyFlow: SpyFlow | null;
-}
-
-export interface ReplayContext {
-  date: string;
-  db: Database.Database;
-  spxBars: ReplayBar[];
-  contracts: ReplayContract[];
-  expiry: string;
-  sessionStartTs: number;
-  sessionEndTs: number;
-}
+import type { BarSummary } from '../agent/types';
+import type { ContractState } from '../agent/market-feed';
+import type { ReplayBar, ReplayContract, ReplayContext, CycleSnapshot, CycleHandlers } from './types';
+import { etLabel, minutesToClose, parseIndicators } from './metrics';
 
 // ── Helpers ────────────────────────────────────────────────────────────────
-
-function etLabel(ts: number): string {
-  const d = new Date(ts * 1000);
-  return d.toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour12: false, hour: '2-digit', minute: '2-digit' }) + ' ET';
-}
-
-function minutesToClose(ts: number, sessionEndTs: number): number {
-  return Math.max(0, Math.floor((sessionEndTs - ts) / 60));
-}
-
-function parseIndicators(raw: string): Record<string, number | null> {
-  try { return JSON.parse(raw || '{}'); }
-  catch { return {}; }
-}
-
-interface FullIndicators {
-  rsi14: number | null;
-  ema9: number | null;
-  ema21: number | null;
-  hma5: number | null;
-  hma19: number | null;
-  bbUpper: number | null;
-  bbLower: number | null;
-  atr14: number | null;
-  vwap: number | null;
-  macd: number | null;
-  stochK: number | null;
-  [key: string]: number | null;
-}
 
 function barsUpTo(bars: ReplayBar[], atTs: number): ReplayBar[] {
   return bars.filter(b => b.ts <= atTs);
@@ -139,6 +66,8 @@ function buildContractState(
   };
 }
 
+// ── Public API ─────────────────────────────────────────────────────────────
+
 export function buildCycleSnapshot(ctx: ReplayContext, atTs: number): CycleSnapshot {
   const barsAtTs = barsUpTo(ctx.spxBars, atTs);
   const lastBar = barsAtTs[barsAtTs.length - 1];
@@ -171,8 +100,6 @@ export function buildCycleSnapshot(ctx: ReplayContext, atTs: number): CycleSnaps
   };
 }
 
-// ── Context builders ───────────────────────────────────────────────────────
-
 export function createReplayContext(db: Database.Database, date: string): ReplayContext {
   const sessionStart = Math.floor(new Date(date + 'T09:30:00-04:00').getTime() / 1000);
   const sessionEnd = sessionStart + 390 * 60;
@@ -190,14 +117,12 @@ export function createReplayContext(db: Database.Database, date: string): Replay
     WHERE b.timeframe='1m' AND b.ts >= ? AND b.ts <= ?
   `).all(sessionStart, sessionEnd) as ReplayContract[];
 
-  const expiry = contractRows[0]?.expiry ?? '';
-
   return {
     date,
     db,
     spxBars: spxRows,
     contracts: contractRows,
-    expiry,
+    expiry: contractRows[0]?.expiry ?? '',
     sessionStartTs: sessionStart,
     sessionEndTs: sessionEnd,
   };
@@ -205,23 +130,11 @@ export function createReplayContext(db: Database.Database, date: string): Replay
 
 export function getAvailableDays(db: Database.Database): string[] {
   const rows = db.prepare(`
-    SELECT DISTINCT date(ts / 86400, 'unixepoch', 'utc') as d
+    SELECT DISTINCT date(ts, 'unixepoch', '-5 hours') as d
     FROM bars WHERE symbol='SPX' AND timeframe='1m'
-    AND ts >= ? AND ts <= ?
     ORDER BY d
-  `).all(
-    Math.floor(new Date('2026-01-01').getTime() / 1000),
-    Math.floor(new Date('2026-12-31').getTime() / 1000),
-  ) as { d: string }[];
+  `).all() as { d: string }[];
   return rows.map(r => r.d);
-}
-
-// ── Replay runner ─────────────────────────────────────────────────────────
-
-export interface CycleHandlers {
-  onCycle: (snapshot: CycleSnapshot, barTs: number) => void | Promise<void>;
-  onTrade?: (entry: { ts: number; symbol: string; side: string; entryPrice: number; positionSize: number; stopLoss: number; takeProfit: number }) => void;
-  onExit?: (exit: { ts: number; symbol: string; reason: string; pnl: number }) => void;
 }
 
 export async function runReplayDay(ctx: ReplayContext, handlers: CycleHandlers): Promise<void> {
@@ -230,26 +143,4 @@ export async function runReplayDay(ctx: ReplayContext, handlers: CycleHandlers):
     const p = handlers.onCycle(snapshot, bar.ts);
     if (p instanceof Promise) await p;
   }
-}
-
-export interface ReplayResult {
-  date: string;
-  trades: TradeResult[];
-  pnl: number;
-  wins: number;
-  losses: number;
-}
-
-export interface TradeResult {
-  ts: number;
-  symbol: string;
-  side: string;
-  entryPrice: number;
-  exitPrice: number;
-  positionSize: number;
-  stopLoss: number;
-  takeProfit: number;
-  reason: string;
-  pnl: number;
-  barsHeld: number;
 }

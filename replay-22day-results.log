@@ -2,3 +2,456 @@
 Started: Sat Mar 21 17:32:17 UTC 2026
 
 === Testing 2026-02-20 ===
+  [haiku] BUY conf=77% SPXW260320C06525000
+  [opus] BUY conf=88% SPXW260320C06565000
+  📈 ENTER SPXW260320C06565000 x1 @ $7.90 | stop=$3.95 tp=$79.00
+
+⚡ [13:08] 8 OPTION SIGNALS | regime=TRENDING_UP
+   SPXW260320C06495000: RSI_CROSS BEARISH
+   SPXW260320C06505000: HMA_CROSS BULLISH
+   SPXW260320C06515000: RSI_CROSS BEARISH
+   SPXW260320C06570000: HMA_CROSS BULLISH
+   SPXW260320C06585000: HMA_CROSS BULLISH
+   SPXW260320C06590000: HMA_CROSS BULLISH
+   SPXW260320P06595000: HMA_CROSS BEARISH
+   SPXW260320P06610000: HMA_CROSS BEARISH
+  [haiku] BUY conf=80% SPXW260320C06570000
+  [opus] BUY conf=82% SPXW260320C06570000
+  📈 ENTER SPXW260320C06570000 x1 @ $6.70 | stop=$3.35 tp=$6600.00
+
+⚡ [13:09] 2 OPTION SIGNALS | regime=TRENDING_UP
+   SPXW260320C06595000: HMA_CROSS BULLISH
+   SPXW260320C06600000: HMA_CROSS BULLISH
+
+=== Testing 2026-02-23 ===
+
+⚡ [09:48] 5 OPTION SIGNALS | regime=MORNING_MOMENTUM
+   SPXW260320C06565000: HMA_CROSS BULLISH
+   SPXW260320C06570000: HMA_CROSS BULLISH
+   SPXW260320C06625000: HMA_CROSS BULLISH
+   SPXW260320P06595000: RSI_CROSS BEARISH
+   SPXW260320P06605000: RSI_CROSS BEARISH
+  [haiku] WAIT conf=5% 
+  [opus] WAIT conf=0% 
+
+⚡ [09:49] 8 OPTION SIGNALS | regime=MORNING_MOMENTUM
+   SPXW260320C06550000: HMA_CROSS BULLISH
+   SPXW260320C06555000: HMA_CROSS BULLISH
+   SPXW260320C06560000: HMA_CROSS BULLISH
+   SPXW260320C06635000: HMA_CROSS BEARISH
+   SPXW260320C06640000: HMA_CROSS BEARISH
+   SPXW260320P06575000: HMA_CROSS BEARISH
+   SPXW260320P06605000: HMA_CROSS BEARISH
+   SPXW260320P06615000: HMA_CROSS BEARISH
+  [haiku] ERROR
+
+=== Testing 2026-02-24 ===
+[dotenv@17.3.1] injecting env (24) from .env -- tip: 🛠️  run anywhere with `dotenvx run -- yourcommand`
+
+════════════════════════════════════════════════════════════════════════
+  SPXer Full-Day Replay — 2026-02-24 (SIGNAL-DETECTOR BASED)
+  151 bars | Option contract signals PRIMARY
+════════════════════════════════════════════════════════════════════════
+  Judges: Claude Haiku, Claude Opus
+
+
+════════════════════════════════════════════════════════════════════════
+  REPLAY RESULTS
+════════════════════════════════════════════════════════════════════════
+
+💼 TRADES (0 total):
+
+📈 SUMMARY:
+  Trades: 0 | Win rate: 0%
+  Total P&L: $0
+
+=== Testing 2026-02-25 ===
+[dotenv@17.3.1] injecting env (24) from .env -- tip: ⚙️  specify custom .env file path with { path: '/custom/path/.env' }
+
+════════════════════════════════════════════════════════════════════════
+  SPXer Full-Day Replay — 2026-02-25 (SIGNAL-DETECTOR BASED)
+  151 bars | Option contract signals PRIMARY
+════════════════════════════════════════════════════════════════════════
+  Judges: Claude Haiku, Claude Opus
+
+
+════════════════════════════════════════════════════════════════════════
+  REPLAY RESULTS
+════════════════════════════════════════════════════════════════════════
+
+💼 TRADES (0 total):
+
+📈 SUMMARY:
+  Trades: 0 | Win rate: 0%
+  Total P&L: $0
+
+=== Testing 2026-02-26 ===
+[dotenv@17.3.1] injecting env (24) from .env -- tip: ⚙️  enable debug logging with { debug: true }
+
+════════════════════════════════════════════════════════════════════════
+  SPXer Full-Day Replay — 2026-02-26 (SIGNAL-DETECTOR BASED)
+  151 bars | Option contract signals PRIMARY
+════════════════════════════════════════════════════════════════════════
+  Judges: Claude Haiku, Claude Opus
+
+
+════════════════════════════════════════════════════════════════════════
+  REPLAY RESULTS
+════════════════════════════════════════════════════════════════════════
+
+💼 TRADES (0 total):
+
+📈 SUMMARY:
+  Trades: 0 | Win rate: 0%
+  Total P&L: $0
+
+=== Testing 2026-02-27 ===
+[dotenv@17.3.1] injecting env (24) from .env -- tip: ⚙️  override existing env vars with { override: true }
+
+════════════════════════════════════════════════════════════════════════
+  SPXer Full-Day Replay — 2026-02-27 (SIGNAL-DETECTOR BASED)
+  151 bars | Option contract signals PRIMARY
+════════════════════════════════════════════════════════════════════════
+  Judges: Claude Haiku, Claude Opus
+
+
+════════════════════════════════════════════════════════════════════════
+  REPLAY RESULTS
+════════════════════════════════════════════════════════════════════════
+
+💼 TRADES (0 total):
+
+📈 SUMMARY:
+  Trades: 0 | Win rate: 0%
+  Total P&L: $0
+
+=== Testing 2026-03-02 ===
+[dotenv@17.3.1] injecting env (24) from .env -- tip: 🔐 prevent building .env in docker: https://dotenvx.com/prebuild
+
+════════════════════════════════════════════════════════════════════════
+  SPXer Full-Day Replay — 2026-03-02 (SIGNAL-DETECTOR BASED)
+  151 bars | Option contract signals PRIMARY
+════════════════════════════════════════════════════════════════════════
+  Judges: Claude Haiku, Claude Opus
+
+
+════════════════════════════════════════════════════════════════════════
+  REPLAY RESULTS
+════════════════════════════════════════════════════════════════════════
+
+💼 TRADES (0 total):
+
+📈 SUMMARY:
+  Trades: 0 | Win rate: 0%
+  Total P&L: $0
+
+=== Testing 2026-03-03 ===
+
+node:internal/modules/run_main:123
+    triggerUncaughtException(
+    ^
+Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/home/ubuntu/SPXer/replay-full.ts' imported from /home/ubuntu/SPXer/
+    at finalizeResolution (node:internal/modules/esm/resolve:275:11)
+    at moduleResolve (node:internal/modules/esm/resolve:861:10)
+    at defaultResolve (node:internal/modules/esm/resolve:985:11)
+    at nextResolve (node:internal/modules/esm/hooks:748:28)
+    at resolveBase (file:///home/ubuntu/SPXer/node_modules/tsx/dist/esm/index.mjs?1774128056603:2:3744)
+    at resolveDirectory (file:///home/ubuntu/SPXer/node_modules/tsx/dist/esm/index.mjs?1774128056603:2:4243)
+    at resolveTsPaths (file:///home/ubuntu/SPXer/node_modules/tsx/dist/esm/index.mjs?1774128056603:2:4984)
+    at resolve (file:///home/ubuntu/SPXer/node_modules/tsx/dist/esm/index.mjs?1774128056603:2:5361)
+    at nextResolve (node:internal/modules/esm/hooks:748:28)
+    at Hooks.resolve (node:internal/modules/esm/hooks:240:30) {
+  code: 'ERR_MODULE_NOT_FOUND',
+  url: 'file:///home/ubuntu/SPXer/replay-full.ts'
+}
+
+Node.js v22.22.1
+
+=== Testing 2026-03-04 ===
+
+node:internal/modules/run_main:123
+    triggerUncaughtException(
+    ^
+Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/home/ubuntu/SPXer/replay-full.ts' imported from /home/ubuntu/SPXer/
+    at finalizeResolution (node:internal/modules/esm/resolve:275:11)
+    at moduleResolve (node:internal/modules/esm/resolve:861:10)
+    at defaultResolve (node:internal/modules/esm/resolve:985:11)
+    at nextResolve (node:internal/modules/esm/hooks:748:28)
+    at resolveBase (file:///home/ubuntu/SPXer/node_modules/tsx/dist/esm/index.mjs?1774128061162:2:3744)
+    at resolveDirectory (file:///home/ubuntu/SPXer/node_modules/tsx/dist/esm/index.mjs?1774128061162:2:4243)
+    at resolveTsPaths (file:///home/ubuntu/SPXer/node_modules/tsx/dist/esm/index.mjs?1774128061162:2:4984)
+    at resolve (file:///home/ubuntu/SPXer/node_modules/tsx/dist/esm/index.mjs?1774128061162:2:5361)
+    at nextResolve (node:internal/modules/esm/hooks:748:28)
+    at Hooks.resolve (node:internal/modules/esm/hooks:240:30) {
+  code: 'ERR_MODULE_NOT_FOUND',
+  url: 'file:///home/ubuntu/SPXer/replay-full.ts'
+}
+
+Node.js v22.22.1
+
+=== Testing 2026-03-05 ===
+
+node:internal/modules/run_main:123
+    triggerUncaughtException(
+    ^
+Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/home/ubuntu/SPXer/replay-full.ts' imported from /home/ubuntu/SPXer/
+    at finalizeResolution (node:internal/modules/esm/resolve:275:11)
+    at moduleResolve (node:internal/modules/esm/resolve:861:10)
+    at defaultResolve (node:internal/modules/esm/resolve:985:11)
+    at nextResolve (node:internal/modules/esm/hooks:748:28)
+    at resolveBase (file:///home/ubuntu/SPXer/node_modules/tsx/dist/esm/index.mjs?1774128065682:2:3744)
+    at resolveDirectory (file:///home/ubuntu/SPXer/node_modules/tsx/dist/esm/index.mjs?1774128065682:2:4243)
+    at resolveTsPaths (file:///home/ubuntu/SPXer/node_modules/tsx/dist/esm/index.mjs?1774128065682:2:4984)
+    at resolve (file:///home/ubuntu/SPXer/node_modules/tsx/dist/esm/index.mjs?1774128065682:2:5361)
+    at nextResolve (node:internal/modules/esm/hooks:748:28)
+    at Hooks.resolve (node:internal/modules/esm/hooks:240:30) {
+  code: 'ERR_MODULE_NOT_FOUND',
+  url: 'file:///home/ubuntu/SPXer/replay-full.ts'
+}
+
+Node.js v22.22.1
+
+=== Testing 2026-03-06 ===
+
+node:internal/modules/run_main:123
+    triggerUncaughtException(
+    ^
+Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/home/ubuntu/SPXer/replay-full.ts' imported from /home/ubuntu/SPXer/
+    at finalizeResolution (node:internal/modules/esm/resolve:275:11)
+    at moduleResolve (node:internal/modules/esm/resolve:861:10)
+    at defaultResolve (node:internal/modules/esm/resolve:985:11)
+    at nextResolve (node:internal/modules/esm/hooks:748:28)
+    at resolveBase (file:///home/ubuntu/SPXer/node_modules/tsx/dist/esm/index.mjs?1774128070098:2:3744)
+    at resolveDirectory (file:///home/ubuntu/SPXer/node_modules/tsx/dist/esm/index.mjs?1774128070098:2:4243)
+    at resolveTsPaths (file:///home/ubuntu/SPXer/node_modules/tsx/dist/esm/index.mjs?1774128070098:2:4984)
+    at resolve (file:///home/ubuntu/SPXer/node_modules/tsx/dist/esm/index.mjs?1774128070098:2:5361)
+    at nextResolve (node:internal/modules/esm/hooks:748:28)
+    at Hooks.resolve (node:internal/modules/esm/hooks:240:30) {
+  code: 'ERR_MODULE_NOT_FOUND',
+  url: 'file:///home/ubuntu/SPXer/replay-full.ts'
+}
+
+Node.js v22.22.1
+
+=== Testing 2026-03-09 ===
+
+node:internal/modules/run_main:123
+    triggerUncaughtException(
+    ^
+Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/home/ubuntu/SPXer/replay-full.ts' imported from /home/ubuntu/SPXer/
+    at finalizeResolution (node:internal/modules/esm/resolve:275:11)
+    at moduleResolve (node:internal/modules/esm/resolve:861:10)
+    at defaultResolve (node:internal/modules/esm/resolve:985:11)
+    at nextResolve (node:internal/modules/esm/hooks:748:28)
+    at resolveBase (file:///home/ubuntu/SPXer/node_modules/tsx/dist/esm/index.mjs?1774128075105:2:3744)
+    at resolveDirectory (file:///home/ubuntu/SPXer/node_modules/tsx/dist/esm/index.mjs?1774128075105:2:4243)
+    at resolveTsPaths (file:///home/ubuntu/SPXer/node_modules/tsx/dist/esm/index.mjs?1774128075105:2:4984)
+    at resolve (file:///home/ubuntu/SPXer/node_modules/tsx/dist/esm/index.mjs?1774128075105:2:5361)
+    at nextResolve (node:internal/modules/esm/hooks:748:28)
+    at Hooks.resolve (node:internal/modules/esm/hooks:240:30) {
+  code: 'ERR_MODULE_NOT_FOUND',
+  url: 'file:///home/ubuntu/SPXer/replay-full.ts'
+}
+
+Node.js v22.22.1
+
+=== Testing 2026-03-10 ===
+
+node:internal/modules/run_main:123
+    triggerUncaughtException(
+    ^
+Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/home/ubuntu/SPXer/replay-full.ts' imported from /home/ubuntu/SPXer/
+    at finalizeResolution (node:internal/modules/esm/resolve:275:11)
+    at moduleResolve (node:internal/modules/esm/resolve:861:10)
+    at defaultResolve (node:internal/modules/esm/resolve:985:11)
+    at nextResolve (node:internal/modules/esm/hooks:748:28)
+    at resolveBase (file:///home/ubuntu/SPXer/node_modules/tsx/dist/esm/index.mjs?1774128079135:2:3744)
+    at resolveDirectory (file:///home/ubuntu/SPXer/node_modules/tsx/dist/esm/index.mjs?1774128079135:2:4243)
+    at resolveTsPaths (file:///home/ubuntu/SPXer/node_modules/tsx/dist/esm/index.mjs?1774128079135:2:4984)
+    at resolve (file:///home/ubuntu/SPXer/node_modules/tsx/dist/esm/index.mjs?1774128079135:2:5361)
+    at nextResolve (node:internal/modules/esm/hooks:748:28)
+    at Hooks.resolve (node:internal/modules/esm/hooks:240:30) {
+  code: 'ERR_MODULE_NOT_FOUND',
+  url: 'file:///home/ubuntu/SPXer/replay-full.ts'
+}
+
+Node.js v22.22.1
+
+=== Testing 2026-03-11 ===
+
+node:internal/modules/run_main:123
+    triggerUncaughtException(
+    ^
+Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/home/ubuntu/SPXer/replay-full.ts' imported from /home/ubuntu/SPXer/
+    at finalizeResolution (node:internal/modules/esm/resolve:275:11)
+    at moduleResolve (node:internal/modules/esm/resolve:861:10)
+    at defaultResolve (node:internal/modules/esm/resolve:985:11)
+    at nextResolve (node:internal/modules/esm/hooks:748:28)
+    at resolveBase (file:///home/ubuntu/SPXer/node_modules/tsx/dist/esm/index.mjs?1774128083332:2:3744)
+    at resolveDirectory (file:///home/ubuntu/SPXer/node_modules/tsx/dist/esm/index.mjs?1774128083332:2:4243)
+    at resolveTsPaths (file:///home/ubuntu/SPXer/node_modules/tsx/dist/esm/index.mjs?1774128083332:2:4984)
+    at resolve (file:///home/ubuntu/SPXer/node_modules/tsx/dist/esm/index.mjs?1774128083332:2:5361)
+    at nextResolve (node:internal/modules/esm/hooks:748:28)
+    at Hooks.resolve (node:internal/modules/esm/hooks:240:30) {
+  code: 'ERR_MODULE_NOT_FOUND',
+  url: 'file:///home/ubuntu/SPXer/replay-full.ts'
+}
+
+Node.js v22.22.1
+
+=== Testing 2026-03-12 ===
+
+node:internal/modules/run_main:123
+    triggerUncaughtException(
+    ^
+Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/home/ubuntu/SPXer/replay-full.ts' imported from /home/ubuntu/SPXer/
+    at finalizeResolution (node:internal/modules/esm/resolve:275:11)
+    at moduleResolve (node:internal/modules/esm/resolve:861:10)
+    at defaultResolve (node:internal/modules/esm/resolve:985:11)
+    at nextResolve (node:internal/modules/esm/hooks:748:28)
+    at resolveBase (file:///home/ubuntu/SPXer/node_modules/tsx/dist/esm/index.mjs?1774128087489:2:3744)
+    at resolveDirectory (file:///home/ubuntu/SPXer/node_modules/tsx/dist/esm/index.mjs?1774128087489:2:4243)
+    at resolveTsPaths (file:///home/ubuntu/SPXer/node_modules/tsx/dist/esm/index.mjs?1774128087489:2:4984)
+    at resolve (file:///home/ubuntu/SPXer/node_modules/tsx/dist/esm/index.mjs?1774128087489:2:5361)
+    at nextResolve (node:internal/modules/esm/hooks:748:28)
+    at Hooks.resolve (node:internal/modules/esm/hooks:240:30) {
+  code: 'ERR_MODULE_NOT_FOUND',
+  url: 'file:///home/ubuntu/SPXer/replay-full.ts'
+}
+
+Node.js v22.22.1
+
+=== Testing 2026-03-13 ===
+
+node:internal/modules/run_main:123
+    triggerUncaughtException(
+    ^
+Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/home/ubuntu/SPXer/replay-full.ts' imported from /home/ubuntu/SPXer/
+    at finalizeResolution (node:internal/modules/esm/resolve:275:11)
+    at moduleResolve (node:internal/modules/esm/resolve:861:10)
+    at defaultResolve (node:internal/modules/esm/resolve:985:11)
+    at nextResolve (node:internal/modules/esm/hooks:748:28)
+    at resolveBase (file:///home/ubuntu/SPXer/node_modules/tsx/dist/esm/index.mjs?1774128091560:2:3744)
+    at resolveDirectory (file:///home/ubuntu/SPXer/node_modules/tsx/dist/esm/index.mjs?1774128091560:2:4243)
+    at resolveTsPaths (file:///home/ubuntu/SPXer/node_modules/tsx/dist/esm/index.mjs?1774128091560:2:4984)
+    at resolve (file:///home/ubuntu/SPXer/node_modules/tsx/dist/esm/index.mjs?1774128091560:2:5361)
+    at nextResolve (node:internal/modules/esm/hooks:748:28)
+    at Hooks.resolve (node:internal/modules/esm/hooks:240:30) {
+  code: 'ERR_MODULE_NOT_FOUND',
+  url: 'file:///home/ubuntu/SPXer/replay-full.ts'
+}
+
+Node.js v22.22.1
+
+=== Testing 2026-03-16 ===
+
+node:internal/modules/run_main:123
+    triggerUncaughtException(
+    ^
+Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/home/ubuntu/SPXer/replay-full.ts' imported from /home/ubuntu/SPXer/
+    at finalizeResolution (node:internal/modules/esm/resolve:275:11)
+    at moduleResolve (node:internal/modules/esm/resolve:861:10)
+    at defaultResolve (node:internal/modules/esm/resolve:985:11)
+    at nextResolve (node:internal/modules/esm/hooks:748:28)
+    at resolveBase (file:///home/ubuntu/SPXer/node_modules/tsx/dist/esm/index.mjs?1774128095594:2:3744)
+    at resolveDirectory (file:///home/ubuntu/SPXer/node_modules/tsx/dist/esm/index.mjs?1774128095594:2:4243)
+    at resolveTsPaths (file:///home/ubuntu/SPXer/node_modules/tsx/dist/esm/index.mjs?1774128095594:2:4984)
+    at resolve (file:///home/ubuntu/SPXer/node_modules/tsx/dist/esm/index.mjs?1774128095594:2:5361)
+    at nextResolve (node:internal/modules/esm/hooks:748:28)
+    at Hooks.resolve (node:internal/modules/esm/hooks:240:30) {
+  code: 'ERR_MODULE_NOT_FOUND',
+  url: 'file:///home/ubuntu/SPXer/replay-full.ts'
+}
+
+Node.js v22.22.1
+
+=== Testing 2026-03-17 ===
+
+node:internal/modules/run_main:123
+    triggerUncaughtException(
+    ^
+Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/home/ubuntu/SPXer/replay-full.ts' imported from /home/ubuntu/SPXer/
+    at finalizeResolution (node:internal/modules/esm/resolve:275:11)
+    at moduleResolve (node:internal/modules/esm/resolve:861:10)
+    at defaultResolve (node:internal/modules/esm/resolve:985:11)
+    at nextResolve (node:internal/modules/esm/hooks:748:28)
+    at resolveBase (file:///home/ubuntu/SPXer/node_modules/tsx/dist/esm/index.mjs?1774128099668:2:3744)
+    at resolveDirectory (file:///home/ubuntu/SPXer/node_modules/tsx/dist/esm/index.mjs?1774128099668:2:4243)
+    at resolveTsPaths (file:///home/ubuntu/SPXer/node_modules/tsx/dist/esm/index.mjs?1774128099668:2:4984)
+    at resolve (file:///home/ubuntu/SPXer/node_modules/tsx/dist/esm/index.mjs?1774128099668:2:5361)
+    at nextResolve (node:internal/modules/esm/hooks:748:28)
+    at Hooks.resolve (node:internal/modules/esm/hooks:240:30) {
+  code: 'ERR_MODULE_NOT_FOUND',
+  url: 'file:///home/ubuntu/SPXer/replay-full.ts'
+}
+
+Node.js v22.22.1
+
+=== Testing 2026-03-18 ===
+
+node:internal/modules/run_main:123
+    triggerUncaughtException(
+    ^
+Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/home/ubuntu/SPXer/replay-full.ts' imported from /home/ubuntu/SPXer/
+    at finalizeResolution (node:internal/modules/esm/resolve:275:11)
+    at moduleResolve (node:internal/modules/esm/resolve:861:10)
+    at defaultResolve (node:internal/modules/esm/resolve:985:11)
+    at nextResolve (node:internal/modules/esm/hooks:748:28)
+    at resolveBase (file:///home/ubuntu/SPXer/node_modules/tsx/dist/esm/index.mjs?1774128103778:2:3744)
+    at resolveDirectory (file:///home/ubuntu/SPXer/node_modules/tsx/dist/esm/index.mjs?1774128103778:2:4243)
+    at resolveTsPaths (file:///home/ubuntu/SPXer/node_modules/tsx/dist/esm/index.mjs?1774128103778:2:4984)
+    at resolve (file:///home/ubuntu/SPXer/node_modules/tsx/dist/esm/index.mjs?1774128103778:2:5361)
+    at nextResolve (node:internal/modules/esm/hooks:748:28)
+    at Hooks.resolve (node:internal/modules/esm/hooks:240:30) {
+  code: 'ERR_MODULE_NOT_FOUND',
+  url: 'file:///home/ubuntu/SPXer/replay-full.ts'
+}
+
+Node.js v22.22.1
+
+=== Testing 2026-03-19 ===
+
+node:internal/modules/run_main:123
+    triggerUncaughtException(
+    ^
+Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/home/ubuntu/SPXer/replay-full.ts' imported from /home/ubuntu/SPXer/
+    at finalizeResolution (node:internal/modules/esm/resolve:275:11)
+    at moduleResolve (node:internal/modules/esm/resolve:861:10)
+    at defaultResolve (node:internal/modules/esm/resolve:985:11)
+    at nextResolve (node:internal/modules/esm/hooks:748:28)
+    at resolveBase (file:///home/ubuntu/SPXer/node_modules/tsx/dist/esm/index.mjs?1774128108047:2:3744)
+    at resolveDirectory (file:///home/ubuntu/SPXer/node_modules/tsx/dist/esm/index.mjs?1774128108047:2:4243)
+    at resolveTsPaths (file:///home/ubuntu/SPXer/node_modules/tsx/dist/esm/index.mjs?1774128108047:2:4984)
+    at resolve (file:///home/ubuntu/SPXer/node_modules/tsx/dist/esm/index.mjs?1774128108047:2:5361)
+    at nextResolve (node:internal/modules/esm/hooks:748:28)
+    at Hooks.resolve (node:internal/modules/esm/hooks:240:30) {
+  code: 'ERR_MODULE_NOT_FOUND',
+  url: 'file:///home/ubuntu/SPXer/replay-full.ts'
+}
+
+Node.js v22.22.1
+
+=== Testing 2026-03-20 ===
+
+node:internal/modules/run_main:123
+    triggerUncaughtException(
+    ^
+Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/home/ubuntu/SPXer/replay-full.ts' imported from /home/ubuntu/SPXer/
+    at finalizeResolution (node:internal/modules/esm/resolve:275:11)
+    at moduleResolve (node:internal/modules/esm/resolve:861:10)
+    at defaultResolve (node:internal/modules/esm/resolve:985:11)
+    at nextResolve (node:internal/modules/esm/hooks:748:28)
+    at resolveBase (file:///home/ubuntu/SPXer/node_modules/tsx/dist/esm/index.mjs?1774128111947:2:3744)
+    at resolveDirectory (file:///home/ubuntu/SPXer/node_modules/tsx/dist/esm/index.mjs?1774128111947:2:4243)
+    at resolveTsPaths (file:///home/ubuntu/SPXer/node_modules/tsx/dist/esm/index.mjs?1774128111947:2:4984)
+    at resolve (file:///home/ubuntu/SPXer/node_modules/tsx/dist/esm/index.mjs?1774128111947:2:5361)
+    at nextResolve (node:internal/modules/esm/hooks:748:28)
+    at Hooks.resolve (node:internal/modules/esm/hooks:240:30) {
+  code: 'ERR_MODULE_NOT_FOUND',
+  url: 'file:///home/ubuntu/SPXer/replay-full.ts'
+}
+
+Node.js v22.22.1
+
+=== SUITE COMPLETE ===
+Finished: Sat Mar 21 21:21:55 UTC 2026

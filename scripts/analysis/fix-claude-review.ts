@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import { askModel } from './src/agent/model-clients';
+import { askModel } from '../../src/agent/model-clients';
 
 const PROMPT = `You are a senior quantitative trading systems architect specializing in 0DTE SPX options.
 

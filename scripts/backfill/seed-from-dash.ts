@@ -4,11 +4,11 @@
  */
 import Database from 'better-sqlite3';
 import path from 'path';
-import { initDb } from './src/storage/db';
-import { upsertBars } from './src/storage/queries';
-import { rawToBar } from './src/pipeline/bar-builder';
-import { computeIndicators } from './src/pipeline/indicator-engine';
-import type { Bar, Timeframe } from './src/types';
+import { initDb } from '../../src/storage/db';
+import { upsertBars } from '../../src/storage/queries';
+import { rawToBar } from '../../src/pipeline/bar-builder';
+import { computeIndicators } from '../../src/pipeline/indicator-engine';
+import type { Bar, Timeframe } from '../../src/types';
 
 const DASH_DB = path.resolve('/home/ubuntu/SPX-0DTE/data.db');
 const SPXER_DB = process.env.DB_PATH ?? './data/spxer.db';

@@ -1,0 +1,11 @@
+{
+  "env": {},
+  "includeCoAuthoredBy": true,
+  "cleanupPeriodDays": 30,
+  "permissions": {
+    "defaultMode": "bypassPermissions",
+    "allow": [],
+    "deny": [],
+    "additionalDirectories": []
+  }
+}
