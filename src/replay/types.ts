@@ -54,10 +54,17 @@ export interface ReplayConfig {
   };
 
   judge: {
+    /** Enable judge tier (advisor tier, doesn't execute) */
+    enabled: boolean;
+    /** Which judge models to consult in parallel */
+    models: ('haiku' | 'sonnet' | 'opus')[];
+    /** Decision rule: how to combine judge votes */
+    consensusRule: 'majority' | 'unanimous' | 'first-agree' | 'primary-decides';
+    /** Primary judge (if consensusRule='primary-decides') — executes the trade */
+    primaryModel?: 'haiku' | 'sonnet' | 'opus';
+    /** Min confidence threshold to accept judge decision (0.0-1.0) */
     confidenceThreshold: number;
-    allowHaiku: boolean;
-    allowSonnet: boolean;
-    allowOpus: boolean;
+    /** Cooldown between judge escalations in seconds */
     escalationCooldownSec: number;
   };
 
@@ -135,6 +142,15 @@ export interface ReplayConfig {
     maxDailyLoss: number;
     maxTradesPerDay: number;
     maxRiskPerTrade: number;
+  };
+
+  /** Exit strategy: how to exit open positions */
+  exit: {
+    /** takeProfit: exit when TP hit or stop hit (standard) */
+    /** scannerReverse: if opposite signal fires, reverse instead of just exiting */
+    strategy: 'takeProfit' | 'scannerReverse';
+    /** For scannerReverse: reload position with same size on opposite side */
+    reversalSizeMultiplier: number;
   };
 }
 

@@ -18,6 +18,7 @@ import * as dotenv from 'dotenv';
 dotenv.config();
 
 import { DEFAULT_CONFIG, CONFIG_PRESETS, createStore, runReplay, type ReplayConfig } from '../../src/replay';
+import { interactiveConfigBuilder } from '../../src/replay/cli-config';
 
 const args = process.argv.slice(2);
 const targetDate = args.find(a => !a.startsWith('--'));
@@ -28,11 +29,13 @@ const flags = Object.fromEntries(
   })
 );
 
-if (!targetDate) {
+if (!targetDate && flags['interactive'] !== 'true') {
   console.error('Usage: npx tsx scripts/backtest/run-replay.ts <YYYY-MM-DD> [options]');
+  console.error('   or: npx tsx scripts/backtest/run-replay.ts --interactive [options]');
   console.error('');
   console.error('Options:');
-  console.error('  --config=<preset>    Use a preset: aggressive, conservative, momentumOnly, reversals');
+  console.error('  --interactive        Launch interactive config builder (skip date arg)');
+  console.error('  --config=<preset>    Use a preset: aggressive, conservative, balanced');
   console.error('  --config-id=<id>     Load a saved config from the store');
   console.error('  --no-judge           Skip judge API calls (deterministic signals only)');
   console.error('  --quiet              Minimal output');
@@ -43,8 +46,13 @@ if (!targetDate) {
 
 async function main() {
   let config: ReplayConfig;
+  let date = targetDate;
 
-  if (flags['config-id']) {
+  // Interactive mode: launch config builder
+  if (flags['interactive'] === 'true') {
+    config = await interactiveConfigBuilder();
+    date = config.date;
+  } else if (flags['config-id']) {
     // Load from store
     const store = createStore();
     const loaded = store.getConfig(flags['config-id']);
@@ -56,8 +64,10 @@ async function main() {
     config = loaded;
   } else if (flags['config'] && flags['config'] in CONFIG_PRESETS) {
     config = CONFIG_PRESETS[flags['config'] as keyof typeof CONFIG_PRESETS]();
+    config.date = targetDate!;
   } else {
     config = { ...DEFAULT_CONFIG };
+    config.date = targetDate!;
   }
 
   // Ensure config is saved to store so results can reference it
@@ -65,7 +75,7 @@ async function main() {
   store.saveConfig(config);
   store.close();
 
-  const result = await runReplay(config, targetDate!, {
+  const result = await runReplay(config, date!, {
     verbose: flags['quiet'] !== 'true',
     noJudge: flags['no-judge'] === 'true',
   });

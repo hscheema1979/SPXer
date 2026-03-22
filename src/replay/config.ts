@@ -47,10 +47,11 @@ export const DEFAULT_CONFIG: ReplayConfig = {
   },
 
   judge: {
+    enabled: true,
+    models: ['sonnet'], // Default: single Sonnet judge
+    consensusRule: 'primary-decides',
+    primaryModel: 'sonnet',
     confidenceThreshold: 0.5,
-    allowHaiku: true,
-    allowSonnet: true,
-    allowOpus: false,
     escalationCooldownSec: 600,
   },
 
@@ -101,6 +102,11 @@ export const DEFAULT_CONFIG: ReplayConfig = {
     maxDailyLoss: 500,
     maxTradesPerDay: 10,
     maxRiskPerTrade: 0.02,
+  },
+
+  exit: {
+    strategy: 'takeProfit', // Standard: exit on TP or stop
+    reversalSizeMultiplier: 1.0, // (for scannerReverse mode)
   },
 };
 
@@ -156,7 +162,7 @@ export const CONFIG_PRESETS = {
     id: 'haiku-scanner',
     name: 'Haiku Scanner + Judge',
     description: 'Use Haiku as a Tier 1 scanner via Agent SDK (parallel execution)',
-    judge: { ...DEFAULT_CONFIG.judge, allowHaiku: true, allowSonnet: true, allowOpus: false },
+    judge: { ...DEFAULT_CONFIG.judge, models: ['haiku', 'sonnet'] },
     scanners: { ...DEFAULT_CONFIG.scanners, enabled: true, enableKimi: false, enableGlm: false, enableMinimax: false, enableHaiku: true },
   }),
 
@@ -165,7 +171,7 @@ export const CONFIG_PRESETS = {
     id: 'all-scanners-parallel',
     name: 'All Scanners + Parallel Judges',
     description: 'Haiku, Kimi, GLM, MiniMax scanners; all judges run in parallel',
-    judge: { ...DEFAULT_CONFIG.judge, allowHaiku: true, allowSonnet: true, allowOpus: true },
+    judge: { ...DEFAULT_CONFIG.judge, models: ['haiku', 'sonnet', 'opus'] },
     scanners: { ...DEFAULT_CONFIG.scanners, enabled: true, enableHaiku: true, enableKimi: true, enableGlm: true, enableMinimax: true },
   }),
 };
@@ -187,6 +193,7 @@ export function mergeConfig(base: ReplayConfig, overrides: Partial<ReplayConfig>
     escalation: { ...base.escalation, ...overrides.escalation },
     timing: { ...base.timing, ...overrides.timing },
     risk: { ...base.risk, ...overrides.risk },
+    exit: { ...base.exit, ...overrides.exit },
   };
 }
 
