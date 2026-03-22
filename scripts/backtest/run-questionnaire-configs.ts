@@ -24,17 +24,17 @@ const baseConfig: Partial<ReplayConfig> = {
     promptId: 'baseline-2026-03-18-v1.0',
   },
 
-  // Judges: Disabled for deterministic testing
-  // Once Agent SDK is stable, enable and test with all 3
+  // Judges: All 3 models evaluate each setup (advisory only, don't execute)
+  // Log what each judge would have decided
   judge: {
-    enabled: false,
-    models: [],
+    enabled: true,
+    models: ['haiku', 'sonnet', 'opus'],
     primaryModel: 'sonnet',
     confidenceThreshold: 0.5,
     escalationCooldownSec: 600,
   },
 
-  // Signal-only escalation (scanners disabled for now)
+  // Escalation: Deterministic signals trigger judges (all 3 models evaluate)
   escalation: {
     signalTriggersJudge: true,
     scannerTriggersJudge: false,
@@ -96,29 +96,23 @@ const baseConfig: Partial<ReplayConfig> = {
   },
 };
 
-// Config 1: Standard takeProfit exits
-const configTakeProfit: ReplayConfig = mergeConfig(DEFAULT_CONFIG, {
+// Config 1: Deterministic signals with judges
+const configTakeProfit = mergeConfig(DEFAULT_CONFIG, {
   ...baseConfig,
-  id: 'aggressive-takeprofit',
-  name: 'Aggressive + TakeProfit Exits',
-  description: 'All 4 scanners, all 3 judges, exit on TP or stop',
-  exit: {
-    strategy: 'takeProfit',
-    reversalSizeMultiplier: 1.0,
-  },
-});
+  id: 'aggressive-withjudges',
+  name: 'Aggressive + Judge Advisory',
+  description: 'Deterministic signals. All 3 judges (Haiku, Sonnet, Opus) evaluate each trade (advisory only).',
+  createdAt: Date.now(),
+} as Partial<ReplayConfig>) as ReplayConfig;
 
-// Config 2: Scanner-driven reversal exits
-const configScannerReverse: ReplayConfig = mergeConfig(DEFAULT_CONFIG, {
+// Config 2: Same as Config 1 (both use same settings, just different run)
+const configScannerReverse = mergeConfig(DEFAULT_CONFIG, {
   ...baseConfig,
-  id: 'aggressive-reversal',
-  name: 'Aggressive + Scanner Reversal Exits',
-  description: 'All 4 scanners, all 3 judges, exit/reverse on opposite scanner signal',
-  exit: {
-    strategy: 'scannerReverse',
-    reversalSizeMultiplier: 1.0,
-  },
-});
+  id: 'aggressive-withjudges-2',
+  name: 'Aggressive + Judge Advisory (Run 2)',
+  description: 'Identical config to Run 1. Tests consistency of judge decisions.',
+  createdAt: Date.now(),
+} as Partial<ReplayConfig>) as ReplayConfig;
 
 // Dates to test
 const dates = ['2026-03-18', '2026-03-19', '2026-03-20'];
