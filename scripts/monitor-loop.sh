@@ -1,6 +1,6 @@
 #!/bin/bash
 # SPXer 2-Minute Monitoring Loop
-cd /home/ubuntu/SPXer
+cd "$(dirname "$0")/.."
 
 while true; do
   clear

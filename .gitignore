@@ -9,3 +9,5 @@ data/archive/
 *.parquet
 logs/
 .omc/
+build/
+.claude/plans/
