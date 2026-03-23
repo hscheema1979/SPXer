@@ -11,18 +11,18 @@ import { ReplayConfig } from './src/replay/types';
 export const AGENT_CONFIG: ReplayConfig = {
   id: 'paper-mode-live',
   
-  // Signal detection
+  // Signal detection — autoresearch session 2,7,8 findings
   signals: {
     enableRsiCrosses: true,
-    enableHmaCrosses: true,
-    enableEmaCrosses: false,
-    rsiOversold: 20,      // Aggressive
-    rsiOverbought: 80,    // Aggressive
-    optionRsiOversold: 30,
-    optionRsiOverbought: 70,
+    enableHmaCrosses: true,   // Essential (s7: off drops score 83→49)
+    enableEmaCrosses: false,  // Hurts (s8: on drops score 83→54)
+    rsiOversold: 20,          // RSI threshold doesn't matter much (s2: all equal)
+    rsiOverbought: 80,
+    optionRsiOversold: 40,    // Tighter = better quality (s5: 86.67 score)
+    optionRsiOverbought: 60,
   },
 
-  // Strike selection (±150 from SPX)
+  // Strike selection — s1: morning ±75-100 is optimal
   strikeSelector: {
     strikeSearchRange: 80,
     otmDistanceMin: 0.2,
@@ -32,12 +32,12 @@ export const AGENT_CONFIG: ReplayConfig = {
     emergencyOtmMax: 10.0,
   },
 
-  // Position management
+  // Position management — s3: SL 80% slightly better, s4: TP 2x highest WR
   position: {
-    stopLossPercent: 50,   // Hold for max drawdown
-    takeProfitMultiplier: 5,
+    stopLossPercent: 80,      // Hold winners longer (s3: 85.26 score)
+    takeProfitMultiplier: 5,  // 5x is baseline; 2x has highest WR but lower P&L per trade
     defaultQuantity: 1,
-    maxPositionsOpen: 3,   // Power hour aggressiveness
+    maxPositionsOpen: 3,
   },
 
   // Time restrictions
@@ -81,7 +81,7 @@ export const AGENT_CONFIG: ReplayConfig = {
   judge: {
     enabled: true,
     activeJudge: 'sonnet',
-    escalationCooldownSec: 180,  // 3 minutes between judge calls
+    escalationCooldownSec: 180,  // s6: 180s is optimal (92.73 score, 81.8% WR)
   },
 
   // Prompts
