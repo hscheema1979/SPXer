@@ -11,10 +11,23 @@ import { getMarketMode, getActiveExpirations } from './pipeline/scheduler';
 import { startHttpServer, setLastSpxPrice, setTrackerCountFn } from './server/http';
 import { startWsServer, broadcast } from './server/ws';
 import { config, STRIKE_BAND, STRIKE_INTERVAL, POLL_UNDERLYING_MS, POLL_OPTIONS_RTH_MS, POLL_OPTIONS_OVERNIGHT_MS, POLL_SCREENER_MS } from './config';
+import type { Bar, Timeframe } from './types';
+
+const HIGHER_TIMEFRAMES: [Timeframe, number][] = [['3m', 180], ['5m', 300], ['10m', 600], ['15m', 900], ['1h', 3600]];
 
 const tracker = new ContractTracker(STRIKE_BAND, STRIKE_INTERVAL);
 let lastSpxPrice: number | null = null;
 let prevMode: string | null = null; // tracks mode transitions for VWAP reset
+
+/** Aggregate 1m bars to all higher timeframes (3m, 5m, 15m, 1h) with indicator computation */
+function aggregateAndStore(bars1m: Bar[], tier: 1 | 2 = 1): void {
+  for (const [tf, secs] of HIGHER_TIMEFRAMES) {
+    const agg = aggregate(bars1m, tf, secs).map(b => ({
+      ...b, indicators: computeIndicators(b, tier)
+    }));
+    if (agg.length > 0) upsertBars(agg);
+  }
+}
 
 function loadContractsFromDb(): void {
   // Reload ACTIVE/STICKY contracts into tracker on startup so sticky state survives restarts
@@ -48,6 +61,8 @@ async function backfillOptionBars(): Promise<void> {
           return { ...bar, indicators: computeIndicators(bar, 2) };
         });
         upsertBars(bars);
+        // Aggregate to higher timeframes
+        aggregateAndStore(bars, 2);
         return bars.length;
       })
     );
@@ -65,13 +80,8 @@ async function warmup(): Promise<void> {
   const enriched = bars.map(b => ({ ...b, indicators: computeIndicators(b, 2) }));
   upsertBars(enriched);
 
-  // Aggregate to higher timeframes
-  for (const [tf, secs] of [['5m', 300], ['15m', 900], ['1h', 3600]] as const) {
-    const agg = aggregate(enriched, tf, secs).map(b => ({
-      ...b, indicators: computeIndicators(b, 2)
-    }));
-    upsertBars(agg);
-  }
+  // Aggregate to higher timeframes (3m, 5m, 15m, 1h)
+  aggregateAndStore(enriched, 2);
   console.log(`[startup] Warmed ${enriched.length} ES 1m bars`);
 }
 
@@ -102,6 +112,11 @@ async function pollUnderlying(): Promise<void> {
       const symbol = mode === 'rth' ? 'SPX' : 'ES';
       const enriched = bars.map(b => ({ ...b, indicators: computeIndicators(b, 2) }));
       upsertBars(enriched);
+
+      // Aggregate to higher timeframes — fetch recent 1m bars for proper aggregation
+      const recent1m = getBars(symbol, '1m', 60);
+      if (recent1m.length > 0) aggregateAndStore(recent1m, 2);
+
       lastSpxPrice = enriched[enriched.length - 1].close;
       setLastSpxPrice(lastSpxPrice);
       broadcast({ type: 'spx_bar', data: enriched[enriched.length - 1] });
@@ -152,7 +167,20 @@ async function pollOptions(): Promise<void> {
         newBars.push(enriched);
         broadcast({ type: 'contract_bar', symbol: sym, data: q });
       });
-      if (newBars.length > 0) upsertBars(newBars);
+      if (newBars.length > 0) {
+        upsertBars(newBars);
+
+        // Aggregate option bars to higher timeframes per symbol
+        const bySymbol = new Map<string, Bar[]>();
+        for (const b of newBars) {
+          if (!bySymbol.has(b.symbol)) bySymbol.set(b.symbol, []);
+          bySymbol.get(b.symbol)!.push(b as Bar);
+        }
+        for (const [sym] of bySymbol) {
+          const recent1m = getBars(sym, '1m', 60);
+          if (recent1m.length > 0) aggregateAndStore(recent1m, 2);
+        }
+      }
     }
 
     tracker.checkExpiries();
@@ -188,16 +216,33 @@ async function main(): Promise<void> {
   }
 
   // Seed indicator state from DB so RSI/EMA are warm immediately (no 14-bar blind spot)
+  const allTimeframes = ['1m', ...HIGHER_TIMEFRAMES.map(([t]) => t)];
+
+  // Seed underlying (SPX/ES) with tier 2 indicators
   for (const sym of ['SPX', 'ES']) {
-    const histBars = getBars(sym, '1m', 50);
-    if (histBars.length > 0) {
-      seedState(sym, '1m', histBars);
-      // Re-compute indicators on seeded bars so EMA/RSI state is primed
-      for (const bar of histBars) {
-        computeIndicators(bar, 2);
+    for (const tf of allTimeframes) {
+      const histBars = getBars(sym, tf, 50);
+      if (histBars.length > 0) {
+        seedState(sym, tf as any, histBars);
+        for (const bar of histBars) computeIndicators(bar, 2);
+        console.log(`[startup] Seeded ${sym} ${tf} indicator state from ${histBars.length} bars`);
       }
-      console.log(`[startup] Seeded ${sym} 1m indicator state from ${histBars.length} historical bars`);
     }
+  }
+
+  // Seed tracked option contracts with tier 1 indicators across all timeframes
+  const trackedContracts = tracker.getActive().concat(tracker.getSticky());
+  for (const c of trackedContracts) {
+    for (const tf of allTimeframes) {
+      const histBars = getBars(c.symbol, tf, 50);
+      if (histBars.length > 0) {
+        seedState(c.symbol, tf as any, histBars);
+        for (const bar of histBars) computeIndicators(bar, 2);
+      }
+    }
+  }
+  if (trackedContracts.length > 0) {
+    console.log(`[startup] Seeded ${trackedContracts.length} option contracts across ${allTimeframes.length} timeframes`);
   }
 
   const { app, httpServer } = startHttpServer(config.port);
@@ -213,8 +258,10 @@ async function main(): Promise<void> {
   setInterval(() => {
     const mode = getMarketMode();
     if (mode === 'rth' && prevMode !== 'rth') {
-      resetVWAP('SPX', '1m');
-      resetVWAP('ES', '1m');
+      for (const sym of ['SPX', 'ES']) {
+        resetVWAP(sym, '1m');
+        for (const [tf] of HIGHER_TIMEFRAMES) resetVWAP(sym, tf);
+      }
     }
     prevMode = mode;
   }, 60_000);

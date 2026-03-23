@@ -1,4 +1,4 @@
-export type Timeframe = '1m' | '5m' | '15m' | '1h' | '1d';
+export type Timeframe = '1m' | '3m' | '5m' | '10m' | '15m' | '1h' | '1d';
 export type ContractState = 'UNSEEN' | 'ACTIVE' | 'STICKY' | 'EXPIRED';
 export type GapType = 'interpolated' | 'stale' | null;
 export type OptionType = 'call' | 'put';

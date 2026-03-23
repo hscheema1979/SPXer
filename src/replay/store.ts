@@ -96,8 +96,16 @@ export class ReplayStore {
 
   createRun(configId: string, date: string): string {
     const id = `${configId}-${date}-${Date.now()}`;
+    // Clean up previous runs for same config+date to avoid FK conflicts
+    const oldRuns = this.db.prepare(
+      'SELECT id FROM replay_runs WHERE configId = ? AND date = ?'
+    ).all(configId, date) as any[];
+    for (const old of oldRuns) {
+      this.db.prepare('DELETE FROM replay_results WHERE runId = ?').run(old.id);
+      this.db.prepare('DELETE FROM replay_runs WHERE id = ?').run(old.id);
+    }
     this.db.prepare(`
-      INSERT OR REPLACE INTO replay_runs (id, configId, date, startedAt, status)
+      INSERT INTO replay_runs (id, configId, date, startedAt, status)
       VALUES (?, ?, ?, ?, 'running')
     `).run(id, configId, date, Date.now());
     return id;

@@ -174,6 +174,26 @@ export const CONFIG_PRESETS = {
     judge: { ...DEFAULT_CONFIG.judge, models: ['haiku', 'sonnet', 'opus'] },
     scanners: { ...DEFAULT_CONFIG.scanners, enabled: true, enableHaiku: true, enableKimi: true, enableGlm: true, enableMinimax: true },
   }),
+
+  wideStrike: (): ReplayConfig => ({
+    ...DEFAULT_CONFIG,
+    id: 'wide-strike',
+    name: 'Wide Strike Range',
+    description: 'Increased strike search range (±150) to capture 2-3x more contracts',
+    strikeSelector: { ...DEFAULT_CONFIG.strikeSelector, strikeSearchRange: 150 },
+  }),
+
+  aggressiveWideStrike: (): ReplayConfig => ({
+    ...DEFAULT_CONFIG,
+    id: 'aggressive-wide-strike',
+    name: 'Aggressive + Wide Strike',
+    description: 'Aggressive config with ±150 strike range for maximum coverage',
+    rsi: { oversoldThreshold: 15, overboughtThreshold: 85 },
+    signals: { ...DEFAULT_CONFIG.signals, optionRsiOversold: 25, optionRsiOverbought: 75 },
+    position: { stopLossPercent: 70, takeProfitMultiplier: 8, maxPositionsOpen: 5, positionSizeMultiplier: 1.2 },
+    sizing: { baseDollarsPerTrade: 400, sizeMultiplier: 1.5, minContracts: 1, maxContracts: 15 },
+    strikeSelector: { ...DEFAULT_CONFIG.strikeSelector, strikeSearchRange: 150 },
+  }),
 };
 
 export function mergeConfig(base: ReplayConfig, overrides: Partial<ReplayConfig>): ReplayConfig {
