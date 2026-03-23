@@ -24,6 +24,62 @@ export function computeHMA(closes: number[], period: number): number | null {
   return computeWMA(raw, sqrtP);
 }
 
+import type { WMAState, HMAState } from '../../types';
+
+/**
+ * Create a fresh WMAState for the given period.
+ */
+export function makeWMAState(period: number): WMAState {
+  return { buf: new Array(period).fill(0), pos: 0, filled: false, period };
+}
+
+/**
+ * Feed one new value into a WMAState and return the current WMA, or null if
+ * the buffer has not yet been fully populated.
+ * O(period) per call — not O(n²).
+ */
+export function wmaStep(state: WMAState, value: number): number | null {
+  state.buf[state.pos] = value;
+  state.pos = (state.pos + 1) % state.period;
+  if (!state.filled && state.pos === 0) state.filled = true;
+  if (!state.filled) return null;
+
+  // Compute WMA over the circular buffer.
+  // buf[pos] is the oldest value (weight 1), buf[pos-1 mod period] is the newest (weight period).
+  let num = 0;
+  const den = (state.period * (state.period + 1)) / 2;
+  for (let i = 0; i < state.period; i++) {
+    const idx = (state.pos + i) % state.period; // oldest→newest order
+    num += state.buf[idx] * (i + 1);
+  }
+  return num / den;
+}
+
+/**
+ * Create a fresh HMAState for the given period.
+ */
+export function makeHMAState(period: number): HMAState {
+  const sqrtP = Math.round(Math.sqrt(period));
+  return {
+    wmaHalf: makeWMAState(Math.floor(period / 2)),
+    wmaFull: makeWMAState(period),
+    wmaSqrt: makeWMAState(sqrtP),
+  };
+}
+
+/**
+ * Incremental HMA: feed one new close price into the HMAState and return the
+ * current HMA value, or null until enough bars have been seen.
+ * Total cost: O(period) per call instead of O(n * period).
+ */
+export function hmaStep(state: HMAState, close: number): number | null {
+  const wh = wmaStep(state.wmaHalf, close);
+  const wf = wmaStep(state.wmaFull, close);
+  if (wh === null || wf === null) return null;
+  const diff = 2 * wh - wf;
+  return wmaStep(state.wmaSqrt, diff);
+}
+
 export function computeEMA(price: number, prevEma: number | null, period: number): number {
   if (prevEma === null) return price;
   const k = 2 / (period + 1);

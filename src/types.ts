@@ -39,6 +39,21 @@ export interface OHLCVRaw {
   volume: number;
 }
 
+/** Rolling circular buffer state for incremental WMA computation */
+export interface WMAState {
+  buf: number[];   // circular buffer of last `period` values
+  pos: number;     // write position in the buffer
+  filled: boolean; // true once buffer has been fully populated
+  period: number;
+}
+
+/** Per-period incremental HMA state: WMA(half), WMA(full), then WMA(sqrt) over the diff series */
+export interface HMAState {
+  wmaHalf:  WMAState; // WMA(floor(period/2)) applied to closes
+  wmaFull:  WMAState; // WMA(period) applied to closes
+  wmaSqrt:  WMAState; // WMA(round(sqrt(period))) applied to the (2*wmaHalf - wmaFull) series
+}
+
 export interface IndicatorState {
   closes: number[];
   highs: number[];
@@ -51,6 +66,7 @@ export interface IndicatorState {
   macdState: { fastEma: number | null; slowEma: number | null; signalEma: number | null };
   atrState: number | null;
   adxState: { plusDM: number | null; minusDM: number | null; tr: number | null; adx: number | null };
+  hmaState: Record<number, HMAState>; // keyed by HMA period
 }
 
 export interface ChainContract {

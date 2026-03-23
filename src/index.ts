@@ -198,6 +198,29 @@ async function pollScreener(): Promise<void> {
   }
 }
 
+/**
+ * Seed indicator state for a large list of contracts without blocking the
+ * event loop. Processes CHUNK contracts per tick, yielding via setImmediate
+ * between chunks so the HTTP server can handle requests during startup.
+ */
+async function seedContractsChunked(contracts: import('./types').Contract[], allTimeframes: string[]): Promise<void> {
+  const CHUNK = 20;
+  for (let i = 0; i < contracts.length; i += CHUNK) {
+    const chunk = contracts.slice(i, i + CHUNK);
+    for (const c of chunk) {
+      for (const tf of allTimeframes) {
+        const histBars = getBars(c.symbol, tf, 50);
+        if (histBars.length > 0) {
+          seedState(c.symbol, tf as any, histBars);
+          for (const bar of histBars) computeIndicators(bar, 2);
+        }
+      }
+    }
+    // Yield to event loop between chunks
+    await new Promise<void>(resolve => setImmediate(resolve));
+  }
+}
+
 async function main(): Promise<void> {
   console.log('[SPXer] Starting...');
 
@@ -230,18 +253,11 @@ async function main(): Promise<void> {
     }
   }
 
-  // Seed tracked option contracts with tier 1 indicators across all timeframes
+  // Seed tracked option contracts with tier 1 indicators across all timeframes.
+  // Chunked with setImmediate to avoid blocking the event loop for 30+ seconds.
   const trackedContracts = tracker.getActive().concat(tracker.getSticky());
-  for (const c of trackedContracts) {
-    for (const tf of allTimeframes) {
-      const histBars = getBars(c.symbol, tf, 50);
-      if (histBars.length > 0) {
-        seedState(c.symbol, tf as any, histBars);
-        for (const bar of histBars) computeIndicators(bar, 2);
-      }
-    }
-  }
   if (trackedContracts.length > 0) {
+    await seedContractsChunked(trackedContracts, allTimeframes);
     console.log(`[startup] Seeded ${trackedContracts.length} option contracts across ${allTimeframes.length} timeframes`);
   }
 
@@ -269,9 +285,13 @@ async function main(): Promise<void> {
   console.log(`[SPXer] Running on port ${config.port}`);
 
   if (config.tradierToken) {
-    await pollUnderlying();
-    await pollOptions();
-    await pollScreener();
+    // Delay first polls by 2 seconds so the HTTP server can process requests
+    // before the event loop is occupied by the first round of network calls.
+    setTimeout(async () => {
+      await pollUnderlying();
+      await pollOptions();
+      await pollScreener();
+    }, 2000);
   }
 
   // Graceful shutdown

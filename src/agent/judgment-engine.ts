@@ -33,7 +33,7 @@ export function getHttpScannerConfigs(): ScannerHttpConfig[] {
       model: process.env.KIMI_MODEL || 'kimi-k2',
       apiKey: process.env.KIMI_API_KEY,
       baseUrl: process.env.KIMI_BASE_URL || 'https://api.kimi.com/coding/',
-      timeoutMs: 15000,
+      timeoutMs: 120000, // 2 minutes - removed timeout constraint
     });
   }
 
@@ -44,7 +44,7 @@ export function getHttpScannerConfigs(): ScannerHttpConfig[] {
       model: process.env.GLM_MODEL || 'glm-5',
       apiKey: process.env.GLM_API_KEY,
       baseUrl: process.env.GLM_BASE_URL || 'https://api.z.ai/api/anthropic',
-      timeoutMs: 15000,
+      timeoutMs: 120000, // 2 minutes - removed timeout constraint
     });
   }
 
@@ -376,8 +376,9 @@ async function runSdkScanner(
   config: ModelConfig,
   prompt: string,
 ): Promise<ScannerResult> {
-  const timeoutMs = config.id === 'minimax' ? 60000 : 30000;
+  const timeoutMs = 120000; // 2 minutes for all scanners - removed timeout constraint to see actual response times
   try {
+    console.log(`[scanner] Starting ${config.id} scan with ${timeoutMs}ms timeout`);
     const text = await askModel(config, SCANNER_SYSTEM, prompt, timeoutMs);
     const clean = extractJSON(text);
 
@@ -407,6 +408,7 @@ async function runSdkScanner(
       nextCheckSecs: Math.max(15, Math.min(120, parseInt(parsed.next_check_secs) || 30)),
     };
   } catch (e) {
+    console.error(`[scanner] ${config.id} failed: ${(e as Error).message}`);
     return {
       scannerId: config.id,
       marketRead: '',

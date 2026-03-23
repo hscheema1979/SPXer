@@ -7,6 +7,7 @@ export function initDb(path: string): void {
   db = new Database(path);
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
+  db.pragma('wal_autocheckpoint = 0'); // disable auto-checkpoint; checkpoint manually to avoid blocking event loop
   runMigrations();
 }
 

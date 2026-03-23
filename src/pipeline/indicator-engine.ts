@@ -1,5 +1,5 @@
 import type { Bar, IndicatorState, Timeframe } from '../types';
-import { computeHMA, computeEMA, computeRSI, computeBB, computeATR, computeVWAP } from './indicators/tier1';
+import { computeEMA, computeRSI, computeBB, computeATR, computeVWAP, makeHMAState, hmaStep } from './indicators/tier1';
 import { computeMACD, computeStochastic, computeADX, computeMomentum, computeCCI } from './indicators/tier2';
 import { MAX_BARS_MEMORY } from '../config';
 
@@ -15,6 +15,7 @@ function getState(symbol: string, tf: Timeframe): IndicatorState {
       cumulativeTPV: 0, cumulativeVol: 0,
       emaState: {}, macdState: { fastEma: null, slowEma: null, signalEma: null },
       atrState: null, adxState: { plusDM: null, minusDM: null, tr: null, adx: null },
+      hmaState: {},
     });
   }
   return states.get(k)!;
@@ -32,6 +33,12 @@ export function seedState(symbol: string, tf: Timeframe, bars: Bar[]): void {
   s.highs = bars.map(b => b.high).slice(-MAX_BARS_MEMORY);
   s.lows = bars.map(b => b.low).slice(-MAX_BARS_MEMORY);
   s.volumes = bars.map(b => b.volume).slice(-MAX_BARS_MEMORY);
+  // Re-seed incremental HMA state by replaying closes through hmaStep
+  for (const period of [5, 19, 25]) {
+    const hma = makeHMAState(period);
+    for (const c of s.closes) hmaStep(hma, c);
+    s.hmaState[period] = hma;
+  }
 }
 
 export function computeIndicators(bar: Bar, tier: 1 | 2 = 1): Record<string, number | null> {
@@ -53,12 +60,20 @@ export function computeIndicators(bar: Bar, tier: 1 | 2 = 1): Record<string, num
     s.emaState[p] = computeEMA(bar.close, s.emaState[p] ?? null, p);
   }
 
+  // Incremental HMA — O(period) per call, not O(n²)
+  for (const period of [5, 19, 25]) {
+    if (!s.hmaState[period]) s.hmaState[period] = makeHMAState(period);
+  }
+  const hma5  = hmaStep(s.hmaState[5],  bar.close);
+  const hma19 = hmaStep(s.hmaState[19], bar.close);
+  const hma25 = hmaStep(s.hmaState[25], bar.close);
+
   const bb = computeBB(s.closes, 20, 2);
 
   const ind: Record<string, number | null> = {
-    hma5:  computeHMA(s.closes, 5),
-    hma19: computeHMA(s.closes, 19),
-    hma25: computeHMA(s.closes, 25),
+    hma5,
+    hma19,
+    hma25,
     ema9:  s.emaState[9],
     ema21: s.emaState[21],
     rsi14: computeRSI(s.closes, 14),

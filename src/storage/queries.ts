@@ -1,17 +1,33 @@
 import { getDb } from './db';
 import type { Bar, Contract, ContractState } from '../types';
+import type { Statement } from 'better-sqlite3';
+
+// Lazy-initialised prepared statement — created once per DB connection, reused on every call.
+// This avoids the overhead of db.prepare() on every row in tight loops.
+let _upsertBarStmt: Statement | null = null;
+
+/** Call this whenever the underlying DB is re-initialised (e.g. in tests). */
+export function resetPreparedStatements(): void {
+  _upsertBarStmt = null;
+}
+
+function getUpsertBarStmt(): Statement {
+  if (!_upsertBarStmt) {
+    _upsertBarStmt = getDb().prepare(`
+      INSERT INTO bars (symbol, timeframe, ts, open, high, low, close, volume, synthetic, gap_type, indicators)
+      VALUES (@symbol, @timeframe, @ts, @open, @high, @low, @close, @volume, @synthetic, @gapType, @indicators)
+      ON CONFLICT(symbol, timeframe, ts) DO UPDATE SET
+        open=excluded.open, high=excluded.high, low=excluded.low,
+        close=excluded.close, volume=excluded.volume,
+        synthetic=excluded.synthetic, gap_type=excluded.gap_type,
+        indicators=excluded.indicators
+    `);
+  }
+  return _upsertBarStmt;
+}
 
 export function upsertBar(bar: Bar): void {
-  const db = getDb();
-  db.prepare(`
-    INSERT INTO bars (symbol, timeframe, ts, open, high, low, close, volume, synthetic, gap_type, indicators)
-    VALUES (@symbol, @timeframe, @ts, @open, @high, @low, @close, @volume, @synthetic, @gapType, @indicators)
-    ON CONFLICT(symbol, timeframe, ts) DO UPDATE SET
-      open=excluded.open, high=excluded.high, low=excluded.low,
-      close=excluded.close, volume=excluded.volume,
-      synthetic=excluded.synthetic, gap_type=excluded.gap_type,
-      indicators=excluded.indicators
-  `).run({
+  getUpsertBarStmt().run({
     ...bar,
     synthetic: bar.synthetic ? 1 : 0,
     gapType: bar.gapType,
