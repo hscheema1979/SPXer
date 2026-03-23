@@ -41,53 +41,126 @@ interface SimPosition {
   entryTs: number; entryET: string;
 }
 
-// ── DB queries ─────────────────────────────────────────────────────────────
+// ── In-memory bar cache (loaded once per replay) ───────────────────────────
 
-function getSpxBars(db: Database.Database, atTs: number, n = 25): Bar[] {
-  const rows = db.prepare(`
-    SELECT ts, open, high, low, close, volume, indicators
-    FROM bars WHERE symbol='SPX' AND timeframe='1m' AND ts <= ?
-    ORDER BY ts DESC LIMIT ?
-  `).all(atTs, n) as any[];
-  return rows.reverse().map(r => ({ ...r, indicators: JSON.parse(r.indicators || '{}') }));
+interface BarCache {
+  spxBars: Bar[];                       // All SPX 1m bars, sorted by ts
+  contractBars: Map<string, Bar[]>;     // symbol → bars, sorted by ts
+  contractStrikes: Map<string, number>; // symbol → strike price
+  timestamps: number[];                 // SPX timestamps for the session
 }
 
-function get0dteContractBars(
-  db: Database.Database, symbolFilter: string, atTs: number,
-  spxPrice: number, strikeRange: number, n = 3,
-): Map<string, Bar[]> {
-  const rows = db.prepare(`
-    SELECT b.symbol, b.ts, b.open, b.high, b.low, b.close, b.volume, b.indicators
+function loadBarCache(
+  db: Database.Database, start: number, end: number, symbolFilter: string,
+): BarCache {
+  // Load all SPX bars
+  const spxRows = db.prepare(`
+    SELECT ts, open, high, low, close, volume, indicators
+    FROM bars WHERE symbol='SPX' AND timeframe='1m'
+    AND ts >= ? AND ts <= ? ORDER BY ts
+  `).all(start, end) as any[];
+
+  const spxBars = spxRows.map((r: any) => ({
+    ts: r.ts, open: r.open, high: r.high, low: r.low,
+    close: r.close, volume: r.volume,
+    indicators: JSON.parse(r.indicators || '{}'),
+  }));
+
+  const timestamps = spxBars.map(b => b.ts);
+
+  // Load all contract bars for the session
+  const contractRows = db.prepare(`
+    SELECT b.symbol, b.ts, b.open, b.high, b.low, b.close, b.volume, b.indicators, c.strike
     FROM bars b
     JOIN contracts c ON b.symbol = c.symbol
-    WHERE b.symbol LIKE ? AND b.timeframe = '1m' AND b.ts <= ?
-      AND c.strike BETWEEN ? AND ?
-    ORDER BY b.symbol, b.ts DESC
-  `).all(symbolFilter, atTs, spxPrice - strikeRange, spxPrice + strikeRange) as any[];
+    WHERE b.symbol LIKE ? AND b.timeframe = '1m'
+      AND b.ts >= ? AND b.ts <= ?
+    ORDER BY b.symbol, b.ts
+  `).all(symbolFilter, start, end) as any[];
 
-  const bySymbol = new Map<string, Bar[]>();
-  for (const r of rows) {
-    if (!bySymbol.has(r.symbol)) bySymbol.set(r.symbol, []);
-    bySymbol.get(r.symbol)!.push({
+  const contractBars = new Map<string, Bar[]>();
+  const contractStrikes = new Map<string, number>();
+  for (const r of contractRows) {
+    if (!contractBars.has(r.symbol)) contractBars.set(r.symbol, []);
+    contractBars.get(r.symbol)!.push({
       ts: r.ts, open: r.open, high: r.high, low: r.low,
       close: r.close, volume: r.volume,
       indicators: JSON.parse(r.indicators || '{}'),
     });
+    if (!contractStrikes.has(r.symbol)) contractStrikes.set(r.symbol, r.strike);
   }
-  for (const [, bars] of bySymbol) {
-    bars.reverse();
-    if (bars.length > n) bars.splice(0, bars.length - n);
-  }
-  return bySymbol;
+
+  return { spxBars, contractBars, contractStrikes, timestamps };
 }
 
-function getSessionTimestamps(db: Database.Database, start: number, end: number): number[] {
-  return (db.prepare(`
-    SELECT ts FROM bars WHERE symbol='SPX' AND timeframe='1m'
-    AND ts >= ? AND ts <= ? ORDER BY ts
-  `).all(start, end) as any[]).map((r: any) => r.ts);
+// ── In-memory lookups (no SQL per tick) ────────────────────────────────────
+
+function getSpxBarsAt(cache: BarCache, atTs: number, n = 25): Bar[] {
+  // Binary search for the position
+  let hi = cache.spxBars.length - 1;
+  let lo = 0;
+  while (lo <= hi) {
+    const mid = (lo + hi) >>> 1;
+    if (cache.spxBars[mid].ts <= atTs) lo = mid + 1;
+    else hi = mid - 1;
+  }
+  // hi is the last bar with ts <= atTs
+  const end = hi + 1;
+  const start = Math.max(0, end - n);
+  return cache.spxBars.slice(start, end);
 }
 
+function getContractBarsAt(
+  cache: BarCache, spxPrice: number, strikeRange: number, atTs: number, n = 3,
+): Map<string, Bar[]> {
+  const result = new Map<string, Bar[]>();
+  const lo = spxPrice - strikeRange;
+  const hi = spxPrice + strikeRange;
+
+  for (const [symbol, bars] of cache.contractBars) {
+    const strike = cache.contractStrikes.get(symbol)!;
+    if (strike < lo || strike > hi) continue;
+
+    // Find bars up to atTs using binary search
+    let right = bars.length - 1;
+    let left = 0;
+    while (left <= right) {
+      const mid = (left + right) >>> 1;
+      if (bars[mid].ts <= atTs) left = mid + 1;
+      else right = mid - 1;
+    }
+    // right is the last bar with ts <= atTs
+    if (right < 0) continue;
+    const end = right + 1;
+    const start = Math.max(0, end - n);
+    result.set(symbol, bars.slice(start, end));
+  }
+  return result;
+}
+
+function getPosPriceAt(
+  cache: BarCache, side: string, strike: number, symbolFilter: string, atTs: number,
+): number | null {
+  const prefix = side === 'call' ? 'C' : 'P';
+  for (const [symbol, bars] of cache.contractBars) {
+    const s = cache.contractStrikes.get(symbol)!;
+    if (s !== strike) continue;
+    if (!symbol.includes(prefix)) continue;
+
+    // Binary search for bar at atTs
+    let right = bars.length - 1;
+    let left = 0;
+    while (left <= right) {
+      const mid = (left + right) >>> 1;
+      if (bars[mid].ts <= atTs) left = mid + 1;
+      else right = mid - 1;
+    }
+    if (right >= 0) return bars[right].close;
+  }
+  return null;
+}
+
+// Legacy DB function kept for position price fallback
 function getPosPrice(
   db: Database.Database, side: string, strike: number, symbolFilter: string, atTs: number,
 ): number | null {
@@ -412,7 +485,10 @@ export async function runReplay(
   try {
     const { start: SESSION_START, end: SESSION_END, closeCutoff: CLOSE_CUTOFF } = buildSessionTimestamps(targetDate);
     const SYMBOL_FILTER = buildSymbolFilter(targetDate);
-    const timestamps = getSessionTimestamps(dataDb, SESSION_START, SESSION_END);
+
+    // Pre-load ALL bars into memory once — no SQL per tick
+    const cache = loadBarCache(dataDb, SESSION_START, SESSION_END, SYMBOL_FILTER);
+    const { timestamps } = cache;
 
     if (timestamps.length === 0) {
       throw new Error(`No SPX bars found for ${targetDate}`);
@@ -421,12 +497,12 @@ export async function runReplay(
     if (verbose) {
       console.log(`\n${'='.repeat(72)}`);
       console.log(`  Replay: ${config.name} | ${targetDate}`);
-      console.log(`  Config: ${config.id} | Bars: ${timestamps.length}`);
+      console.log(`  Config: ${config.id} | Bars: ${timestamps.length} | Contracts: ${cache.contractBars.size}`);
       console.log('='.repeat(72));
     }
 
     // Init regime with prior close (auto-detect from first bar if not provided)
-    const firstBars = getSpxBars(dataDb, timestamps[0], 2);
+    const firstBars = getSpxBarsAt(cache, timestamps[0], 2);
     const priorClose = opts.priorClose || firstBars[0]?.close || 6606.49;
     initRegimeSession(priorClose);
 
@@ -451,13 +527,13 @@ export async function runReplay(
     const strikeRange = config.strikeSelector.strikeSearchRange;
 
     for (const ts of timestamps) {
-      const spxBars = getSpxBars(dataDb, ts);
+      const spxBars = getSpxBarsAt(cache, ts);
       if (spxBars.length < 5) continue;
       const spx = spxBars[spxBars.length - 1];
 
       // ── Position monitoring ────────────────────────────────────────────
       for (const [posId, openPos] of openPositions.entries()) {
-        const curPrice = getPosPrice(dataDb, openPos.side, openPos.strike, SYMBOL_FILTER, ts);
+        const curPrice = getPosPriceAt(cache, openPos.side, openPos.strike, SYMBOL_FILTER, ts);
         if (curPrice === null) continue;
 
         let closeReason: Trade['reason'] | null = null;
@@ -483,7 +559,7 @@ export async function runReplay(
       }
 
       // ── Signal detection ───────────────────────────────────────────────
-      const contractBars = get0dteContractBars(dataDb, SYMBOL_FILTER, ts, spx.close, strikeRange);
+      const contractBars = getContractBarsAt(cache, spx.close, strikeRange, ts);
       const optionSignals = detectOptionSignals(contractBars, spx.close, config);
 
       // ── Regime classification ──────────────────────────────────────────
@@ -678,7 +754,7 @@ export async function runReplay(
     // ── EOD close remaining ──────────────────────────────────────────────
     const finalTs = timestamps[timestamps.length - 1];
     for (const [, openPos] of openPositions.entries()) {
-      const curPrice = getPosPrice(dataDb, openPos.side, openPos.strike, SYMBOL_FILTER, finalTs) ?? openPos.entryPrice;
+      const curPrice = getPosPriceAt(cache, openPos.side, openPos.strike, SYMBOL_FILTER, finalTs) ?? openPos.entryPrice;
       const pnlPct = ((curPrice - openPos.entryPrice) / openPos.entryPrice) * 100;
       const pnl$ = (curPrice - openPos.entryPrice) * openPos.qty * 100;
       trades.push({
