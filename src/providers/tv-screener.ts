@@ -1,5 +1,9 @@
 import axios from 'axios';
 import type { ScreenerSnapshot } from '../types';
+import { CircuitBreaker, withRetry, circuitBreakers } from '../utils/resilience';
+
+const cb = new CircuitBreaker('tvScreener', { failureThreshold: 3, resetTimeoutMs: 30_000 });
+circuitBreakers.set('tvScreener', cb);
 
 const TV_SCAN_BASE = 'https://scanner.tradingview.com';
 const COLUMNS = [
@@ -18,11 +22,18 @@ async function scan(market: string, names: string[], exchangeFilter?: string): P
     sort: { sortBy: 'name', sortOrder: 'asc' },
     range: [0, names.length],
   };
-  const { data } = await axios.post(
-    `${TV_SCAN_BASE}/${market}/scan`,
-    body,
-    { headers: { 'Content-Type': 'application/json' }, timeout: 10000 }
+  const resp = await cb.call(() =>
+    withRetry(
+      () => axios.post(
+        `${TV_SCAN_BASE}/${market}/scan`,
+        body,
+        { headers: { 'Content-Type': 'application/json' }, timeout: 10000 }
+      ),
+      { label: `tvScreener:scan:${market}` }
+    )
   );
+  if (!resp) return [];
+  const { data } = resp;
   const ts = Math.floor(Date.now() / 1000);
   return (data?.data || []).map((row: any) => {
     const [name, close, change, rsi, macd, ema50,,, volD, rec] = row.d;

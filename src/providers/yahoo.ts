@@ -1,5 +1,9 @@
 import axios from 'axios';
 import type { OHLCVRaw } from '../types';
+import { CircuitBreaker, withRetry, circuitBreakers } from '../utils/resilience';
+
+const cb = new CircuitBreaker('yahoo', { failureThreshold: 3, resetTimeoutMs: 30_000 });
+circuitBreakers.set('yahoo', cb);
 
 const YAHOO_BASE = 'https://query1.finance.yahoo.com/v8/finance/chart';
 const HEADERS = { 'User-Agent': 'Mozilla/5.0' };
@@ -11,8 +15,14 @@ export async function fetchYahooBars(
 ): Promise<OHLCVRaw[]> {
   const encoded = encodeURIComponent(symbol);
   const url = `${YAHOO_BASE}/${encoded}?interval=${interval}&range=${range}`;
-  const { data } = await axios.get(url, { headers: HEADERS, timeout: 10000 });
-  const result = data?.chart?.result?.[0];
+  const resp = await cb.call(() =>
+    withRetry(
+      () => axios.get(url, { headers: HEADERS, timeout: 10000 }),
+      { label: 'yahoo:fetchYahooBars' }
+    )
+  );
+  if (!resp) return [];
+  const result = resp.data?.chart?.result?.[0];
   if (!result) return [];
 
   const timestamps: number[] = result.timestamp || [];

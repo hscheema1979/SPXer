@@ -1,6 +1,10 @@
 import axios from 'axios';
 import { config, TRADIER_BASE } from '../config';
 import type { ChainContract, OHLCVRaw } from '../types';
+import { CircuitBreaker, withRetry, circuitBreakers } from '../utils/resilience';
+
+const cb = new CircuitBreaker('tradier', { failureThreshold: 3, resetTimeoutMs: 30_000 });
+circuitBreakers.set('tradier', cb);
 
 function headers() {
   return {
@@ -25,13 +29,20 @@ export function normalizeSymbol(symbol: string): string {
   return `${match[1]}${String(strike).padStart(8, '0')}`;
 }
 
-export async function fetchSpxQuote(): Promise<SpxQuote> {
-  const { data } = await axios.get(`${TRADIER_BASE}/markets/quotes`, {
-    headers: headers(),
-    params: { symbols: 'SPX' },
-    timeout: 8000,
-  });
-  const q = data?.quotes?.quote;
+export async function fetchSpxQuote(): Promise<SpxQuote | null> {
+  const resp = await cb.call(() =>
+    withRetry(
+      () => axios.get(`${TRADIER_BASE}/markets/quotes`, {
+        headers: headers(),
+        params: { symbols: 'SPX' },
+        timeout: 8000,
+      }),
+      { label: 'tradier:fetchSpxQuote' }
+    )
+  );
+  if (!resp) return null;
+  const q = resp.data?.quotes?.quote;
+  if (!q) return null;
   return {
     last: q.last ?? q.bid ?? 0,
     bid: q.bid ?? 0,
@@ -42,12 +53,18 @@ export async function fetchSpxQuote(): Promise<SpxQuote> {
 }
 
 export async function fetchExpirations(symbol: string): Promise<string[]> {
-  const { data } = await axios.get(`${TRADIER_BASE}/markets/options/expirations`, {
-    headers: headers(),
-    params: { symbol, includeAllRoots: true },
-    timeout: 8000,
-  });
-  const dates = data?.expirations?.date;
+  const resp = await cb.call(() =>
+    withRetry(
+      () => axios.get(`${TRADIER_BASE}/markets/options/expirations`, {
+        headers: headers(),
+        params: { symbol, includeAllRoots: true },
+        timeout: 8000,
+      }),
+      { label: 'tradier:fetchExpirations' }
+    )
+  );
+  if (!resp) return [];
+  const dates = resp.data?.expirations?.date;
   if (!dates) return [];
   return Array.isArray(dates) ? dates : [dates];
 }
@@ -57,12 +74,18 @@ export async function fetchOptionsChain(
   expiry: string,
   greeks = true
 ): Promise<ChainContract[]> {
-  const { data } = await axios.get(`${TRADIER_BASE}/markets/options/chains`, {
-    headers: headers(),
-    params: { symbol, expiration: expiry, greeks },
-    timeout: 10000,
-  });
-  const opts = data?.options?.option;
+  const resp = await cb.call(() =>
+    withRetry(
+      () => axios.get(`${TRADIER_BASE}/markets/options/chains`, {
+        headers: headers(),
+        params: { symbol, expiration: expiry, greeks },
+        timeout: 10000,
+      }),
+      { label: 'tradier:fetchOptionsChain' }
+    )
+  );
+  if (!resp) return [];
+  const opts = resp.data?.options?.option;
   if (!opts) return [];
   const list = Array.isArray(opts) ? opts : [opts];
   return list.map((o: any) => ({
@@ -101,12 +124,18 @@ export async function fetchBatchQuotes(symbols: string[]): Promise<Map<string, B
   const result = new Map<string, BatchQuote>();
   for (let i = 0; i < symbols.length; i += 50) {
     const batch = symbols.slice(i, i + 50);
-    const { data } = await axios.get(`${TRADIER_BASE}/markets/quotes`, {
-      headers: headers(),
-      params: { symbols: batch.join(',') },
-      timeout: 10000,
-    });
-    const quotes = data?.quotes?.quote;
+    const resp = await cb.call(() =>
+      withRetry(
+        () => axios.get(`${TRADIER_BASE}/markets/quotes`, {
+          headers: headers(),
+          params: { symbols: batch.join(',') },
+          timeout: 10000,
+        }),
+        { label: 'tradier:fetchBatchQuotes' }
+      )
+    );
+    if (!resp) continue;
+    const quotes = resp.data?.quotes?.quote;
     if (!quotes) continue;
     const list = Array.isArray(quotes) ? quotes : [quotes];
     for (const q of list) {
@@ -137,12 +166,18 @@ export async function fetchSpxTimesales(date: string): Promise<OHLCVRaw[]> {
 export async function fetchTimesales(symbol: string, date?: string): Promise<OHLCVRaw[]> {
   const params: Record<string, string> = { symbol, interval: '1min' };
   if (date) { params.start = date; params.end = date; }
-  const { data } = await axios.get(`${TRADIER_BASE}/markets/timesales`, {
-    headers: headers(),
-    params,
-    timeout: 10000,
-  });
-  const series = data?.series?.data;
+  const resp = await cb.call(() =>
+    withRetry(
+      () => axios.get(`${TRADIER_BASE}/markets/timesales`, {
+        headers: headers(),
+        params,
+        timeout: 10000,
+      }),
+      { label: 'tradier:fetchTimesales' }
+    )
+  );
+  if (!resp) return [];
+  const series = resp.data?.series?.data;
   if (!series) return [];
   const list = Array.isArray(series) ? series : [series];
   return list.map((d: any) => ({

@@ -27,18 +27,26 @@ function getUpsertBarStmt(): Statement {
 }
 
 export function upsertBar(bar: Bar): void {
-  getUpsertBarStmt().run({
-    ...bar,
-    synthetic: bar.synthetic ? 1 : 0,
-    gapType: bar.gapType,
-    indicators: JSON.stringify(bar.indicators),
-  });
+  try {
+    getUpsertBarStmt().run({
+      ...bar,
+      synthetic: bar.synthetic ? 1 : 0,
+      gapType: bar.gapType,
+      indicators: JSON.stringify(bar.indicators),
+    });
+  } catch (err) {
+    console.error(`[db] upsertBar failed for ${bar.symbol}:`, err);
+  }
 }
 
 export function upsertBars(bars: Bar[]): void {
-  const db = getDb();
-  const insert = db.transaction((rows: Bar[]) => rows.forEach(upsertBar));
-  insert(bars);
+  try {
+    const db = getDb();
+    const insert = db.transaction((rows: Bar[]) => rows.forEach(upsertBar));
+    insert(bars);
+  } catch (err) {
+    console.error(`[db] upsertBars failed for ${bars.length} bars:`, err);
+  }
 }
 
 export function getBars(symbol: string, timeframe: string, n: number): Bar[] {
@@ -59,12 +67,16 @@ export function getLatestBar(symbol: string, timeframe: string): Bar | null {
 }
 
 export function upsertContract(contract: Contract): void {
-  getDb().prepare(`
-    INSERT INTO contracts (symbol, type, underlying, strike, expiry, state, first_seen, last_bar_ts, created_at)
-    VALUES (@symbol, @type, @underlying, @strike, @expiry, @state, @firstSeen, @lastBarTs, @createdAt)
-    ON CONFLICT(symbol) DO UPDATE SET
-      state=excluded.state, last_bar_ts=excluded.last_bar_ts
-  `).run(contract);
+  try {
+    getDb().prepare(`
+      INSERT INTO contracts (symbol, type, underlying, strike, expiry, state, first_seen, last_bar_ts, created_at)
+      VALUES (@symbol, @type, @underlying, @strike, @expiry, @state, @firstSeen, @lastBarTs, @createdAt)
+      ON CONFLICT(symbol) DO UPDATE SET
+        state=excluded.state, last_bar_ts=excluded.last_bar_ts
+    `).run(contract);
+  } catch (err) {
+    console.error(`[db] upsertContract failed for ${contract.symbol}:`, err);
+  }
 }
 
 export function getContractsByState(...states: ContractState[]): Contract[] {
@@ -85,9 +97,13 @@ export function getExpiredContracts(): Contract[] {
 }
 
 export function deleteBarsBySymbols(symbols: string[]): void {
-  const db = getDb();
-  const placeholders = symbols.map(() => '?').join(',');
-  db.prepare(`DELETE FROM bars WHERE symbol IN (${placeholders})`).run(...symbols);
+  try {
+    const db = getDb();
+    const placeholders = symbols.map(() => '?').join(',');
+    db.prepare(`DELETE FROM bars WHERE symbol IN (${placeholders})`).run(...symbols);
+  } catch (err) {
+    console.error(`[db] deleteBarsBySymbols failed for ${symbols.length} symbols:`, err);
+  }
 }
 
 export function getDbSizeMb(): number {

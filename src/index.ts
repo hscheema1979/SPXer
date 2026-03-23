@@ -1,4 +1,4 @@
-import { initDb } from './storage/db';
+import { initDb, getDb, closeDb } from './storage/db';
 import { getAllActiveContracts, upsertBar, upsertBars, upsertContract, getDbSizeMb, getBars } from './storage/queries';
 import { fetchYahooBars } from './providers/yahoo';
 import { fetchSpxQuote, fetchOptionsChain, fetchExpirations, fetchSpxTimesales, fetchBatchQuotes, fetchTimesales } from './providers/tradier';
@@ -11,6 +11,7 @@ import { getMarketMode, getActiveExpirations } from './pipeline/scheduler';
 import { startHttpServer, setLastSpxPrice, setTrackerCountFn } from './server/http';
 import { startWsServer, broadcast } from './server/ws';
 import { config, STRIKE_BAND, STRIKE_INTERVAL, POLL_UNDERLYING_MS, POLL_OPTIONS_RTH_MS, POLL_OPTIONS_OVERNIGHT_MS, POLL_SCREENER_MS } from './config';
+import { healthTracker } from './utils/health';
 import type { Bar, Timeframe } from './types';
 
 const HIGHER_TIMEFRAMES: [Timeframe, number][] = [['3m', 180], ['5m', 300], ['10m', 600], ['15m', 900], ['1h', 3600]];
@@ -98,14 +99,16 @@ async function pollUnderlying(): Promise<void> {
       } else {
         // Timesales may lag on session open — fall back to live quote to prime lastSpxPrice
         const quote = await fetchSpxQuote();
-        if (quote.last > 0) {
+        if (quote && quote.last > 0) {
           const ts = Math.floor(Date.now() / 1000);
           bars = [rawToBar('SPX', '1m', { ts, open: quote.last, high: quote.ask || quote.last, low: quote.bid || quote.last, close: quote.last, volume: quote.volume ?? 0 })];
         }
       }
+      healthTracker.recordSuccess('tradier');
     } else {
       const raw = await fetchYahooBars('ES=F', '1m', '1d');
       bars = buildBars('ES', '1m', raw.slice(-5));
+      healthTracker.recordSuccess('yahoo');
     }
 
     if (bars?.length) {
@@ -119,9 +122,12 @@ async function pollUnderlying(): Promise<void> {
 
       lastSpxPrice = enriched[enriched.length - 1].close;
       setLastSpxPrice(lastSpxPrice);
-      broadcast({ type: 'spx_bar', data: enriched[enriched.length - 1] });
+      const lastBar = enriched[enriched.length - 1];
+      healthTracker.recordBar(symbol, lastBar.ts * 1000);
+      broadcast({ type: 'spx_bar', data: lastBar });
     }
   } catch (e) {
+    healthTracker.recordFailure(mode === 'rth' ? 'tradier' : 'yahoo');
     console.error('[poll:underlying]', e);
   }
 }
@@ -184,7 +190,9 @@ async function pollOptions(): Promise<void> {
     }
 
     tracker.checkExpiries();
+    healthTracker.recordSuccess('tradier-options');
   } catch (e) {
+    healthTracker.recordFailure('tradier-options');
     console.error('[poll:options]', e);
   }
 }
@@ -193,7 +201,9 @@ async function pollScreener(): Promise<void> {
   try {
     const snap = await fetchScreenerSnapshot();
     broadcast({ type: 'market_context', data: snap });
+    healthTracker.recordSuccess('tvScreener');
   } catch (e) {
+    healthTracker.recordFailure('tvScreener');
     console.error('[poll:screener]', e);
   }
 }
@@ -221,6 +231,62 @@ async function seedContractsChunked(contracts: import('./types').Contract[], all
   }
 }
 
+// ── Shutdown state ──
+let shuttingDown = false;
+const intervals: NodeJS.Timeout[] = [];
+let httpServerRef: import('http').Server | null = null;
+let wsServerRef: import('ws').WebSocketServer | null = null;
+
+async function shutdown(signal: string): Promise<void> {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`[shutdown] ${signal} received, cleaning up...`);
+
+  // Safety timeout — force exit after 5s if cleanup hangs
+  setTimeout(() => {
+    console.log('[shutdown] forced exit after 5s timeout');
+    process.exit(1);
+  }, 5000).unref();
+
+  // 1. Stop all polling intervals
+  for (const id of intervals) clearInterval(id);
+
+  // 2. Notify WebSocket clients and close WS server
+  try {
+    broadcast({ type: 'service_shutdown' });
+  } catch {}
+  if (wsServerRef) {
+    try {
+      for (const client of wsServerRef.clients) {
+        try { client.close(); } catch {}
+      }
+      wsServerRef.close();
+    } catch {}
+  }
+
+  // 3. Close HTTP server
+  if (httpServerRef) {
+    try {
+      httpServerRef.close();
+    } catch {}
+  }
+
+  // 4. Checkpoint WAL and close database
+  try {
+    const db = getDb();
+    db.pragma('wal_checkpoint(TRUNCATE)');
+  } catch {}
+  try {
+    closeDb();
+  } catch {}
+
+  console.log('[shutdown] clean exit');
+  process.exit(0);
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
+
 async function main(): Promise<void> {
   console.log('[SPXer] Starting...');
 
@@ -228,50 +294,88 @@ async function main(): Promise<void> {
     console.warn('[SPXer] TRADIER_TOKEN not set — running in degraded mode (no live data)');
   }
 
-  initDb(config.dbPath);
-  loadContractsFromDb(); // restore ACTIVE/STICKY contracts from previous session
-
-  if (config.tradierToken) {
-    await warmup();
-    // Run initial pollOptions to discover today's contracts, then backfill bars
-    await pollOptions();
-    await backfillOptionBars();
-  }
-
-  // Seed indicator state from DB so RSI/EMA are warm immediately (no 14-bar blind spot)
-  const allTimeframes = ['1m', ...HIGHER_TIMEFRAMES.map(([t]) => t)];
-
-  // Seed underlying (SPX/ES) with tier 2 indicators
-  for (const sym of ['SPX', 'ES']) {
-    for (const tf of allTimeframes) {
-      const histBars = getBars(sym, tf, 50);
-      if (histBars.length > 0) {
-        seedState(sym, tf as any, histBars);
-        for (const bar of histBars) computeIndicators(bar, 2);
-        console.log(`[startup] Seeded ${sym} ${tf} indicator state from ${histBars.length} bars`);
+  // ── initDb — retry up to 3 times with 2s delay (no DB = no service) ──
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      initDb(config.dbPath);
+      break;
+    } catch (e) {
+      console.error(`[startup] initDb failed (attempt ${attempt}/3):`, e);
+      if (attempt === 3) {
+        console.error('[startup] All DB init attempts failed, cannot start');
+        process.exit(1);
       }
+      await new Promise(r => setTimeout(r, 2000));
     }
   }
 
-  // Seed tracked option contracts with tier 1 indicators across all timeframes.
-  // Chunked with setImmediate to avoid blocking the event loop for 30+ seconds.
-  const trackedContracts = tracker.getActive().concat(tracker.getSticky());
-  if (trackedContracts.length > 0) {
-    await seedContractsChunked(trackedContracts, allTimeframes);
-    console.log(`[startup] Seeded ${trackedContracts.length} option contracts across ${allTimeframes.length} timeframes`);
+  // ── loadContractsFromDb — non-fatal, start with empty contracts ──
+  try {
+    loadContractsFromDb();
+  } catch (e) {
+    console.warn('[startup] DB read failed, starting with empty contracts:', e);
   }
 
-  const { app, httpServer } = startHttpServer(config.port);
-  startWsServer(httpServer); // pass http.Server, not Express app
+  if (config.tradierToken) {
+    // ── warmup — non-fatal, continue without history ──
+    try {
+      await warmup();
+    } catch (e) {
+      console.warn('[startup] warmup failed (provider down?), starting without history:', e);
+    }
+
+    // ── Initial pollOptions + backfillOptionBars — non-fatal ──
+    try {
+      await pollOptions();
+    } catch (e) {
+      console.warn('[startup] initial pollOptions failed, will pick up on next cycle:', e);
+    }
+    try {
+      await backfillOptionBars();
+    } catch (e) {
+      console.warn('[startup] initial backfillOptionBars failed, will pick up on next cycle:', e);
+    }
+  }
+
+  // ── seedIndicatorState — non-fatal, indicators will warm up naturally ──
+  try {
+    const allTimeframes = ['1m', ...HIGHER_TIMEFRAMES.map(([t]) => t)];
+
+    // Seed underlying (SPX/ES) with tier 2 indicators
+    for (const sym of ['SPX', 'ES']) {
+      for (const tf of allTimeframes) {
+        const histBars = getBars(sym, tf, 50);
+        if (histBars.length > 0) {
+          seedState(sym, tf as any, histBars);
+          for (const bar of histBars) computeIndicators(bar, 2);
+          console.log(`[startup] Seeded ${sym} ${tf} indicator state from ${histBars.length} bars`);
+        }
+      }
+    }
+
+    // Seed tracked option contracts with tier 1 indicators across all timeframes.
+    // Chunked with setImmediate to avoid blocking the event loop for 30+ seconds.
+    const trackedContracts = tracker.getActive().concat(tracker.getSticky());
+    if (trackedContracts.length > 0) {
+      await seedContractsChunked(trackedContracts, allTimeframes);
+      console.log(`[startup] Seeded ${trackedContracts.length} option contracts across ${allTimeframes.length} timeframes`);
+    }
+  } catch (e) {
+    console.warn('[startup] seedIndicatorState failed, indicators will warm up from incoming bars:', e);
+  }
+
+  const { httpServer } = startHttpServer(config.port);
+  httpServerRef = httpServer;
+  wsServerRef = startWsServer(httpServer);
   setTrackerCountFn(() => tracker.getActive().length + tracker.getSticky().length);
 
-  setInterval(pollUnderlying, POLL_UNDERLYING_MS);
+  intervals.push(setInterval(pollUnderlying, POLL_UNDERLYING_MS));
   const optionsInterval = getMarketMode() === 'rth' ? POLL_OPTIONS_RTH_MS : POLL_OPTIONS_OVERNIGHT_MS;
-  setInterval(pollOptions, optionsInterval);
-  setInterval(pollScreener, POLL_SCREENER_MS);
+  intervals.push(setInterval(pollOptions, optionsInterval));
+  intervals.push(setInterval(pollScreener, POLL_SCREENER_MS));
 
   // Reset VWAP exactly once on transition into RTH (not every minute during RTH)
-  setInterval(() => {
+  intervals.push(setInterval(() => {
     const mode = getMarketMode();
     if (mode === 'rth' && prevMode !== 'rth') {
       for (const sym of ['SPX', 'ES']) {
@@ -280,7 +384,24 @@ async function main(): Promise<void> {
       }
     }
     prevMode = mode;
-  }, 60_000);
+  }, 60_000));
+
+  // Periodic health check — log warnings when providers are degraded or data is stale
+  intervals.push(setInterval(() => {
+    const report = healthTracker.getStatus();
+    if (report.status === 'critical') {
+      console.error('[health] CRITICAL: all providers down');
+    } else if (report.status === 'degraded') {
+      console.warn('[health] DEGRADED: some providers failing');
+    }
+    const spxData = report.data['SPX'];
+    if (spxData && spxData.staleSec > 120) {
+      const currentMode = getMarketMode();
+      if (currentMode === 'rth') {
+        console.warn(`[health] SPX data stale: ${spxData.staleSec}s since last bar`);
+      }
+    }
+  }, 60_000));
 
   console.log(`[SPXer] Running on port ${config.port}`);
 
@@ -293,10 +414,6 @@ async function main(): Promise<void> {
       await pollScreener();
     }, 2000);
   }
-
-  // Graceful shutdown
-  process.on('SIGTERM', () => { console.log('[SPXer] Shutting down'); process.exit(0); });
-  process.on('SIGINT',  () => { console.log('[SPXer] Shutting down'); process.exit(0); });
 }
 
 main().catch(console.error);

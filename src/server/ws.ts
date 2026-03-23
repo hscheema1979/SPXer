@@ -4,7 +4,7 @@ import type { Server } from 'http';
 type Subscription = { channel: string; symbol?: string; expiry?: string };
 const clients = new Map<WebSocket, Set<string>>();
 
-export function startWsServer(httpServer: Server): void {
+export function startWsServer(httpServer: Server): WebSocketServer {
   const wss = new WebSocketServer({ server: httpServer, path: '/ws' });
 
   wss.on('connection', (ws) => {
@@ -30,6 +30,8 @@ export function startWsServer(httpServer: Server): void {
   setInterval(() => {
     broadcast({ type: 'heartbeat', ts: Math.floor(Date.now() / 1000) });
   }, 30_000);
+
+  return wss;
 }
 
 export function broadcast(message: object): void {
@@ -48,6 +50,10 @@ export function broadcast(message: object): void {
       ws.send(data); // broadcast to all
     }
   }
+}
+
+export function getWsClientCount(): number {
+  return clients.size;
 }
 
 function subKey(sub: Subscription): string {

@@ -1,5 +1,6 @@
 import Database from 'better-sqlite3';
 import type { Database as DB } from 'better-sqlite3';
+import * as fs from 'fs';
 
 let db: DB;
 
@@ -8,7 +9,27 @@ export function initDb(path: string): void {
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
   db.pragma('wal_autocheckpoint = 0'); // disable auto-checkpoint; checkpoint manually to avoid blocking event loop
+  db.pragma('synchronous = NORMAL');   // Faster writes, still durable with WAL
+  db.pragma('busy_timeout = 5000');     // Wait 5s on lock instead of failing immediately
+  db.pragma('cache_size = -64000');     // 64MB cache (negative = KB)
+  db.pragma('temp_store = MEMORY');     // Temp tables in memory
   runMigrations();
+
+  // Checkpoint WAL every 5 minutes to prevent unbounded growth
+  setInterval(() => {
+    try {
+      const d = getDb();
+      d.pragma('wal_checkpoint(TRUNCATE)');
+      console.log('[db] WAL checkpoint complete');
+    } catch (err) {
+      console.error('[db] WAL checkpoint failed:', err);
+    }
+  }, 5 * 60 * 1000);
+
+  // Daily backup
+  setInterval(() => backupDb(), 24 * 60 * 60 * 1000);
+  // Also backup immediately on first init
+  setTimeout(() => backupDb(), 10_000);
 }
 
 export function getDb(): DB {
@@ -18,6 +39,25 @@ export function getDb(): DB {
 
 export function closeDb(): void {
   if (db) db.close();
+}
+
+export function backupDb(): void {
+  try {
+    const d = getDb();
+    const backupPath = (process.env.DB_PATH || './data/spxer.db') + '.backup';
+    d.backup(backupPath);
+    console.log(`[db] backup complete: ${backupPath}`);
+  } catch (err) {
+    console.error('[db] backup failed:', err);
+  }
+}
+
+export function getDbStats(): { sizeMb: number; walSizeMb: number } {
+  const dbPath = process.env.DB_PATH || './data/spxer.db';
+  const sizeMb = fs.existsSync(dbPath) ? fs.statSync(dbPath).size / (1024 * 1024) : 0;
+  const walPath = dbPath + '-wal';
+  const walSizeMb = fs.existsSync(walPath) ? fs.statSync(walPath).size / (1024 * 1024) : 0;
+  return { sizeMb: Math.round(sizeMb * 10) / 10, walSizeMb: Math.round(walSizeMb * 10) / 10 };
 }
 
 function runMigrations(): void {

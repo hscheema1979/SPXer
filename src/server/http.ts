@@ -1,9 +1,13 @@
 import express, { type Express } from 'express';
 import { createServer, type Server } from 'http';
+import { statSync } from 'fs';
 import { getBars, getLatestBar, getAllActiveContracts, getDbSizeMb } from '../storage/queries';
 import { getMarketMode } from '../pipeline/scheduler';
 import { fetchOptionsChain, fetchExpirations } from '../providers/tradier';
 import { readStatus, readRecentActivity } from '../agent/reporter';
+import { healthTracker } from '../utils/health';
+import { getWsClientCount } from './ws';
+import { config } from '../config';
 
 let lastSpxPrice: number | null = null;
 export function setLastSpxPrice(p: number) { lastSpxPrice = p; }
@@ -17,14 +21,38 @@ export function startHttpServer(port: number): { app: Express; httpServer: Serve
   const app = express();
   app.use(express.json());
 
-  app.get('/health', (_, res) => res.json({
-    status: 'ok',
-    uptime: Math.floor((Date.now() - startTime) / 1000),
-    mode: getMarketMode(),
-    lastSpxPrice,
-    dbSizeMb: getDbSizeMb(),
-    trackedContracts: trackerCountFn(),
-  }));
+  app.get('/health', (_, res) => {
+    const report = healthTracker.getStatus();
+    const dbSizeMb = getDbSizeMb();
+
+    // WAL file size (best-effort — file may not exist)
+    let walSizeMb = 0;
+    try {
+      const walPath = (config.dbPath || './data/spxer.db') + '-wal';
+      walSizeMb = Math.round(statSync(walPath).size / 1024 / 1024 * 10) / 10;
+    } catch {}
+
+    const tracked = trackerCountFn();
+    const active = getAllActiveContracts();
+    const activeCount = active.filter(c => c.state === 'ACTIVE').length;
+
+    res.json({
+      // New health report fields
+      status: report.status,
+      uptimeSec: report.uptimeSec,
+      providers: report.providers,
+      data: report.data,
+      db: { sizeMb: dbSizeMb, walSizeMb },
+      trackedContracts: tracked,
+      activeContracts: activeCount,
+      wsClients: getWsClientCount(),
+      // Backward-compatible fields
+      uptime: Math.floor((Date.now() - startTime) / 1000),
+      mode: getMarketMode(),
+      lastSpxPrice,
+      dbSizeMb,
+    });
+  });
 
   app.get('/spx/snapshot', (_, res) => {
     const bar = getLatestBar('SPX', '1m') ?? getLatestBar('ES', '1m');
