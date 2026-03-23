@@ -214,6 +214,9 @@ export function mergeConfig(base: ReplayConfig, overrides: Partial<ReplayConfig>
     timing: { ...base.timing, ...overrides.timing },
     risk: { ...base.risk, ...overrides.risk },
     exit: { ...base.exit, ...overrides.exit },
+    timeWindows: overrides.timeWindows !== undefined
+      ? { ...(base.timeWindows || {}), ...overrides.timeWindows }
+      : base.timeWindows,
   };
 }
 

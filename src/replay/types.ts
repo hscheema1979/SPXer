@@ -18,6 +18,8 @@ export interface ReplayConfig {
   rsi: {
     oversoldThreshold: number;
     overboughtThreshold: number;
+    /** When true, only enter trades when SPX RSI is at extremes (< oversold or > overbought) */
+    enableSpxGate?: boolean;
   };
 
   indicators: {
@@ -43,6 +45,12 @@ export interface ReplayConfig {
     takeProfitMultiplier: number;
     maxPositionsOpen: number;
     positionSizeMultiplier: number;
+  };
+
+  /** Optional time window gate — only enter new trades within this ET range */
+  timeWindows?: {
+    activeStart?: string; // 'HH:MM' ET, e.g. '09:30'
+    activeEnd?: string;   // 'HH:MM' ET, e.g. '15:45'
   };
 
   regime: {

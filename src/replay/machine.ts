@@ -572,6 +572,22 @@ export async function runReplay(
       if (openPositions.size >= config.position.maxPositionsOpen) continue;
       if (trades.length >= config.risk.maxTradesPerDay) continue;
 
+      // ── Time window gate (optional) ────────────────────────────────────
+      if (config.timeWindows?.activeStart || config.timeWindows?.activeEnd) {
+        const etHHMM = etLabel(ts).slice(0, 5); // 'HH:MM'
+        if (config.timeWindows.activeStart && etHHMM < config.timeWindows.activeStart) continue;
+        if (config.timeWindows.activeEnd && etHHMM >= config.timeWindows.activeEnd) continue;
+      }
+
+      // ── SPX RSI gate (opt-in via config.rsi.enableSpxGate) ────────────
+      if (config.rsi.enableSpxGate) {
+        const spxRsi = spx.indicators.rsi14;
+        if (spxRsi != null) {
+          const { oversoldThreshold, overboughtThreshold } = config.rsi;
+          if (spxRsi > oversoldThreshold && spxRsi < overboughtThreshold) continue;
+        }
+      }
+
       // Check daily loss limit
       const currentDayPnl = trades.reduce((sum, t) => sum + t.pnl$, 0);
       if (currentDayPnl <= -config.risk.maxDailyLoss) continue;

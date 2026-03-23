@@ -44,14 +44,25 @@ export async function runPreSessionAgent(dbPath: string): Promise<PreSessionResu
     if (!esLastBar) {
       console.warn('[pre-session] No ES bars available — using previous day close');
       const spxClose = spxYesterday?.close ?? 0;
+      const preMarket = await getPreMarketData(db, today);
       return {
-        overnight_context: 'No overnight data available',
-        market_character: 'UNKNOWN',
-        vix: 0,
-        gap_expectation: 0,
-        auction_range: { high: 0, low: 0, range: 0 },
-        key_levels: { resistance: spxClose, support: spxClose },
-        regime_expectation: 'UNKNOWN',
+        overnight: {
+          esHigh: spxClose,
+          esLow: spxClose,
+          esClose: spxClose,
+          esChange: 0,
+          esRange: 0,
+          character: 'choppy',
+          vix: vix ?? 0,
+          skew: 0.02,
+          keyLevels: { support: [spxClose - 25, spxClose - 50], resistance: [spxClose + 25, spxClose + 50] },
+        },
+        narrative: 'No ES overnight data available — using prior day close.',
+        preMarket: {
+          impliedOpen: preMarket.impliedOpen,
+          auctionRange: preMarket.auctionRange,
+        },
+        priorDayClose: spxClose,
       };
     }
 

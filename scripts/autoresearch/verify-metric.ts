@@ -86,18 +86,35 @@ async function main() {
   // Apply config overrides from CLI flags
   const overrides: Partial<ReplayConfig> = {};
   if (flags.strikeSearchRange) overrides.strikeSelector = { ...config.strikeSelector, strikeSearchRange: Number(flags.strikeSearchRange) };
-  if (flags.rsiOversold) overrides.signals = { ...config.signals, ...(overrides.signals || {}), rsiOversold: Number(flags.rsiOversold) };
-  if (flags.rsiOverbought) overrides.signals = { ...(overrides.signals || config.signals), rsiOverbought: Number(flags.rsiOverbought) };
-  if (flags.optionRsiOversold) overrides.signals = { ...(overrides.signals || config.signals), optionRsiOversold: Number(flags.optionRsiOversold) };
-  if (flags.optionRsiOverbought) overrides.signals = { ...(overrides.signals || config.signals), optionRsiOverbought: Number(flags.optionRsiOverbought) };
-  if (flags.stopLossPercent) overrides.position = { ...config.position, stopLossPercent: Number(flags.stopLossPercent) };
-  if (flags.takeProfitMultiplier) overrides.position = { ...(overrides.position || config.position), takeProfitMultiplier: Number(flags.takeProfitMultiplier) };
-  if (flags.activeStart) overrides.timeWindows = { ...config.timeWindows, activeStart: flags.activeStart };
-  if (flags.activeEnd) overrides.timeWindows = { ...(overrides.timeWindows || config.timeWindows), activeEnd: flags.activeEnd };
+  // SPX RSI gate thresholds — setting either flag also enables the gate
+  if (flags.rsiOversold || flags.rsiOverbought) overrides.rsi = {
+    ...config.rsi,
+    enableSpxGate: true,
+    ...(flags.rsiOversold ? { oversoldThreshold: Number(flags.rsiOversold) } : {}),
+    ...(flags.rsiOverbought ? { overboughtThreshold: Number(flags.rsiOverbought) } : {}),
+  };
+  // Option RSI signal thresholds (config.signals, used in option signal detection)
+  if (flags.optionRsiOversold || flags.optionRsiOverbought || flags.enableHmaCrosses || flags.enableEmaCrosses) {
+    overrides.signals = {
+      ...config.signals,
+      ...(flags.optionRsiOversold ? { optionRsiOversold: Number(flags.optionRsiOversold) } : {}),
+      ...(flags.optionRsiOverbought ? { optionRsiOverbought: Number(flags.optionRsiOverbought) } : {}),
+      ...(flags.enableHmaCrosses ? { enableHmaCrosses: flags.enableHmaCrosses === 'true' } : {}),
+      ...(flags.enableEmaCrosses ? { enableEmaCrosses: flags.enableEmaCrosses === 'true' } : {}),
+    };
+  }
+  if (flags.stopLossPercent || flags.takeProfitMultiplier) overrides.position = {
+    ...config.position,
+    ...(flags.stopLossPercent ? { stopLossPercent: Number(flags.stopLossPercent) } : {}),
+    ...(flags.takeProfitMultiplier ? { takeProfitMultiplier: Number(flags.takeProfitMultiplier) } : {}),
+  };
+  if (flags.activeStart || flags.activeEnd) overrides.timeWindows = {
+    ...(config.timeWindows || {}),
+    ...(flags.activeStart ? { activeStart: flags.activeStart } : {}),
+    ...(flags.activeEnd ? { activeEnd: flags.activeEnd } : {}),
+  };
   if (flags.cooldownSec) overrides.judge = { ...config.judge, escalationCooldownSec: Number(flags.cooldownSec) };
   if (flags.maxDailyLoss) overrides.risk = { ...config.risk, maxDailyLoss: Number(flags.maxDailyLoss) };
-  if (flags.enableHmaCrosses) overrides.signals = { ...(overrides.signals || config.signals), enableHmaCrosses: flags.enableHmaCrosses === 'true' };
-  if (flags.enableEmaCrosses) overrides.signals = { ...(overrides.signals || config.signals), enableEmaCrosses: flags.enableEmaCrosses === 'true' };
 
   if (Object.keys(overrides).length > 0) {
     config = mergeConfig(config, overrides);

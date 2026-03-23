@@ -1,12 +1,14 @@
 /**
  * JudgmentEngine — two-tier market assessment.
- * Tier 1: direct HTTP scanners (Kimi, GLM, MiniMax) — parallel, no SDK bottleneck
- * Tier 2: Claude Sonnet via SDK — fires only on escalation
+ * Tier 1: scanners run in parallel —
+ *   - Kimi, GLM via direct HTTP (callHttpLLM)
+ *   - Haiku, MiniMax via Claude Agent SDK (askModel)
+ * Tier 2: Claude judges via Claude Agent SDK — fires only on escalation
  */
 import type { MarketSnapshot, ContractState, SpyFlow } from './market-feed';
 import type { OpenPosition } from './types';
 import type { RiskGuard } from './risk-guard';
-import { getJudgeConfigs, getActiveJudgeId, askModel } from './model-clients';
+import { getJudgeConfigs, getActiveJudgeId, askModel, getScannerConfigs } from './model-clients';
 import type { ModelConfig } from './model-clients';
 import { classify, getSignalGate, formatRegimeContext, getState as getRegimeState } from './regime-classifier';
 import type { RegimeState } from './regime-classifier';
@@ -46,16 +48,9 @@ export function getHttpScannerConfigs(): ScannerHttpConfig[] {
     });
   }
 
-  if (process.env.MINIMAX_API_KEY) {
-    configs.push({
-      id: 'minimax',
-      label: 'MiniMax M2.7',
-      model: process.env.MINIMAX_MODEL || 'MiniMax-M2.7',
-      apiKey: process.env.MINIMAX_API_KEY,
-      baseUrl: process.env.MINIMAX_BASE_URL || 'https://api.minimax.io/anthropic',
-      timeoutMs: 60000,
-    });
-  }
+  // MiniMax intentionally excluded: returns HTTP 200 with empty body on the direct
+  // HTTP path. It works correctly via the Claude Agent SDK (askModel). MiniMax is
+  // picked up by getSdkScannerConfigs() below.
 
   return configs;
 }
@@ -364,6 +359,64 @@ async function runScanner(config: ScannerHttpConfig, prompt: string): Promise<Sc
   }
 }
 
+// ---------------------------------------------------------------------------
+// Tier 1 (SDK path): Haiku + MiniMax via Claude Agent SDK
+// ---------------------------------------------------------------------------
+
+/** SDK-backed scanners: Haiku (always) + MiniMax (when key present).
+ *  These use askModel() rather than callHttpLLM() because:
+ *  - Haiku is on the Pro subscription (no custom base URL needed)
+ *  - MiniMax returns an empty body on the raw HTTP path; SDK handles it correctly
+ */
+function getSdkScannerConfigs() {
+  return getScannerConfigs().filter(c => c.id === 'haiku' || c.id === 'minimax');
+}
+
+async function runSdkScanner(
+  config: ModelConfig,
+  prompt: string,
+): Promise<ScannerResult> {
+  const timeoutMs = config.id === 'minimax' ? 60000 : 30000;
+  try {
+    const text = await askModel(config, SCANNER_SYSTEM, prompt, timeoutMs);
+    const clean = extractJSON(text);
+
+    let parsed: any;
+    try {
+      parsed = JSON.parse(clean);
+    } catch {
+      return {
+        scannerId: config.id,
+        marketRead: 'Parse error',
+        setups: [],
+        nextCheckSecs: 30,
+        error: `JSON parse failed: ${text.slice(0, 100)}`,
+      };
+    }
+
+    return {
+      scannerId: config.id,
+      marketRead: String(parsed.market_read || ''),
+      setups: (Array.isArray(parsed.setups) ? parsed.setups : []).map((s: any) => ({
+        symbol: String(s.symbol || ''),
+        setupType: String(s.setup_type || ''),
+        confidence: Math.max(0, Math.min(1, parseFloat(s.confidence) || 0)),
+        urgency: ['now', 'building', 'watch'].includes(s.urgency) ? s.urgency : 'watch',
+        notes: String(s.notes || ''),
+      })),
+      nextCheckSecs: Math.max(15, Math.min(120, parseInt(parsed.next_check_secs) || 30)),
+    };
+  } catch (e) {
+    return {
+      scannerId: config.id,
+      marketRead: '',
+      setups: [],
+      nextCheckSecs: 30,
+      error: (e as Error).message,
+    };
+  }
+}
+
 export async function scan(
   snap: MarketSnapshot,
   positions: OpenPosition[],
@@ -371,46 +424,75 @@ export async function scan(
   narratives: Map<string, MarketNarrative>,
 ): Promise<ScannerResult[]> {
   const basePrompt = buildMarketPrompt(snap, positions, guard);
-  const scanners = getHttpScannerConfigs();
+  const httpScanners = getHttpScannerConfigs();
+  const sdkScanners = getSdkScannerConfigs();
 
-  if (scanners.length === 0) return [];
+  if (httpScanners.length === 0 && sdkScanners.length === 0) return [];
 
-  const results = await Promise.allSettled(
-    scanners.map(async (cfg: ScannerHttpConfig) => {
-      const narrative = narratives.get(cfg.id);
-      const narrativeContext = narrative ? '\n\nYOUR NARRATIVE SO FAR:\n' + narrative.buildTLDR() : '';
-      const prompt = basePrompt + narrativeContext;
-      const result = await runScanner(cfg, prompt);
+  /** Shared post-run narrative update — same logic for HTTP and SDK scanners. */
+  async function runAndUpdateNarrative(
+    scannerId: string,
+    runFn: () => Promise<ScannerResult>,
+  ): Promise<ScannerResult> {
+    const result = await runFn();
+    const narrative = narratives.get(scannerId);
+    if (narrative) {
+      narrative.addScannerNote(result.marketRead);
+      const spxPrice = snap.spx.price;
+      const latestBar = snap.spx.bars1m[snap.spx.bars1m.length - 1];
+      const rsi = latestBar?.rsi14 ?? null;
+      const regime = getRegimeState().regime;
+      const eventSummary = result.setups.length > 0
+        ? `${result.setups[0].setupType} on ${result.setups[0].symbol} conf=${result.setups[0].confidence.toFixed(2)}`
+        : 'no setup';
+      narrative.appendEvent(
+        Math.floor(Date.now() / 1000),
+        snap.timeET,
+        spxPrice,
+        rsi,
+        regime,
+        eventSummary,
+      );
+    }
+    return result;
+  }
 
-      if (narrative) {
-        narrative.addScannerNote(result.marketRead);
-        const spxPrice = snap.spx.price;
-        const latestBar = snap.spx.bars1m[snap.spx.bars1m.length - 1];
-        const rsi = latestBar?.rsi14 ?? null;
-        const regimeState = getRegimeState();
-        const regime = regimeState.regime;
-        const eventSummary = result.setups.length > 0
-          ? `${result.setups[0].setupType} on ${result.setups[0].symbol} conf=${result.setups[0].confidence.toFixed(2)}`
-          : 'no setup';
-        narrative.appendEvent(
-          Math.floor(Date.now() / 1000),
-          snap.timeET,
-          spxPrice,
-          rsi,
-          regime,
-          eventSummary,
-        );
-      }
+  // Build prompt helper (adds per-scanner narrative context)
+  function buildPrompt(scannerId: string): string {
+    const narrative = narratives.get(scannerId);
+    const narrativeContext = narrative ? '\n\nYOUR NARRATIVE SO FAR:\n' + narrative.buildTLDR() : '';
+    return basePrompt + narrativeContext;
+  }
 
-      return result;
-    })
+  // Launch all HTTP scanners
+  const httpPromises = httpScanners.map((cfg: ScannerHttpConfig) =>
+    Promise.allSettled([
+      runAndUpdateNarrative(cfg.id, () => runScanner(cfg, buildPrompt(cfg.id))),
+    ]).then(([r]) =>
+      r.status === 'fulfilled'
+        ? r.value
+        : { scannerId: cfg.id, marketRead: '', setups: [], nextCheckSecs: 30, error: String(r.reason) } as ScannerResult
+    )
   );
 
-  return results.map((r: PromiseSettledResult<ScannerResult>, i: number) =>
-    r.status === 'fulfilled'
-      ? r.value
-      : { scannerId: scanners[i].id, marketRead: '', setups: [], nextCheckSecs: 30, error: String(r.reason) }
+  // Launch all SDK scanners (Haiku + MiniMax)
+  const sdkPromises = sdkScanners.map((cfg) =>
+    Promise.allSettled([
+      runAndUpdateNarrative(cfg.id, () => runSdkScanner(cfg, buildPrompt(cfg.id))),
+    ]).then(([r]) =>
+      r.status === 'fulfilled'
+        ? r.value
+        : { scannerId: cfg.id, marketRead: '', setups: [], nextCheckSecs: 30, error: String(r.reason) } as ScannerResult
+    )
   );
+
+  // All scanners run in parallel; merge results preserving order: HTTP first, then SDK
+  const [httpResults, sdkResults] = await Promise.all([
+    Promise.all(httpPromises),
+    Promise.all(sdkPromises),
+  ]);
+
+  return [...httpResults, ...sdkResults];
 }
 
 // ---------------------------------------------------------------------------
