@@ -8,7 +8,9 @@ SPXer is two things in one repo:
 
 1. **Data Service** (`npm run dev`) — An always-on 24/5 market data pipeline that polls SPX/ES futures, tracks ~250-480 SPXW 0DTE options contracts via a sticky band model, builds 1m OHLCV bars with a full indicator battery, and serves enriched data over REST + WebSocket on port 3600.
 
-2. **Trading Agent** (`npm run agent`) — A multi-model autonomous trading agent that consumes the data service, runs 3 parallel LLM scanners (Kimi K2.5, GLM-5, MiniMax M2.7) for setup detection, escalates to a Claude Opus judge for trade decisions, and executes via Tradier. Paper mode by default.
+2. **Trading Agent** (`npm run agent`) — A multi-model autonomous trading agent that consumes the data service, runs 3 parallel LLM scanners (Kimi K2.5, GLM-5, MiniMax M2.7) for setup detection, escalates to a Claude judge for trade decisions, and executes via Tradier. Paper mode by default.
+
+3. **Replay System** (`src/replay/`) — A config-driven backtesting engine that replays historical days through the same signal detection → scanner → judge pipeline, using an in-memory bar cache for performance.
 
 ## Commands
 
@@ -19,7 +21,15 @@ npm run agent:live       # Start trading agent with real orders (AGENT_PAPER=fal
 npm run build            # TypeScript compile to dist/
 npm run test             # Run all tests (vitest run)
 npm run test:watch       # Run tests in watch mode
+npm run monitor          # Live parallel AI scanner monitor (6 models x 2 variants)
+npm run replay           # Full-day replay with AI judge calls
+npm run replay:22day     # 22-day parallel replay (bash wrapper)
+npm run backtest         # Multi-day deterministic backtester (no AI calls)
 npx vitest run tests/pipeline/bar-builder.test.ts   # Run a single test file
+
+# Autoresearch (parameter optimization)
+npx tsx scripts/autoresearch/verify-metric.ts --no-scanners                    # Run with defaults
+npx tsx scripts/autoresearch/verify-metric.ts --dates=2026-03-19 --cooldownSec=180 --label=test1
 ```
 
 ## Architecture
@@ -52,8 +62,8 @@ agent.ts (main loop)
 ├── agent/regime-classifier.ts  — classifies market regime (MORNING_MOMENTUM, MEAN_REVERSION, TRENDING_*, GAMMA_EXPIRY, NO_TRADE)
 ├── agent/market-narrative.ts   — per-scanner rolling narrative: overnight build, trajectory tracking, escalation briefs
 ├── agent/pre-session-agent.ts  — overnight + pre-market analysis (runs at 9:20 ET)
-├── agent/judgment-engine.ts    — two-tier: 3 LLM scanners → optional Sonnet judge escalation
-├── agent/model-clients.ts      — Claude Agent SDK query() with env overrides for third-party models
+├── agent/judgment-engine.ts    — two-tier: 3 LLM scanners → optional judge escalation
+├── agent/model-clients.ts      — direct HTTP calls to all LLM providers
 ├── agent/signal-detector.ts    — deterministic signal detection (RSI breaks, EMA/HMA crosses)
 ├── agent/price-action.ts       — price action trigger patterns (session break, range expansion, RSI velocity)
 ├── agent/strike-selector.ts    — deterministic OTM strike selection
@@ -66,7 +76,7 @@ agent.ts (main loop)
 
 **Regime classifier gates signals**: Each regime (time-of-day + trend detection) defines which signal types are allowed/suppressed via `SignalGate`. This is the first filter before any trade consideration.
 
-**Two-tier assessment**: Scanners run every 15-60s (cheap/free models). If any scanner flags confidence >= 0.5, the Sonnet judge is invoked with full context. The active judge is configurable via `AGENT_ACTIVE_JUDGE` env var.
+**Two-tier assessment**: Scanners run every 15-60s (cheap/free models). If any scanner flags confidence >= 0.5, the judge is invoked with full context. The active judge is configurable via `AGENT_ACTIVE_JUDGE` env var.
 
 **Per-scanner MarketNarrative**: Each scanner maintains its own `MarketNarrative` instance that builds context throughout the day:
 - **Overnight**: Pre-session agent reads ES bars, builds overnight narrative (range, character, VIX, key levels)
@@ -75,7 +85,53 @@ agent.ts (main loop)
 - **Trajectory tracking**: Session SPX high/low, RSI high/low with timestamps, key moves logged
 - **Escalation brief**: When escalating, the scanner builds a full narrative brief including trajectory ("RSI traveled from 18→85 in 47 minutes"), overnight context, recent session events, and the scanner's own evolving interpretation
 
-The judge doesn't receive isolated signals — it receives context-rich escalations. A scanner escalating without narrative context can't justify its signal past the judge.
+The judge doesn't receive isolated signals — it receives context-rich escalations.
+
+### Replay System (`src/replay/`)
+
+```
+src/replay/
+├── machine.ts        — Core replay engine: in-memory bar cache, signal → scanner → judge → position mgmt
+├── config.ts         — DEFAULT_CONFIG, presets, mergeConfig(), validateConfig()
+├── types.ts          — ReplayConfig (comprehensive), Trade, ReplayResult, CycleSnapshot
+├── store.ts          — SQLite store for replay runs and results (data/replay.db)
+├── prompt-library.ts — 18 scanner prompts: 2 original + 8 session-specific + 5 regime + 3 calendar
+├── metrics.ts        — ET time helpers, symbol filters, composite score computation
+├── cli-config.ts     — CLI flag parsing for config overrides
+├── framework.ts      — Cycle snapshot builder for agent injection
+└── index.ts          — Re-exports
+```
+
+**Performance-critical**: `machine.ts` uses an in-memory bar cache — loads all bars for a date once from SQLite, then iterates with binary search. Mar 20 (159K bars, 648 contracts) replays in ~5 seconds. NEVER go back to SQL-per-tick (caused OOM at 3+ GB per process with 8 parallel sessions).
+
+**`agent-config.ts`** (project root): Live agent configuration derived from autoresearch findings. Uses `ReplayConfig` type so the same config shape drives both live trading and replay.
+
+### Autoresearch System (`scripts/autoresearch/`)
+
+Parameter optimization loop: modify config → run replay → measure composite score → keep/discard.
+
+```
+scripts/autoresearch/
+├── verify-metric.ts              — Runs replay with config overrides, outputs composite score (0-100)
+├── param-search.ts               — Automated parameter sweep
+├── config-optimizer.ts           — Config optimization driver
+└── sessions/                     — 10 session briefs (each tests one dimension)
+    ├── session-01-time-otm.md    — Strike range + time windows
+    ├── session-02-rsi.md         — RSI thresholds
+    ├── session-03-stoploss.md    — Stop loss %
+    ├── session-04-tp-exit.md     — Take profit multiplier
+    ├── session-05-option-rsi.md  — Option RSI thresholds
+    ├── session-06-cooldown.md    — Judge escalation cooldown
+    ├── session-07-hma.md         — HMA cross signals
+    ├── session-08-ema.md         — EMA cross signals
+    ├── session-09-prompts.md     — Scanner prompt variants (AI calls)
+    ├── session-10-calendar.md    — Economic calendar context
+    └── runner-hybrid.ts          — Hybrid session runner
+```
+
+**Composite score**: `(winRate * 40) + (sharpe * 30) + (avgDailyPnl > 0 ? 20 : 0) + (maxLoss > -500 ? 10 : 0)`. Range 0-100.
+
+**verify-metric.ts CLI flags**: `--dates`, `--no-scanners`, `--strikeSearchRange`, `--rsiOversold`, `--rsiOverbought`, `--optionRsiOversold`, `--optionRsiOverbought`, `--stopLossPercent`, `--takeProfitMultiplier`, `--activeStart`, `--activeEnd`, `--cooldownSec`, `--maxDailyLoss`, `--enableHmaCrosses`, `--enableEmaCrosses`, `--label`.
 
 ## Key Types (`src/types.ts`)
 
@@ -84,12 +140,14 @@ The judge doesn't receive isolated signals — it receives context-rich escalati
 - `Timeframe` — `'1m' | '5m' | '15m' | '1h' | '1d'`
 - `IndicatorState` — Rolling window state for incremental indicator computation
 
+`src/replay/types.ts` adds: `ReplayConfig` (full config shape with RSI, signals, position, regime, judge, scanner, sizing, escalation, risk, exit sections), `Trade`, `ReplayResult`, `CycleSnapshot`.
+
 ## Environment Variables
 
 Required in `.env`:
 - `TRADIER_TOKEN` — Tradier API token (data + order execution)
 - `TRADIER_ACCOUNT_ID` — For live trading
-- `ANTHROPIC_API_KEY` — For Opus judge in the trading agent
+- `ANTHROPIC_API_KEY` — For judge in the trading agent
 - `PORT` — Default 3600
 - `DB_PATH` — Default `./data/spxer.db`
 
@@ -118,99 +176,78 @@ Tests mirror `src/` structure under `tests/`. Uses Vitest with `globals: true` a
 - **Tradier batch quotes** — all options quotes use the batch endpoint (max 50 symbols/call), never one call per contract.
 - **Contract symbol format** — Tradier canonical: `SPXW260318C05000000` (SPXW + YYMMDD + C/P + 8-digit zero-padded strike × 1000).
 - **Archival** — Expired contracts exported to parquet via DuckDB, uploaded to Google Drive via rclone. Hot DB target < 500MB.
-- **OTM only** — Strike selector targets $0.20-$8.00 OTM contracts. We don't buy ITM. On emergency signals, prefer ~$1.00 strikes for maximum gamma exposure. "We're not collecting dividends."
-- **Anticipation over reaction** — A human trader doesn't just react to each bar. They watch a story unfold, track trajectory, and anticipate what's coming. The system works the same way. Scanners build narrative state across the session: session trajectory (SPX/RSI high/low with timestamps), overnight context, pre-market setup, notable moves, their own notes. When they escalate, it's not "I see something now" — it's "here's how we got here and what I'm watching."
-- **Agentic over simple or overly complex** — Simple signal systems (RSI >80 = buy puts) are too reactive and too simplistic to capture real market dynamics. Overly complex indicator systems are fragile and overfit to historical data. An agentic system sits between: scanners observe, build narrative, detect patterns, and escalate with context. The judge weighs the full story. This is how a human analyst would work.
-- **Price action first, RSI second** — The system should trigger on session high/low breaks, candle range spikes, and V-reversals. RSI is a confirmation filter, not the primary trigger.
-- **Scanner prompts are neutral** — Don't tell the models what RSI means or what to think. Give them raw OHLC bars + RSI value + contract chain and let them form their own view. We're testing if they're naturally good market readers, not building an echo chamber.
-- **LLMs advise, code executes** — Scanners/judges classify regime (advisory). Strike selection and trade execution are deterministic — no LLM in the hot path. Sub-second execution.
+- **OTM only** — Strike selector targets $0.20-$8.00 OTM contracts. We don't buy ITM. On emergency signals, prefer ~$1.00 strikes for maximum gamma exposure.
+- **Anticipation over reaction** — Scanners build narrative state across the session: session trajectory, overnight context, pre-market setup, notable moves. When they escalate, it's "here's how we got here and what I'm watching" — not "I see something now."
+- **Agentic over simple or overly complex** — Simple signal systems (RSI >80 = buy puts) are too reactive. Overly complex indicator systems are fragile. An agentic system sits between: scanners observe, build narrative, detect patterns, and escalate with context.
+- **Price action first, RSI second** — The system triggers on session high/low breaks, candle range spikes, and V-reversals. RSI is a confirmation filter, not the primary trigger.
+- **Scanner prompts are neutral** — Raw OHLC bars + RSI value + contract chain. No guidance on what RSI means. We test if models are naturally good market readers.
+- **LLMs advise, code executes** — Scanners/judges classify regime (advisory). Strike selection and trade execution are deterministic — no LLM in the hot path.
 
 ## Scanning & Judgment Agents
 
 ### Scanners (Tier 1) — "What do you see?"
-Fast, cheap models called every 15-60s with raw market data. They assess conditions and flag setups. All use Claude Agent SDK `query()` with `env` overrides to route to third-party APIs.
+Fast, cheap models called every 15-60s with raw market data.
 
-| Model | Provider | Speed | Personality | API |
-|-------|----------|-------|-------------|-----|
-| **Kimi K2.5** | Moonshot | ~2.6s | Cautious, analytical. Wants confirmation before committing. | api.kimi.com/coding/ |
-| **ZAI GLM-5** | Zhipu AI | ~3-5s | Fundamentals-focused. Considers macro context. | api.z.ai/api/anthropic |
-| **MiniMax M2.7** | MiniMax | ~40-47s | Aggressive, decisive. Picks specific strikes. Only model to respond AND say BUY on first live signal (March 20). | api.minimax.io/anthropic |
+| Model | Provider | Speed | API |
+|-------|----------|-------|-----|
+| **Kimi K2.5** | Moonshot | ~2.6s | api.kimi.com/coding/ |
+| **ZAI GLM-5** | Zhipu AI | ~3-5s | api.z.ai/api/anthropic |
+| **MiniMax M2.7** | MiniMax | ~40-47s | api.minimax.io/anthropic |
 
 ### Judges (Tier 2) — "Should we trade?"
-Claude models that review scanner output + full market context and make the final call. `AGENT_ACTIVE_JUDGE` env var selects which judge's decision is executed (default: sonnet).
+Claude models that review scanner output + full market context. `AGENT_ACTIVE_JUDGE` env var selects which judge's decision is executed (default: sonnet).
 
-| Model | Speed | Personality |
-|-------|-------|-------------|
+| Model | Speed | Notes |
+|-------|-------|-------|
 | **Claude Haiku** | Fast | Quick tiebreaker, momentum reader |
-| **Claude Sonnet** | Medium | Structured, decisive, good at formatted output |
-| **Claude Opus** | Slow | Deep reasoning, considers edge cases, sometimes overly cautious |
+| **Claude Sonnet** | Medium | Structured, decisive (default judge) |
+| **Claude Opus** | Slow | Deep reasoning, sometimes overly cautious |
 
-### Prompt Philosophy
-All models receive the same neutral prompt — raw OHLC bars, RSI value, and the contract chain. No guidance on what RSI means, no "emergency" language, no bias. Two variants run for each model: **+REGIME** (includes regime classifier tag) and **-REGIME** (no regime context). This tests whether the regime classifier adds value.
+### Model Call Strategy: Direct HTTP Only
 
-### Model Call Strategy: Direct HTTP for All Scanner/Judge Calls
+**All LLM calls (scanners and judges) use direct HTTP via `fetch` + `AbortController`, NOT the Agent SDK's `query()` iterator.** The SDK iterator does not support cancellation — timeouts leave iterators running in the background, causing OOM in batch workloads.
 
-**CRITICAL: All LLM calls (scanners and judges) use direct HTTP, NOT the Agent SDK's `query()` iterator.**
+All calls route through `askModel()` in `src/agent/model-clients.ts` with `forceDirect=true`. All providers use the same Anthropic Messages API format (`/v1/messages`) — only the base URL and API key differ.
 
-#### Why Direct HTTP?
-
-The Agent SDK's `query()` async iterator **does not support cancellation**. When a timeout fires, the Promise rejects but the iterator keeps running in the background, consuming resources. For batch/replay workloads that make thousands of calls, this causes OOM or deadlocks.
-
-**Direct HTTP calls** (via `fetch` with `AbortController`) provide:
-- ✅ Native timeout support
-- ✅ Proper cancellation on abort
-- ✅ Predictable resource cleanup
-- ✅ Consistent behavior across all contexts (live agent, replay, autoresearch)
-
-#### Implementation
-
-All scanner and judge calls go through `askModel()` in `src/agent/model-clients.ts`:
-
-```typescript
-// Always use direct HTTP (forceDirect=true)
-const response = await askModel(config, systemPrompt, userPrompt, timeoutMs, true);
-//                                                                            ^^^^ forceDirect
-```
-
-This routes to `askModelDirect()` which uses the Anthropic Messages API format:
-
-```typescript
-const response = await fetch(`${baseUrl}/v1/messages`, {
-  method: 'POST',
-  headers: {
-    'Content-Type': 'application/json',
-    'x-api-key': apiKey,
-    'anthropic-version': '2023-06-01',
-  },
-  body: JSON.stringify({
-    model: config.model,
-    max_tokens: 4096,
-    system: systemPrompt,
-    messages: [{ role: 'user', content: userPrompt }],
-  }),
-  signal: controller.signal,  // Proper abort support
-});
-```
-
-#### Model Endpoints
-
-| Model | Base URL | API Key Source |
-|-------|----------|----------------|
-| **Claude (Haiku/Sonnet/Opus)** | `https://api.anthropic.com` | `ANTHROPIC_API_KEY` |
+| Model | Base URL | API Key |
+|-------|----------|---------|
+| **Claude** | `https://api.anthropic.com` | `ANTHROPIC_API_KEY` |
 | **Kimi K2.5** | `https://api.kimi.com/coding` | `KIMI_API_KEY` |
 | **ZAI GLM-5** | `https://api.z.ai/api/anthropic` | `GLM_API_KEY` |
 | **MiniMax M2.7** | `https://api.minimax.io/anthropic` | `MINIMAX_API_KEY` |
 
-All use the **same Anthropic Messages API format** — only the base URL and API key differ.
+## Scripts
 
-#### Consistency Guarantee
+```
+scripts/
+├── backtest/                    — Replay and backtesting scripts
+│   ├── backtest-multi.ts        — Multi-day deterministic backtester (no AI, fast)
+│   ├── backtest-no-regime.ts    — Same without regime filter (A/B comparison)
+│   ├── replay-full.ts           — Full-day replay with AI judge calls (slow)
+│   ├── replay-machine.ts        — Machine-based replay runner
+│   ├── replay-price-action.ts   — Price action focused replay
+│   ├── run-replay.ts            — CLI replay runner
+│   └── view-results.ts          — View stored replay results
+├── backfill/                    — Historical data import
+│   ├── backfill-polygon.ts      — Historical option data from Polygon/Massive API
+│   ├── backfill-spx.ts          — Historical SPX bars
+│   ├── seed-from-dash.ts        — Import from SPX-0DTE dashboard DB
+│   ├── compute-indicators.ts    — Recompute indicators on existing bars
+│   └── fix-indicators.ts        — Fix indicator data issues
+├── monitor/                     — Live monitoring
+│   ├── live-monitor.ts          — 6 models x 2 variants parallel monitor
+│   └── orchestrator.ts          — Monitor orchestration
+├── autoresearch/                — Parameter optimization (see Autoresearch section)
+└── analysis/                    — Post-hoc analysis scripts
+```
 
-**Scanners behave identically across all contexts:**
-- Live agent → Direct HTTP
-- Replay backtest → Direct HTTP
-- Autoresearch optimization → Direct HTTP
+## PM2 Processes
 
-No guessing what works where. Same code path, same timeouts, same behavior.
+| Name | Purpose |
+|------|---------|
+| spxer | Data pipeline — collects SPX/ES/options bars (port 3600) |
+| live-monitor | Parallel AI scanner monitor (6 models x 2 variants) |
+| spx | SPX-0DTE dashboard frontend (port 3502) |
 
 ## Known Bugs (Fixed, March 19-20 2026)
 
@@ -221,53 +258,18 @@ No guessing what works where. Same code path, same timeouts, same behavior.
 5. **Indicator pipeline resets** — RSI/EMA reset 5 times during March 19 session due to data gaps causing re-initialization.
 6. **Promise.allSettled contention** — 6 parallel `query()` calls serialize through claude session, exceeding timeouts. Changed to sequential for judges, parallel only for independent API providers.
 
-## Backtesting & Replay
+## Replay Library
 
-### Scripts
-- `backtest-multi.ts` — Multi-day deterministic backtester (no AI calls, runs in seconds)
-- `backtest-no-regime.ts` — Same but no regime filter (A/B comparison)
-- `live-monitor.ts` — Live parallel monitor (6 models x 2 variants: +regime/-regime)
-- `replay-full.ts` — Full-day replay with AI judge calls (slow, uses API)
-- `replay.ts` — 4-moment replay (original, deprecated)
-- `backfill-polygon.ts` — Historical option data from Polygon/Massive API
-- `backfill-spx.ts` — Historical SPX bars backfill
-- `seed-from-dash.ts` — Import from SPX-0DTE dashboard DB
-
-### Replay Library
 `replay-library/` contains per-day markdown replay logs and SCORECARD.md. 22 trading days backfilled (Feb 18 → Mar 19, 2026) from Polygon.
 
-### Backtest Targets
-- Win rate > 40%
-- Average P&L positive per day
-- No single day loses more than $500
-- Emergency oversold/overbought trades consistently caught
+## Autoresearch Key Findings (Sessions 1-8)
 
-### Current Backtest Status (March 20, post-iteration)
-- **42.9% win rate** (target: >40%) ✅ — 3 wins / 7 trades across 21 days
-- **$66 avg P&L/day** (target: >$0) ✅
-- **-$445 max day loss** (target: >-$500) ✅
-- **4/7 emergencies caught** (target: >80%) ❌ — 3 missed are data gaps (Polygon strike range too narrow)
-- Key fix: strike search range widened from ±50 to ±200, stop loss widened from 50% to 70%
-- 14/21 days have zero signals (Polygon data: only 42 contracts/day in $100 strike band)
-- Optimized params: RSI 25/75 triggers, 70% stop, 5x TP, gamma zone trades allowed
-
-## PM2 Processes
-
-| Name | Purpose |
-|------|---------|
-| spxer | Data pipeline — collects SPX/ES/options bars (port 3600) |
-| live-monitor | Parallel AI scanner monitor (6 models x 2 variants) |
-| spx | SPX-0DTE dashboard frontend (port 3502) |
-| litellm | LiteLLM proxy for MiniMax via Chutes (port 4010) |
-
-## March 19, 2026 — Key Reference Day
-
-Full storyboard replay exists in the conversation history and `replay-library/2026-03-19-full-day-replay.md`. Key moments:
-- 09:50 RSI=85.7 overbought (put entered, stopped out -55% — morning momentum trap)
-- 11:30 RSI=19.3 oversold (call→put bug, wrong direction)
-- 14:34 RSI=8.4 EMERGENCY oversold (the day's key moment)
-  - C6600: $1.62 → $33.82 = +1,986%
-  - C6615: $0.55 → $23.20 = +4,118%
-  - System entered a put (bug) and exited +22% instead of catching the 20-bagger
-- 14:57 RSI=82.2 overbought (put entered during explosive rally, -85%)
-- Perfect day P&L with fixes: +$8,480. Actual: -$991.
+| Finding | Score | Detail |
+|---------|-------|--------|
+| 180s cooldown optimal | 92.73 | s6: 81.8% WR, beats 120s/300s/600s |
+| Strike range ±75-100 | 91.58 | s1: morning window, wide enough for emergencies |
+| Option RSI 40/60 (tight) | 86.67 | s5: filters for quality signals |
+| SL 80% > SL 50% | 85.26 | s3: hold winners longer |
+| HMA essential | — | s7: removing drops score 83→49 |
+| EMA hurts | — | s8: enabling drops score 83→54 |
+| RSI thresholds don't matter | — | s2: 15/85 ≈ 20/80 ≈ 25/75 ≈ 30/70 |
