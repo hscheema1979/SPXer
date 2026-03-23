@@ -9,14 +9,25 @@
  * Range: 0-100. Higher is better.
  *
  * Usage:
- *   npx tsx scripts/autoresearch/verify-metric.ts
- *   npx tsx scripts/autoresearch/verify-metric.ts --dates=2026-03-19,2026-03-20
- *   npx tsx scripts/autoresearch/verify-metric.ts --dates=2026-03-19,2026-03-20 --promptId=session01-time-otm-2026-03-23-v1.0
+ *   npx tsx scripts/autoresearch/verify-metric.ts --no-scanners
+ *   npx tsx scripts/autoresearch/verify-metric.ts --dates=2026-03-19,2026-03-20 --no-scanners
+ *   npx tsx scripts/autoresearch/verify-metric.ts --no-scanners --strikeSearchRange=50 --activeStart=14:00 --activeEnd=15:45
  *
- * Flags:
- *   --dates=YYYY-MM-DD,...   Comma-separated dates to test (default: all 21)
- *   --promptId=ID            Scanner prompt ID from prompt library
- *   --no-scanners            Disable scanners (deterministic only, faster)
+ * Config override flags (applied to DEFAULT_CONFIG):
+ *   --strikeSearchRange=N    Strike search range (20-200)
+ *   --rsiOversold=N          SPX RSI oversold threshold
+ *   --rsiOverbought=N        SPX RSI overbought threshold
+ *   --optionRsiOversold=N    Option RSI oversold threshold
+ *   --optionRsiOverbought=N  Option RSI overbought threshold
+ *   --stopLossPercent=N      Stop loss % (0-100, 0=disabled)
+ *   --takeProfitMultiplier=N TP multiplier
+ *   --activeStart=HH:MM      Trading window start (ET)
+ *   --activeEnd=HH:MM        Trading window end (ET)
+ *   --cooldownSec=N          Escalation cooldown seconds
+ *   --maxDailyLoss=N         Max daily loss limit
+ *   --enableHmaCrosses       Enable HMA cross signals
+ *   --enableEmaCrosses       Enable EMA cross signals
+ *   --label=NAME             Label for results tracking
  */
 
 import * as dotenv from 'dotenv';
@@ -71,6 +82,29 @@ async function main() {
       },
     });
   }
+
+  // Apply config overrides from CLI flags
+  const overrides: Partial<ReplayConfig> = {};
+  if (flags.strikeSearchRange) overrides.strikeSelector = { ...config.strikeSelector, strikeSearchRange: Number(flags.strikeSearchRange) };
+  if (flags.rsiOversold) overrides.signals = { ...config.signals, ...(overrides.signals || {}), rsiOversold: Number(flags.rsiOversold) };
+  if (flags.rsiOverbought) overrides.signals = { ...(overrides.signals || config.signals), rsiOverbought: Number(flags.rsiOverbought) };
+  if (flags.optionRsiOversold) overrides.signals = { ...(overrides.signals || config.signals), optionRsiOversold: Number(flags.optionRsiOversold) };
+  if (flags.optionRsiOverbought) overrides.signals = { ...(overrides.signals || config.signals), optionRsiOverbought: Number(flags.optionRsiOverbought) };
+  if (flags.stopLossPercent) overrides.position = { ...config.position, stopLossPercent: Number(flags.stopLossPercent) };
+  if (flags.takeProfitMultiplier) overrides.position = { ...(overrides.position || config.position), takeProfitMultiplier: Number(flags.takeProfitMultiplier) };
+  if (flags.activeStart) overrides.timeWindows = { ...config.timeWindows, activeStart: flags.activeStart };
+  if (flags.activeEnd) overrides.timeWindows = { ...(overrides.timeWindows || config.timeWindows), activeEnd: flags.activeEnd };
+  if (flags.cooldownSec) overrides.judge = { ...config.judge, escalationCooldownSec: Number(flags.cooldownSec) };
+  if (flags.maxDailyLoss) overrides.risk = { ...config.risk, maxDailyLoss: Number(flags.maxDailyLoss) };
+  if (flags.enableHmaCrosses) overrides.signals = { ...(overrides.signals || config.signals), enableHmaCrosses: flags.enableHmaCrosses === 'true' };
+  if (flags.enableEmaCrosses) overrides.signals = { ...(overrides.signals || config.signals), enableEmaCrosses: flags.enableEmaCrosses === 'true' };
+
+  if (Object.keys(overrides).length > 0) {
+    config = mergeConfig(config, overrides);
+  }
+
+  // Set config ID from label flag for results tracking
+  if (flags.label) config = { ...config, id: flags.label };
 
   // Save config to store (FK constraint)
   const store = new ReplayStore();
