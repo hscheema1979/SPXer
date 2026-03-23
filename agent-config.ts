@@ -62,7 +62,7 @@ export const AGENT_CONFIG: ReplayConfig = {
     enabled: true,
     enableKimi: true,
     enableGlm: true,
-    enableMinimax: true,
+    enableMinimax: false,  // Disabled — empty responses (API issue)
     enableHaiku: false,
     promptId: 'original-1',
     cycleIntervalSec: 60,
@@ -81,7 +81,7 @@ export const AGENT_CONFIG: ReplayConfig = {
   judge: {
     enabled: true,
     activeJudge: 'sonnet',
-    escalationCooldownSec: 120,
+    escalationCooldownSec: 180,  // 3 minutes between judge calls
   },
 
   // Prompts

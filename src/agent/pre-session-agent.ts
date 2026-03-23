@@ -39,6 +39,22 @@ export async function runPreSessionAgent(dbPath: string): Promise<PreSessionResu
 
     const esFirstBar = esBars[0];
     const esLastBar = esBars[esBars.length - 1];
+
+    // Handle empty ES bars — use yesterday's SPX close as fallback
+    if (!esLastBar) {
+      console.warn('[pre-session] No ES bars available — using previous day close');
+      const spxClose = spxYesterday?.close ?? 0;
+      return {
+        overnight_context: 'No overnight data available',
+        market_character: 'UNKNOWN',
+        vix: 0,
+        gap_expectation: 0,
+        auction_range: { high: 0, low: 0, range: 0 },
+        key_levels: { resistance: spxClose, support: spxClose },
+        regime_expectation: 'UNKNOWN',
+      };
+    }
+
     const spxClose = spxYesterday?.close ?? esLastBar.close;
 
     const esChange = esLastBar.close - spxClose;

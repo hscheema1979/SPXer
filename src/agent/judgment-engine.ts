@@ -86,7 +86,14 @@ export async function callHttpLLM(
   }
 
   const data = await response.json() as { content?: Array<{ text?: string }> };
-  return data.content?.[0]?.text ?? '';
+  const text = data.content?.[0]?.text ?? '';
+
+  if (!text) {
+    console.warn(`[scanner] ${config.label} returned empty response`, { status: response.status });
+    throw new Error(`${config.label} returned empty response`);
+  }
+
+  return text;
 }
 
 // ---------------------------------------------------------------------------
