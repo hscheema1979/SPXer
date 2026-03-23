@@ -55,10 +55,13 @@ async function main() {
     });
   }
 
-  // Scanners enabled by default (the system is agentic).
   // Use --no-scanners for deterministic-only fast runs.
   const noScanners = flags['no-scanners'] === 'true';
-  if (!noScanners && !config.scanners.enabled) {
+  if (noScanners) {
+    config = mergeConfig(config, {
+      scanners: { ...config.scanners, enabled: false },
+    });
+  } else if (!config.scanners.enabled) {
     config = mergeConfig(config, {
       scanners: { ...config.scanners, enabled: true },
       escalation: {
