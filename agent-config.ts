@@ -63,7 +63,7 @@ export const AGENT_CONFIG: ReplayConfig = {
     enableKimi: true,
     enableGlm: true,
     enableMinimax: false,  // Disabled — empty responses (API issue)
-    enableHaiku: false,
+    enableHaiku: true,     // Fast scanner + judge fallback
     promptId: 'original-1',
     cycleIntervalSec: 60,
     minConfidenceToEscalate: 0.5,
