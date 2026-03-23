@@ -230,8 +230,8 @@ export function validateConfig(config: ReplayConfig): { valid: boolean; errors: 
     errors.push('Option RSI oversold must be between 5-50');
   if (config.signals.optionRsiOverbought < 50 || config.signals.optionRsiOverbought > 95)
     errors.push('Option RSI overbought must be between 50-95');
-  if (config.position.stopLossPercent < 10 || config.position.stopLossPercent > 100)
-    errors.push('Stop loss must be between 10-100%');
+  if (config.position.stopLossPercent < 0 || config.position.stopLossPercent > 100)
+    errors.push('Stop loss must be between 0-100% (0 = no stop)');
   if (config.position.takeProfitMultiplier < 1 || config.position.takeProfitMultiplier > 50)
     errors.push('Take profit multiplier must be between 1-50x');
   if (config.judge.confidenceThreshold < 0 || config.judge.confidenceThreshold > 1)

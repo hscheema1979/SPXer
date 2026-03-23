@@ -1,21 +1,4 @@
-▶ [2026-02-27] Starting...
----
-[dotenv@17.3.1] injecting env (24) from .env -- tip: ⚙️  specify custom .env file path with { path: '/custom/path/.env' }
+[dotenv@17.3.1] injecting env (24) from .env -- tip: ⚡️ secrets for agents: https://dotenvx.com/as2
+[dotenv@17.3.1] injecting env (0) from .env -- tip: 🛡️ auth for agents: https://vestauth.com
 
-════════════════════════════════════════════════════════════════════════
-  SPXer Full-Day Replay — 2026-02-27 (SIGNAL-DETECTOR BASED)
-  151 bars | Option contract signals PRIMARY
-════════════════════════════════════════════════════════════════════════
-  Judges: Claude Haiku, Claude Opus
-
-
-════════════════════════════════════════════════════════════════════════
-  REPLAY RESULTS
-════════════════════════════════════════════════════════════════════════
-
-💼 TRADES (0 total):
-
-📈 SUMMARY:
-  Trades: 0 | Win rate: 0%
-  Total P&L: $0
-✅ [2026-02-27] COMPLETE
+RESULT:{"date":"2026-02-27","configId":"aggressive-wide-strike","trades":4,"wins":2,"winRate":0.5,"totalPnl":-232.00000000000068}

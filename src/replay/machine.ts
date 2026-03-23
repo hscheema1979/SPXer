@@ -29,7 +29,7 @@ interface Bar {
 
 interface OptionSignal {
   symbol: string; type: 'call' | 'put'; strike: number;
-  signalType: 'RSI_CROSS' | 'EMA_CROSS' | 'HMA_CROSS';
+  signalType: 'RSI_CROSS' | 'EMA_CROSS' | 'HMA_CROSS' | 'PRICE_CROSS_HMA' | 'PRICE_CROSS_EMA';
   direction: 'bullish' | 'bearish';
   rsi?: number; ema9?: number; ema21?: number; hma5?: number; hma19?: number;
 }
@@ -165,6 +165,26 @@ function detectOptionSignals(
         signals.push({ symbol, type: isCall ? 'call' : 'put', strike, signalType: 'EMA_CROSS', direction: 'bearish', ema9: ind.ema9, ema21: ind.ema21 });
       }
     }
+
+    // Price crosses HMA (Session 7)
+    if (config.signals.enableHmaCrosses && prevInd.hma5 && ind.hma5) {
+      if (prevInd.hma5 >= curr.close && ind.hma5 < curr.close) {
+        signals.push({ symbol, type: isCall ? 'call' : 'put', strike, signalType: 'PRICE_CROSS_HMA', direction: 'bullish', hma5: ind.hma5 });
+      }
+      if (prevInd.hma5 <= curr.close && ind.hma5 > curr.close) {
+        signals.push({ symbol, type: isCall ? 'call' : 'put', strike, signalType: 'PRICE_CROSS_HMA', direction: 'bearish', hma5: ind.hma5 });
+      }
+    }
+
+    // Price crosses EMA (Session 8)
+    if (config.signals.enableEmaCrosses && prevInd.ema21 && ind.ema21) {
+      if (prevInd.ema21 >= curr.close && ind.ema21 < curr.close) {
+        signals.push({ symbol, type: isCall ? 'call' : 'put', strike, signalType: 'PRICE_CROSS_EMA', direction: 'bullish', ema21: ind.ema21 });
+      }
+      if (prevInd.ema21 <= curr.close && ind.ema21 > curr.close) {
+        signals.push({ symbol, type: isCall ? 'call' : 'put', strike, signalType: 'PRICE_CROSS_EMA', direction: 'bearish', ema21: ind.ema21 });
+      }
+    }
   }
 
   return signals;
@@ -275,7 +295,7 @@ async function runReplayScanners(
   const results = await Promise.allSettled(
     enabled.map(async (scannerCfg: ModelConfig) => {
       const systemPrompt = getScannerPrompt(config, scannerCfg.id) || libraryPrompt;
-      const text = await askModel(scannerCfg, systemPrompt, scannerPrompt, 15000);
+      const text = await askModel(scannerCfg, systemPrompt, scannerPrompt, 60000);
       const clean = extractJSON(text);
       const parsed = JSON.parse(clean);
 

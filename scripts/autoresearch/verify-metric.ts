@@ -1,8 +1,9 @@
 /**
  * verify-metric.ts — Mechanical metric for autoresearch loop.
  *
- * Runs the 22-day backtest with current DEFAULT_CONFIG and outputs a single
- * composite score to stdout. Autoresearch reads this number to decide keep/discard.
+ * Runs the backtest with current DEFAULT_CONFIG (+ any overrides from flags)
+ * and outputs a single composite score to stdout. Autoresearch reads this number
+ * to decide keep/discard.
  *
  * Composite score = (winRate * 40) + (sharpe * 30) + (avgDailyPnl > 0 ? 20 : 0) + (maxLoss > -500 ? 10 : 0)
  * Range: 0-100. Higher is better.
@@ -10,15 +11,21 @@
  * Usage:
  *   npx tsx scripts/autoresearch/verify-metric.ts
  *   npx tsx scripts/autoresearch/verify-metric.ts --dates=2026-03-19,2026-03-20
+ *   npx tsx scripts/autoresearch/verify-metric.ts --dates=2026-03-19,2026-03-20 --promptId=session01-time-otm-2026-03-23-v1.0
+ *
+ * Flags:
+ *   --dates=YYYY-MM-DD,...   Comma-separated dates to test (default: all 21)
+ *   --promptId=ID            Scanner prompt ID from prompt library
+ *   --no-scanners            Disable scanners (deterministic only, faster)
  */
 
 import * as dotenv from 'dotenv';
 dotenv.config();
 
 import { runReplay } from '../../src/replay/machine';
-import { DEFAULT_CONFIG } from '../../src/replay/config';
+import { DEFAULT_CONFIG, mergeConfig } from '../../src/replay/config';
 import { ReplayStore } from '../../src/replay/store';
-import type { ReplayResult } from '../../src/replay/types';
+import type { ReplayConfig } from '../../src/replay/types';
 
 const ALL_DATES = [
   '2026-02-20',
@@ -38,7 +45,29 @@ for (const a of args) {
 const DATES = flags.dates ? flags.dates.split(',') : ALL_DATES;
 
 async function main() {
-  const config = { ...DEFAULT_CONFIG };
+  // Start with DEFAULT_CONFIG — autoresearch modifies this file directly
+  let config: ReplayConfig = { ...DEFAULT_CONFIG };
+
+  // Override promptId if provided via flag
+  if (flags.promptId) {
+    config = mergeConfig(config, {
+      scanners: { ...config.scanners, enabled: true, promptId: flags.promptId },
+    });
+  }
+
+  // Scanners enabled by default (the system is agentic).
+  // Use --no-scanners for deterministic-only fast runs.
+  const noScanners = flags['no-scanners'] === 'true';
+  if (!noScanners && !config.scanners.enabled) {
+    config = mergeConfig(config, {
+      scanners: { ...config.scanners, enabled: true },
+      escalation: {
+        ...config.escalation,
+        scannerTriggersJudge: true,
+        signalTriggersJudge: true,
+      },
+    });
+  }
 
   // Save config to store (FK constraint)
   const store = new ReplayStore();
@@ -57,7 +86,8 @@ async function main() {
       const dateConfig = { ...config, date };
       const result = await runReplay(dateConfig, date, {
         verbose: false,
-        noJudge: true,
+        // No noJudge flag — scanners run the full pipeline
+        // Judges are disabled separately via config.judge.enabled if needed
       });
 
       totalTrades += result.trades;

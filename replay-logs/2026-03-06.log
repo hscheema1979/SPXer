@@ -1,21 +1,4 @@
-▶ [2026-03-06] Starting...
----
-[dotenv@17.3.1] injecting env (24) from .env -- tip: 🔐 prevent building .env in docker: https://dotenvx.com/prebuild
+[dotenv@17.3.1] injecting env (24) from .env -- tip: ⚙️  enable debug logging with { debug: true }
+[dotenv@17.3.1] injecting env (0) from .env -- tip: ⚙️  write to custom object with { processEnv: myObject }
 
-════════════════════════════════════════════════════════════════════════
-  SPXer Full-Day Replay — 2026-03-06 (SIGNAL-DETECTOR BASED)
-  151 bars | Option contract signals PRIMARY
-════════════════════════════════════════════════════════════════════════
-  Judges: Claude Haiku, Claude Opus
-
-
-════════════════════════════════════════════════════════════════════════
-  REPLAY RESULTS
-════════════════════════════════════════════════════════════════════════
-
-💼 TRADES (0 total):
-
-📈 SUMMARY:
-  Trades: 0 | Win rate: 0%
-  Total P&L: $0
-✅ [2026-03-06] COMPLETE
+RESULT:{"date":"2026-03-06","configId":"aggressive-wide-strike","trades":3,"wins":1,"winRate":0.3333333333333333,"totalPnl":-316.9999999999997}

@@ -1,0 +1,119 @@
+/**
+ * compute-indicators.ts — Backfill indicator values for stored bars.
+ *
+ * Reads bars from DB, computes indicators incrementally, and writes them back.
+ *
+ * Usage:
+ *   npx tsx scripts/backfill/compute-indicators.ts              # all dates
+ *   npx tsx scripts/backfill/compute-indicators.ts 2026-02-20   # specific date
+ *   npx tsx scripts/backfill/compute-indicators.ts 2026-02-20 2026-03-20  # range
+ */
+import * as dotenv from 'dotenv';
+dotenv.config();
+
+import Database = require('better-sqlite3');
+import * as path from 'path';
+import { computeIndicators, seedState } from '../../src/pipeline/indicator-engine';
+import type { Bar, Timeframe } from '../../src/types';
+
+const DB_PATH = path.resolve(__dirname, '../../data/spxer.db');
+
+function getDb() {
+  const db = new Database(DB_PATH);
+  db.pragma('journal_mode = WAL');
+  return db;
+}
+
+async function computeIndicatorsForSymbol(
+  db: Database.Database,
+  symbol: string,
+  tf: Timeframe,
+  dryRun: boolean = false
+): Promise<number> {
+  // Get all bars for this symbol, ordered by timestamp
+  const bars = db.prepare(`
+    SELECT id, symbol, timeframe, ts, open, high, low, close, volume, indicators
+    FROM bars
+    WHERE symbol = ? AND timeframe = ?
+    ORDER BY ts ASC
+  `).all(symbol, tf) as any[];
+
+  if (bars.length === 0) return 0;
+
+  // Seed the indicator engine with all bars (it maintains rolling state)
+  const barObjs = bars.map(r => ({
+    symbol: r.symbol,
+    timeframe: r.timeframe as Timeframe,
+    ts: r.ts,
+    open: r.open,
+    high: r.high,
+    low: r.low,
+    close: r.close,
+    volume: r.volume,
+    indicators: JSON.parse(r.indicators || '{}'),
+  })) as Bar[];
+
+  seedState(symbol, tf, barObjs);
+
+  // Now compute indicators for each bar and collect updates
+  let updated = 0;
+  const updates = db.transaction((data: Array<[number, string]>) => {
+    for (const [id, ind] of data) {
+      db.prepare(`UPDATE bars SET indicators = ? WHERE id = ?`).run(ind, id);
+      updated++;
+    }
+  });
+
+  const indicatorData: Array<[number, string]> = [];
+  for (const bar of barObjs) {
+    const indicators = computeIndicators(bar, 1);  // Tier 1 only for speed
+    indicatorData.push([bar.id, JSON.stringify(indicators)]);
+  }
+
+  if (!dryRun) {
+    updates(indicatorData);
+  }
+
+  return updated;
+}
+
+async function main() {
+  const args = process.argv.slice(2);
+  const db = getDb();
+
+  // Parse date range
+  let dateFilter = '';
+  if (args.length === 2) {
+    dateFilter = `AND DATE(ts, 'unixepoch') >= '${args[0]}' AND DATE(ts, 'unixepoch') <= '${args[1]}'`;
+  } else if (args.length === 1) {
+    dateFilter = `AND DATE(ts, 'unixepoch') = '${args[0]}'`;
+  }
+
+  // Get all unique (symbol, timeframe) pairs with empty indicators
+  const pairs = db.prepare(`
+    SELECT DISTINCT symbol, timeframe
+    FROM bars
+    WHERE indicators = '{}'
+    ${dateFilter}
+    ORDER BY symbol, timeframe
+  `).all() as any[];
+
+  console.log(`\n${'═'.repeat(60)}`);
+  console.log(`  Computing Indicators — ${pairs.length} symbol/timeframe combos`);
+  console.log(`${'═'.repeat(60)}\n`);
+
+  let totalUpdated = 0;
+  for (const pair of pairs) {
+    process.stdout.write(`  ${pair.symbol} (${pair.timeframe}): `);
+    const updated = await computeIndicatorsForSymbol(db, pair.symbol, pair.timeframe);
+    console.log(`✓ ${updated} bars updated`);
+    totalUpdated += updated;
+  }
+
+  db.close();
+  console.log(`\n${'═'.repeat(60)}`);
+  console.log(`  COMPLETE: ${totalUpdated} bars computed`);
+  console.log(`${'═'.repeat(60)}\n`);
+}
+
+main().catch(console.error);
