@@ -168,22 +168,43 @@ export function getActiveJudgeId(): string {
 // Unified query helper — all models go through Claude Agent SDK
 // ---------------------------------------------------------------------------
 
-export async function askModel(config: ModelConfig, systemPrompt: string, userPrompt: string, timeoutMs = 45000): Promise<string> {
-  return Promise.race([
-    askModelInner(config, systemPrompt, userPrompt),
-    new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error(`askModel timeout after ${timeoutMs}ms (${config.id})`)), timeoutMs)
-    ),
-  ]);
+export async function askModel(config: ModelConfig, systemPrompt: string, userPrompt: string, timeoutMs = 45000, forceDirect = false): Promise<string> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    // When forced or using third-party models, use direct HTTP (proper cancellation support)
+    if (forceDirect || config.env) {
+      const result = await askModelDirect(config, systemPrompt, userPrompt, controller.signal);
+      clearTimeout(timeoutId);
+      return result;
+    }
+
+    // For Claude models via SDK, use Agent SDK (limited cancellation support)
+    const result = await askModelInner(config, systemPrompt, userPrompt, controller.signal);
+    clearTimeout(timeoutId);
+    return result;
+  } catch (err) {
+    clearTimeout(timeoutId);
+    if (err instanceof Error && err.name === 'AbortError') {
+      throw new Error(`askModel timeout after ${timeoutMs}ms (${config.id})`);
+    }
+    throw err;
+  }
 }
 
-async function askModelInner(config: ModelConfig, systemPrompt: string, userPrompt: string): Promise<string> {
+async function askModelInner(config: ModelConfig, systemPrompt: string, userPrompt: string, signal?: AbortSignal): Promise<string> {
   let result = '';
   let lastAssistantText = '';
 
   // Embed system prompt into the user prompt to override any default system prompts
   // that the SDK injects (which can confuse third-party models).
   const combinedPrompt = `INSTRUCTIONS:\n${systemPrompt}\n\n---\n\n${userPrompt}`;
+
+  // Check if aborted before starting
+  if (signal?.aborted) {
+    throw new Error('Aborted before query started');
+  }
 
   for await (const message of query({
     prompt: combinedPrompt,
@@ -209,4 +230,48 @@ async function askModelInner(config: ModelConfig, systemPrompt: string, userProm
   }
 
   return result || lastAssistantText;
+}
+
+// ---------------------------------------------------------------------------
+// Direct HTTP implementation for third-party APIs with proper cancellation
+// ---------------------------------------------------------------------------
+
+async function askModelDirect(config: ModelConfig, systemPrompt: string, userPrompt: string, signal?: AbortSignal): Promise<string> {
+  // Determine base URL and API key
+  // Priority: config.env > process.env > defaults
+  const baseUrl = config.env?.ANTHROPIC_BASE_URL || process.env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com';
+  const apiKey = config.env?.ANTHROPIC_API_KEY || process.env.ANTHROPIC_API_KEY;
+
+  if (!apiKey) {
+    throw new Error(`ANTHROPIC_API_KEY required for ${config.id}`);
+  }
+
+  // Check if aborted before starting
+  if (signal?.aborted) {
+    throw new Error('Aborted before request started');
+  }
+
+  const response = await fetch(`${baseUrl}/v1/messages`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+    },
+    body: JSON.stringify({
+      model: config.model,
+      max_tokens: 4096,
+      system: systemPrompt,
+      messages: [{ role: 'user', content: userPrompt }],
+    }),
+    signal,
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`HTTP ${response.status}: ${errorText}`);
+  }
+
+  const data = await response.json();
+  return data.content[0]?.text || '';
 }

@@ -148,8 +148,69 @@ Claude models that review scanner output + full market context and make the fina
 ### Prompt Philosophy
 All models receive the same neutral prompt — raw OHLC bars, RSI value, and the contract chain. No guidance on what RSI means, no "emergency" language, no bias. Two variants run for each model: **+REGIME** (includes regime classifier tag) and **-REGIME** (no regime context). This tests whether the regime classifier adds value.
 
-### Known Issue: Judge Timeout
-All judges run via `Promise.allSettled` in parallel, but they share a single `query()` session which can cause contention and 60s+ timeouts under load. Third-party scanners (Kimi, GLM, MiniMax) use separate HTTP endpoints and work independently. Potential fix: run Claude judges via LiteLLM proxy or direct API instead of Agent SDK.
+### Model Call Strategy: Direct HTTP for All Scanner/Judge Calls
+
+**CRITICAL: All LLM calls (scanners and judges) use direct HTTP, NOT the Agent SDK's `query()` iterator.**
+
+#### Why Direct HTTP?
+
+The Agent SDK's `query()` async iterator **does not support cancellation**. When a timeout fires, the Promise rejects but the iterator keeps running in the background, consuming resources. For batch/replay workloads that make thousands of calls, this causes OOM or deadlocks.
+
+**Direct HTTP calls** (via `fetch` with `AbortController`) provide:
+- ✅ Native timeout support
+- ✅ Proper cancellation on abort
+- ✅ Predictable resource cleanup
+- ✅ Consistent behavior across all contexts (live agent, replay, autoresearch)
+
+#### Implementation
+
+All scanner and judge calls go through `askModel()` in `src/agent/model-clients.ts`:
+
+```typescript
+// Always use direct HTTP (forceDirect=true)
+const response = await askModel(config, systemPrompt, userPrompt, timeoutMs, true);
+//                                                                            ^^^^ forceDirect
+```
+
+This routes to `askModelDirect()` which uses the Anthropic Messages API format:
+
+```typescript
+const response = await fetch(`${baseUrl}/v1/messages`, {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json',
+    'x-api-key': apiKey,
+    'anthropic-version': '2023-06-01',
+  },
+  body: JSON.stringify({
+    model: config.model,
+    max_tokens: 4096,
+    system: systemPrompt,
+    messages: [{ role: 'user', content: userPrompt }],
+  }),
+  signal: controller.signal,  // Proper abort support
+});
+```
+
+#### Model Endpoints
+
+| Model | Base URL | API Key Source |
+|-------|----------|----------------|
+| **Claude (Haiku/Sonnet/Opus)** | `https://api.anthropic.com` | `ANTHROPIC_API_KEY` |
+| **Kimi K2.5** | `https://api.kimi.com/coding` | `KIMI_API_KEY` |
+| **ZAI GLM-5** | `https://api.z.ai/api/anthropic` | `GLM_API_KEY` |
+| **MiniMax M2.7** | `https://api.minimax.io/anthropic` | `MINIMAX_API_KEY` |
+
+All use the **same Anthropic Messages API format** — only the base URL and API key differ.
+
+#### Consistency Guarantee
+
+**Scanners behave identically across all contexts:**
+- Live agent → Direct HTTP
+- Replay backtest → Direct HTTP
+- Autoresearch optimization → Direct HTTP
+
+No guessing what works where. Same code path, same timeouts, same behavior.
 
 ## Known Bugs (Fixed, March 19-20 2026)
 

@@ -7,7 +7,8 @@ import Database from 'better-sqlite3';
 import * as path from 'path';
 import type { ReplayConfig, ReplayRun, ReplayResult } from './types';
 
-const REPLAY_DB_PATH = path.resolve(__dirname, '../../data/replay.db');
+// Use process.cwd() to resolve from actual working directory, not __dirname (breaks in bundled code)
+const REPLAY_DB_PATH = path.resolve(process.cwd(), 'data/replay.db');
 
 export class ReplayStore {
   private db: Database.Database;

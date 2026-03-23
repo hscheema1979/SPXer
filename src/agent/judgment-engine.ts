@@ -379,7 +379,8 @@ async function runSdkScanner(
   const timeoutMs = 120000; // 2 minutes for all scanners - removed timeout constraint to see actual response times
   try {
     console.log(`[scanner] Starting ${config.id} scan with ${timeoutMs}ms timeout`);
-    const text = await askModel(config, SCANNER_SYSTEM, prompt, timeoutMs);
+    // ALWAYS use direct HTTP for scanners (forceDirect=true) - consistent behavior, predictable timeouts
+    const text = await askModel(config, SCANNER_SYSTEM, prompt, timeoutMs, true);
     const clean = extractJSON(text);
 
     let parsed: any;
