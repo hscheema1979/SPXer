@@ -89,4 +89,81 @@ export const AGENT_CONFIG: ReplayConfig = {
     scannerPrompts: {},
     judgeSystemPrompt: '',
   },
+
+  // Regime system — ALL parameters configurable, nothing hardcoded
+  regime: {
+    enabled: true,
+    mode: 'enforce',
+
+    classification: {
+      trendThreshold: 0.15,        // pts/bar — ~$9/5min sustained move
+      lookbackBars: 20,            // Number of bars for trend slope calculation
+      openingRangeMinutes: 15,     // Opening range duration (09:30-09:45)
+    },
+
+    timeWindows: {
+      morningEnd: '10:15',         // When MORNING_MOMENTUM ends
+      middayEnd: '14:00',          // When MEAN_REVERSION period ends
+      gammaExpiryStart: '14:00',   // When GAMMA_EXPIRY starts
+      noTradeStart: '15:30',       // When NO_TRADE period starts
+    },
+
+    emergencyRsi: {
+      oversold: 15,                // Forces gates open for calls
+      overbought: 85,              // Forces gates open for puts
+      morningOversold: 10,         // More stringent during morning
+      morningOverbought: 92,
+    },
+
+    signalGates: {
+      MORNING_MOMENTUM: {
+        allowOverboughtFade: false,   // Don't short morning momentum
+        allowOversoldFade: false,     // Don't buy dips until range established
+        allowBreakoutFollow: true,    // Follow opening drive
+        allowVReversal: false,        // Too early for reversals
+        overboughtMeaning: 'momentum',
+        oversoldMeaning: 'momentum',
+      },
+      MEAN_REVERSION: {
+        allowOverboughtFade: true,    // Puts OK at extremes
+        allowOversoldFade: true,      // Calls OK at extremes
+        allowBreakoutFollow: false,   // Suppress breakouts in chop
+        allowVReversal: true,         // Reversals work in ranges
+        overboughtMeaning: 'reversal',
+        oversoldMeaning: 'reversal',
+      },
+      TRENDING_UP: {
+        allowOverboughtFade: false,   // Don't short uptrend
+        allowOversoldFade: true,      // Buy the dip
+        allowBreakoutFollow: true,    // Follow momentum
+        allowVReversal: false,        // Don't catch top
+        overboughtMeaning: 'momentum',
+        oversoldMeaning: 'reversal',
+      },
+      TRENDING_DOWN: {
+        allowOverboughtFade: true,    // Sell the rip
+        allowOversoldFade: false,     // Don't buy in downtrend
+        allowBreakoutFollow: true,    // Follow breakdown
+        allowVReversal: false,        // Don't catch bottom
+        overboughtMeaning: 'reversal',
+        oversoldMeaning: 'momentum',
+      },
+      GAMMA_EXPIRY: {
+        allowOverboughtFade: false,   // Don't fade gamma moves
+        allowOversoldFade: false,     // Don't fade gamma moves
+        allowBreakoutFollow: true,    // Follow gamma squeeze
+        allowVReversal: false,        // Too dangerous
+        overboughtMeaning: 'momentum',
+        oversoldMeaning: 'momentum',
+      },
+      NO_TRADE: {
+        allowOverboughtFade: false,
+        allowOversoldFade: false,
+        allowBreakoutFollow: false,
+        allowVReversal: false,
+        overboughtMeaning: 'momentum',
+        oversoldMeaning: 'momentum',
+      },
+    },
+  },
 };

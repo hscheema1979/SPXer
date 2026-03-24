@@ -422,6 +422,7 @@ function getScannerPrompt(config: ReplayConfig, scannerId: string): string | nul
 }
 
 function buildPrompt(
+  config: ReplayConfig,
   ts: number, sessionEnd: number, spxBars: Bar[],
   optionSignals: OptionSignal[], regime: string, regimeContext: string,
 ): string {
@@ -442,19 +443,15 @@ TIME: ${etLabel(ts)} ET | ${Math.max(0, Math.floor((sessionEnd - ts) / 60))}m to
 ---
 Option contract signals are primary escalation triggers.
 Determine which signal to trade based on regime fit.
-In ${regime}: calls ${getSignalGate(regime as any).allowOversoldFade ? 'ALLOWED' : 'BLOCKED'}, puts ${getSignalGate(regime as any).allowOverboughtFade ? 'ALLOWED' : 'BLOCKED'}.`;
+In ${regime}: calls ${getSignalGate(regime as any, null, config.regime).allowOversoldFade ? 'ALLOWED' : 'BLOCKED'}, puts ${getSignalGate(regime as any, null, config.regime).allowOverboughtFade ? 'ALLOWED' : 'BLOCKED'}.`;
 }
 
 // ── Select judges from config ──────────────────────────────────────────────
 
 function selectJudges(config: ReplayConfig) {
   const all = getJudgeConfigs();
-  return all.filter(j => {
-    if (j.id === 'haiku' && config.judge.allowHaiku) return true;
-    if (j.id === 'sonnet' && config.judge.allowSonnet) return true;
-    if (j.id === 'opus' && config.judge.allowOpus) return true;
-    return false;
-  });
+  const enabledModels = new Set(config.judge.models);
+  return all.filter(j => enabledModels.has(j.id as 'haiku' | 'sonnet' | 'opus'));
 }
 
 // ── Main engine ────────────────────────────────────────────────────────────
@@ -563,8 +560,8 @@ export async function runReplay(
       const optionSignals = detectOptionSignals(contractBars, spx.close, config);
 
       // ── Regime classification ──────────────────────────────────────────
-      const regimeState = classify({ close: spx.close, high: spx.high, low: spx.low, ts });
-      const regimeContext = formatRegimeContext(regimeState);
+      const regimeState = classify({ close: spx.close, high: spx.high, low: spx.low, ts }, config.regime);
+      const regimeContext = formatRegimeContext(regimeState, config.regime);
 
       // ── Escalation checks ─────────────────────────────────────────────
       if (ts >= CLOSE_CUTOFF) continue;
@@ -667,7 +664,7 @@ export async function runReplay(
         }
       } else {
         const judgeSystem = buildJudgeSystem(config);
-        let prompt = buildPrompt(ts, SESSION_END, spxBars, optionSignals, regimeState.regime, regimeContext);
+        let prompt = buildPrompt(config, ts, SESSION_END, spxBars, optionSignals, regimeState.regime, regimeContext);
 
         // Append scanner context to judge prompt if scanners ran
         if (scannerResults.length > 0) {
@@ -717,18 +714,11 @@ export async function runReplay(
       // ── Regime gate ────────────────────────────────────────────────────
       if (judgeAction === 'buy' && judgeTarget) {
         const isCall = judgeTarget.includes('C');
-        const gate = getSignalGate(regimeState.regime as any);
+        const spxRsi = spx.indicators.rsi14 ?? null;
+        const gate = getSignalGate(regimeState.regime, spxRsi, config.regime);
         const allowed = isCall ? gate.allowOversoldFade : gate.allowOverboughtFade;
 
-        // Check config regime gates
-        const regimeAllowed =
-          (regimeState.regime === 'MORNING_MOMENTUM' && config.regime.allowMorningMomentum) ||
-          (regimeState.regime === 'MEAN_REVERSION' && config.regime.allowMeanReversion) ||
-          (regimeState.regime === 'TRENDING_UP' && config.regime.allowTrendingUp) ||
-          (regimeState.regime === 'TRENDING_DOWN' && config.regime.allowTrendingDown) ||
-          (regimeState.regime === 'GAMMA_EXPIRY' && config.regime.allowGammaExpiry);
-
-        if (!allowed || !regimeAllowed) {
+        if (!allowed) {
           if (verbose) console.log(`  REGIME BLOCKED (${regimeState.regime})`);
           judgeAction = 'wait';
         }

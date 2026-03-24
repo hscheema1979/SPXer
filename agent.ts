@@ -20,6 +20,8 @@ import { assess, getHttpScannerConfigs } from './src/agent/judgment-engine';
 import type { ScannerResult, Assessment, JudgeResult } from './src/agent/judgment-engine';
 import { openPosition, closePosition } from './src/agent/trade-executor';
 import { PositionManager } from './src/agent/position-manager';
+import { getConfigManager } from './src/config/manager';
+import type { ReplayConfig } from './src/replay/types';
 import { RiskGuard, defaultRiskConfig } from './src/agent/risk-guard';
 import { logEntry, logClose, logRejected } from './src/agent/audit-log';
 import { writeStatus, logActivity } from './src/agent/reporter';
@@ -47,6 +49,7 @@ const narratives = new Map<string, MarketNarrative>([
   ['kimi',    new MarketNarrative('kimi',    'Kimi K2.5')],
   ['glm',     new MarketNarrative('glm',     'ZAI GLM-5')],
   ['minimax', new MarketNarrative('minimax', 'MiniMax M2.7')],
+  ['haiku',   new MarketNarrative('haiku',   'Claude Haiku')],
 ]);
 
 async function executeBuy(
@@ -211,7 +214,7 @@ async function runCycle(): Promise<void> {
 
   let result: { scannerResults: ScannerResult[]; assessment: Assessment; allJudges?: JudgeResult[] };
   try {
-    result = await assess(snap, positions.getAll(), guard, narratives);
+    result = await assess(snap, positions.getAll(), guard, narratives, AGENT_CONFIG.regime);
   } catch (e) {
     console.error('[agent] Assessment failed:', (e as Error).message);
     nextCheckSecs = 30;

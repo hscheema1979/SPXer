@@ -39,11 +39,79 @@ export const DEFAULT_CONFIG: ReplayConfig = {
   },
 
   regime: {
-    allowMorningMomentum: true,
-    allowMeanReversion: true,
-    allowTrendingUp: true,
-    allowTrendingDown: true,
-    allowGammaExpiry: true,
+    enabled: true,
+    mode: 'enforce',
+
+    classification: {
+      trendThreshold: 0.15,
+      lookbackBars: 20,
+      openingRangeMinutes: 15,
+    },
+
+    timeWindows: {
+      morningEnd: '10:15',
+      middayEnd: '14:00',
+      gammaExpiryStart: '14:00',
+      noTradeStart: '15:30',
+    },
+
+    emergencyRsi: {
+      oversold: 15,
+      overbought: 85,
+      morningOversold: 10,
+      morningOverbought: 92,
+    },
+
+    signalGates: {
+      MORNING_MOMENTUM: {
+        allowOverboughtFade: false,
+        allowOversoldFade: false,
+        allowBreakoutFollow: true,
+        allowVReversal: false,
+        overboughtMeaning: 'momentum',
+        oversoldMeaning: 'momentum',
+      },
+      MEAN_REVERSION: {
+        allowOverboughtFade: true,
+        allowOversoldFade: true,
+        allowBreakoutFollow: false,
+        allowVReversal: true,
+        overboughtMeaning: 'reversal',
+        oversoldMeaning: 'reversal',
+      },
+      TRENDING_UP: {
+        allowOverboughtFade: false,
+        allowOversoldFade: true,
+        allowBreakoutFollow: true,
+        allowVReversal: false,
+        overboughtMeaning: 'momentum',
+        oversoldMeaning: 'reversal',
+      },
+      TRENDING_DOWN: {
+        allowOverboughtFade: true,
+        allowOversoldFade: false,
+        allowBreakoutFollow: true,
+        allowVReversal: false,
+        overboughtMeaning: 'reversal',
+        oversoldMeaning: 'momentum',
+      },
+      GAMMA_EXPIRY: {
+        allowOverboughtFade: false,
+        allowOversoldFade: false,
+        allowBreakoutFollow: true,
+        allowVReversal: false,
+        overboughtMeaning: 'momentum',
+        oversoldMeaning: 'momentum',
+      },
+      NO_TRADE: {
+        allowOverboughtFade: false,
+        allowOversoldFade: false,
+        allowBreakoutFollow: false,
+        allowVReversal: false,
+        overboughtMeaning: 'momentum',
+        oversoldMeaning: 'momentum',
+      },
+    },
   },
 
   judge: {
@@ -138,7 +206,17 @@ export const CONFIG_PRESETS = {
     id: 'momentum-only',
     name: 'Momentum Only',
     description: 'Trade only MORNING_MOMENTUM regime',
-    regime: { allowMorningMomentum: true, allowMeanReversion: false, allowTrendingUp: false, allowTrendingDown: false, allowGammaExpiry: false },
+    regime: {
+      ...DEFAULT_CONFIG.regime,
+      signalGates: {
+        MORNING_MOMENTUM: DEFAULT_CONFIG.regime.signalGates.MORNING_MOMENTUM,
+        MEAN_REVERSION: { ...DEFAULT_CONFIG.regime.signalGates.MEAN_REVERSION, allowOverboughtFade: false, allowOversoldFade: false, allowBreakoutFollow: false, allowVReversal: false },
+        TRENDING_UP: { ...DEFAULT_CONFIG.regime.signalGates.TRENDING_UP, allowOversoldFade: false },
+        TRENDING_DOWN: { ...DEFAULT_CONFIG.regime.signalGates.TRENDING_DOWN, allowOverboughtFade: false },
+        GAMMA_EXPIRY: { ...DEFAULT_CONFIG.regime.signalGates.GAMMA_EXPIRY, allowBreakoutFollow: false },
+        NO_TRADE: DEFAULT_CONFIG.regime.signalGates.NO_TRADE,
+      },
+    },
   }),
 
   reversals: (): ReplayConfig => ({
@@ -146,7 +224,17 @@ export const CONFIG_PRESETS = {
     id: 'reversals',
     name: 'Reversals Focus',
     description: 'Trade mean reversion and extremes',
-    regime: { allowMorningMomentum: false, allowMeanReversion: true, allowTrendingUp: false, allowTrendingDown: false, allowGammaExpiry: true },
+    regime: {
+      ...DEFAULT_CONFIG.regime,
+      signalGates: {
+        MORNING_MOMENTUM: { ...DEFAULT_CONFIG.regime.signalGates.MORNING_MOMENTUM, allowBreakoutFollow: false },
+        MEAN_REVERSION: DEFAULT_CONFIG.regime.signalGates.MEAN_REVERSION,
+        TRENDING_UP: { ...DEFAULT_CONFIG.regime.signalGates.TRENDING_UP, allowOversoldFade: false, allowVReversal: false },
+        TRENDING_DOWN: { ...DEFAULT_CONFIG.regime.signalGates.TRENDING_DOWN, allowOverboughtFade: false, allowVReversal: false },
+        GAMMA_EXPIRY: DEFAULT_CONFIG.regime.signalGates.GAMMA_EXPIRY,
+        NO_TRADE: DEFAULT_CONFIG.regime.signalGates.NO_TRADE,
+      },
+    },
   }),
 
   scannersEnabled: (): ReplayConfig => ({

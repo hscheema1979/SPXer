@@ -13,7 +13,11 @@
  *   NO_TRADE           — 15:30-16:00 ET (too close to expiry)
  *
  * Each regime defines which signals are allowed and which are suppressed.
+ *
+ * **ALL parameters are now config-driven — no hardcoded values.**
  */
+
+import type { RegimeConfig } from '../replay/types';
 
 export type Regime =
   | 'MORNING_MOMENTUM'
@@ -83,8 +87,18 @@ export function initSession(priorDayClose: number): void {
   recentCloses.length = 0;
 }
 
-/** Call every 1m bar. Returns the current regime classification. */
-export function classify(bar: { close: number; high: number; low: number; ts: number }): RegimeState {
+/** Parse time string "HH:MM" to minutes since midnight */
+function parseTimeToMinutes(timeStr: string): number {
+  const [h, m] = timeStr.split(':').map(Number);
+  return h * 60 + m;
+}
+
+/** Call every 1m bar. Returns the current regime classification.
+ *  Config parameter required — all thresholds and time windows come from config. */
+export function classify(
+  bar: { close: number; high: number; low: number; ts: number },
+  config: RegimeConfig
+): RegimeState {
   state.barsProcessed++;
 
   // Track session extremes
@@ -100,15 +114,17 @@ export function classify(bar: { close: number; high: number; low: number; ts: nu
     state.gapPct = Math.abs(bar.close - priorClose) / priorClose * 100;
   }
 
-  // Build opening range (first 15 bars = 09:30-09:45)
-  if (state.barsProcessed <= 15) {
+  // Build opening range (configurable duration)
+  const openingRangeBars = config.classification.openingRangeMinutes;
+  if (state.barsProcessed <= openingRangeBars) {
     if (bar.high > state.openingRangeHigh) state.openingRangeHigh = bar.high;
     if (bar.low < state.openingRangeLow) state.openingRangeLow = bar.low;
-    if (state.barsProcessed === 15) state.openingRangeSet = true;
+    if (state.barsProcessed === openingRangeBars) state.openingRangeSet = true;
   }
 
-  // Compute trend slope (20-bar linear regression)
-  state.trendSlope = linearRegressionSlope(recentCloses, 20);
+  // Compute trend slope (configurable lookback)
+  const lookbackBars = config.classification.lookbackBars;
+  state.trendSlope = linearRegressionSlope(recentCloses, lookbackBars);
 
   // Get ET hour and minute from timestamp
   const etDate = new Date(bar.ts * 1000);
@@ -117,19 +133,25 @@ export function classify(bar: { close: number; high: number; low: number; ts: nu
   const [h, m] = timePart.split(':').map(Number);
   const minuteOfDay = h * 60 + m;
 
-  // ── Classification logic ────────────────────────────────────────────────
+  // ── Classification logic (ALL from config) ─────────────────────────────
 
-  const TREND_THRESHOLD = 0.15;  // pts/bar — ~$9/5min sustained move
+  const TREND_THRESHOLD = config.classification.trendThreshold;
   const isTrendingUp = state.trendSlope > TREND_THRESHOLD;
   const isTrendingDown = state.trendSlope < -TREND_THRESHOLD;
 
-  // 15:30-16:00 — NO_TRADE
-  if (minuteOfDay >= 15 * 60 + 30) {
+  // Parse time windows from config
+  const noTradeStart = parseTimeToMinutes(config.timeWindows.noTradeStart);
+  const gammaExpiryStart = parseTimeToMinutes(config.timeWindows.gammaExpiryStart);
+  const morningEnd = parseTimeToMinutes(config.timeWindows.morningEnd);
+  const middayEnd = parseTimeToMinutes(config.timeWindows.middayEnd);
+
+  // NO_TRADE period
+  if (minuteOfDay >= noTradeStart) {
     state.regime = 'NO_TRADE';
     state.confidence = 0.9;
   }
-  // 14:00-15:30 — GAMMA_EXPIRY (unless strongly trending)
-  else if (minuteOfDay >= 14 * 60) {
+  // GAMMA_EXPIRY period (unless strongly trending)
+  else if (minuteOfDay >= gammaExpiryStart) {
     if (isTrendingUp) {
       state.regime = 'TRENDING_UP';
       state.confidence = Math.min(0.9, 0.5 + Math.abs(state.trendSlope) * 2);
@@ -141,8 +163,8 @@ export function classify(bar: { close: number; high: number; low: number; ts: nu
       state.confidence = 0.7;
     }
   }
-  // 09:30-10:15 — MORNING_MOMENTUM (unless opening range already broken both ways)
-  else if (minuteOfDay < 10 * 60 + 15) {
+  // MORNING_MOMENTUM period
+  else if (minuteOfDay < morningEnd) {
     if (isTrendingUp || isTrendingDown) {
       state.regime = isTrendingUp ? 'TRENDING_UP' : 'TRENDING_DOWN';
       state.confidence = Math.min(0.9, 0.5 + Math.abs(state.trendSlope) * 2);
@@ -151,33 +173,23 @@ export function classify(bar: { close: number; high: number; low: number; ts: nu
       state.confidence = 0.7;
     }
   }
-  // 10:15-14:00 — MEAN_REVERSION or TRENDING
-  else {
-    if (isTrendingUp) {
-      state.regime = 'TRENDING_UP';
-      state.confidence = Math.min(0.9, 0.5 + Math.abs(state.trendSlope) * 2);
-    } else if (isTrendingDown) {
-      state.regime = 'TRENDING_DOWN';
-      state.confidence = Math.min(0.9, 0.5 + Math.abs(state.trendSlope) * 2);
-    } else {
-      state.regime = 'MEAN_REVERSION';
-      state.confidence = 0.6;
-    }
-  }
 
   return { ...state };
 }
 
 /** Get the signal gate rules for the current regime.
- *  rsi parameter enables emergency overrides — RSI <15 or >85 forces the gate open
- *  regardless of regime, because those extremes statistically mean-revert on 0DTE. */
-export function getSignalGate(regime: Regime, rsi: number | null = null): SignalGate {
+ *  Config parameter required — all gate rules and RSI thresholds come from config.
+ *  rsi parameter enables emergency overrides — forces gate open at extremes. */
+export function getSignalGate(regime: Regime, rsi: number | null = null, config: RegimeConfig): SignalGate {
   // Morning requires MORE extreme readings to override (momentum dominates early)
   const isMorning = regime === 'MORNING_MOMENTUM';
-  const isEmergencyOversold = rsi !== null && rsi < (isMorning ? 10 : 15);
-  const isEmergencyOverbought = rsi !== null && rsi > (isMorning ? 92 : 85);
+  const emergencyOversoldThreshold = isMorning ? config.emergencyRsi.morningOversold : config.emergencyRsi.oversold;
+  const emergencyOverboughtThreshold = isMorning ? config.emergencyRsi.morningOverbought : config.emergencyRsi.overbought;
 
-  // Emergency override: RSI <15 or >85 forces the gate open
+  const isEmergencyOversold = rsi !== null && rsi < emergencyOversoldThreshold;
+  const isEmergencyOverbought = rsi !== null && rsi > emergencyOverboughtThreshold;
+
+  // Emergency override: extreme RSI forces the gate open
   if (isEmergencyOversold && regime !== 'NO_TRADE') {
     return {
       allowOverboughtFade: false,
@@ -198,72 +210,14 @@ export function getSignalGate(regime: Regime, rsi: number | null = null): Signal
       oversoldMeaning: 'momentum',
     };
   }
-  switch (regime) {
-    case 'MORNING_MOMENTUM':
-      return {
-        allowOverboughtFade: false,   // do NOT short morning momentum
-        allowOversoldFade: false,     // do NOT buy dips until range established
-        allowBreakoutFollow: true,    // follow the opening drive
-        allowVReversal: false,        // too early for reversals
-        overboughtMeaning: 'momentum',
-        oversoldMeaning: 'momentum',
-      };
 
-    case 'MEAN_REVERSION':
-      return {
-        allowOverboughtFade: true,    // puts OK at extremes
-        allowOversoldFade: true,      // calls OK at extremes
-        allowBreakoutFollow: false,   // suppress breakouts in chop
-        allowVReversal: true,         // reversals work in ranges
-        overboughtMeaning: 'reversal',
-        oversoldMeaning: 'reversal',
-      };
-
-    case 'TRENDING_UP':
-      return {
-        allowOverboughtFade: false,   // do NOT short an uptrend
-        allowOversoldFade: true,      // buy the dip
-        allowBreakoutFollow: true,    // follow momentum
-        allowVReversal: false,        // don't try to catch the top
-        overboughtMeaning: 'momentum',
-        oversoldMeaning: 'reversal',  // oversold in uptrend = buy opportunity
-      };
-
-    case 'TRENDING_DOWN':
-      return {
-        allowOverboughtFade: true,    // sell the rip
-        allowOversoldFade: false,     // do NOT buy in a downtrend
-        allowBreakoutFollow: true,    // follow breakdown
-        allowVReversal: false,        // don't try to catch the bottom
-        overboughtMeaning: 'reversal',
-        oversoldMeaning: 'momentum',  // oversold in downtrend = continuation
-      };
-
-    case 'GAMMA_EXPIRY':
-      return {
-        allowOverboughtFade: false,   // do NOT fade gamma moves
-        allowOversoldFade: false,     // do NOT fade gamma moves
-        allowBreakoutFollow: true,    // follow the gamma squeeze
-        allowVReversal: false,        // too dangerous
-        overboughtMeaning: 'momentum',
-        oversoldMeaning: 'momentum',
-      };
-
-    case 'NO_TRADE':
-      return {
-        allowOverboughtFade: false,
-        allowOversoldFade: false,
-        allowBreakoutFollow: false,
-        allowVReversal: false,
-        overboughtMeaning: 'momentum',
-        oversoldMeaning: 'momentum',
-      };
-  }
+  // Return gate rules from config (NO hardcoded values)
+  return config.signalGates[regime];
 }
 
 /** Format regime for prompt injection */
-export function formatRegimeContext(rs: RegimeState): string {
-  const gate = getSignalGate(rs.regime);
+export function formatRegimeContext(rs: RegimeState, config: RegimeConfig): string {
+  const gate = getSignalGate(rs.regime, null, config);
   const trendDir = rs.trendSlope > 0 ? 'UP' : rs.trendSlope < 0 ? 'DOWN' : 'FLAT';
   const orRange = rs.openingRangeSet
     ? `${rs.openingRangeLow.toFixed(2)}-${rs.openingRangeHigh.toFixed(2)}`

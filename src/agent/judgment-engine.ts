@@ -12,6 +12,7 @@ import { getJudgeConfigs, getActiveJudgeId, askModel, getScannerConfigs } from '
 import type { ModelConfig } from './model-clients';
 import { classify, getSignalGate, formatRegimeContext, getState as getRegimeState } from './regime-classifier';
 import type { RegimeState } from './regime-classifier';
+import type { RegimeConfig } from '../replay/types';
 import { MarketNarrative } from './market-narrative';
 
 export interface ScannerHttpConfig {
@@ -629,6 +630,7 @@ export async function assess(
   positions: OpenPosition[],
   guard: RiskGuard,
   narratives: Map<string, MarketNarrative>,
+  regimeConfig: RegimeConfig,
 ): Promise<{ scannerResults: ScannerResult[]; assessment: Assessment; allJudges?: JudgeResult[] }> {
   const scannerResults = await scan(snap, positions, guard, narratives);
 
@@ -653,9 +655,9 @@ export async function assess(
   if (hotSetups.length > 0 || hasOpenPositions || rsiExtreme) {
     const latestBar = snap.spx.bars1m[snap.spx.bars1m.length - 1];
     const regimeState = latestBar
-      ? classify({ close: latestBar.close, high: latestBar.close, low: latestBar.close, ts: Date.now() / 1000 })
+      ? classify({ close: latestBar.close, high: latestBar.close, low: latestBar.close, ts: Date.now() / 1000 }, regimeConfig)
       : getRegimeState();
-    const regimeContext = formatRegimeContext(regimeState);
+    const regimeContext = formatRegimeContext(regimeState, regimeConfig);
 
     let escalationBanner = rsiExtreme ? rsiEscalationBanner! : null;
 
@@ -681,7 +683,7 @@ export async function assess(
 
     // ── REGIME GATE: block trades that conflict with current regime ──
     if (activeAssessment.action === 'buy' && activeAssessment.targetSymbol) {
-      const gate = getSignalGate(regimeState.regime, spxRsi);
+      const gate = getSignalGate(regimeState.regime, spxRsi, regimeConfig);
       const sym = activeAssessment.targetSymbol.toUpperCase();
       const isCallTrade = sym.includes('C0') || sym.match(/C\d{4,}/);
       const isPutTrade = sym.includes('P0') || sym.match(/P\d{4,}/);

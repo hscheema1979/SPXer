@@ -1,0 +1,51 @@
+{
+  "summary": "2 test failures, both in health endpoint tests. The /health endpoint returns `healthTracker.getStatus().status` which uses the enum 'healthy'|'degraded'|'critical'. Tests expect 'ok' which never exists in the enum. Additionally, when no providers are registered (test environment), the HealthTracker returns 'critical' because `providerValues.length === 0` makes `allHealthy` false and `anyHealthy` false. Two fixes needed: (1) HealthTracker should return 'healthy' when no providers are registered (empty state is not critical), and (2) tests must use the correct status string.",
+  "riskLevel": "medium",
+  "issues": [
+    {
+      "severity": "critical",
+      "category": "backend",
+      "file": "src/utils/health.ts",
+      "line": 65,
+      "description": "HealthTracker.getStatus() returns 'critical' when zero providers are registered (providerValues.length === 0). In test environments (and at fresh startup), no providers have called recordSuccess(), so the health endpoint always returns 'critical'. An empty provider map means the service just started — it's not actually critical.",
+      "fix": "In src/utils/health.ts line 65, change the allHealthy calculation to treat zero providers as healthy: `const allHealthy = providerValues.length === 0 || providerValues.every(p => p.healthy);`. This makes the health endpoint return 'healthy' when no providers have registered yet (fresh startup / test env), 'healthy' when all registered providers are healthy, 'degraded' when some are healthy, and 'critical' only when all registered providers are unhealthy.",
+      "confidence": 95
+    },
+    {
+      "severity": "critical",
+      "category": "testing",
+      "file": "tests/smoke.test.ts",
+      "line": 69,
+      "description": "Test asserts `data.status` equals 'ok', but the HealthReport type only produces 'healthy'|'degraded'|'critical'. The string 'ok' never appears in the health status enum.",
+      "fix": "In tests/smoke.test.ts line 69, change `expect(data.status).toBe('ok')` to `expect(data.status).toBe('healthy')`. This matches the actual HealthReport type defined in src/utils/health.ts.",
+      "confidence": 99
+    },
+    {
+      "severity": "critical",
+      "category": "testing",
+      "file": "tests/server/http.test.ts",
+      "line": 21,
+      "description": "Test asserts `data.status` equals 'ok', but the HealthReport type only produces 'healthy'|'degraded'|'critical'. The string 'ok' never appears in the health status enum.",
+      "fix": "In tests/server/http.test.ts line 21, change `expect(data.status).toBe('ok')` to `expect(data.status).toBe('healthy')`. This matches the actual HealthReport type defined in src/utils/health.ts.",
+      "confidence": 99
+    }
+  ],
+  "strengths": [
+    "All 16 test files have real assertions against actual code — no mocks, stubs, or skipped tests",
+    "Test coverage spans the full pipeline: bar-builder, aggregator, indicators, contract-tracker, scheduler, providers, storage, and HTTP server",
+    "Smoke test validates end-to-end: raw data → bar builder → indicator engine → storage → HTTP retrieval",
+    "Health endpoint design is solid — provider-level granularity with staleness tracking and consecutive failure counting",
+    "In-memory SQLite for tests avoids filesystem side effects"
+  ],
+  "testGaps": [
+    "category:testing — tests/server/http.test.ts should also validate the new health report fields (providers, data, db, trackedContracts, activeContracts, wsClients) not just status",
+    "category:testing — No test for health endpoint returning 'degraded' state (some providers healthy, some not)",
+    "category:testing — No test for health endpoint returning 'critical' state (all providers unhealthy)",
+    "category:testing — No unit test for HealthTracker class itself (recordSuccess, recordFailure, state transitions)"
+  ],
+  "architecture": [
+    "The health status enum was changed from a simple 'ok'/'error' to 'healthy'/'degraded'/'critical' (likely during the resilience/health monitoring commit b6b3487) but the two test files were not updated to match",
+    "HealthTracker is a singleton module-level instance — test isolation could be a concern if tests run in the same process and share provider state across test files",
+    "The /health endpoint mixes new health report fields with backward-compatible fields (uptime, mode, lastSpxPrice, dbSizeMb) — consumers relying on status:'ok' will break"
+  ]
+}

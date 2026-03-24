@@ -8,6 +8,107 @@ import type { ContractState, SpyFlow } from '../agent/market-feed';
 
 // ── Config ─────────────────────────────────────────────────────────────────
 
+export interface RegimeConfig {
+  /** Master enable switch for entire regime system */
+  enabled: boolean;
+
+  /** Enforcement mode: 'enforce' = hard-block trades, 'advisory' = tell judge only, 'disabled' = no regime filtering */
+  mode: 'enforce' | 'advisory' | 'disabled';
+
+  /** Regime classification parameters */
+  classification: {
+    /** Trend slope threshold (pts/bar) to classify as trending. ~0.15 = $9/5min sustained move */
+    trendThreshold: number;
+    /** Number of bars to use for trend slope calculation */
+    lookbackBars: number;
+    /** Opening range duration in minutes (for MORNING_MOMENTUM detection) */
+    openingRangeMinutes: number;
+  };
+
+  /** Time windows for regime classification (all times ET) */
+  timeWindows: {
+    /** When morning momentum regime ends (default: '10:15') */
+    morningEnd: string;
+    /** When midday/mean reversion period ends (default: '14:00') */
+    middayEnd: string;
+    /** When gamma expiry period starts (default: '14:00') */
+    gammaExpiryStart: string;
+    /** When no-trade period starts (default: '15:30') */
+    noTradeStart: string;
+  };
+
+  /** Emergency RSI overrides that force gates open regardless of regime */
+  emergencyRsi: {
+    /** RSI level that forces gates open for calls (default: 15, morning: 10) */
+    oversold: number;
+    /** RSI level that forces gates open for puts (default: 85, morning: 92) */
+    overbought: number;
+    /** More stringent oversold threshold during morning (default: 10) */
+    morningOversold: number;
+    /** More stringent overbought threshold during morning (default: 92) */
+    morningOverbought: number;
+  };
+
+  /** Signal gate rules for each regime */
+  signalGates: {
+    MORNING_MOMENTUM: {
+      allowOverboughtFade: boolean;
+      allowOversoldFade: boolean;
+      allowBreakoutFollow: boolean;
+      allowVReversal: boolean;
+      overboughtMeaning: 'reversal' | 'momentum';
+      oversoldMeaning: 'reversal' | 'momentum';
+    };
+    MEAN_REVERSION: {
+      allowOverboughtFade: boolean;
+      allowOversoldFade: boolean;
+      allowBreakoutFollow: boolean;
+      allowVReversal: boolean;
+      overboughtMeaning: 'reversal' | 'momentum';
+      oversoldMeaning: 'reversal' | 'momentum';
+    };
+    TRENDING_UP: {
+      allowOverboughtFade: boolean;
+      allowOversoldFade: boolean;
+      allowBreakoutFollow: boolean;
+      allowVReversal: boolean;
+      overboughtMeaning: 'reversal' | 'momentum';
+      oversoldMeaning: 'reversal' | 'momentum';
+    };
+    TRENDING_DOWN: {
+      allowOverboughtFade: boolean;
+      allowOversoldFade: boolean;
+      allowBreakoutFollow: boolean;
+      allowVReversal: boolean;
+      overboughtMeaning: 'reversal' | 'momentum';
+      oversoldMeaning: 'reversal' | 'momentum';
+    };
+    GAMMA_EXPIRY: {
+      allowOverboughtFade: boolean;
+      allowOversoldFade: boolean;
+      allowBreakoutFollow: boolean;
+      allowVReversal: boolean;
+      overboughtMeaning: 'reversal' | 'momentum';
+      oversoldMeaning: 'reversal' | 'momentum';
+    };
+    NO_TRADE: {
+      allowOverboughtFade: boolean;
+      allowOversoldFade: boolean;
+      allowBreakoutFollow: boolean;
+      allowVReversal: boolean;
+      overboughtMeaning: 'reversal' | 'momentum';
+      oversoldMeaning: 'reversal' | 'momentum';
+    };
+  };
+
+  /** Legacy flags for backwards compatibility (deprecated: use signalGates instead) */
+  allowMorningMomentum?: boolean;
+  allowMeanReversion?: boolean;
+  allowTrendingUp?: boolean;
+  allowTrendingDown?: boolean;
+  allowGammaExpiry?: boolean;
+}
+
 export interface ReplayConfig {
   id: string;
   name: string;
@@ -53,13 +154,7 @@ export interface ReplayConfig {
     activeEnd?: string;   // 'HH:MM' ET, e.g. '15:45'
   };
 
-  regime: {
-    allowMorningMomentum: boolean;
-    allowMeanReversion: boolean;
-    allowTrendingUp: boolean;
-    allowTrendingDown: boolean;
-    allowGammaExpiry: boolean;
-  };
+  regime: RegimeConfig;
 
   judge: {
     /** Enable judge tier (advisor tier, doesn't execute) */
