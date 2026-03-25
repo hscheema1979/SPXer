@@ -11,3 +11,5 @@ logs/
 .omc/
 build/
 .claude/plans/
+data/spxer.db.backup
+data/spxer.db.pre-utc-fix
