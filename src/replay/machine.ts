@@ -18,6 +18,14 @@ import type { ReplayConfig, Trade, ReplayResult } from './types';
 import { ReplayStore } from './store';
 import { etLabel, buildSymbolFilter, buildSessionTimestamps, computeMetrics } from './metrics';
 
+// ── Core modules (shared with live agent) ─────────────────────────────────
+import { detectSignals } from '../core/signal-detector';
+import { checkExit, type ExitContext } from '../core/position-manager';
+import { computeQty } from '../core/position-sizer';
+import { isRiskBlocked, type RiskState } from '../core/risk-guard';
+import { isRegimeBlocked } from '../core/regime-gate';
+import type { Signal, CoreBar } from '../core/types';
+
 const DATA_DB_PATH = path.resolve(process.cwd(), 'data/spxer.db');
 
 // Configurable data source: 'bars' (live) or 'replay_bars' (sanitized Polygon)
@@ -31,13 +39,6 @@ import { computeIndicators, seedState } from '../pipeline/indicator-engine';
 interface Bar {
   ts: number; open: number; high: number; low: number; close: number; volume: number;
   indicators: Record<string, number | null>;
-}
-
-interface OptionSignal {
-  symbol: string; type: 'call' | 'put'; strike: number;
-  signalType: 'RSI_CROSS' | 'EMA_CROSS' | 'HMA_CROSS' | 'PRICE_CROSS_HMA' | 'PRICE_CROSS_EMA';
-  direction: 'bullish' | 'bearish';
-  rsi?: number; ema9?: number; ema21?: number; hma5?: number; hma19?: number;
 }
 
 interface SimPosition {
@@ -268,103 +269,6 @@ function extractJSON(text: string): string {
   return text.replace(/```json?\n?/g, '').replace(/```/g, '').trim();
 }
 
-// ── Signal detection (config-driven) ───────────────────────────────────────
-
-function detectOptionSignals(
-  contractBars: Map<string, Bar[]>,
-  spxPrice: number,
-  config: ReplayConfig,
-): OptionSignal[] {
-  const signals: OptionSignal[] = [];
-
-  for (const [symbol, bars] of contractBars) {
-    if (bars.length < 2) continue;
-
-    const curr = bars[bars.length - 1];
-    const prev = bars[bars.length - 2];
-    const ind = curr.indicators;
-    const prevInd = prev.indicators;
-
-    const match = symbol.match(/([CP])(\d{4,5})(?:000)?$/);
-    if (!match) continue;
-    const [, type, strikeStr] = match;
-    const strike = parseInt(strikeStr);
-    const isCall = type === 'C';
-
-    // MUST be OTM — never trade ITM contracts
-    if (isCall && strike <= spxPrice) continue;  // ITM call
-    if (!isCall && strike >= spxPrice) continue;  // ITM put
-
-    // Contract price filter — skip contracts outside the price band
-    const price = curr.close;
-    const priceMin = config.strikeSelector?.contractPriceMin ?? 0.2;
-    const priceMax = config.strikeSelector?.contractPriceMax ?? 8.0;
-    if (price < priceMin || price > priceMax) continue;
-
-    // RSI crosses (config-driven thresholds on option contracts)
-    if (config.signals.enableRsiCrosses && ind.rsi14 && prevInd.rsi14) {
-      const osLevel = config.signals.optionRsiOversold;
-      const obLevel = config.signals.optionRsiOverbought;
-      if (prevInd.rsi14 >= osLevel && ind.rsi14 < osLevel) {
-        signals.push({ symbol, type: isCall ? 'call' : 'put', strike, signalType: 'RSI_CROSS', direction: 'bullish', rsi: ind.rsi14 });
-      }
-      if (prevInd.rsi14 <= obLevel && ind.rsi14 > obLevel) {
-        signals.push({ symbol, type: isCall ? 'call' : 'put', strike, signalType: 'RSI_CROSS', direction: 'bearish', rsi: ind.rsi14 });
-      }
-    }
-
-    // HMA crosses — configurable periods (default 5×19)
-    const hmaFast = config.signals.hmaCrossFast ?? 5;
-    const hmaSlow = config.signals.hmaCrossSlow ?? 19;
-    const hmaFastKey = `hma${hmaFast}`;
-    const hmaSlowKey = `hma${hmaSlow}`;
-    if (config.signals.enableHmaCrosses && prevInd[hmaFastKey] && prevInd[hmaSlowKey] && ind[hmaFastKey] && ind[hmaSlowKey]) {
-      if (prevInd[hmaFastKey] < prevInd[hmaSlowKey] && ind[hmaFastKey] >= ind[hmaSlowKey]) {
-        signals.push({ symbol, type: isCall ? 'call' : 'put', strike, signalType: 'HMA_CROSS', direction: 'bullish', hma5: ind[hmaFastKey], hma19: ind[hmaSlowKey] });
-      }
-      if (prevInd[hmaFastKey] >= prevInd[hmaSlowKey] && ind[hmaFastKey] < ind[hmaSlowKey]) {
-        signals.push({ symbol, type: isCall ? 'call' : 'put', strike, signalType: 'HMA_CROSS', direction: 'bearish', hma5: ind[hmaFastKey], hma19: ind[hmaSlowKey] });
-      }
-    }
-
-    // EMA crosses — configurable periods (default 9×21)
-    const emaFast = config.signals.emaCrossFast ?? 9;
-    const emaSlow = config.signals.emaCrossSlow ?? 21;
-    const emaFastKey = `ema${emaFast}`;
-    const emaSlowKey = `ema${emaSlow}`;
-    if (config.signals.enableEmaCrosses && prevInd[emaFastKey] && prevInd[emaSlowKey] && ind[emaFastKey] && ind[emaSlowKey]) {
-      if (prevInd[emaFastKey] < prevInd[emaSlowKey] && ind[emaFastKey] >= ind[emaSlowKey]) {
-        signals.push({ symbol, type: isCall ? 'call' : 'put', strike, signalType: 'EMA_CROSS', direction: 'bullish', ema9: ind[emaFastKey], ema21: ind[emaSlowKey] });
-      }
-      if (prevInd[emaFastKey] >= prevInd[emaSlowKey] && ind[emaFastKey] < ind[emaSlowKey]) {
-        signals.push({ symbol, type: isCall ? 'call' : 'put', strike, signalType: 'EMA_CROSS', direction: 'bearish', ema9: ind[emaFastKey], ema21: ind[emaSlowKey] });
-      }
-    }
-
-    // Price crosses HMA (Session 7) — separate flag from HMA5×HMA19 cross
-    if (config.signals.enablePriceCrossHma && prevInd.hma5 && ind.hma5) {
-      if (prevInd.hma5 >= curr.close && ind.hma5 < curr.close) {
-        signals.push({ symbol, type: isCall ? 'call' : 'put', strike, signalType: 'PRICE_CROSS_HMA', direction: 'bullish', hma5: ind.hma5 });
-      }
-      if (prevInd.hma5 <= curr.close && ind.hma5 > curr.close) {
-        signals.push({ symbol, type: isCall ? 'call' : 'put', strike, signalType: 'PRICE_CROSS_HMA', direction: 'bearish', hma5: ind.hma5 });
-      }
-    }
-
-    // Price crosses EMA (Session 8)
-    if (config.signals.enableEmaCrosses && prevInd.ema21 && ind.ema21) {
-      if (prevInd.ema21 >= curr.close && ind.ema21 < curr.close) {
-        signals.push({ symbol, type: isCall ? 'call' : 'put', strike, signalType: 'PRICE_CROSS_EMA', direction: 'bullish', ema21: ind.ema21 });
-      }
-      if (prevInd.ema21 <= curr.close && ind.ema21 > curr.close) {
-        signals.push({ symbol, type: isCall ? 'call' : 'put', strike, signalType: 'PRICE_CROSS_EMA', direction: 'bearish', ema21: ind.ema21 });
-      }
-    }
-  }
-
-  return signals;
-}
-
 // ── Scanner integration ───────────────────────────────────────────────────
 
 const DEFAULT_SCANNER_SYSTEM = `You are an expert 0DTE SPX options day-trader scanning for setups.
@@ -529,11 +433,11 @@ function getScannerPrompt(config: ReplayConfig, scannerId: string): string | nul
 function buildPrompt(
   config: ReplayConfig,
   ts: number, sessionEnd: number, spxBars: Bar[],
-  optionSignals: OptionSignal[], regime: string, regimeContext: string,
+  optionSignals: Signal[], regime: string, regimeContext: string,
 ): string {
   const spx = spxBars[spxBars.length - 1];
   const signalDesc = optionSignals.map(s =>
-    `${s.symbol}: ${s.signalType} ${s.direction.toUpperCase()} (RSI=${s.rsi?.toFixed(1) ?? '?'})`
+    `${s.symbol}: ${s.signalType} ${s.direction.toUpperCase()} (RSI=${s.indicators.rsi14?.toFixed(1) ?? '?'})`
   ).join('\n  ');
 
   return `${regimeContext}
@@ -650,28 +554,11 @@ export async function runReplay(
         const curPrice = getPosPriceAt(cache, openPos.side, openPos.strike, SYMBOL_FILTER, ts);
         if (curPrice === null) continue;
 
-        let closeReason: Trade['reason'] | null = null;
+        const exitCtx: ExitContext = { ts, closeCutoffTs: CLOSE_CUTOFF, hmaCrossDirection: spxHmaCrossDirection };
+        const exitResult = checkExit(openPos, curPrice, config, exitCtx);
+        const closeReason = exitResult.reason;
 
-        // Stop loss (skipped when stopLossPercent is 0 = disabled)
-        if (config.position.stopLossPercent > 0 && curPrice <= openPos.stopLoss) {
-          closeReason = 'stop_loss';
-        }
-        // Take profit
-        else if (curPrice >= openPos.takeProfit) {
-          closeReason = 'take_profit';
-        }
-        // Signal reversal: underlying HMA cross flipped against our position
-        else if (spxHmaCrossDirection != null) {
-          const crossAgainst = (openPos.side === 'call' && spxHmaCrossDirection === 'bearish')
-                            || (openPos.side === 'put' && spxHmaCrossDirection === 'bullish');
-          if (crossAgainst) closeReason = 'signal_reversal';
-        }
-        // EOD
-        else if (ts >= CLOSE_CUTOFF) {
-          closeReason = 'time_exit';
-        }
-
-        if (closeReason) {
+        if (exitResult.shouldExit && closeReason) {
           const pnlPct = ((curPrice - openPos.entryPrice) / openPos.entryPrice) * 100;
           const pnl$ = (curPrice - openPos.entryPrice) * openPos.qty * 100;
           trades.push({
@@ -689,9 +576,9 @@ export async function runReplay(
       }
       prevSpxHmaSlow = currSpxHmaSlow;
 
-      // ── Signal detection ───────────────────────────────────────────────
+      // ── Signal detection (core module — OTM + price band filtering built in) ──
       const contractBars = getContractBarsAt(cache, spx.close, strikeRange, ts);
-      let optionSignals = detectOptionSignals(contractBars, spx.close, config);
+      let optionSignals: Signal[] = detectSignals(contractBars as Map<string, CoreBar[]>, spx.close, config);
 
       // ── Target OTM distance filter ─────────────────────────────────────
       // When set, only keep signals on the strike closest to the target OTM distance
@@ -702,8 +589,8 @@ export async function runReplay(
         const targetPutStrike = spxRounded - targetDist;
 
         optionSignals = optionSignals.filter(sig => {
-          if (sig.type === 'call') return Math.abs(sig.strike - targetCallStrike) <= 5;
-          if (sig.type === 'put') return Math.abs(sig.strike - targetPutStrike) <= 5;
+          if (sig.side === 'call') return Math.abs(sig.strike - targetCallStrike) <= 5;
+          if (sig.side === 'put') return Math.abs(sig.strike - targetPutStrike) <= 5;
           return false;
         });
       }
@@ -739,11 +626,17 @@ export async function runReplay(
       const regimeState = classify({ close: spx.close, high: spx.high, low: spx.low, ts }, config.regime);
       const regimeContext = formatRegimeContext(regimeState, config.regime);
 
-      // ── Escalation checks ─────────────────────────────────────────────
-      if (ts >= CLOSE_CUTOFF) continue;
-      if (ts - lastEscalationTs < config.judges.escalationCooldownSec) continue;
-      if (openPositions.size >= config.position.maxPositionsOpen) continue;
-      if (trades.length >= config.risk.maxTradesPerDay) continue;
+      // ── Risk guard (core module — max positions, trades, loss, cutoff, cooldown) ──
+      const riskState: RiskState = {
+        openPositions: openPositions.size,
+        tradesCompleted: trades.length,
+        dailyPnl: trades.reduce((sum, t) => sum + t.pnl$, 0),
+        currentTs: ts,
+        closeCutoffTs: CLOSE_CUTOFF,
+        lastEscalationTs,
+      };
+      const riskCheck = isRiskBlocked(riskState, config);
+      if (riskCheck.blocked) continue;
 
       // ── Time window gate ──────────────────────────────────────────────
       if (config.timeWindows?.activeStart || config.timeWindows?.activeEnd) {
@@ -760,10 +653,6 @@ export async function runReplay(
           if (spxRsi > rsiOversold && spxRsi < rsiOverbought) continue;
         }
       }
-
-      // Check daily loss limit
-      const currentDayPnl = trades.reduce((sum, t) => sum + t.pnl$, 0);
-      if (currentDayPnl <= -config.risk.maxDailyLoss) continue;
 
       // Need either deterministic signals or scanners enabled to proceed
       if (optionSignals.length === 0 && !config.scanners.enabled) continue;
@@ -887,14 +776,14 @@ export async function runReplay(
 
       lastEscalationTs = ts;
 
-      // ── Regime gate (skipped when regime disabled) ──────────────────────
-      if (config.regime.enabled && judgeAction === 'buy' && judgeTarget) {
+      // ── Regime gate (core module — skipped when regime disabled) ──────
+      if (judgeAction === 'buy' && judgeTarget) {
         const isCall = /C\d/.test(judgeTarget);
+        const side: 'call' | 'put' = isCall ? 'call' : 'put';
+        const direction = isCall ? 'bullish' as const : 'bearish' as const;
         const spxRsi = spx.indicators.rsi14 ?? null;
-        const gate = getSignalGate(regimeState.regime, spxRsi, config.regime);
-        const allowed = isCall ? gate.allowOversoldFade : gate.allowOverboughtFade;
 
-        if (!allowed) {
+        if (isRegimeBlocked(regimeState.regime, direction, side, spxRsi, config)) {
           if (verbose) console.log(`  REGIME BLOCKED (${regimeState.regime})`);
           judgeAction = 'wait';
         }
@@ -914,8 +803,7 @@ export async function runReplay(
             const takeProfit = judgeTp && judgeTp > entryPrice
               ? judgeTp
               : entryPrice * config.position.takeProfitMultiplier;
-            const rawQty = Math.floor((config.sizing.baseDollarsPerTrade * config.sizing.sizeMultiplier) / (entryPrice * 100)) || 1;
-            const qty = Math.max(config.sizing.minContracts, Math.min(config.sizing.maxContracts, rawQty));
+            const qty = computeQty(entryPrice, config);
 
             openPositions.set(`${judgeTarget}_${ts}`, {
               id: `${judgeTarget}_${ts}`,
