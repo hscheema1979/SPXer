@@ -21,7 +21,7 @@ import type { ScannerResult, Assessment, JudgeResult } from './src/agent/judgmen
 import { openPosition, closePosition } from './src/agent/trade-executor';
 import { PositionManager } from './src/agent/position-manager';
 import { getConfigManager } from './src/config/manager';
-import type { ReplayConfig } from './src/replay/types';
+import { AGENT_CONFIG } from './agent-config';
 import { RiskGuard, defaultRiskConfig } from './src/agent/risk-guard';
 import { logEntry, logClose, logRejected } from './src/agent/audit-log';
 import { writeStatus, logActivity } from './src/agent/reporter';

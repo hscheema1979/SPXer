@@ -272,6 +272,6 @@ async function askModelDirect(config: ModelConfig, systemPrompt: string, userPro
     throw new Error(`HTTP ${response.status}: ${errorText}`);
   }
 
-  const data = await response.json();
-  return data.content[0]?.text || '';
+  const data = await response.json() as { content?: Array<{ text?: string }> };
+  return data?.content?.[0]?.text || '';
 }

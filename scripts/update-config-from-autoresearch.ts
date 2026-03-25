@@ -4,8 +4,9 @@
  * Runs at 6 AM to:
  * 1. Parse .autoresearch-results.tsv
  * 2. Find best config by composite score
- * 3. Update agent-config.ts and scanner prompt
- * 4. Restart spxer-agent PM2 process
+ * 3. Update agent-config.ts (transitional file)
+ * 4. Save updated config to DB via ConfigManager
+ * 5. Restart spxer-agent PM2 process
  *
  * Usage:
  *   npx tsx scripts/update-config-from-autoresearch.ts
@@ -33,6 +34,11 @@ interface ResultRow {
   sharpe: string;
 }
 
+function computeScore(r: ResultRow): number {
+  return (parseFloat(r.win_rate) * 40) + (parseFloat(r.sharpe) * 30) +
+    (parseFloat(r.total_pnl) > 0 ? 20 : 0) + (parseFloat(r.total_pnl) > -500 ? 10 : 0);
+}
+
 function parseResults(): { best: ResultRow; all: ResultRow[] } {
   const resultsFile = path.resolve(__dirname, '../.autoresearch-results.tsv');
 
@@ -51,14 +57,7 @@ function parseResults(): { best: ResultRow; all: ResultRow[] } {
     return obj as ResultRow;
   });
 
-  // Score by: winRate*40 + sharpe*30 + (pnl>0?20:0) + (pnl>-500?10:0)
-  rows.sort((a, b) => {
-    const scoreA = (parseFloat(a.win_rate) * 40) + (parseFloat(a.sharpe) * 30) +
-      (parseFloat(a.total_pnl) > 0 ? 20 : 0) + (parseFloat(a.total_pnl) > -500 ? 10 : 0);
-    const scoreB = (parseFloat(b.win_rate) * 40) + (parseFloat(b.sharpe) * 30) +
-      (parseFloat(b.total_pnl) > 0 ? 20 : 0) + (parseFloat(b.total_pnl) > -500 ? 10 : 0);
-    return scoreB - scoreA;
-  });
+  rows.sort((a, b) => computeScore(b) - computeScore(a));
 
   return { best: rows[0], all: rows };
 }
@@ -79,43 +78,78 @@ function updateAgentConfig(best: ResultRow) {
 
   let config = fs.readFileSync(configPath, 'utf-8');
 
-  // Update strike range
-  config = config.replace(
-    /strikeSearchRange: \d+/,
-    `strikeSearchRange: ${strikeRange}`
-  );
-
-  // Update RSI thresholds
+  // Update values via regex (field names match unified Config type)
+  config = config.replace(/strikeSearchRange: \d+/, `strikeSearchRange: ${strikeRange}`);
   config = config.replace(/rsiOversold: \d+/, `rsiOversold: ${rsiOs}`);
   config = config.replace(/rsiOverbought: \d+/, `rsiOverbought: ${rsiOb}`);
-
-  // Update option RSI thresholds
   config = config.replace(/optionRsiOversold: \d+/, `optionRsiOversold: ${optRsiOs}`);
   config = config.replace(/optionRsiOverbought: \d+/, `optionRsiOverbought: ${optRsiOb}`);
-
-  // Update stop loss
   config = config.replace(/stopLossPercent: \d+/, `stopLossPercent: ${stopLoss}`);
-
-  // Update TP multiplier
   config = config.replace(/takeProfitMultiplier: [\d.]+/, `takeProfitMultiplier: ${tpMult}`);
-
-  // Update time windows
   config = config.replace(/activeStart: '[0-9:]+'/,  `activeStart: '${timeStart}'`);
   config = config.replace(/activeEnd: '[0-9:]+'/,    `activeEnd: '${timeEnd}'`);
-
-  // Update max positions
   config = config.replace(/maxPositionsOpen: \d+/, `maxPositionsOpen: ${maxPos}`);
 
+  // Update the updatedAt timestamp
+  config = config.replace(/updatedAt: Date\.now\(\)|updatedAt: \d+/, `updatedAt: ${Date.now()}`);
+
   fs.writeFileSync(configPath, config);
-  console.log(`[UPDATED] Agent config with best params from autoresearch`);
-  console.log(`  Strike: ±${strikeRange} | RSI: ${rsiOs}/${rsiOb} | Stop: ${stopLoss}% | TP: ${tpMult}x`);
-  console.log(`  Time: ${timeStart}-${timeEnd} | Max pos: ${maxPos}`);
+  console.log(`[UPDATED] agent-config.ts with best params`);
+  console.log(`  Strike: ±${strikeRange} | RSI: ${rsiOs}/${rsiOb} | OptRSI: ${optRsiOs}/${optRsiOb}`);
+  console.log(`  Stop: ${stopLoss}% | TP: ${tpMult}x | Time: ${timeStart}-${timeEnd} | MaxPos: ${maxPos}`);
+}
+
+function saveToDb(best: ResultRow) {
+  // Save via ConfigManager — import dynamically to avoid circular deps
+  try {
+    const { getConfigManager } = require('../src/config/manager');
+    const mgr = getConfigManager();
+
+    // Load current config, apply autoresearch best params
+    const existing = mgr.getConfig('paper-mode-live');
+    if (existing) {
+      const updated = {
+        ...existing,
+        updatedAt: Date.now(),
+        signals: {
+          ...existing.signals,
+          rsiOversold: parseInt(best.rsi_os),
+          rsiOverbought: parseInt(best.rsi_ob),
+          optionRsiOversold: parseInt(best.opt_rsi_os),
+          optionRsiOverbought: parseInt(best.opt_rsi_ob),
+        },
+        strikeSelector: {
+          ...existing.strikeSelector,
+          strikeSearchRange: parseInt(best.strike_range),
+        },
+        position: {
+          ...existing.position,
+          stopLossPercent: parseInt(best.stop_loss),
+          takeProfitMultiplier: parseFloat(best.tp_mult),
+          maxPositionsOpen: parseInt(best.max_pos),
+        },
+        timeWindows: {
+          ...existing.timeWindows,
+          activeStart: best.time_start,
+          activeEnd: best.time_end,
+        },
+      };
+      mgr.saveConfig(updated);
+      mgr.bindSubsystem('live-agent', updated.id);
+      console.log(`[UPDATED] DB config '${updated.id}' and bound to live-agent`);
+    } else {
+      console.log('[WARN] Config "paper-mode-live" not found in DB — skipping DB update');
+    }
+  } catch (err) {
+    console.log(`[WARN] Could not update DB config: ${(err as Error).message}`);
+    console.log('  (This is OK if running before first agent startup)');
+  }
 }
 
 function main() {
-  console.log('═══════════════════════════════════════════════════════════');
+  console.log('===================================================================');
   console.log('  Auto-Update: Config from Autoresearch Results');
-  console.log('═══════════════════════════════════════════════════════════');
+  console.log('===================================================================');
   console.log('');
 
   try {
@@ -126,34 +160,34 @@ function main() {
     console.log('[TOP 5 CONFIGS]');
     for (let i = 0; i < Math.min(5, all.length); i++) {
       const r = all[i];
-      const score = (parseFloat(r.win_rate) * 40) + (parseFloat(r.sharpe) * 30) +
-        (parseFloat(r.total_pnl) > 0 ? 20 : 0) + (parseFloat(r.total_pnl) > -500 ? 10 : 0);
       console.log(`  ${i+1}. ${r.label}`);
-      console.log(`     WR: ${r.win_rate}, P&L: $${r.total_pnl}, Score: ${score.toFixed(0)}`);
+      console.log(`     WR: ${(parseFloat(r.win_rate) * 100).toFixed(1)}%, P&L: $${r.total_pnl}, Score: ${computeScore(r).toFixed(0)}`);
     }
     console.log('');
 
     console.log(`[BEST] ${best.label}`);
-    console.log(`  Win rate: ${(parseFloat(best.win_rate) * 100).toFixed(0)}%`);
+    console.log(`  Win rate: ${(parseFloat(best.win_rate) * 100).toFixed(1)}%`);
     console.log(`  P&L: $${best.total_pnl}`);
+    console.log(`  Score: ${computeScore(best).toFixed(1)}`);
     console.log('');
 
     updateAgentConfig(best);
+    saveToDb(best);
     console.log('');
 
     // Restart agent to pick up new config
     console.log('[RESTART] Restarting spxer-agent PM2 process...');
     try {
       execSync('pm2 restart spxer-agent', { stdio: 'pipe' });
-      console.log('  ✓ Agent restarted');
-    } catch (err) {
+      console.log('  Agent restarted');
+    } catch {
       console.log('  [WARN] Failed to restart agent (may need manual restart)');
     }
 
     console.log('');
-    console.log('═══════════════════════════════════════════════════════════');
+    console.log('===================================================================');
     console.log('  Configuration updated. Agent ready for trading.');
-    console.log('═══════════════════════════════════════════════════════════');
+    console.log('===================================================================');
 
   } catch (err) {
     console.error('[ERROR]', err instanceof Error ? err.message : String(err));

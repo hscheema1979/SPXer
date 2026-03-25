@@ -11,7 +11,7 @@ The replay/backtest system is now **production-ready** with all core components 
 - ✅ Config-driven execution engine
 - ✅ Prompt library with semantic versioning
 - ✅ Escalation logic (signals, scanners, judges)
-- ✅ Database storage (separate replay.db)
+- ✅ Database storage (unified spxer.db)
 - ✅ CLI orchestration (run-replay.ts)
 - ✅ End-to-end signal → regime → judge pipeline
 
@@ -94,7 +94,7 @@ If both exist:
 
 ### 4. Storage (`src/replay/store.ts`)
 
-**Separate Database:** `data/replay.db` (independent from `data/spxer.db`)
+**Unified Database:** `data/spxer.db` (replay tables alongside market data and configs)
 
 **Tables:**
 - `replay_configs` — Store configs with version history

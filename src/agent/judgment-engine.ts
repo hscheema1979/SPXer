@@ -12,7 +12,9 @@ import { getJudgeConfigs, getActiveJudgeId, askModel, getScannerConfigs } from '
 import type { ModelConfig } from './model-clients';
 import { classify, getSignalGate, formatRegimeContext, getState as getRegimeState } from './regime-classifier';
 import type { RegimeState } from './regime-classifier';
-import type { RegimeConfig } from '../replay/types';
+import type { Config } from '../config/types';
+
+type RegimeConfig = Config['regime'];
 import { MarketNarrative } from './market-narrative';
 
 export interface ScannerHttpConfig {

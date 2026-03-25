@@ -17,7 +17,9 @@
  * **ALL parameters are now config-driven — no hardcoded values.**
  */
 
-import type { RegimeConfig } from '../replay/types';
+import type { Config } from '../config/types';
+
+type RegimeConfig = Config['regime'];
 
 export type Regime =
   | 'MORNING_MOMENTUM'
@@ -171,6 +173,19 @@ export function classify(
     } else {
       state.regime = 'MORNING_MOMENTUM';
       state.confidence = 0.7;
+    }
+  }
+  // MEAN_REVERSION or TRENDING (morningEnd to gammaExpiryStart)
+  else {
+    if (isTrendingUp) {
+      state.regime = 'TRENDING_UP';
+      state.confidence = Math.min(0.9, 0.5 + Math.abs(state.trendSlope) * 2);
+    } else if (isTrendingDown) {
+      state.regime = 'TRENDING_DOWN';
+      state.confidence = Math.min(0.9, 0.5 + Math.abs(state.trendSlope) * 2);
+    } else {
+      state.regime = 'MEAN_REVERSION';
+      state.confidence = 0.6;
     }
   }
 

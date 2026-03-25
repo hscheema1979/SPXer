@@ -5,6 +5,10 @@
 
 import type { Trade, ReplayResult } from './types';
 
+/**
+ * Convert a UTC Unix timestamp to an ET time label (HH:MM format).
+ * Handles EST/EDT automatically via Intl timezone resolution.
+ */
 export function etLabel(ts: number): string {
   return new Date(ts * 1000).toLocaleTimeString('en-US', {
     timeZone: 'America/New_York',
@@ -74,7 +78,7 @@ export function buildSymbolFilter(date: string): string {
 }
 
 /**
- * Convert an ET time string to a Unix timestamp, handling DST correctly.
+ * Convert an ET time string to a real UTC Unix timestamp.
  * Uses Intl to determine whether a given date falls in EDT or EST.
  */
 export function etToUnix(date: string, timeET: string): number {
@@ -90,8 +94,8 @@ export function etToUnix(date: string, timeET: string): number {
 
 /**
  * Build session timestamps from a date string.
- * Returns Unix timestamps for session start (09:30 ET) and end (16:00 ET).
- * Handles EDT/EST correctly via Intl timezone resolution.
+ * Returns real UTC Unix timestamps for session start (09:30 ET) and end (16:00 ET).
+ * Handles EDT/EST correctly via etToUnix.
  */
 export function buildSessionTimestamps(date: string): { start: number; end: number; closeCutoff: number } {
   const start = etToUnix(date, '09:30');

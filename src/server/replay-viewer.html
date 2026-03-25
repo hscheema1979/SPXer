@@ -67,6 +67,53 @@
   /* ── Loading ── */
   .loading { display: flex; align-items: center; justify-content: center; height: 200px; color: #444; font-size: 14px; }
   .no-data { text-align: center; padding: 40px; color: #444; }
+
+  /* ── Config Button ── */
+  .config-btn { background: #1a1a24; color: #8b8bff; border: 1px solid #8b8bff44; padding: 5px 14px; border-radius: 4px; cursor: pointer; font-family: inherit; font-size: 12px; white-space: nowrap; }
+  .config-btn:hover { background: #2a2a3a; border-color: #8b8bff; }
+  .run-btn { background: #10b98122; color: #10b981; border: 1px solid #10b98144; padding: 5px 14px; border-radius: 4px; cursor: pointer; font-family: inherit; font-size: 12px; white-space: nowrap; }
+  .run-btn:hover { background: #10b98133; border-color: #10b981; }
+  .run-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  /* ── Config Modal ── */
+  .modal-overlay { display: none; position: fixed; inset: 0; background: #000a; z-index: 100; justify-content: center; align-items: flex-start; padding: 40px 20px; overflow-y: auto; }
+  .modal-overlay.open { display: flex; }
+  .modal { background: #111118; border: 1px solid #333; border-radius: 8px; width: 680px; max-width: 100%; max-height: calc(100vh - 80px); overflow-y: auto; }
+  .modal-header { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid #222; position: sticky; top: 0; background: #111118; z-index: 1; }
+  .modal-header h2 { font-size: 14px; color: #8b8bff; font-weight: 600; }
+  .modal-close { color: #666; cursor: pointer; font-size: 18px; background: none; border: none; padding: 4px 8px; }
+  .modal-close:hover { color: #fff; }
+  .modal-body { padding: 12px 16px; }
+  .modal-footer { display: flex; gap: 12px; justify-content: flex-end; align-items: center; padding: 12px 16px; border-top: 1px solid #222; position: sticky; bottom: 0; background: #111118; }
+
+  /* ── Config Sections ── */
+  .cfg-section { margin-bottom: 16px; }
+  .cfg-section-title { font-size: 11px; color: #8b8bff; text-transform: uppercase; letter-spacing: 1px; padding: 6px 0 8px; border-bottom: 1px solid #1a1a24; margin-bottom: 8px; cursor: pointer; display: flex; justify-content: space-between; }
+  .cfg-section-title:hover { color: #a8a8ff; }
+  .cfg-section-title .chevron { transition: transform 0.15s; }
+  .cfg-section.collapsed .cfg-fields { display: none; }
+  .cfg-section.collapsed .chevron { transform: rotate(-90deg); }
+  .cfg-row { display: grid; grid-template-columns: 180px 1fr; align-items: center; gap: 8px; padding: 3px 0; }
+  .cfg-label { font-size: 11px; color: #888; }
+  .cfg-input { background: #0a0a0f; color: #e0e0e0; border: 1px solid #333; padding: 4px 8px; border-radius: 3px; font-family: inherit; font-size: 12px; width: 100%; }
+  .cfg-input:focus { border-color: #8b8bff; outline: none; }
+  .cfg-input[type="number"] { width: 100px; }
+  .cfg-input[type="checkbox"] { width: auto; margin: 0; }
+  .cfg-check-row { display: flex; align-items: center; gap: 8px; padding: 3px 0; }
+  .cfg-check-row label { font-size: 11px; color: #888; cursor: pointer; }
+  select.cfg-input { cursor: pointer; }
+
+  /* ── Name input at bottom ── */
+  .cfg-name-section { border-top: 1px solid #333; padding-top: 12px; margin-top: 8px; }
+  .cfg-name-row { display: grid; grid-template-columns: 80px 1fr; align-items: center; gap: 8px; }
+  .cfg-name-row .cfg-input { font-size: 13px; }
+  .cfg-name-hint { font-size: 10px; color: #555; margin-top: 4px; }
+
+  /* ── Run Status ── */
+  .run-status { font-size: 11px; color: #888; }
+  .run-status.running { color: #f59e0b; }
+  .run-status.done { color: #10b981; }
+  .run-status.error { color: #f43f5e; }
 </style>
 </head>
 <body>
@@ -75,7 +122,36 @@
   <h1>SPXer Replay</h1>
   <select id="date-select"><option>Loading...</option></select>
   <select id="config-select"><option>Loading...</option></select>
+  <button class="config-btn" onclick="openConfigModal()">Settings</button>
+  <button class="run-btn" id="run-btn" onclick="runReplay()">Run</button>
+  <span class="run-status" id="run-status"></span>
   <div class="summary" id="summary"></div>
+</div>
+
+<!-- Config Modal -->
+<div class="modal-overlay" id="config-modal">
+  <div class="modal">
+    <div class="modal-header">
+      <h2>Replay Configuration</h2>
+      <button class="modal-close" onclick="closeConfigModal()">&times;</button>
+    </div>
+    <div class="modal-body" id="config-body">Loading...</div>
+    <div class="modal-footer">
+      <div class="cfg-name-section" style="flex:1; border:none; padding:0; margin:0;">
+        <div class="cfg-name-row">
+          <span class="cfg-label" style="color:#ccc">Config ID</span>
+          <input type="text" class="cfg-input" id="cfg-id" placeholder="my-config-name">
+        </div>
+        <div class="cfg-name-row" style="margin-top:6px">
+          <span class="cfg-label" style="color:#ccc">Name</span>
+          <input type="text" class="cfg-input" id="cfg-name" placeholder="My Custom Config">
+        </div>
+        <div class="cfg-name-hint">Leave blank to auto-generate from settings</div>
+      </div>
+      <button class="config-btn" onclick="closeConfigModal()">Cancel</button>
+      <button class="run-btn" onclick="saveAndRun()">Save &amp; Run</button>
+    </div>
+  </div>
 </div>
 
 <div id="spx-chart"><div class="loading">Select a date and config...</div></div>
@@ -118,6 +194,27 @@ let expandedSeries = null;
 let miniCharts = new Map(); // symbol -> { chart, series }
 let currentTab = 'calls';
 
+// ── Timezone: UTC → ET display ──────────────────────────────────────────────
+// replay_bars stores timestamps in real UTC. lightweight-charts displays Unix
+// timestamps as UTC. To show Eastern Time on the chart, we subtract the ET
+// offset so the chart renders ET labels (it thinks it's UTC but shows ET).
+let etOffsetSec = -5 * 3600; // default EST; updated per selected date
+
+function isDST(dateStr) {
+  // US DST 2026: starts March 8 (2nd Sunday of March), ends Nov 1
+  const d = new Date(dateStr + 'T12:00:00Z');
+  const year = d.getUTCFullYear();
+  const mar1 = new Date(Date.UTC(year, 2, 1));
+  const dstStart = new Date(Date.UTC(year, 2, 14 - mar1.getUTCDay()));
+  const nov1 = new Date(Date.UTC(year, 10, 1));
+  const dstEnd = new Date(Date.UTC(year, 10, 7 - nov1.getUTCDay()));
+  return d >= dstStart && d < dstEnd;
+}
+
+function toEtDisplay(utcTs) {
+  return utcTs + etOffsetSec;
+}
+
 // ── Init ───────────────────────────────────────────────────────────────────
 
 async function init() {
@@ -154,6 +251,9 @@ async function loadDay() {
   const date = document.getElementById('date-select').value;
   const configId = document.getElementById('config-select').value;
   if (!date || !configId) return;
+
+  // Set ET offset for this date (EST=-5h or EDT=-4h)
+  etOffsetSec = isDST(date) ? -4 * 3600 : -5 * 3600;
 
   // Fetch everything in parallel
   const [spxBars, results, contracts] = await Promise.all([
@@ -215,12 +315,12 @@ function renderSpxChart(bars, trades) {
     wickUpColor: '#10b98188', wickDownColor: '#f43f5e88',
   });
 
-  const candleData = bars.map(b => ({ time: b.ts, open: b.o, high: b.h, low: b.l, close: b.c }));
+  const candleData = bars.map(b => ({ time: toEtDisplay(b.ts), open: b.o, high: b.h, low: b.l, close: b.c }));
   spxCandleSeries.setData(candleData);
 
   // HMA overlays
-  const hma5Data = bars.filter(b => b.ind.hma5).map(b => ({ time: b.ts, value: b.ind.hma5 }));
-  const hma19Data = bars.filter(b => b.ind.hma19).map(b => ({ time: b.ts, value: b.ind.hma19 }));
+  const hma5Data = bars.filter(b => b.ind.hma5).map(b => ({ time: toEtDisplay(b.ts), value: b.ind.hma5 }));
+  const hma19Data = bars.filter(b => b.ind.hma19).map(b => ({ time: toEtDisplay(b.ts), value: b.ind.hma19 }));
 
   if (hma5Data.length) {
     const hma5Series = spxChart.addSeries(LightweightCharts.LineSeries, {
@@ -241,14 +341,14 @@ function renderSpxChart(bars, trades) {
   const markers = [];
   for (const t of trades) {
     markers.push({
-      time: t.entryTs,
+      time: toEtDisplay(t.entryTs),
       position: 'belowBar',
       color: t.side === 'call' ? '#10b981' : '#f43f5e',
       shape: 'arrowUp',
       text: `${t.side === 'call' ? 'C' : 'P'}${t.strike}`,
     });
     markers.push({
-      time: t.exitTs,
+      time: toEtDisplay(t.exitTs),
       position: 'aboveBar',
       color: t['pnl$'] >= 0 ? '#10b981' : '#f43f5e',
       shape: 'arrowDown',
@@ -310,8 +410,8 @@ function selectTrade(idx) {
   // Scroll SPX chart to the trade
   if (spxChart) {
     spxChart.timeScale().setVisibleRange({
-      from: trade.entryTs - 300,
-      to: trade.exitTs + 300,
+      from: toEtDisplay(trade.entryTs) - 300,
+      to: toEtDisplay(trade.exitTs) + 300,
     });
   }
 
@@ -357,11 +457,11 @@ async function openExpanded(trade) {
     wickUpColor: '#10b98188', wickDownColor: '#f43f5e88',
   });
 
-  expandedSeries.setData(bars.map(b => ({ time: b.ts, open: b.o, high: b.h, low: b.l, close: b.c })));
+  expandedSeries.setData(bars.map(b => ({ time: toEtDisplay(b.ts), open: b.o, high: b.h, low: b.l, close: b.c })));
 
   // HMA overlays
-  const hma5 = bars.filter(b => b.ind.hma5).map(b => ({ time: b.ts, value: b.ind.hma5 }));
-  const hma19 = bars.filter(b => b.ind.hma19).map(b => ({ time: b.ts, value: b.ind.hma19 }));
+  const hma5 = bars.filter(b => b.ind.hma5).map(b => ({ time: toEtDisplay(b.ts), value: b.ind.hma5 }));
+  const hma19 = bars.filter(b => b.ind.hma19).map(b => ({ time: toEtDisplay(b.ts), value: b.ind.hma19 }));
   if (hma5.length) {
     expandedChart.addSeries(LightweightCharts.LineSeries, {
       color: '#10b98166', lineWidth: 1, priceLineVisible: false, lastValueVisible: false,
@@ -376,12 +476,12 @@ async function openExpanded(trade) {
   // Entry/exit markers
   const markers = [
     {
-      time: trade.entryTs, position: 'belowBar',
+      time: toEtDisplay(trade.entryTs), position: 'belowBar',
       color: '#2196F3', shape: 'arrowUp',
       text: `BUY $${trade.entryPrice.toFixed(2)}`,
     },
     {
-      time: trade.exitTs, position: 'aboveBar',
+      time: toEtDisplay(trade.exitTs), position: 'aboveBar',
       color: trade['pnl$'] >= 0 ? '#10b981' : '#f43f5e', shape: 'arrowDown',
       text: `${formatReason(trade.reason)} $${trade.exitPrice.toFixed(2)} (${trade['pnl$'] >= 0 ? '+' : ''}$${trade['pnl$'].toFixed(0)})`,
     },
@@ -391,8 +491,8 @@ async function openExpanded(trade) {
 
   // Zoom to trade window with padding
   expandedChart.timeScale().setVisibleRange({
-    from: trade.entryTs - 600,
-    to: trade.exitTs + 600,
+    from: toEtDisplay(trade.entryTs) - 600,
+    to: toEtDisplay(trade.exitTs) + 600,
   });
 
   const ro = new ResizeObserver(() => {
@@ -485,15 +585,15 @@ async function renderMiniChart(contract, date) {
     wickUpColor: '#10b98155', wickDownColor: '#f43f5e55',
   });
 
-  series.setData(bars.map(b => ({ time: b.ts, open: b.o, high: b.h, low: b.l, close: b.c })));
+  series.setData(bars.map(b => ({ time: toEtDisplay(b.ts), open: b.o, high: b.h, low: b.l, close: b.c })));
 
   // Add entry/exit markers for this specific contract
   const contractTrades = allTrades.filter(t => t.symbol === contract.symbol);
   if (contractTrades.length) {
     const markers = [];
     for (const t of contractTrades) {
-      markers.push({ time: t.entryTs, position: 'belowBar', color: '#2196F3', shape: 'arrowUp', text: '' });
-      markers.push({ time: t.exitTs, position: 'aboveBar', color: t['pnl$'] >= 0 ? '#10b981' : '#f43f5e', shape: 'arrowDown', text: '' });
+      markers.push({ time: toEtDisplay(t.entryTs), position: 'belowBar', color: '#2196F3', shape: 'arrowUp', text: '' });
+      markers.push({ time: toEtDisplay(t.exitTs), position: 'aboveBar', color: t['pnl$'] >= 0 ? '#10b981' : '#f43f5e', shape: 'arrowDown', text: '' });
     }
     markers.sort((a, b) => a.time - b.time);
     LightweightCharts.createSeriesMarkers(series, markers);
@@ -536,7 +636,7 @@ async function openMiniExpanded(contract, date) {
       upColor: '#10b981', downColor: '#f43f5e',
       borderUpColor: '#10b981', borderDownColor: '#f43f5e',
     });
-    expandedSeries.setData(bars.map(b => ({ time: b.ts, open: b.o, high: b.h, low: b.l, close: b.c })));
+    expandedSeries.setData(bars.map(b => ({ time: toEtDisplay(b.ts), open: b.o, high: b.h, low: b.l, close: b.c })));
     expandedChart.timeScale().fitContent();
 
     const ro = new ResizeObserver(() => {
@@ -563,6 +663,357 @@ function setTab(tab, btn) {
   const date = document.getElementById('date-select').value;
   renderMiniCharts(date);
 }
+
+// ── Config Modal ──────────────────────────────────────────────────────────
+
+let currentConfig = null; // full config object
+
+const CONFIG_SECTIONS = [
+  { key: 'signals', title: 'Signals', fields: [
+    { path: 'signals.enableHmaCrosses', label: 'HMA Crosses', type: 'bool' },
+    { path: 'signals.hmaCrossFast', label: 'HMA Fast Period', type: 'select', options: ['5', '19', '25'] },
+    { path: 'signals.hmaCrossSlow', label: 'HMA Slow Period', type: 'select', options: ['19', '25', '5'] },
+    { path: 'signals.enableRsiCrosses', label: 'RSI Crosses', type: 'bool' },
+    { path: 'signals.enablePriceCrossHma', label: 'Price Cross HMA', type: 'bool' },
+    { path: 'signals.enableEmaCrosses', label: 'EMA Crosses', type: 'bool' },
+    { path: 'signals.emaCrossFast', label: 'EMA Fast Period', type: 'select', options: ['9', '21', '50'] },
+    { path: 'signals.emaCrossSlow', label: 'EMA Slow Period', type: 'select', options: ['21', '50', '200'] },
+    { path: 'signals.requireUnderlyingHmaCross', label: 'Require SPX HMA Cross', type: 'bool' },
+    { path: 'signals.rsiOversold', label: 'RSI Oversold', type: 'num', min: 1, max: 50 },
+    { path: 'signals.rsiOverbought', label: 'RSI Overbought', type: 'num', min: 50, max: 99 },
+    { path: 'signals.optionRsiOversold', label: 'Option RSI Oversold', type: 'num', min: 1, max: 50 },
+    { path: 'signals.optionRsiOverbought', label: 'Option RSI Overbought', type: 'num', min: 50, max: 99 },
+    { path: 'signals.targetOtmDistance', label: 'Target OTM Distance ($)', type: 'num-null', min: 0, max: 200 },
+    { path: 'signals.targetContractPrice', label: 'Target Contract Price ($)', type: 'num-null', min: 0, max: 50 },
+  ]},
+  { key: 'position', title: 'Position Management', fields: [
+    { path: 'position.stopLossPercent', label: 'Stop Loss %', type: 'num', min: 0, max: 100 },
+    { path: 'position.takeProfitMultiplier', label: 'Take Profit Multiplier', type: 'num', min: 0, max: 50, step: 0.5 },
+    { path: 'position.maxPositionsOpen', label: 'Max Positions Open', type: 'num', min: 1, max: 20 },
+    { path: 'position.defaultQuantity', label: 'Default Quantity', type: 'num', min: 1, max: 100 },
+    { path: 'position.positionSizeMultiplier', label: 'Position Size Multiplier', type: 'num', min: 0.1, max: 10, step: 0.1 },
+  ]},
+  { key: 'risk', title: 'Risk Management', fields: [
+    { path: 'risk.maxDailyLoss', label: 'Max Daily Loss ($)', type: 'num', min: 0, max: 10000 },
+    { path: 'risk.maxTradesPerDay', label: 'Max Trades / Day', type: 'num', min: 1, max: 100 },
+    { path: 'risk.maxRiskPerTrade', label: 'Max Risk / Trade ($)', type: 'num', min: 0, max: 10000 },
+    { path: 'risk.cutoffTimeET', label: 'Cutoff Time (ET)', type: 'time' },
+    { path: 'risk.minMinutesToClose', label: 'Min Minutes to Close', type: 'num', min: 0, max: 60 },
+  ]},
+  { key: 'strikeSelector', title: 'Strike Selection', fields: [
+    { path: 'strikeSelector.strikeSearchRange', label: 'Strike Search Range ($)', type: 'num', min: 10, max: 300 },
+    { path: 'strikeSelector.otmDistanceMin', label: 'OTM Distance Min ($)', type: 'num', min: 0, max: 20, step: 0.1 },
+    { path: 'strikeSelector.otmDistanceMax', label: 'OTM Distance Max ($)', type: 'num', min: 0, max: 50, step: 0.1 },
+    { path: 'strikeSelector.emergencyStrikeRange', label: 'Emergency Strike Range ($)', type: 'num', min: 50, max: 500 },
+    { path: 'strikeSelector.emergencyOtmMin', label: 'Emergency OTM Min ($)', type: 'num', min: 0, max: 20, step: 0.1 },
+    { path: 'strikeSelector.emergencyOtmMax', label: 'Emergency OTM Max ($)', type: 'num', min: 0, max: 50, step: 0.1 },
+  ]},
+  { key: 'timeWindows', title: 'Time Windows', fields: [
+    { path: 'timeWindows.activeStart', label: 'Active Start (ET)', type: 'time' },
+    { path: 'timeWindows.activeEnd', label: 'Active End (ET)', type: 'time' },
+    { path: 'timeWindows.sessionStart', label: 'Session Start (ET)', type: 'time' },
+    { path: 'timeWindows.sessionEnd', label: 'Session End (ET)', type: 'time' },
+  ]},
+  { key: 'exit', title: 'Exit Strategy', fields: [
+    { path: 'exit.strategy', label: 'Strategy', type: 'select', options: ['takeProfit', 'scannerReverse'] },
+    { path: 'exit.trailingStopEnabled', label: 'Trailing Stop', type: 'bool' },
+    { path: 'exit.trailingStopPercent', label: 'Trailing Stop %', type: 'num', min: 1, max: 50 },
+    { path: 'exit.timeBasedExitEnabled', label: 'Time-Based Exit', type: 'bool' },
+    { path: 'exit.timeBasedExitMinutes', label: 'Time Exit (minutes)', type: 'num', min: 1, max: 60 },
+    { path: 'exit.reversalSizeMultiplier', label: 'Reversal Size Mult', type: 'num', min: 0.1, max: 5, step: 0.1 },
+  ]},
+  { key: 'regime', title: 'Regime Classification', collapsed: true, fields: [
+    { path: 'regime.enabled', label: 'Enabled', type: 'bool' },
+    { path: 'regime.mode', label: 'Mode', type: 'select', options: ['enforce', 'advisory', 'disabled'] },
+    { path: 'regime.classification.trendThreshold', label: 'Trend Threshold', type: 'num', min: 0, max: 1, step: 0.01 },
+    { path: 'regime.classification.lookbackBars', label: 'Lookback Bars', type: 'num', min: 5, max: 100 },
+    { path: 'regime.classification.openingRangeMinutes', label: 'Opening Range (min)', type: 'num', min: 5, max: 60 },
+    { path: 'regime.timeWindows.morningEnd', label: 'Morning End (ET)', type: 'time' },
+    { path: 'regime.timeWindows.middayEnd', label: 'Midday End (ET)', type: 'time' },
+    { path: 'regime.timeWindows.gammaExpiryStart', label: 'Gamma Expiry Start', type: 'time' },
+    { path: 'regime.timeWindows.noTradeStart', label: 'No-Trade Start', type: 'time' },
+    { path: 'regime.emergencyRsi.oversold', label: 'Emergency RSI Oversold', type: 'num', min: 1, max: 30 },
+    { path: 'regime.emergencyRsi.overbought', label: 'Emergency RSI Overbought', type: 'num', min: 70, max: 99 },
+    { path: 'regime.emergencyRsi.morningOversold', label: 'Morning Emergency Oversold', type: 'num', min: 1, max: 30 },
+    { path: 'regime.emergencyRsi.morningOverbought', label: 'Morning Emergency Overbought', type: 'num', min: 70, max: 99 },
+  ]},
+  { key: 'sizing', title: 'Position Sizing', collapsed: true, fields: [
+    { path: 'sizing.baseDollarsPerTrade', label: 'Base $/Trade', type: 'num', min: 50, max: 10000 },
+    { path: 'sizing.sizeMultiplier', label: 'Size Multiplier', type: 'num', min: 0.1, max: 10, step: 0.1 },
+    { path: 'sizing.minContracts', label: 'Min Contracts', type: 'num', min: 1, max: 50 },
+    { path: 'sizing.maxContracts', label: 'Max Contracts', type: 'num', min: 1, max: 100 },
+  ]},
+  { key: 'pipeline', title: 'Pipeline / Timeframe', collapsed: true, fields: [
+    { path: 'pipeline.timeframe', label: 'Timeframe', type: 'select', options: ['1m', '2m', '3m', '5m', '10m', '15m', '30m', '1h'] },
+    { path: 'pipeline.strikeBand', label: 'Strike Band ($)', type: 'num', min: 10, max: 300 },
+    { path: 'pipeline.gapInterpolateMaxMins', label: 'Gap Interpolate Max (min)', type: 'num', min: 1, max: 120 },
+  ]},
+  { key: 'scanners', title: 'Scanners (AI)', collapsed: true, fields: [
+    { path: 'scanners.enabled', label: 'Enabled', type: 'bool' },
+    { path: 'scanners.cycleIntervalSec', label: 'Cycle Interval (sec)', type: 'num', min: 10, max: 300 },
+    { path: 'scanners.minConfidenceToEscalate', label: 'Min Confidence', type: 'num', min: 0, max: 1, step: 0.1 },
+  ]},
+  { key: 'judges', title: 'Judges (AI)', collapsed: true, fields: [
+    { path: 'judges.enabled', label: 'Enabled', type: 'bool' },
+    { path: 'judges.activeJudge', label: 'Active Judge', type: 'select', options: ['sonnet', 'haiku', 'opus'] },
+    { path: 'judges.confidenceThreshold', label: 'Confidence Threshold', type: 'num', min: 0, max: 1, step: 0.1 },
+    { path: 'judges.escalationCooldownSec', label: 'Cooldown (sec)', type: 'num', min: 30, max: 600 },
+    { path: 'judges.consensusRule', label: 'Consensus', type: 'select', options: ['primary-decides', 'majority', 'unanimous', 'first-agree'] },
+  ]},
+  { key: 'escalation', title: 'Escalation', collapsed: true, fields: [
+    { path: 'escalation.signalTriggersJudge', label: 'Signal Triggers Judge', type: 'bool' },
+    { path: 'escalation.scannerTriggersJudge', label: 'Scanner Triggers Judge', type: 'bool' },
+    { path: 'escalation.requireScannerAgreement', label: 'Require Scanner Agreement', type: 'bool' },
+    { path: 'escalation.requireSignalAgreement', label: 'Require Signal Agreement', type: 'bool' },
+  ]},
+  { key: 'narrative', title: 'Narrative', collapsed: true, fields: [
+    { path: 'narrative.buildOvernightContext', label: 'Build Overnight Context', type: 'bool' },
+    { path: 'narrative.barHistoryDepth', label: 'Bar History Depth', type: 'num', min: 10, max: 200 },
+    { path: 'narrative.trackTrajectory', label: 'Track Trajectory', type: 'bool' },
+  ]},
+];
+
+function getPath(obj, path) {
+  return path.split('.').reduce((o, k) => o && o[k], obj);
+}
+
+function setPath(obj, path, val) {
+  const keys = path.split('.');
+  let cur = obj;
+  for (let i = 0; i < keys.length - 1; i++) {
+    if (!cur[keys[i]]) cur[keys[i]] = {};
+    cur = cur[keys[i]];
+  }
+  cur[keys[keys.length - 1]] = val;
+}
+
+async function openConfigModal() {
+  const modal = document.getElementById('config-modal');
+  modal.classList.add('open');
+
+  // Load defaults if we don't have a config loaded
+  if (!currentConfig) {
+    const configId = document.getElementById('config-select').value;
+    try {
+      currentConfig = await fetch(`${API}/config/${configId}`).then(r => r.json());
+    } catch {
+      currentConfig = await fetch(`${API}/defaults`).then(r => r.json());
+    }
+  }
+
+  renderConfigForm();
+  updateAutoName();
+}
+
+function closeConfigModal() {
+  document.getElementById('config-modal').classList.remove('open');
+}
+
+function renderConfigForm() {
+  const body = document.getElementById('config-body');
+  let html = '';
+
+  for (const section of CONFIG_SECTIONS) {
+    const collapsed = section.collapsed ? ' collapsed' : '';
+    html += `<div class="cfg-section${collapsed}" id="cfg-sec-${section.key}">`;
+    html += `<div class="cfg-section-title" onclick="toggleSection('${section.key}')">
+      <span>${section.title}</span><span class="chevron">▼</span></div>`;
+    html += `<div class="cfg-fields">`;
+
+    for (const f of section.fields) {
+      const val = getPath(currentConfig, f.path);
+      const inputId = `cfg-${f.path.replace(/\./g, '-')}`;
+
+      if (f.type === 'bool') {
+        html += `<div class="cfg-check-row">
+          <input type="checkbox" id="${inputId}" class="cfg-input" ${val ? 'checked' : ''} onchange="cfgChanged('${f.path}', this.checked)">
+          <label for="${inputId}">${f.label}</label>
+        </div>`;
+      } else if (f.type === 'select') {
+        const isNumeric = f.options.every(o => !isNaN(Number(o)));
+        const valStr = String(val);
+        html += `<div class="cfg-row">
+          <span class="cfg-label">${f.label}</span>
+          <select id="${inputId}" class="cfg-input" onchange="cfgChanged('${f.path}', ${isNumeric ? 'parseFloat(this.value)' : 'this.value'})">
+            ${f.options.map(o => `<option value="${o}" ${valStr === o ? 'selected' : ''}>${o}</option>`).join('')}
+          </select>
+        </div>`;
+      } else if (f.type === 'num') {
+        html += `<div class="cfg-row">
+          <span class="cfg-label">${f.label}</span>
+          <input type="number" id="${inputId}" class="cfg-input" value="${val ?? ''}"
+            min="${f.min ?? ''}" max="${f.max ?? ''}" step="${f.step ?? 1}"
+            onchange="cfgChanged('${f.path}', parseFloat(this.value))">
+        </div>`;
+      } else if (f.type === 'num-null') {
+        const isNull = val === null || val === undefined;
+        html += `<div class="cfg-row">
+          <span class="cfg-label">${f.label}</span>
+          <div style="display:flex;gap:6px;align-items:center">
+            <input type="checkbox" ${!isNull ? 'checked' : ''} onchange="cfgNullToggle('${f.path}', '${inputId}', this.checked)">
+            <input type="number" id="${inputId}" class="cfg-input" value="${isNull ? '' : val}"
+              min="${f.min ?? ''}" max="${f.max ?? ''}" step="${f.step ?? 1}"
+              ${isNull ? 'disabled' : ''}
+              onchange="cfgChanged('${f.path}', parseFloat(this.value))">
+          </div>
+        </div>`;
+      } else if (f.type === 'time') {
+        html += `<div class="cfg-row">
+          <span class="cfg-label">${f.label}</span>
+          <input type="text" id="${inputId}" class="cfg-input" value="${val || ''}" placeholder="HH:MM"
+            style="width:80px" onchange="cfgChanged('${f.path}', this.value)">
+        </div>`;
+      }
+    }
+    html += `</div></div>`;
+  }
+
+  body.innerHTML = html;
+}
+
+function toggleSection(key) {
+  document.getElementById(`cfg-sec-${key}`).classList.toggle('collapsed');
+}
+
+function cfgChanged(path, val) {
+  setPath(currentConfig, path, val);
+  updateAutoName();
+}
+
+function cfgNullToggle(path, inputId, enabled) {
+  const input = document.getElementById(inputId);
+  input.disabled = !enabled;
+  if (enabled) {
+    cfgChanged(path, parseFloat(input.value) || 0);
+  } else {
+    cfgChanged(path, null);
+  }
+  updateAutoName();
+}
+
+function updateAutoName() {
+  if (!currentConfig) return;
+  const parts = [];
+  const s = currentConfig.signals || {};
+  if (s.enableHmaCrosses) parts.push(`HMA${s.hmaCrossFast || 5}x${s.hmaCrossSlow || 19}`);
+  if (s.enableRsiCrosses) parts.push('RSI');
+  if (s.enableEmaCrosses) parts.push(`EMA${s.emaCrossFast || 9}x${s.emaCrossSlow || 21}`);
+  if (s.enablePriceCrossHma) parts.push('PxHMA');
+  if (s.requireUnderlyingHmaCross) parts.push('UndHMA');
+  if (s.targetOtmDistance != null) parts.push(`OTM${s.targetOtmDistance}`);
+  if (s.targetContractPrice != null) parts.push(`$${s.targetContractPrice}`);
+  const p = currentConfig.position || {};
+  if (p.takeProfitMultiplier) parts.push(`TP${p.takeProfitMultiplier}x`);
+  if (p.stopLossPercent > 0) parts.push(`SL${p.stopLossPercent}%`);
+  else parts.push('NoSL');
+  const tf = currentConfig.pipeline?.timeframe;
+  if (tf && tf !== '1m') parts.push(tf);
+
+  const autoId = parts.join('-').toLowerCase().replace(/[^a-z0-9-]/g, '');
+  const autoName = parts.join(' | ');
+
+  const idInput = document.getElementById('cfg-id');
+  const nameInput = document.getElementById('cfg-name');
+  if (!idInput.dataset.userEdited) idInput.value = autoId;
+  if (!nameInput.dataset.userEdited) nameInput.value = autoName;
+
+  // Mark as user-edited on input
+  idInput.oninput = () => { idInput.dataset.userEdited = '1'; };
+  nameInput.oninput = () => { nameInput.dataset.userEdited = '1'; };
+}
+
+async function saveAndRun() {
+  const date = document.getElementById('date-select').value;
+  if (!date) return alert('Select a date first');
+
+  const configId = document.getElementById('cfg-id').value || `custom-${Date.now()}`;
+  const configName = document.getElementById('cfg-name').value || configId;
+
+  closeConfigModal();
+  await runReplayWithConfig(date, currentConfig, configId, configName);
+}
+
+async function runReplay() {
+  const date = document.getElementById('date-select').value;
+  const configId = document.getElementById('config-select').value;
+  if (!date || !configId) return;
+
+  const statusEl = document.getElementById('run-status');
+  const runBtn = document.getElementById('run-btn');
+  runBtn.disabled = true;
+  statusEl.className = 'run-status running';
+  statusEl.textContent = 'Running...';
+
+  try {
+    const res = await fetch(`${API}/run`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ date, configId }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+
+    statusEl.className = 'run-status done';
+    statusEl.textContent = `${data.summary.trades} trades | $${data.summary.totalPnl.toFixed(0)}`;
+    // Reload the day to show new results
+    await loadDay();
+    setTimeout(() => { statusEl.textContent = ''; }, 5000);
+  } catch (err) {
+    statusEl.className = 'run-status error';
+    statusEl.textContent = err.message;
+  } finally {
+    runBtn.disabled = false;
+  }
+}
+
+async function runReplayWithConfig(date, config, configId, configName) {
+  const statusEl = document.getElementById('run-status');
+  const runBtn = document.getElementById('run-btn');
+  runBtn.disabled = true;
+  statusEl.className = 'run-status running';
+  statusEl.textContent = 'Running...';
+
+  try {
+    const res = await fetch(`${API}/run`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ date, config, configId, configName }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+
+    statusEl.className = 'run-status done';
+    statusEl.textContent = `${data.summary.trades} trades | $${data.summary.totalPnl.toFixed(0)}`;
+
+    // Reload configs dropdown and select the new one
+    const configs = await fetch(`${API}/configs`).then(r => r.json());
+    const configSel = document.getElementById('config-select');
+    const important = configs.filter(c => c.name !== 'Default Configuration');
+    const defaults = configs.filter(c => c.name === 'Default Configuration');
+    const sorted = [...important, ...defaults];
+    configSel.innerHTML = sorted.map(c =>
+      `<option value="${c.id}">${c.id} — ${c.name}</option>`
+    ).join('');
+    configSel.value = data.configId;
+    await loadDay();
+    setTimeout(() => { statusEl.textContent = ''; }, 5000);
+  } catch (err) {
+    statusEl.className = 'run-status error';
+    statusEl.textContent = err.message;
+  } finally {
+    runBtn.disabled = false;
+  }
+}
+
+// Load config when config dropdown changes
+document.addEventListener('DOMContentLoaded', () => {
+  const configSel = document.getElementById('config-select');
+  if (configSel) {
+    configSel.addEventListener('change', () => {
+      currentConfig = null; // reset so modal reloads
+    });
+  }
+});
 
 // ── Boot ───────────────────────────────────────────────────────────────────
 init().catch(err => console.error('Init failed:', err));

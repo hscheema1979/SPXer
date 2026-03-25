@@ -1,6 +1,9 @@
 import Database from 'better-sqlite3';
 import type { Database as DB } from 'better-sqlite3';
 import * as fs from 'fs';
+import { createConfigTables } from '../config/manager';
+import { ConfigManager } from '../config/manager';
+import { seedDefaults } from '../config/seed';
 
 let db: DB;
 
@@ -14,6 +17,7 @@ export function initDb(path: string): void {
   db.pragma('cache_size = -64000');     // 64MB cache (negative = KB)
   db.pragma('temp_store = MEMORY');     // Temp tables in memory
   runMigrations();
+  runConfigMigrations();
 
   // Checkpoint WAL every 5 minutes to prevent unbounded growth
   setInterval(() => {
@@ -39,6 +43,11 @@ export function getDb(): DB {
 
 export function closeDb(): void {
   if (db) db.close();
+}
+
+/** Get a ConfigManager backed by the main DB. Requires initDb() first. */
+export function getConfigManager(): ConfigManager {
+  return new ConfigManager(getDb());
 }
 
 export function backupDb(): void {
@@ -91,4 +100,56 @@ function runMigrations(): void {
       created_at  INTEGER NOT NULL DEFAULT (unixepoch())
     );
   `);
+}
+
+/** Add config/model/prompt tables + replay tables to the single DB.
+ *  Seeds defaults on first run. */
+function runConfigMigrations(): void {
+  // Create config tables (models, prompts, configs, active_configs)
+  createConfigTables(db);
+
+  // Create replay tables (migrated from replay.db)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS replay_runs (
+      id          TEXT PRIMARY KEY,
+      config_id   TEXT NOT NULL,
+      date        TEXT NOT NULL,
+      started_at  INTEGER NOT NULL,
+      completed_at INTEGER,
+      status      TEXT NOT NULL,
+      error       TEXT,
+      FOREIGN KEY(config_id) REFERENCES configs(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_replay_runs_config ON replay_runs(config_id);
+    CREATE INDEX IF NOT EXISTS idx_replay_runs_date ON replay_runs(date);
+
+    CREATE TABLE IF NOT EXISTS replay_results (
+      run_id      TEXT NOT NULL,
+      config_id   TEXT NOT NULL,
+      date        TEXT NOT NULL,
+      trades      INTEGER,
+      wins        INTEGER,
+      win_rate    REAL,
+      total_pnl   REAL,
+      avg_pnl     REAL,
+      max_win     REAL,
+      max_loss    REAL,
+      max_consecutive_wins INTEGER,
+      max_consecutive_losses INTEGER,
+      sharpe      REAL,
+      trades_json TEXT,
+      PRIMARY KEY(run_id, date),
+      FOREIGN KEY(config_id) REFERENCES configs(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_replay_results_config ON replay_results(config_id);
+    CREATE INDEX IF NOT EXISTS idx_replay_results_date ON replay_results(date);
+  `);
+
+  // Seed defaults if models table is empty (first run)
+  const modelCount = (db.prepare('SELECT COUNT(*) as cnt FROM models').get() as any).cnt;
+  if (modelCount === 0) {
+    const mgr = new ConfigManager(db);
+    seedDefaults(mgr);
+    console.log('[db] Seeded config tables with defaults');
+  }
 }

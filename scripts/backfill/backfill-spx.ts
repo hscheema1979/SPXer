@@ -8,7 +8,7 @@ import axios from 'axios';
 import Database from 'better-sqlite3';
 import * as path from 'path';
 
-const DB_PATH = path.resolve(__dirname, 'data/spxer.db');
+const DB_PATH = path.resolve(__dirname, '../../data/spxer.db');
 const TOKEN = process.env.TRADIER_TOKEN!;
 
 interface Bar { ts: number; open: number; high: number; low: number; close: number; volume: number; }

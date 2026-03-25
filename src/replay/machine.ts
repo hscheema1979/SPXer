@@ -23,6 +23,9 @@ const DATA_DB_PATH = path.resolve(process.cwd(), 'data/spxer.db');
 // Configurable data source: 'bars' (live) or 'replay_bars' (sanitized Polygon)
 const REPLAY_DATA_SOURCE = process.env.REPLAY_DATA_SOURCE || 'replay_bars';
 
+// Import indicator engine for recomputing indicators on aggregated bars
+import { computeIndicators, seedState } from '../pipeline/indicator-engine';
+
 // ── Internal types ─────────────────────────────────────────────────────────
 
 interface Bar {
@@ -56,36 +59,44 @@ interface BarCache {
 function loadBarCache(
   db: Database.Database, start: number, end: number, symbolFilter: string, timeframe: string = '1m',
 ): BarCache {
-  // Load all SPX bars from replay_bars (sanitized Polygon data)
+  const tfMinutes = TF_MINUTES[timeframe] || 1;
+
+  // Always load 1m bars from DB — aggregate to target timeframe if needed
   const spxRows = db.prepare(`
     SELECT ts, open, high, low, close, volume, indicators
-    FROM ${REPLAY_DATA_SOURCE} WHERE symbol='SPX' AND timeframe=?
+    FROM ${REPLAY_DATA_SOURCE} WHERE symbol='SPX' AND timeframe='1m'
     AND ts >= ? AND ts <= ? ORDER BY ts
-  `).all(timeframe, start, end) as any[];
+  `).all(start, end) as any[];
 
-  const spxBars = spxRows.map((r: any) => ({
+  let spxBars = spxRows.map((r: any) => ({
     ts: r.ts, open: r.open, high: r.high, low: r.low,
     close: r.close, volume: r.volume,
     indicators: JSON.parse(r.indicators || '{}'),
   }));
 
+  // Aggregate SPX bars if timeframe > 1m
+  if (tfMinutes > 1) {
+    spxBars = aggregateBars(spxBars, tfMinutes, 'SPX', timeframe);
+  }
+
   const timestamps = spxBars.map(b => b.ts);
 
-  // Load all contract bars for the session from replay_bars (sanitized Polygon data)
+  // Load all contract 1m bars for the session
   const contractRows = db.prepare(`
     SELECT b.symbol, b.ts, b.open, b.high, b.low, b.close, b.volume, b.indicators,
            CAST(substr(b.symbol, -8) AS INTEGER) / 1000.0 as strike
     FROM ${REPLAY_DATA_SOURCE} b
-    WHERE b.symbol LIKE ? AND b.timeframe = ?
+    WHERE b.symbol LIKE ? AND b.timeframe = '1m'
       AND b.ts >= ? AND b.ts <= ?
     ORDER BY b.symbol, b.ts
-  `).all(symbolFilter, timeframe, start, end) as any[];
+  `).all(symbolFilter, start, end) as any[];
 
-  const contractBars = new Map<string, Bar[]>();
+  // Group by symbol first, then aggregate each
+  const rawContractBars = new Map<string, Bar[]>();
   const contractStrikes = new Map<string, number>();
   for (const r of contractRows) {
-    if (!contractBars.has(r.symbol)) contractBars.set(r.symbol, []);
-    contractBars.get(r.symbol)!.push({
+    if (!rawContractBars.has(r.symbol)) rawContractBars.set(r.symbol, []);
+    rawContractBars.get(r.symbol)!.push({
       ts: r.ts, open: r.open, high: r.high, low: r.low,
       close: r.close, volume: r.volume,
       indicators: JSON.parse(r.indicators || '{}'),
@@ -93,7 +104,78 @@ function loadBarCache(
     if (!contractStrikes.has(r.symbol)) contractStrikes.set(r.symbol, r.strike);
   }
 
+  // Aggregate contract bars if timeframe > 1m
+  const contractBars = new Map<string, Bar[]>();
+  for (const [symbol, bars] of rawContractBars) {
+    contractBars.set(symbol, tfMinutes > 1 ? aggregateBars(bars, tfMinutes, symbol, timeframe) : bars);
+  }
+
   return { spxBars, contractBars, contractStrikes, timestamps };
+}
+
+// ── Timeframe aggregation ─────────────────────────────────────────────────
+
+const TF_MINUTES: Record<string, number> = {
+  '1m': 1, '2m': 2, '3m': 3, '5m': 5, '10m': 10, '15m': 15, '30m': 30, '1h': 60,
+};
+
+function aggregateBars(bars1m: Bar[], tfMinutes: number, symbol: string, tf: string): Bar[] {
+  if (tfMinutes <= 1 || bars1m.length === 0) return bars1m;
+
+  const result: Bar[] = [];
+  let bucket: Bar[] = [];
+  let bucketStart = 0;
+
+  for (const bar of bars1m) {
+    // Bucket by rounding down to tfMinutes boundary
+    const barMinute = Math.floor(bar.ts / (tfMinutes * 60)) * (tfMinutes * 60);
+    if (bucket.length === 0) {
+      bucketStart = barMinute;
+    }
+    if (barMinute !== bucketStart && bucket.length > 0) {
+      // Flush the bucket
+      result.push(mergeBucket(bucket, bucketStart));
+      bucket = [];
+      bucketStart = barMinute;
+    }
+    bucket.push(bar);
+  }
+  if (bucket.length > 0) {
+    result.push(mergeBucket(bucket, bucketStart));
+  }
+
+  // Recompute indicators on the aggregated bars
+  // Use seedState to init, then compute incrementally
+  const fullBars = result.map(b => ({
+    symbol, timeframe: tf, ts: b.ts,
+    open: b.open, high: b.high, low: b.low, close: b.close,
+    volume: b.volume, synthetic: false, gapType: null as any,
+  }));
+
+  // Seed with first few bars then compute
+  if (fullBars.length > 0) {
+    seedState(symbol, tf as any, []);
+    for (const fb of fullBars) {
+      const ind = computeIndicators(fb, symbol.startsWith('SPXW') ? 1 : 2);
+      // Find the matching aggregated bar and set indicators
+      const agg = result.find(r => r.ts === fb.ts);
+      if (agg) agg.indicators = ind;
+    }
+  }
+
+  return result;
+}
+
+function mergeBucket(bucket: Bar[], ts: number): Bar {
+  return {
+    ts,
+    open: bucket[0].open,
+    high: Math.max(...bucket.map(b => b.high)),
+    low: Math.min(...bucket.map(b => b.low)),
+    close: bucket[bucket.length - 1].close,
+    volume: bucket.reduce((sum, b) => sum + b.volume, 0),
+    indicators: {}, // will be recomputed
+  };
 }
 
 // ── In-memory lookups (no SQL per tick) ────────────────────────────────────
@@ -221,23 +303,31 @@ function detectOptionSignals(
       }
     }
 
-    // HMA crosses
-    if (config.signals.enableHmaCrosses && prevInd.hma5 && prevInd.hma19 && ind.hma5 && ind.hma19) {
-      if (prevInd.hma5 < prevInd.hma19 && ind.hma5 >= ind.hma19) {
-        signals.push({ symbol, type: isCall ? 'call' : 'put', strike, signalType: 'HMA_CROSS', direction: 'bullish', hma5: ind.hma5, hma19: ind.hma19 });
+    // HMA crosses — configurable periods (default 5×19)
+    const hmaFast = config.signals.hmaCrossFast ?? 5;
+    const hmaSlow = config.signals.hmaCrossSlow ?? 19;
+    const hmaFastKey = `hma${hmaFast}`;
+    const hmaSlowKey = `hma${hmaSlow}`;
+    if (config.signals.enableHmaCrosses && prevInd[hmaFastKey] && prevInd[hmaSlowKey] && ind[hmaFastKey] && ind[hmaSlowKey]) {
+      if (prevInd[hmaFastKey] < prevInd[hmaSlowKey] && ind[hmaFastKey] >= ind[hmaSlowKey]) {
+        signals.push({ symbol, type: isCall ? 'call' : 'put', strike, signalType: 'HMA_CROSS', direction: 'bullish', hma5: ind[hmaFastKey], hma19: ind[hmaSlowKey] });
       }
-      if (prevInd.hma5 >= prevInd.hma19 && ind.hma5 < ind.hma19) {
-        signals.push({ symbol, type: isCall ? 'call' : 'put', strike, signalType: 'HMA_CROSS', direction: 'bearish', hma5: ind.hma5, hma19: ind.hma19 });
+      if (prevInd[hmaFastKey] >= prevInd[hmaSlowKey] && ind[hmaFastKey] < ind[hmaSlowKey]) {
+        signals.push({ symbol, type: isCall ? 'call' : 'put', strike, signalType: 'HMA_CROSS', direction: 'bearish', hma5: ind[hmaFastKey], hma19: ind[hmaSlowKey] });
       }
     }
 
-    // EMA crosses
-    if (config.signals.enableEmaCrosses && prevInd.ema9 && prevInd.ema21 && ind.ema9 && ind.ema21) {
-      if (prevInd.ema9 < prevInd.ema21 && ind.ema9 >= ind.ema21) {
-        signals.push({ symbol, type: isCall ? 'call' : 'put', strike, signalType: 'EMA_CROSS', direction: 'bullish', ema9: ind.ema9, ema21: ind.ema21 });
+    // EMA crosses — configurable periods (default 9×21)
+    const emaFast = config.signals.emaCrossFast ?? 9;
+    const emaSlow = config.signals.emaCrossSlow ?? 21;
+    const emaFastKey = `ema${emaFast}`;
+    const emaSlowKey = `ema${emaSlow}`;
+    if (config.signals.enableEmaCrosses && prevInd[emaFastKey] && prevInd[emaSlowKey] && ind[emaFastKey] && ind[emaSlowKey]) {
+      if (prevInd[emaFastKey] < prevInd[emaSlowKey] && ind[emaFastKey] >= ind[emaSlowKey]) {
+        signals.push({ symbol, type: isCall ? 'call' : 'put', strike, signalType: 'EMA_CROSS', direction: 'bullish', ema9: ind[emaFastKey], ema21: ind[emaSlowKey] });
       }
-      if (prevInd.ema9 >= prevInd.ema21 && ind.ema9 < ind.ema21) {
-        signals.push({ symbol, type: isCall ? 'call' : 'put', strike, signalType: 'EMA_CROSS', direction: 'bearish', ema9: ind.ema9, ema21: ind.ema21 });
+      if (prevInd[emaFastKey] >= prevInd[emaSlowKey] && ind[emaFastKey] < ind[emaSlowKey]) {
+        signals.push({ symbol, type: isCall ? 'call' : 'put', strike, signalType: 'EMA_CROSS', direction: 'bearish', ema9: ind[emaFastKey], ema21: ind[emaSlowKey] });
       }
     }
 
@@ -524,24 +614,26 @@ export async function runReplay(
     let lastEscalationTs = 0;
     let lastScannerTs = 0;
     const strikeRange = config.strikeSelector.strikeSearchRange;
-    let prevSpxHma5: number | null = null;
-    let prevSpxHma19: number | null = null;
+    let prevSpxHmaFast: number | null = null;
+    let prevSpxHmaSlow: number | null = null;
     let spxHmaCrossDirection: 'bullish' | 'bearish' | null = null;
+    const spxHmaFastKey = `hma${config.signals.hmaCrossFast ?? 5}`;
+    const spxHmaSlowKey = `hma${config.signals.hmaCrossSlow ?? 19}`;
 
     for (const ts of timestamps) {
       const spxBars = getSpxBarsAt(cache, ts);
       if (spxBars.length < 5) continue;
       const spx = spxBars[spxBars.length - 1];
 
-      // ── Underlying HMA cross detection ─────────────────────────────────
+      // ── Underlying HMA cross detection (uses same configurable periods) ──
       spxHmaCrossDirection = null;
-      const currSpxHma5 = spx.indicators.hma5 ?? null;
-      const currSpxHma19 = spx.indicators.hma19 ?? null;
-      if (prevSpxHma5 != null && prevSpxHma19 != null && currSpxHma5 != null && currSpxHma19 != null) {
-        if (prevSpxHma5 < prevSpxHma19 && currSpxHma5 >= currSpxHma19) spxHmaCrossDirection = 'bullish';
-        if (prevSpxHma5 >= prevSpxHma19 && currSpxHma5 < currSpxHma19) spxHmaCrossDirection = 'bearish';
+      const currSpxHmaFast = spx.indicators[spxHmaFastKey] ?? null;
+      const currSpxHmaSlow = spx.indicators[spxHmaSlowKey] ?? null;
+      if (prevSpxHmaFast != null && prevSpxHmaSlow != null && currSpxHmaFast != null && currSpxHmaSlow != null) {
+        if (prevSpxHmaFast < prevSpxHmaSlow && currSpxHmaFast >= currSpxHmaSlow) spxHmaCrossDirection = 'bullish';
+        if (prevSpxHmaFast >= prevSpxHmaSlow && currSpxHmaFast < currSpxHmaSlow) spxHmaCrossDirection = 'bearish';
       }
-      prevSpxHma5 = currSpxHma5;
+      prevSpxHmaFast = currSpxHmaFast;
 
       // ── Position monitoring ────────────────────────────────────────────
       for (const [posId, openPos] of openPositions.entries()) {
@@ -585,7 +677,7 @@ export async function runReplay(
           openPositions.delete(posId);
         }
       }
-      prevSpxHma19 = currSpxHma19;
+      prevSpxHmaSlow = currSpxHmaSlow;
 
       // ── Signal detection ───────────────────────────────────────────────
       const contractBars = getContractBarsAt(cache, spx.close, strikeRange, ts);

@@ -7,12 +7,19 @@ import { Router } from 'express';
 import Database from 'better-sqlite3';
 import * as path from 'path';
 import * as fs from 'fs';
+import { runReplay } from '../replay/machine';
+import { DEFAULT_CONFIG, mergeConfig } from '../config/defaults';
+import type { Config } from '../config/types';
 
 const REPLAY_DATA_SOURCE = process.env.REPLAY_DATA_SOURCE || 'replay_bars';
 const DB_PATH = path.resolve(process.cwd(), process.env.DB_PATH || 'data/spxer.db');
 
 function getDb(): Database.Database {
   return new Database(DB_PATH, { readonly: true });
+}
+
+function getWriteDb(): Database.Database {
+  return new Database(DB_PATH);
 }
 
 export function createReplayRoutes(): Router {
@@ -34,8 +41,11 @@ export function createReplayRoutes(): Router {
   router.get('/api/dates', (_req, res) => {
     const db = getDb();
     try {
+      // replay_bars stores real UTC timestamps. SPX RTH (9:30-16:00 ET) maps to
+      // 13:30-20:00 UTC (EDT) or 14:30-21:00 UTC (EST) — all within the same
+      // calendar day, so date(ts, 'unixepoch') groups correctly.
       const rows = db.prepare(`
-        SELECT DISTINCT date(ts, 'unixepoch', '-5 hours') as d
+        SELECT DISTINCT date(ts, 'unixepoch') as d
         FROM ${REPLAY_DATA_SOURCE} WHERE symbol='SPX' AND timeframe='1m'
         ORDER BY d
       `).all() as { d: string }[];
@@ -162,6 +172,114 @@ export function createReplayRoutes(): Router {
       res.json(rows);
     } finally {
       db.close();
+    }
+  });
+
+  // ── GET /replay/api/config/:id — full config JSON for a saved config ────
+  router.get('/api/config/:id', (req, res) => {
+    const db = getDb();
+    try {
+      const row = db.prepare('SELECT config_json FROM replay_configs WHERE id = ?')
+        .get(req.params.id) as { config_json: string } | undefined;
+      if (!row) return res.status(404).json({ error: 'Config not found' });
+      res.json(JSON.parse(row.config_json));
+    } finally {
+      db.close();
+    }
+  });
+
+  // ── GET /replay/api/defaults — return DEFAULT_CONFIG ──────────────────────
+  router.get('/api/defaults', (_req, res) => {
+    res.json(DEFAULT_CONFIG);
+  });
+
+  // ── POST /replay/api/run — run replay with config, store results ─────────
+  router.post('/api/run', async (req, res) => {
+    const { date, config, configId, configName } = req.body as {
+      date?: string;
+      config?: Partial<Config>;
+      configId?: string;
+      configName?: string;
+    };
+
+    if (!date) return res.status(400).json({ error: 'date required' });
+
+    try {
+      // Build the full config
+      let fullConfig: Config;
+
+      if (configId && !config) {
+        // Load existing config (no overrides — just re-run it)
+        const db = getDb();
+        try {
+          const row = db.prepare('SELECT config_json FROM replay_configs WHERE id = ?')
+            .get(configId) as { config_json: string } | undefined;
+          if (!row) return res.status(404).json({ error: `Config '${configId}' not found` });
+          fullConfig = JSON.parse(row.config_json) as Config;
+        } finally {
+          db.close();
+        }
+      } else if (configId && config) {
+        // Try loading existing config as base, fall back to defaults
+        const db = getDb();
+        try {
+          const row = db.prepare('SELECT config_json FROM replay_configs WHERE id = ?')
+            .get(configId) as { config_json: string } | undefined;
+          const base = row ? JSON.parse(row.config_json) as Config : DEFAULT_CONFIG;
+          fullConfig = mergeConfig(base, config);
+        } finally {
+          db.close();
+        }
+      } else if (config) {
+        fullConfig = mergeConfig(DEFAULT_CONFIG, config);
+      } else {
+        fullConfig = { ...DEFAULT_CONFIG };
+      }
+
+      // Generate or use provided ID/name
+      const id = configId || `custom-${Date.now()}`;
+      const name = configName || fullConfig.name || 'Custom Config';
+      fullConfig.id = id;
+      fullConfig.name = name;
+
+      // Save the config to the DB
+      const wdb = getWriteDb();
+      try {
+        wdb.prepare(`
+          INSERT INTO replay_configs (id, name, description, config_json, createdAt, updatedAt)
+          VALUES (?, ?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET
+            name=excluded.name, config_json=excluded.config_json, updatedAt=excluded.updatedAt
+        `).run(id, name, fullConfig.description || '', JSON.stringify(fullConfig), Date.now(), Date.now());
+      } finally {
+        wdb.close();
+      }
+
+      // Run the replay (no judge by default — deterministic, fast)
+      const result = await runReplay(fullConfig, date, {
+        dataDbPath: DB_PATH,
+        storeDbPath: DB_PATH,
+        verbose: false,
+        noJudge: true,
+      });
+
+      res.json({
+        configId: id,
+        configName: name,
+        date,
+        summary: {
+          trades: result.trades,
+          wins: result.wins,
+          winRate: result.winRate,
+          totalPnl: result.totalPnl,
+          avgPnlPerTrade: result.avgPnlPerTrade,
+          maxWin: result.maxWin,
+          maxLoss: result.maxLoss,
+        },
+      });
+    } catch (err: any) {
+      console.error('[replay-run] Error:', err.message);
+      res.status(500).json({ error: err.message });
     }
   });
 

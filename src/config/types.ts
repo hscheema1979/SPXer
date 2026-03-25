@@ -82,7 +82,11 @@ export interface Config {
     enableHmaCrosses: boolean;
     enablePriceCrossHma: boolean;   // price crossing HMA5 (noisy — separate from HMA5×HMA19 cross)
     enableEmaCrosses: boolean;
-    requireUnderlyingHmaCross: boolean;  // require SPX HMA5×HMA19 cross in same direction
+    requireUnderlyingHmaCross: boolean;  // require SPX HMA cross in same direction
+    hmaCrossFast: number;   // fast HMA period for cross detection (default 5)
+    hmaCrossSlow: number;   // slow HMA period for cross detection (default 19)
+    emaCrossFast: number;   // fast EMA period for cross detection (default 9)
+    emaCrossSlow: number;   // slow EMA period for cross detection (default 21)
     targetOtmDistance: number | null;    // if set, only trade the strike closest to this OTM distance (e.g. 25 = $25 OTM)
     targetContractPrice: number | null;  // if set, only trade contracts priced near this $ (e.g. 3.00 = ~$3.00 premium)
     rsiOversold: number;
