@@ -291,6 +291,16 @@ function detectOptionSignals(
     const strike = parseInt(strikeStr);
     const isCall = type === 'C';
 
+    // MUST be OTM — never trade ITM contracts
+    if (isCall && strike <= spxPrice) continue;  // ITM call
+    if (!isCall && strike >= spxPrice) continue;  // ITM put
+
+    // Contract price filter — skip contracts outside the price band
+    const price = curr.close;
+    const priceMin = config.strikeSelector?.contractPriceMin ?? 0.2;
+    const priceMax = config.strikeSelector?.contractPriceMax ?? 8.0;
+    if (price < priceMin || price > priceMax) continue;
+
     // RSI crosses (config-driven thresholds on option contracts)
     if (config.signals.enableRsiCrosses && ind.rsi14 && prevInd.rsi14) {
       const osLevel = config.signals.optionRsiOversold;
