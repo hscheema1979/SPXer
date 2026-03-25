@@ -121,6 +121,8 @@
 <div class="header">
   <h1>SPXer Replay</h1>
   <select id="date-select"><option>Loading...</option></select>
+  <span style="color:#444">to</span>
+  <select id="date-end-select"><option value="">same</option></select>
   <select id="config-select"><option>Loading...</option></select>
   <button class="config-btn" onclick="openConfigModal()">Settings</button>
   <button class="run-btn" id="run-btn" onclick="runReplay()">Run</button>
@@ -225,6 +227,9 @@ async function init() {
 
   const dateSel = document.getElementById('date-select');
   dateSel.innerHTML = dates.map(d => `<option value="${d}">${d}</option>`).join('');
+
+  const dateEndSel = document.getElementById('date-end-select');
+  dateEndSel.innerHTML = '<option value="">same</option>' + dates.map(d => `<option value="${d}">${d}</option>`).join('');
 
   const configSel = document.getElementById('config-select');
   // Sort: put named/important configs first
@@ -923,41 +928,66 @@ function updateAutoName() {
 }
 
 async function saveAndRun() {
-  const date = document.getElementById('date-select').value;
-  if (!date) return alert('Select a date first');
+  const dates = getSelectedDates();
+  if (!dates.length) return alert('Select a date first');
 
   const configId = document.getElementById('cfg-id').value || `custom-${Date.now()}`;
   const configName = document.getElementById('cfg-name').value || configId;
 
   closeConfigModal();
-  await runReplayWithConfig(date, currentConfig, configId, configName);
+  await runReplayWithConfig(dates, currentConfig, configId, configName);
+}
+
+function getSelectedDates() {
+  const start = document.getElementById('date-select').value;
+  const end = document.getElementById('date-end-select').value;
+  if (!start) return [];
+  if (!end || end === start) return [start];
+  // Get all dates between start and end from the dropdown options
+  const dateSel = document.getElementById('date-select');
+  const allDates = Array.from(dateSel.options).map(o => o.value);
+  const startIdx = allDates.indexOf(start);
+  const endIdx = allDates.indexOf(end);
+  if (startIdx < 0 || endIdx < 0) return [start];
+  const lo = Math.min(startIdx, endIdx);
+  const hi = Math.max(startIdx, endIdx);
+  return allDates.slice(lo, hi + 1);
 }
 
 async function runReplay() {
-  const date = document.getElementById('date-select').value;
+  const dates = getSelectedDates();
   const configId = document.getElementById('config-select').value;
-  if (!date || !configId) return;
+  if (!dates.length || !configId) return;
 
   const statusEl = document.getElementById('run-status');
   const runBtn = document.getElementById('run-btn');
   runBtn.disabled = true;
-  statusEl.className = 'run-status running';
-  statusEl.textContent = 'Running...';
 
+  let totalTrades = 0, totalPnl = 0;
   try {
-    const res = await fetch(`${API}/run`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ date, configId }),
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error);
+    for (let i = 0; i < dates.length; i++) {
+      statusEl.className = 'run-status running';
+      statusEl.textContent = dates.length > 1
+        ? `Running ${i + 1}/${dates.length} (${dates[i]})...`
+        : 'Running...';
+
+      const res = await fetch(`${API}/run`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ date: dates[i], configId }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+      totalTrades += data.summary.trades;
+      totalPnl += data.summary.totalPnl;
+    }
 
     statusEl.className = 'run-status done';
-    statusEl.textContent = `${data.summary.trades} trades | $${data.summary.totalPnl.toFixed(0)}`;
-    // Reload the day to show new results
+    statusEl.textContent = dates.length > 1
+      ? `${dates.length} days | ${totalTrades} trades | $${totalPnl.toFixed(0)}`
+      : `${totalTrades} trades | $${totalPnl.toFixed(0)}`;
     await loadDay();
-    setTimeout(() => { statusEl.textContent = ''; }, 5000);
+    setTimeout(() => { statusEl.textContent = ''; }, 8000);
   } catch (err) {
     statusEl.className = 'run-status error';
     statusEl.textContent = err.message;
@@ -966,24 +996,40 @@ async function runReplay() {
   }
 }
 
-async function runReplayWithConfig(date, config, configId, configName) {
+async function runReplayWithConfig(dates, config, configId, configName) {
+  if (typeof dates === 'string') dates = [dates];
   const statusEl = document.getElementById('run-status');
   const runBtn = document.getElementById('run-btn');
   runBtn.disabled = true;
-  statusEl.className = 'run-status running';
-  statusEl.textContent = 'Running...';
 
+  let totalTrades = 0, totalPnl = 0;
+  let lastConfigId = configId;
   try {
-    const res = await fetch(`${API}/run`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ date, config, configId, configName }),
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error);
+    for (let i = 0; i < dates.length; i++) {
+      statusEl.className = 'run-status running';
+      statusEl.textContent = dates.length > 1
+        ? `Running ${i + 1}/${dates.length} (${dates[i]})...`
+        : 'Running...';
+
+      const body = i === 0
+        ? { date: dates[i], config, configId, configName }
+        : { date: dates[i], configId }; // config already saved on first run
+      const res = await fetch(`${API}/run`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+      totalTrades += data.summary.trades;
+      totalPnl += data.summary.totalPnl;
+      lastConfigId = data.configId;
+    }
 
     statusEl.className = 'run-status done';
-    statusEl.textContent = `${data.summary.trades} trades | $${data.summary.totalPnl.toFixed(0)}`;
+    statusEl.textContent = dates.length > 1
+      ? `${dates.length} days | ${totalTrades} trades | $${totalPnl.toFixed(0)}`
+      : `${totalTrades} trades | $${totalPnl.toFixed(0)}`;
 
     // Reload configs dropdown and select the new one
     const configs = await fetch(`${API}/configs`).then(r => r.json());
@@ -994,9 +1040,9 @@ async function runReplayWithConfig(date, config, configId, configName) {
     configSel.innerHTML = sorted.map(c =>
       `<option value="${c.id}">${c.id} — ${c.name}</option>`
     ).join('');
-    configSel.value = data.configId;
+    configSel.value = lastConfigId;
     await loadDay();
-    setTimeout(() => { statusEl.textContent = ''; }, 5000);
+    setTimeout(() => { statusEl.textContent = ''; }, 8000);
   } catch (err) {
     statusEl.className = 'run-status error';
     statusEl.textContent = err.message;
