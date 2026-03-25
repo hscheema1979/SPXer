@@ -1,0 +1,571 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SPXer Replay Viewer</title>
+<script src="https://unpkg.com/lightweight-charts@5.0.5/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #0a0a0f; color: #e0e0e0; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 13px; }
+
+  /* ── Header ── */
+  .header { display: flex; align-items: center; gap: 16px; padding: 10px 16px; background: #111118; border-bottom: 1px solid #222; }
+  .header h1 { font-size: 15px; color: #8b8bff; font-weight: 600; white-space: nowrap; }
+  .header select { background: #1a1a24; color: #e0e0e0; border: 1px solid #333; padding: 5px 10px; border-radius: 4px; font-family: inherit; font-size: 12px; cursor: pointer; }
+  .header select:hover { border-color: #555; }
+  .summary { margin-left: auto; display: flex; gap: 16px; font-size: 12px; color: #888; }
+  .summary .win { color: #10b981; }
+  .summary .loss { color: #f43f5e; }
+  .summary .neutral { color: #a78bfa; }
+
+  /* ── SPX Chart ── */
+  #spx-chart { width: 100%; height: 380px; border-bottom: 1px solid #222; }
+
+  /* ── Trades Table ── */
+  .trades-section { border-bottom: 1px solid #222; }
+  .trades-section h2 { font-size: 12px; color: #666; padding: 8px 16px 4px; text-transform: uppercase; letter-spacing: 1px; }
+  .trades-table { width: 100%; border-collapse: collapse; }
+  .trades-table th { text-align: left; padding: 4px 12px; color: #555; font-size: 11px; text-transform: uppercase; border-bottom: 1px solid #1a1a24; }
+  .trades-table td { padding: 5px 12px; border-bottom: 1px solid #111118; cursor: pointer; font-size: 12px; }
+  .trades-table tr:hover td { background: #1a1a28; }
+  .trades-table tr.selected td { background: #1a1a38; border-left: 2px solid #8b8bff; }
+  .trades-table .call { color: #10b981; }
+  .trades-table .put { color: #f43f5e; }
+  .trades-table .pnl-pos { color: #10b981; }
+  .trades-table .pnl-neg { color: #f43f5e; }
+  .trades-table .pnl-zero { color: #666; }
+  .reason { font-size: 10px; padding: 2px 6px; border-radius: 3px; }
+  .reason-take_profit { background: #10b98120; color: #10b981; }
+  .reason-stop_loss { background: #f43f5e20; color: #f43f5e; }
+  .reason-signal_reversal { background: #f59e0b20; color: #f59e0b; }
+  .reason-time_exit { background: #64748b20; color: #64748b; }
+
+  /* ── Expanded Contract Chart ── */
+  #expanded-chart-wrap { display: none; border-bottom: 1px solid #222; position: relative; }
+  #expanded-chart-wrap .close-btn { position: absolute; top: 8px; right: 12px; color: #666; cursor: pointer; z-index: 10; font-size: 16px; }
+  #expanded-chart-wrap .close-btn:hover { color: #fff; }
+  #expanded-chart-label { padding: 8px 16px 0; font-size: 12px; color: #a78bfa; }
+  #expanded-chart { width: 100%; height: 300px; }
+
+  /* ── Mini Charts Grid ── */
+  .mini-section { padding: 8px 12px; }
+  .mini-section h2 { font-size: 12px; color: #666; padding: 0 4px 8px; text-transform: uppercase; letter-spacing: 1px; }
+  .mini-tabs { display: flex; gap: 8px; margin-bottom: 10px; padding: 0 4px; }
+  .mini-tabs button { background: #1a1a24; color: #888; border: 1px solid #333; padding: 4px 14px; border-radius: 4px; cursor: pointer; font-size: 11px; font-family: inherit; }
+  .mini-tabs button.active { background: #2a2a3a; color: #e0e0e0; border-color: #8b8bff; }
+  .mini-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px; }
+  .mini-card { background: #111118; border: 1px solid #222; border-radius: 6px; cursor: pointer; overflow: hidden; transition: border-color 0.15s; }
+  .mini-card:hover { border-color: #444; }
+  .mini-card.traded { border-color: #8b8bff55; }
+  .mini-card-header { display: flex; justify-content: space-between; padding: 4px 8px; font-size: 11px; }
+  .mini-card-header .strike { color: #ccc; font-weight: 600; }
+  .mini-card-header .price { color: #888; }
+  .mini-card-header .traded-badge { color: #8b8bff; font-size: 10px; }
+  .mini-card-chart { height: 100px; }
+
+  /* ── Loading ── */
+  .loading { display: flex; align-items: center; justify-content: center; height: 200px; color: #444; font-size: 14px; }
+  .no-data { text-align: center; padding: 40px; color: #444; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>SPXer Replay</h1>
+  <select id="date-select"><option>Loading...</option></select>
+  <select id="config-select"><option>Loading...</option></select>
+  <div class="summary" id="summary"></div>
+</div>
+
+<div id="spx-chart"><div class="loading">Select a date and config...</div></div>
+
+<div class="trades-section">
+  <h2>Trades</h2>
+  <table class="trades-table">
+    <thead><tr>
+      <th>#</th><th>Side</th><th>Strike</th><th>Entry</th><th>Exit</th><th>P&L</th><th>%</th><th>Reason</th>
+    </tr></thead>
+    <tbody id="trades-body"></tbody>
+  </table>
+</div>
+
+<div id="expanded-chart-wrap">
+  <span class="close-btn" onclick="closeExpanded()">&times;</span>
+  <div id="expanded-chart-label"></div>
+  <div id="expanded-chart"></div>
+</div>
+
+<div class="mini-section">
+  <h2>Option Chain Charts</h2>
+  <div class="mini-tabs">
+    <button class="active" onclick="setTab('calls', this)">Calls</button>
+    <button onclick="setTab('puts', this)">Puts</button>
+    <button onclick="setTab('traded', this)">Traded Only</button>
+  </div>
+  <div class="mini-grid" id="mini-grid"></div>
+</div>
+
+<script>
+const API = '/replay/api';
+let allContracts = [];
+let allTrades = [];
+let spxChart = null;
+let spxCandleSeries = null;
+let spxMarkers = [];
+let expandedChart = null;
+let expandedSeries = null;
+let miniCharts = new Map(); // symbol -> { chart, series }
+let currentTab = 'calls';
+
+// ── Init ───────────────────────────────────────────────────────────────────
+
+async function init() {
+  const [dates, configs] = await Promise.all([
+    fetch(`${API}/dates`).then(r => r.json()),
+    fetch(`${API}/configs`).then(r => r.json()),
+  ]);
+
+  const dateSel = document.getElementById('date-select');
+  dateSel.innerHTML = dates.map(d => `<option value="${d}">${d}</option>`).join('');
+
+  const configSel = document.getElementById('config-select');
+  // Sort: put named/important configs first
+  const important = configs.filter(c => c.name !== 'Default Configuration');
+  const defaults = configs.filter(c => c.name === 'Default Configuration');
+  const sorted = [...important, ...defaults];
+  configSel.innerHTML = sorted.map(c =>
+    `<option value="${c.id}">${c.id} — ${c.name}</option>`
+  ).join('');
+
+  dateSel.addEventListener('change', loadDay);
+  configSel.addEventListener('change', loadDay);
+
+  // Auto-load latest date
+  if (dates.length) {
+    dateSel.value = dates[dates.length - 1];
+    loadDay();
+  }
+}
+
+// ── Load a day ─────────────────────────────────────────────────────────────
+
+async function loadDay() {
+  const date = document.getElementById('date-select').value;
+  const configId = document.getElementById('config-select').value;
+  if (!date || !configId) return;
+
+  // Fetch everything in parallel
+  const [spxBars, results, contracts] = await Promise.all([
+    fetch(`${API}/bars?date=${date}&symbol=SPX`).then(r => r.json()),
+    fetch(`${API}/results?date=${date}&configId=${configId}`).then(r => r.json()),
+    fetch(`${API}/contracts?date=${date}`).then(r => r.json()),
+  ]);
+
+  allContracts = contracts;
+  allTrades = results.trades || [];
+
+  renderSummary(results.summary);
+  renderSpxChart(spxBars, allTrades);
+  renderTradesTable(allTrades);
+  closeExpanded();
+  renderMiniCharts(date);
+}
+
+// ── Summary ────────────────────────────────────────────────────────────────
+
+function renderSummary(s) {
+  const el = document.getElementById('summary');
+  if (!s || s.trades === 0) {
+    el.innerHTML = '<span>No trades</span>';
+    return;
+  }
+  const pnlClass = s.totalPnl > 0 ? 'win' : s.totalPnl < 0 ? 'loss' : 'neutral';
+  el.innerHTML = `
+    <span class="neutral">${s.trades} trades</span>
+    <span class="${s.winRate >= 0.5 ? 'win' : 'loss'}">${(s.winRate * 100).toFixed(0)}% WR</span>
+    <span class="${pnlClass}">$${s.totalPnl.toFixed(0)}</span>
+  `;
+}
+
+// ── SPX Chart ──────────────────────────────────────────────────────────────
+
+function renderSpxChart(bars, trades) {
+  const container = document.getElementById('spx-chart');
+  container.innerHTML = '';
+
+  if (!bars.length) {
+    container.innerHTML = '<div class="no-data">No SPX data for this date</div>';
+    return;
+  }
+
+  spxChart = LightweightCharts.createChart(container, {
+    width: container.clientWidth,
+    height: 380,
+    layout: { background: { color: '#0a0a0f' }, textColor: '#666' },
+    grid: { vertLines: { color: '#151520' }, horzLines: { color: '#151520' } },
+    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+    timeScale: { timeVisible: true, secondsVisible: false, borderColor: '#222' },
+    rightPriceScale: { borderColor: '#222' },
+  });
+
+  spxCandleSeries = spxChart.addSeries(LightweightCharts.CandlestickSeries, {
+    upColor: '#10b981', downColor: '#f43f5e',
+    borderUpColor: '#10b981', borderDownColor: '#f43f5e',
+    wickUpColor: '#10b98188', wickDownColor: '#f43f5e88',
+  });
+
+  const candleData = bars.map(b => ({ time: b.ts, open: b.o, high: b.h, low: b.l, close: b.c }));
+  spxCandleSeries.setData(candleData);
+
+  // HMA overlays
+  const hma5Data = bars.filter(b => b.ind.hma5).map(b => ({ time: b.ts, value: b.ind.hma5 }));
+  const hma19Data = bars.filter(b => b.ind.hma19).map(b => ({ time: b.ts, value: b.ind.hma19 }));
+
+  if (hma5Data.length) {
+    const hma5Series = spxChart.addSeries(LightweightCharts.LineSeries, {
+      color: '#10b98166', lineWidth: 1, lineStyle: 0, priceLineVisible: false,
+      lastValueVisible: false, crosshairMarkerVisible: false,
+    });
+    hma5Series.setData(hma5Data);
+  }
+  if (hma19Data.length) {
+    const hma19Series = spxChart.addSeries(LightweightCharts.LineSeries, {
+      color: '#3b82f666', lineWidth: 1, lineStyle: 0, priceLineVisible: false,
+      lastValueVisible: false, crosshairMarkerVisible: false,
+    });
+    hma19Series.setData(hma19Data);
+  }
+
+  // Entry/exit markers on SPX chart
+  const markers = [];
+  for (const t of trades) {
+    markers.push({
+      time: t.entryTs,
+      position: 'belowBar',
+      color: t.side === 'call' ? '#10b981' : '#f43f5e',
+      shape: 'arrowUp',
+      text: `${t.side === 'call' ? 'C' : 'P'}${t.strike}`,
+    });
+    markers.push({
+      time: t.exitTs,
+      position: 'aboveBar',
+      color: t['pnl$'] >= 0 ? '#10b981' : '#f43f5e',
+      shape: 'arrowDown',
+      text: `$${t['pnl$'].toFixed(0)}`,
+    });
+  }
+  markers.sort((a, b) => a.time - b.time);
+  spxMarkers = markers;
+  if (markers.length) LightweightCharts.createSeriesMarkers(spxCandleSeries, markers);
+
+  spxChart.timeScale().fitContent();
+
+  // Resize handler
+  const ro = new ResizeObserver(() => {
+    spxChart.applyOptions({ width: container.clientWidth });
+  });
+  ro.observe(container);
+}
+
+// ── Trades Table ───────────────────────────────────────────────────────────
+
+function renderTradesTable(trades) {
+  const tbody = document.getElementById('trades-body');
+  if (!trades.length) {
+    tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:#444;padding:16px">No trades</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = trades.map((t, i) => {
+    const pnlClass = t['pnl$'] > 0 ? 'pnl-pos' : t['pnl$'] < 0 ? 'pnl-neg' : 'pnl-zero';
+    const sideClass = t.side === 'call' ? 'call' : 'put';
+    return `<tr data-idx="${i}" onclick="selectTrade(${i})">
+      <td>${i + 1}</td>
+      <td class="${sideClass}">${t.side.toUpperCase()}</td>
+      <td>${t.strike}</td>
+      <td>${t.entryET} @ $${t.entryPrice.toFixed(2)}</td>
+      <td>${t.exitET} @ $${t.exitPrice.toFixed(2)}</td>
+      <td class="${pnlClass}">$${t['pnl$'].toFixed(0)}</td>
+      <td class="${pnlClass}">${t.pnlPct >= 0 ? '+' : ''}${t.pnlPct.toFixed(0)}%</td>
+      <td><span class="reason reason-${t.reason}">${formatReason(t.reason)}</span></td>
+    </tr>`;
+  }).join('');
+}
+
+function formatReason(r) {
+  const map = { take_profit: 'TP', stop_loss: 'SL', signal_reversal: 'REV', time_exit: 'EOD' };
+  return map[r] || r;
+}
+
+function selectTrade(idx) {
+  // Highlight row
+  document.querySelectorAll('.trades-table tr.selected').forEach(r => r.classList.remove('selected'));
+  const row = document.querySelector(`tr[data-idx="${idx}"]`);
+  if (row) row.classList.add('selected');
+
+  const trade = allTrades[idx];
+  if (!trade) return;
+
+  // Scroll SPX chart to the trade
+  if (spxChart) {
+    spxChart.timeScale().setVisibleRange({
+      from: trade.entryTs - 300,
+      to: trade.exitTs + 300,
+    });
+  }
+
+  // Open expanded contract chart
+  openExpanded(trade);
+}
+
+// ── Expanded Contract Chart ────────────────────────────────────────────────
+
+async function openExpanded(trade) {
+  const wrap = document.getElementById('expanded-chart-wrap');
+  const container = document.getElementById('expanded-chart');
+  const label = document.getElementById('expanded-chart-label');
+  wrap.style.display = 'block';
+  container.innerHTML = '';
+
+  const sideLabel = trade.side === 'call' ? 'CALL' : 'PUT';
+  label.textContent = `${trade.symbol} — ${sideLabel} ${trade.strike} | ${trade.entryET} -> ${trade.exitET} | $${trade['pnl$'].toFixed(0)}`;
+
+  const date = document.getElementById('date-select').value;
+  const bars = await fetch(`${API}/bars?date=${date}&symbol=${trade.symbol}`).then(r => r.json());
+
+  if (!bars.length) {
+    container.innerHTML = '<div class="no-data">No bar data for this contract</div>';
+    return;
+  }
+
+  if (expandedChart) { expandedChart.remove(); expandedChart = null; }
+
+  expandedChart = LightweightCharts.createChart(container, {
+    width: container.clientWidth,
+    height: 300,
+    layout: { background: { color: '#0a0a0f' }, textColor: '#666' },
+    grid: { vertLines: { color: '#151520' }, horzLines: { color: '#151520' } },
+    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+    timeScale: { timeVisible: true, secondsVisible: false, borderColor: '#222' },
+    rightPriceScale: { borderColor: '#222' },
+  });
+
+  expandedSeries = expandedChart.addSeries(LightweightCharts.CandlestickSeries, {
+    upColor: '#10b981', downColor: '#f43f5e',
+    borderUpColor: '#10b981', borderDownColor: '#f43f5e',
+    wickUpColor: '#10b98188', wickDownColor: '#f43f5e88',
+  });
+
+  expandedSeries.setData(bars.map(b => ({ time: b.ts, open: b.o, high: b.h, low: b.l, close: b.c })));
+
+  // HMA overlays
+  const hma5 = bars.filter(b => b.ind.hma5).map(b => ({ time: b.ts, value: b.ind.hma5 }));
+  const hma19 = bars.filter(b => b.ind.hma19).map(b => ({ time: b.ts, value: b.ind.hma19 }));
+  if (hma5.length) {
+    expandedChart.addSeries(LightweightCharts.LineSeries, {
+      color: '#10b98166', lineWidth: 1, priceLineVisible: false, lastValueVisible: false,
+    }).setData(hma5);
+  }
+  if (hma19.length) {
+    expandedChart.addSeries(LightweightCharts.LineSeries, {
+      color: '#3b82f666', lineWidth: 1, priceLineVisible: false, lastValueVisible: false,
+    }).setData(hma19);
+  }
+
+  // Entry/exit markers
+  const markers = [
+    {
+      time: trade.entryTs, position: 'belowBar',
+      color: '#2196F3', shape: 'arrowUp',
+      text: `BUY $${trade.entryPrice.toFixed(2)}`,
+    },
+    {
+      time: trade.exitTs, position: 'aboveBar',
+      color: trade['pnl$'] >= 0 ? '#10b981' : '#f43f5e', shape: 'arrowDown',
+      text: `${formatReason(trade.reason)} $${trade.exitPrice.toFixed(2)} (${trade['pnl$'] >= 0 ? '+' : ''}$${trade['pnl$'].toFixed(0)})`,
+    },
+  ];
+  markers.sort((a, b) => a.time - b.time);
+  LightweightCharts.createSeriesMarkers(expandedSeries, markers);
+
+  // Zoom to trade window with padding
+  expandedChart.timeScale().setVisibleRange({
+    from: trade.entryTs - 600,
+    to: trade.exitTs + 600,
+  });
+
+  const ro = new ResizeObserver(() => {
+    if (expandedChart) expandedChart.applyOptions({ width: container.clientWidth });
+  });
+  ro.observe(container);
+}
+
+function closeExpanded() {
+  document.getElementById('expanded-chart-wrap').style.display = 'none';
+  if (expandedChart) { expandedChart.remove(); expandedChart = null; }
+}
+
+// ── Mini Chart Grid ────────────────────────────────────────────────────────
+
+async function renderMiniCharts(date) {
+  const grid = document.getElementById('mini-grid');
+  grid.innerHTML = '<div class="loading">Loading contracts...</div>';
+
+  // Clear old mini charts
+  for (const [, mc] of miniCharts) { mc.chart.remove(); }
+  miniCharts.clear();
+
+  // Filter by current tab
+  let contracts = filterContracts();
+  if (!contracts.length) {
+    grid.innerHTML = '<div class="no-data">No contracts</div>';
+    return;
+  }
+
+  // Limit to manageable count (nearest strikes to SPX)
+  if (contracts.length > 40) {
+    // Keep only strikes within reasonable range
+    contracts = contracts.slice(0, 40);
+  }
+
+  grid.innerHTML = '';
+
+  // Get the traded symbols for badges
+  const tradedSymbols = new Set(allTrades.map(t => t.symbol));
+
+  // Create cards and fetch bars
+  for (const c of contracts) {
+    const card = document.createElement('div');
+    card.className = 'mini-card' + (tradedSymbols.has(c.symbol) ? ' traded' : '');
+    card.onclick = () => openMiniExpanded(c, date);
+
+    const typeLabel = c.type === 'call' ? 'C' : 'P';
+    const traded = tradedSymbols.has(c.symbol) ? '<span class="traded-badge">TRADED</span>' : '';
+
+    card.innerHTML = `
+      <div class="mini-card-header">
+        <span class="strike">${typeLabel}${c.strike}</span>
+        <span class="price">$${c.minPrice.toFixed(2)}-${c.maxPrice.toFixed(2)}</span>
+        ${traded}
+      </div>
+      <div class="mini-card-chart" id="mc-${c.symbol.replace(/[^a-zA-Z0-9]/g, '')}"></div>
+    `;
+    grid.appendChild(card);
+
+    // Fetch bars and render chart (staggered to avoid flooding)
+    renderMiniChart(c, date);
+  }
+}
+
+async function renderMiniChart(contract, date) {
+  const containerId = `mc-${contract.symbol.replace(/[^a-zA-Z0-9]/g, '')}`;
+  const container = document.getElementById(containerId);
+  if (!container) return;
+
+  const bars = await fetch(`${API}/bars?date=${date}&symbol=${contract.symbol}`).then(r => r.json());
+  if (!bars.length) return;
+
+  const chart = LightweightCharts.createChart(container, {
+    width: container.clientWidth,
+    height: 100,
+    layout: { background: { color: '#111118' }, textColor: '#444' },
+    grid: { vertLines: { visible: false }, horzLines: { visible: false } },
+    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+    timeScale: { visible: false, borderVisible: false },
+    rightPriceScale: { visible: false, borderVisible: false },
+    leftPriceScale: { visible: false },
+    handleScroll: false,
+    handleScale: false,
+  });
+
+  const series = chart.addSeries(LightweightCharts.CandlestickSeries, {
+    upColor: '#10b981', downColor: '#f43f5e',
+    borderUpColor: '#10b981', borderDownColor: '#f43f5e',
+    wickUpColor: '#10b98155', wickDownColor: '#f43f5e55',
+  });
+
+  series.setData(bars.map(b => ({ time: b.ts, open: b.o, high: b.h, low: b.l, close: b.c })));
+
+  // Add entry/exit markers for this specific contract
+  const contractTrades = allTrades.filter(t => t.symbol === contract.symbol);
+  if (contractTrades.length) {
+    const markers = [];
+    for (const t of contractTrades) {
+      markers.push({ time: t.entryTs, position: 'belowBar', color: '#2196F3', shape: 'arrowUp', text: '' });
+      markers.push({ time: t.exitTs, position: 'aboveBar', color: t['pnl$'] >= 0 ? '#10b981' : '#f43f5e', shape: 'arrowDown', text: '' });
+    }
+    markers.sort((a, b) => a.time - b.time);
+    LightweightCharts.createSeriesMarkers(series, markers);
+  }
+
+  chart.timeScale().fitContent();
+  miniCharts.set(contract.symbol, { chart, series });
+}
+
+async function openMiniExpanded(contract, date) {
+  // Build a fake trade object for the expanded view if not already traded
+  const contractTrades = allTrades.filter(t => t.symbol === contract.symbol);
+
+  if (contractTrades.length) {
+    openExpanded(contractTrades[0]);
+  } else {
+    // Show full contract chart without trade markers
+    const wrap = document.getElementById('expanded-chart-wrap');
+    const container = document.getElementById('expanded-chart');
+    const label = document.getElementById('expanded-chart-label');
+    wrap.style.display = 'block';
+    container.innerHTML = '';
+
+    label.textContent = `${contract.symbol} — ${contract.type.toUpperCase()} ${contract.strike} (no trades)`;
+
+    const bars = await fetch(`${API}/bars?date=${date}&symbol=${contract.symbol}`).then(r => r.json());
+    if (!bars.length) { container.innerHTML = '<div class="no-data">No data</div>'; return; }
+
+    if (expandedChart) { expandedChart.remove(); expandedChart = null; }
+
+    expandedChart = LightweightCharts.createChart(container, {
+      width: container.clientWidth, height: 300,
+      layout: { background: { color: '#0a0a0f' }, textColor: '#666' },
+      grid: { vertLines: { color: '#151520' }, horzLines: { color: '#151520' } },
+      timeScale: { timeVisible: true, secondsVisible: false, borderColor: '#222' },
+      rightPriceScale: { borderColor: '#222' },
+    });
+
+    expandedSeries = expandedChart.addSeries(LightweightCharts.CandlestickSeries, {
+      upColor: '#10b981', downColor: '#f43f5e',
+      borderUpColor: '#10b981', borderDownColor: '#f43f5e',
+    });
+    expandedSeries.setData(bars.map(b => ({ time: b.ts, open: b.o, high: b.h, low: b.l, close: b.c })));
+    expandedChart.timeScale().fitContent();
+
+    const ro = new ResizeObserver(() => {
+      if (expandedChart) expandedChart.applyOptions({ width: container.clientWidth });
+    });
+    ro.observe(container);
+  }
+}
+
+// ── Tab filtering ──────────────────────────────────────────────────────────
+
+function filterContracts() {
+  const tradedSymbols = new Set(allTrades.map(t => t.symbol));
+  if (currentTab === 'calls') return allContracts.filter(c => c.type === 'call');
+  if (currentTab === 'puts') return allContracts.filter(c => c.type === 'put');
+  if (currentTab === 'traded') return allContracts.filter(c => tradedSymbols.has(c.symbol));
+  return allContracts;
+}
+
+function setTab(tab, btn) {
+  currentTab = tab;
+  document.querySelectorAll('.mini-tabs button').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  const date = document.getElementById('date-select').value;
+  renderMiniCharts(date);
+}
+
+// ── Boot ───────────────────────────────────────────────────────────────────
+init().catch(err => console.error('Init failed:', err));
+</script>
+</body>
+</html>

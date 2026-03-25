@@ -14,8 +14,8 @@ export type {
   CycleHandlers,
 } from './types';
 
-export { DEFAULT_CONFIG, CONFIG_PRESETS, mergeConfig, validateConfig } from './config';
+export { DEFAULT_CONFIG, mergeConfig, validateConfig } from './config';
 export { ReplayStore, createStore } from './store';
-export { computeMetrics, etLabel, minutesToClose, parseIndicators, buildSymbolFilter, buildSessionTimestamps } from './metrics';
+export { computeMetrics, etLabel, etToUnix, minutesToClose, parseIndicators, buildSymbolFilter, buildSessionTimestamps } from './metrics';
 export { buildCycleSnapshot, createReplayContext, getAvailableDays, runReplayDay } from './framework';
 export { runReplay, type ReplayOptions } from './machine';

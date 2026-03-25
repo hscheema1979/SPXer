@@ -62,7 +62,7 @@ for date in "${DATES[@]}"; do
 
   logfile="replay-logs/${date}.log"
   (
-    npx tsx scripts/backtest/run-replay.ts "$date" $CONFIG $NO_JUDGE $QUIET > "$logfile" 2>&1
+    npx tsx src/replay/cli.ts run "$date" $CONFIG $NO_JUDGE $QUIET > "$logfile" 2>&1
     echo "  Done: $date ($(tail -1 "$logfile" | grep -oP 'totalPnl":\K[^,}]+' || echo '?'))"
   ) &
   RUNNING=$((RUNNING + 1))
@@ -77,5 +77,5 @@ echo "=========================================="
 
 # Print summary from store
 echo ""
-echo "Results saved to replay-logs/ and data/replay.db"
+echo "Results saved to replay-logs/ and data/spxer.db"
 echo "View results: npx tsx scripts/backtest/view-results.ts"

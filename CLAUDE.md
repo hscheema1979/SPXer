@@ -87,14 +87,28 @@ agent.ts (main loop)
 
 The judge doesn't receive isolated signals — it receives context-rich escalations.
 
+### Unified Config System (`src/config/`)
+
+```
+src/config/
+├── types.ts          — Canonical type definitions: Config, ModelRecord, PromptRecord, SignalGate, ResolvedConfig
+├── defaults.ts       — DEFAULT_CONFIG, DEFAULT_MODELS, mergeConfig(), validateConfig()
+├── manager.ts        — ConfigManager class: CRUD for configs, models, prompts; subsystem binding; DB table creation
+└── seed.ts           — seedDefaults(): populates models, prompts, default config on first run
+```
+
+**Single source of truth**: All subsystems (live agent, replay, autoresearch, monitor) share the same `Config` type. Configs are stored as JSON in the `configs` table of `spxer.db`. Models and prompts have their own tables (`models`, `prompts`). Active config bindings (`active_configs`) map subsystem names to config IDs.
+
+**`agent-config.ts`** (project root): Live agent configuration derived from autoresearch findings. Uses `Config` type. Transitional — will eventually load from DB via `ConfigManager.loadForSubsystem('live-agent')`.
+
 ### Replay System (`src/replay/`)
 
 ```
 src/replay/
 ├── machine.ts        — Core replay engine: in-memory bar cache, signal → scanner → judge → position mgmt
-├── config.ts         — DEFAULT_CONFIG, presets, mergeConfig(), validateConfig()
-├── types.ts          — ReplayConfig (comprehensive), Trade, ReplayResult, CycleSnapshot
-├── store.ts          — SQLite store for replay runs and results (data/replay.db)
+├── config.ts         — Re-exports from src/config/defaults.ts
+├── types.ts          — Re-exports Config as ReplayConfig, plus replay-specific types
+├── store.ts          — SQLite store for replay runs and results (data/spxer.db)
 ├── prompt-library.ts — 18 scanner prompts: 2 original + 8 session-specific + 5 regime + 3 calendar
 ├── metrics.ts        — ET time helpers, symbol filters, composite score computation
 ├── cli-config.ts     — CLI flag parsing for config overrides
@@ -104,7 +118,7 @@ src/replay/
 
 **Performance-critical**: `machine.ts` uses an in-memory bar cache — loads all bars for a date once from SQLite, then iterates with binary search. Mar 20 (159K bars, 648 contracts) replays in ~5 seconds. NEVER go back to SQL-per-tick (caused OOM at 3+ GB per process with 8 parallel sessions).
 
-**`agent-config.ts`** (project root): Live agent configuration derived from autoresearch findings. Uses `ReplayConfig` type so the same config shape drives both live trading and replay.
+**One database**: All replay tables (`replay_runs`, `replay_results`) live in `spxer.db` alongside market data and configs. There is no separate `replay.db`.
 
 ### Autoresearch System (`scripts/autoresearch/`)
 

@@ -59,7 +59,7 @@ for date in "${dates[@]}"; do
   echo "📅 $date"
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-  npx tsx scripts/backtest/replay-full.ts "$date" 2>&1 | tee "replay-logs/$date.log"
+  npx tsx src/replay/cli.ts run "$date" 2>&1 | tee "replay-logs/$date.log"
 
   # Extract metrics from output
   if grep -q "SUMMARY:" "replay-logs/$date.log"; then

@@ -273,12 +273,10 @@ function buildConfig(params: ParamSet): ReplayConfig {
     id: `search-${params.id}`,
     name: `Search: ${params.label}`,
     description: `Autoresearch param search variant: ${params.label}`,
-    rsi: {
-      oversoldThreshold: params.rsiOversold,
-      overboughtThreshold: params.rsiOverbought,
-    },
     signals: {
       ...DEFAULT_CONFIG.signals,
+      rsiOversold: params.rsiOversold,
+      rsiOverbought: params.rsiOverbought,
       optionRsiOversold: params.optionRsiOversold,
       optionRsiOverbought: params.optionRsiOverbought,
     },
@@ -292,10 +290,10 @@ function buildConfig(params: ParamSet): ReplayConfig {
       ...DEFAULT_CONFIG.strikeSelector,
       strikeSearchRange: params.strikeSearchRange,
     },
-    timing: {
-      tradingStartEt: params.tradingStartEt,
-      tradingEndEt: params.tradingEndEt,
-      noTradeAfterEt: params.tradingEndEt === '15:45' ? '15:30' : params.tradingEndEt,
+    timeWindows: {
+      ...DEFAULT_CONFIG.timeWindows,
+      activeStart: params.tradingStartEt,
+      activeEnd: params.tradingEndEt,
     },
   });
 }

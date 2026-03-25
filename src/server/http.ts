@@ -8,6 +8,7 @@ import { readStatus, readRecentActivity } from '../agent/reporter';
 import { healthTracker } from '../utils/health';
 import { getWsClientCount } from './ws';
 import { config } from '../config';
+import { createReplayRoutes } from './replay-routes';
 
 let lastSpxPrice: number | null = null;
 export function setLastSpxPrice(p: number) { lastSpxPrice = p; }
@@ -123,6 +124,9 @@ export function startHttpServer(port: number): { app: Express; httpServer: Serve
     const n = Math.min(parseInt(req.query.n as string) || 50, 200);
     res.json(readRecentActivity(n));
   });
+
+  // ── Replay viewer ──
+  app.use('/replay', createReplayRoutes());
 
   const httpServer = createServer(app);
   httpServer.listen(port, () => console.log(`[http] Listening on :${port}`));

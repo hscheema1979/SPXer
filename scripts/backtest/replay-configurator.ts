@@ -4,7 +4,8 @@
  */
 
 import { createStore } from '../../src/replay';
-import { DEFAULT_CONFIG, CONFIG_PRESETS, ReplayConfig, mergeConfig, validateConfig } from '../../src/replay';
+import { DEFAULT_CONFIG, mergeConfig, validateConfig } from '../../src/replay';
+import type { ReplayConfig } from '../../src/replay';
 import { runReplay } from './replay-machine';
 
 /**

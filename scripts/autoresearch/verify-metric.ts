@@ -62,7 +62,7 @@ async function main() {
   // Override promptId if provided via flag
   if (flags.promptId) {
     config = mergeConfig(config, {
-      scanners: { ...config.scanners, enabled: true, promptId: flags.promptId },
+      scanners: { ...config.scanners, enabled: true, defaultPromptId: flags.promptId },
     });
   }
 
@@ -86,17 +86,16 @@ async function main() {
   // Apply config overrides from CLI flags
   const overrides: Partial<ReplayConfig> = {};
   if (flags.strikeSearchRange) overrides.strikeSelector = { ...config.strikeSelector, strikeSearchRange: Number(flags.strikeSearchRange) };
-  // SPX RSI gate thresholds — setting either flag also enables the gate
-  if (flags.rsiOversold || flags.rsiOverbought) overrides.rsi = {
-    ...config.rsi,
-    enableSpxGate: true,
-    ...(flags.rsiOversold ? { oversoldThreshold: Number(flags.rsiOversold) } : {}),
-    ...(flags.rsiOverbought ? { overboughtThreshold: Number(flags.rsiOverbought) } : {}),
+  // SPX RSI thresholds
+  if (flags.rsiOversold || flags.rsiOverbought) overrides.signals = {
+    ...config.signals,
+    ...(flags.rsiOversold ? { rsiOversold: Number(flags.rsiOversold) } : {}),
+    ...(flags.rsiOverbought ? { rsiOverbought: Number(flags.rsiOverbought) } : {}),
   };
-  // Option RSI signal thresholds (config.signals, used in option signal detection)
+  // Option RSI signal thresholds + HMA/EMA crosses (merged with any SPX RSI overrides above)
   if (flags.optionRsiOversold || flags.optionRsiOverbought || flags.enableHmaCrosses || flags.enableEmaCrosses) {
     overrides.signals = {
-      ...config.signals,
+      ...(overrides.signals || config.signals),
       ...(flags.optionRsiOversold ? { optionRsiOversold: Number(flags.optionRsiOversold) } : {}),
       ...(flags.optionRsiOverbought ? { optionRsiOverbought: Number(flags.optionRsiOverbought) } : {}),
       ...(flags.enableHmaCrosses ? { enableHmaCrosses: flags.enableHmaCrosses === 'true' } : {}),
@@ -113,7 +112,7 @@ async function main() {
     ...(flags.activeStart ? { activeStart: flags.activeStart } : {}),
     ...(flags.activeEnd ? { activeEnd: flags.activeEnd } : {}),
   };
-  if (flags.cooldownSec) overrides.judge = { ...config.judge, escalationCooldownSec: Number(flags.cooldownSec) };
+  if (flags.cooldownSec) overrides.judges = { ...config.judges, escalationCooldownSec: Number(flags.cooldownSec) };
   if (flags.maxDailyLoss) overrides.risk = { ...config.risk, maxDailyLoss: Number(flags.maxDailyLoss) };
 
   if (Object.keys(overrides).length > 0) {
@@ -141,7 +140,7 @@ async function main() {
       const result = await runReplay(dateConfig, date, {
         verbose: false,
         // No noJudge flag — scanners run the full pipeline
-        // Judges are disabled separately via config.judge.enabled if needed
+        // Judges are disabled separately via config.judges.enabled if needed
       });
 
       totalTrades += result.trades;

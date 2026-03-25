@@ -15,9 +15,10 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "monitor": "tsx scripts/monitor/live-monitor.ts",
-    "replay": "tsx scripts/backtest/replay-full.ts",
+    "replay": "tsx src/replay/cli.ts run",
     "replay:22day": "bash scripts/backtest/run-22day-replay-parallel.sh",
-    "backtest": "tsx scripts/backtest/backtest-multi.ts"
+    "backtest": "tsx src/replay/cli.ts backtest --no-scanners --no-judge",
+    "viewer": "tsx src/server/replay-server.ts"
   },
   "keywords": [],
   "author": "",

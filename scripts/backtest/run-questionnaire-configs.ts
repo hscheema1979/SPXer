@@ -12,26 +12,27 @@ import { ReplayStore } from '../../src/replay/store';
 import type { ReplayConfig } from '../../src/replay/types';
 import { DEFAULT_CONFIG, mergeConfig } from '../../src/replay/config';
 
-// Base config from questionnaire answers
+// Base config from questionnaire answers — mapped to unified Config type
 const baseConfig: Partial<ReplayConfig> = {
   // Scanners: Disabled for now (timeouts on Agent SDK calls)
-  // Will enable once askModel() is stable
   scanners: {
     enabled: false,
     models: [],
     cycleIntervalSec: 30,
     minConfidenceToEscalate: 0.5,
-    promptId: 'baseline-2026-03-18-v1.0',
+    promptAssignments: {},
+    defaultPromptId: 'scanner-baseline-v1',
   },
 
   // Judges: All 3 models evaluate each setup (advisory only, don't execute)
-  // Log what each judge would have decided
-  judge: {
+  judges: {
     enabled: true,
     models: ['haiku', 'sonnet', 'opus'],
-    primaryModel: 'sonnet',
+    activeJudge: 'sonnet',
+    consensusRule: 'primary-decides',
     confidenceThreshold: 0.5,
     escalationCooldownSec: 600,
+    promptId: 'judge-regime-advisor-v1',
   },
 
   // Escalation: Deterministic signals trigger judges (all 3 models evaluate)
@@ -42,17 +43,13 @@ const baseConfig: Partial<ReplayConfig> = {
     requireSignalAgreement: false,
   },
 
-  // RSI Thresholds
-  rsi: {
-    oversoldThreshold: 25,
-    overboughtThreshold: 75,
-  },
-
-  // HMA Crosses enabled
+  // Signals (includes RSI thresholds + crosses)
   signals: {
     enableRsiCrosses: true,
     enableHmaCrosses: true,
     enableEmaCrosses: false,
+    rsiOversold: 25,
+    rsiOverbought: 75,
     optionRsiOversold: 25,
     optionRsiOverbought: 75,
   },
@@ -61,38 +58,29 @@ const baseConfig: Partial<ReplayConfig> = {
   position: {
     maxPositionsOpen: 3,
     stopLossPercent: 70,
-    takeProfitMultiplier: 5, // 500% = 5x risk (user said "700%" = 7x, but let's use 5x as typical aggressive)
+    takeProfitMultiplier: 5,
+    defaultQuantity: 1,
     positionSizeMultiplier: 1.0,
   },
 
-  // Regime: Allow morning (after 9:45), midday, afternoon. No close.
-  regime: {
-    allowMorningMomentum: true,
-    allowMeanReversion: true,
-    allowTrendingUp: true,
-    allowTrendingDown: true,
-    allowGammaExpiry: true,
+  // Time windows: 9:45 start (after morning chaos), end at 15:00 (before close)
+  timeWindows: {
+    sessionStart: '09:30',
+    sessionEnd: '16:15',
+    activeStart: '09:45',
+    activeEnd: '15:00',
+    skipWeekends: true,
+    skipHolidays: true,
   },
 
-  // Timing: 9:45 start (after morning chaos), end at 15:00 (before close)
-  timing: {
-    tradingStartEt: '09:45',
-    tradingEndEt: '15:00',
-    noTradeAfterEt: '15:00',
-  },
-
-  // Narrative enabled, brief detail level
-  prompts: {
-    contextBrief: 'brief',
-  },
-
-  // 0DTE only
+  // Strike selector: 0DTE only
   strikeSelector: {
-    minOtmDollar: 0.20,
-    maxOtmDollar: 8.00,
-    minOtmPoints: 10,
-    maxOtmPoints: 60,
     strikeSearchRange: 200,
+    otmDistanceMin: 10,
+    otmDistanceMax: 60,
+    emergencyStrikeRange: 100,
+    emergencyOtmMin: 5,
+    emergencyOtmMax: 30,
   },
 };
 

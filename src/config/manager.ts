@@ -1,247 +1,279 @@
 /**
- * ConfigManager — centralized configuration management from database.
+ * ConfigManager — centralized config CRUD against the single spxer.db.
  *
- * Single source of truth for ALL configs:
- * - Live trading agent (agent.ts)
- * - Replay system (src/replay/)
- * - Autoresearch (scripts/autoresearch/)
- *
- * All services load their ReplayConfig from replay.db, not from files.
- * Multiple services can run in parallel with different configs.
+ * Three tables: models, prompts, configs (+ active_configs for subsystem binding).
+ * All subsystems (live agent, replay, autoresearch) load from the same DB.
  */
 
 import Database from 'better-sqlite3';
-import * as path from 'path';
-import type { ReplayConfig } from '../replay/types';
+import type { Database as DB } from 'better-sqlite3';
+import type { Config, ModelRecord, PromptRecord, ActiveConfigBinding, ResolvedConfig } from './types';
 
-const CONFIG_DB_PATH = path.resolve(process.cwd(), 'data/replay.db');
+// ── Table creation ─────────────────────────────────────────────────────────
+
+export function createConfigTables(db: DB): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS models (
+      id          TEXT PRIMARY KEY,
+      name        TEXT NOT NULL,
+      provider    TEXT NOT NULL,
+      role        TEXT NOT NULL CHECK(role IN ('scanner', 'judge', 'both')),
+      base_url    TEXT NOT NULL,
+      model_name  TEXT NOT NULL,
+      api_key_env TEXT NOT NULL,
+      timeout_ms  INTEGER NOT NULL DEFAULT 180000,
+      max_tokens  INTEGER NOT NULL DEFAULT 1024,
+      enabled     INTEGER NOT NULL DEFAULT 1,
+      created_at  INTEGER NOT NULL,
+      updated_at  INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS prompts (
+      id          TEXT PRIMARY KEY,
+      role        TEXT NOT NULL CHECK(role IN ('scanner', 'judge')),
+      name        TEXT NOT NULL,
+      content     TEXT NOT NULL,
+      version     TEXT,
+      notes       TEXT,
+      created_at  INTEGER NOT NULL,
+      updated_at  INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS configs (
+      id          TEXT PRIMARY KEY,
+      name        TEXT NOT NULL,
+      description TEXT,
+      baseline_id TEXT,
+      config_json TEXT NOT NULL,
+      created_at  INTEGER NOT NULL,
+      updated_at  INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS active_configs (
+      subsystem   TEXT PRIMARY KEY,
+      config_id   TEXT NOT NULL,
+      loaded_at   INTEGER NOT NULL,
+      FOREIGN KEY(config_id) REFERENCES configs(id)
+    );
+  `);
+}
+
+// ── ConfigManager ──────────────────────────────────────────────────────────
 
 export class ConfigManager {
-  private db: Database.Database;
-
-  constructor(dbPath?: string) {
-    this.db = new Database(dbPath || CONFIG_DB_PATH);
-    this.db.pragma('journal_mode = WAL');
-    this.initTables();
+  constructor(private db: DB) {
+    createConfigTables(db);
   }
 
-  private initTables() {
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS replay_configs (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        description TEXT,
-        config_json TEXT NOT NULL,
-        baselineConfigId TEXT,
-        createdAt INTEGER NOT NULL,
-        updatedAt INTEGER NOT NULL
-      );
+  // ── Models CRUD ──────────────────────────────────────────────────────────
 
-      CREATE TABLE IF NOT EXISTS active_configs (
-        service_name TEXT PRIMARY KEY,
-        config_id TEXT NOT NULL,
-        loaded_at INTEGER NOT NULL,
-        FOREIGN KEY(config_id) REFERENCES replay_configs(id)
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_active_configs_loaded ON active_configs(loaded_at);
-    `);
-  }
-
-  // ── Config CRUD ─────────────────────────────────────────────────────────────
-
-  /**
-   * Save a config to the database.
-   * Updates updatedAt timestamp automatically.
-   */
-  saveConfig(config: ReplayConfig): void {
+  saveModel(model: ModelRecord): void {
     const now = Date.now();
     this.db.prepare(`
-      INSERT OR REPLACE INTO replay_configs
-      (id, name, description, config_json, baselineConfigId, createdAt, updatedAt)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      INSERT OR REPLACE INTO models
+      (id, name, provider, role, base_url, model_name, api_key_env, timeout_ms, max_tokens, enabled, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
-      config.id,
-      config.name,
-      config.description || '',
-      JSON.stringify(config),
-      config.baselineConfigId || null,
-      config.createdAt || now,
-      now
+      model.id, model.name, model.provider, model.role, model.baseUrl,
+      model.modelName, model.apiKeyEnv, model.timeoutMs, model.maxTokens,
+      model.enabled ? 1 : 0, model.createdAt || now, now,
     );
   }
 
-  /**
-   * Load a config by ID from the database.
-   * Returns null if not found.
-   */
-  getConfig(id: string): ReplayConfig | null {
-    const row = this.db.prepare('SELECT config_json FROM replay_configs WHERE id = ?').get(id) as any;
+  getModel(id: string): ModelRecord | null {
+    const row = this.db.prepare('SELECT * FROM models WHERE id = ?').get(id) as any;
+    return row ? this.rowToModel(row) : null;
+  }
+
+  listModels(role?: 'scanner' | 'judge' | 'both'): ModelRecord[] {
+    const query = role
+      ? 'SELECT * FROM models WHERE role = ? OR role = \'both\' ORDER BY name'
+      : 'SELECT * FROM models ORDER BY name';
+    const rows = role ? this.db.prepare(query).all(role) : this.db.prepare(query).all();
+    return (rows as any[]).map(r => this.rowToModel(r));
+  }
+
+  listEnabledModels(role?: 'scanner' | 'judge' | 'both'): ModelRecord[] {
+    return this.listModels(role).filter(m => m.enabled);
+  }
+
+  deleteModel(id: string): void {
+    this.db.prepare('DELETE FROM models WHERE id = ?').run(id);
+  }
+
+  private rowToModel(row: any): ModelRecord {
+    return {
+      id: row.id,
+      name: row.name,
+      provider: row.provider,
+      role: row.role,
+      baseUrl: row.base_url,
+      modelName: row.model_name,
+      apiKeyEnv: row.api_key_env,
+      timeoutMs: row.timeout_ms,
+      maxTokens: row.max_tokens,
+      enabled: !!row.enabled,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  // ── Prompts CRUD ─────────────────────────────────────────────────────────
+
+  savePrompt(prompt: PromptRecord): void {
+    const now = Date.now();
+    this.db.prepare(`
+      INSERT OR REPLACE INTO prompts
+      (id, role, name, content, version, notes, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      prompt.id, prompt.role, prompt.name, prompt.content,
+      prompt.version || null, prompt.notes || null,
+      prompt.createdAt || now, now,
+    );
+  }
+
+  getPrompt(id: string): PromptRecord | null {
+    const row = this.db.prepare('SELECT * FROM prompts WHERE id = ?').get(id) as any;
+    return row ? this.rowToPrompt(row) : null;
+  }
+
+  listPrompts(role?: 'scanner' | 'judge'): PromptRecord[] {
+    const query = role
+      ? 'SELECT * FROM prompts WHERE role = ? ORDER BY created_at DESC'
+      : 'SELECT * FROM prompts ORDER BY created_at DESC';
+    const rows = role ? this.db.prepare(query).all(role) : this.db.prepare(query).all();
+    return (rows as any[]).map(r => this.rowToPrompt(r));
+  }
+
+  deletePrompt(id: string): void {
+    this.db.prepare('DELETE FROM prompts WHERE id = ?').run(id);
+  }
+
+  private rowToPrompt(row: any): PromptRecord {
+    return {
+      id: row.id,
+      role: row.role,
+      name: row.name,
+      content: row.content,
+      version: row.version,
+      notes: row.notes,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  // ── Configs CRUD ─────────────────────────────────────────────────────────
+
+  saveConfig(config: Config): void {
+    const now = Date.now();
+    const saved = { ...config, updatedAt: now, createdAt: config.createdAt || now };
+    this.db.prepare(`
+      INSERT OR REPLACE INTO configs
+      (id, name, description, baseline_id, config_json, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      saved.id, saved.name, saved.description || null,
+      saved.baselineId || null, JSON.stringify(saved),
+      saved.createdAt, saved.updatedAt,
+    );
+  }
+
+  getConfig(id: string): Config | null {
+    const row = this.db.prepare('SELECT config_json FROM configs WHERE id = ?').get(id) as any;
     return row ? JSON.parse(row.config_json) : null;
   }
 
-  /**
-   * List all configs in the database.
-   */
-  listConfigs(): ReplayConfig[] {
-    const rows = this.db.prepare('SELECT config_json FROM replay_configs ORDER BY createdAt DESC').all() as any[];
+  listConfigs(): Config[] {
+    const rows = this.db.prepare('SELECT config_json FROM configs ORDER BY created_at DESC').all() as any[];
     return rows.map(r => JSON.parse(r.config_json));
   }
 
-  /**
-   * Delete a config by ID.
-   * Also clears any active_config references to this config.
-   */
   deleteConfig(id: string): void {
     this.db.prepare('DELETE FROM active_configs WHERE config_id = ?').run(id);
-    this.db.prepare('DELETE FROM replay_configs WHERE id = ?').run(id);
+    this.db.prepare('DELETE FROM configs WHERE id = ?').run(id);
   }
 
-  /**
-   * Create a new config as a variation of an existing config.
-   * Copies all properties, allows overrides.
-   */
-  deriveConfig(baseConfigId: string, newId: string, overrides: Partial<ReplayConfig>): ReplayConfig {
-    const base = this.getConfig(baseConfigId);
-    if (!base) {
-      throw new Error(`Base config ${baseConfigId} not found`);
-    }
+  deriveConfig(baseId: string, newId: string, overrides: Partial<Config>): Config {
+    const base = this.getConfig(baseId);
+    if (!base) throw new Error(`Base config '${baseId}' not found`);
 
-    const derived: ReplayConfig = {
+    const derived: Config = {
       ...base,
       ...overrides,
       id: newId,
-      baselineConfigId: baseConfigId,
+      baselineId: baseId,
       createdAt: Date.now(),
+      updatedAt: Date.now(),
     };
-
     this.saveConfig(derived);
     return derived;
   }
 
-  // ── Service Config Tracking ────────────────────────────────────────────────
+  // ── Subsystem Binding ────────────────────────────────────────────────────
 
-  /**
-   * Register that a service is using a specific config.
-   * Allows tracking which config each active service is running with.
-   */
-  registerActiveService(serviceName: string, configId: string): void {
+  bindSubsystem(subsystem: string, configId: string): void {
     const config = this.getConfig(configId);
-    if (!config) {
-      throw new Error(`Config ${configId} not found`);
-    }
+    if (!config) throw new Error(`Config '${configId}' not found`);
 
     this.db.prepare(`
-      INSERT OR REPLACE INTO active_configs (service_name, config_id, loaded_at)
+      INSERT OR REPLACE INTO active_configs (subsystem, config_id, loaded_at)
       VALUES (?, ?, ?)
-    `).run(serviceName, configId, Date.now());
+    `).run(subsystem, configId, Date.now());
   }
 
-  /**
-   * Get the config ID currently in use by a service.
-   */
-  getActiveServiceConfig(serviceName: string): string | null {
-    const row = this.db.prepare('SELECT config_id FROM active_configs WHERE service_name = ?').get(serviceName) as any;
+  unbindSubsystem(subsystem: string): void {
+    this.db.prepare('DELETE FROM active_configs WHERE subsystem = ?').run(subsystem);
+  }
+
+  getSubsystemConfigId(subsystem: string): string | null {
+    const row = this.db.prepare('SELECT config_id FROM active_configs WHERE subsystem = ?').get(subsystem) as any;
     return row?.config_id || null;
   }
 
-  /**
-   * Get the full config for a service.
-   */
-  loadServiceConfig(serviceName: string): ReplayConfig | null {
-    const configId = this.getActiveServiceConfig(serviceName);
+  loadForSubsystem(subsystem: string): Config | null {
+    const configId = this.getSubsystemConfigId(subsystem);
     return configId ? this.getConfig(configId) : null;
   }
 
-  /**
-   * List all active services and their configs.
-   */
-  listActiveServices(): Array<{ serviceName: string; configId: string; loadedAt: number; config: ReplayConfig }> {
-    const rows = this.db.prepare(`
-      SELECT ac.service_name, ac.config_id, ac.loaded_at, rc.config_json
-      FROM active_configs ac
-      JOIN replay_configs rc ON ac.config_id = rc.id
-      ORDER BY ac.loaded_at DESC
-    `).all() as any[];
-
-    return rows.map(r => ({
-      serviceName: r.service_name,
-      configId: r.config_id,
-      loadedAt: r.loaded_at,
-      config: JSON.parse(r.config_json),
-    }));
+  listActiveBindings(): ActiveConfigBinding[] {
+    return this.db.prepare('SELECT subsystem, config_id as configId, loaded_at as loadedAt FROM active_configs ORDER BY loaded_at DESC').all() as any[];
   }
 
-  /**
-   * Unregister a service (when it shuts down cleanly).
-   */
-  unregisterService(serviceName: string): void {
-    this.db.prepare('DELETE FROM active_configs WHERE service_name = ?').run(serviceName);
-  }
+  // ── Resolved Config (hydrated with models + prompts) ─────────────────────
 
-  // ── Convenience Methods ─────────────────────────────────────────────────────
+  resolveConfig(config: Config): ResolvedConfig {
+    const resolvedScanners = config.scanners.models
+      .map(id => this.getModel(id))
+      .filter((m): m is ModelRecord => m !== null && m.enabled);
 
-  /**
-   * Get or create default config for live trading.
-   * Seeds from agent-config.ts defaults if no config exists.
-   */
-  getOrCreateDefaultAgentConfig(): ReplayConfig {
-    const existing = this.getConfig('agent-default');
-    if (existing) return existing;
+    const resolvedJudges = config.judges.models
+      .map(id => this.getModel(id))
+      .filter((m): m is ModelRecord => m !== null && m.enabled);
 
-    // Seed from agent-config.ts
-    const { AGENT_CONFIG } = require('../../agent-config');
-    const config: ReplayConfig = {
-      id: 'agent-default',
-      name: 'Default Agent Config',
-      description: 'Default configuration for live trading agent',
-      createdAt: Date.now(),
-      ...AGENT_CONFIG,
+    const promptIds = new Set<string>();
+    promptIds.add(config.scanners.defaultPromptId);
+    promptIds.add(config.judges.promptId);
+    for (const pid of Object.values(config.scanners.promptAssignments)) {
+      promptIds.add(pid);
+    }
+
+    const resolvedPrompts: Record<string, PromptRecord> = {};
+    for (const pid of promptIds) {
+      const prompt = this.getPrompt(pid);
+      if (prompt) resolvedPrompts[pid] = prompt;
+    }
+
+    return {
+      ...config,
+      resolvedScanners,
+      resolvedJudges,
+      resolvedPrompts,
     };
-
-    this.saveConfig(config);
-    return config;
   }
 
-  /**
-   * Get or create default config for replay.
-   * Seeds from replay/config.ts DEFAULT_CONFIG if no config exists.
-   */
-  getOrCreateDefaultReplayConfig(): ReplayConfig {
-    const existing = this.getConfig('replay-default');
-    if (existing) return existing;
-
-    // Seed from replay/config.ts
-    const { DEFAULT_CONFIG } = require('../replay/config');
-    const config: ReplayConfig = {
-      id: 'replay-default',
-      name: 'Default Replay Config',
-      description: 'Default configuration for replay system',
-      createdAt: Date.now(),
-      ...DEFAULT_CONFIG,
-    };
-
-    this.saveConfig(config);
-    return config;
+  resolveForSubsystem(subsystem: string): ResolvedConfig | null {
+    const config = this.loadForSubsystem(subsystem);
+    return config ? this.resolveConfig(config) : null;
   }
-
-  // ── Cleanup ───────────────────────────────────────────────────────────────
-
-  close(): void {
-    this.db.close();
-  }
-}
-
-// Singleton instance for convenience
-let defaultManager: ConfigManager | null = null;
-
-export function getConfigManager(): ConfigManager {
-  if (!defaultManager) {
-    defaultManager = new ConfigManager();
-  }
-  return defaultManager;
-}
-
-export function createConfigManager(dbPath?: string): ConfigManager {
-  return new ConfigManager(dbPath);
 }

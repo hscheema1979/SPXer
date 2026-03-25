@@ -54,7 +54,7 @@ run_replay() {
   echo "▶ [$date] Starting..." > "$logfile"
   echo "---" >> "$logfile"
 
-  npx tsx scripts/backtest/replay-full.ts "$date" >> "$logfile" 2>&1
+  npx tsx src/replay/cli.ts run "$date" >> "$logfile" 2>&1
 
   if [ $? -eq 0 ]; then
     echo "✅ [$date] COMPLETE" | tee -a "$logfile"

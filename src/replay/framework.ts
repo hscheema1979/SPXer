@@ -8,7 +8,10 @@ import Database from 'better-sqlite3';
 import type { BarSummary } from '../agent/types';
 import type { ContractState } from '../agent/market-feed';
 import type { ReplayBar, ReplayContract, ReplayContext, CycleSnapshot, CycleHandlers } from './types';
-import { etLabel, minutesToClose, parseIndicators } from './metrics';
+import { etLabel, minutesToClose, parseIndicators, etToUnix } from './metrics';
+
+// Configurable data source: 'bars' (live) or 'replay_bars' (sanitized Polygon)
+const REPLAY_DATA_SOURCE = process.env.REPLAY_DATA_SOURCE || 'replay_bars';
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -101,20 +104,25 @@ export function buildCycleSnapshot(ctx: ReplayContext, atTs: number): CycleSnaps
 }
 
 export function createReplayContext(db: Database.Database, date: string): ReplayContext {
-  const sessionStart = Math.floor(new Date(date + 'T09:30:00-04:00').getTime() / 1000);
+  const sessionStart = etToUnix(date, '09:30');
   const sessionEnd = sessionStart + 390 * 60;
 
   const spxRows = db.prepare(`
     SELECT ts, open, high, low, close, volume, indicators
-    FROM bars WHERE symbol='SPX' AND timeframe='1m' AND ts >= ? AND ts <= ?
+    FROM ${REPLAY_DATA_SOURCE} WHERE symbol='SPX' AND timeframe='1m' AND ts >= ? AND ts <= ?
     ORDER BY ts
   `).all(sessionStart, sessionEnd) as ReplayBar[];
 
   const contractRows = db.prepare(`
-    SELECT DISTINCT c.symbol, c.type, c.strike, c.expiry
-    FROM contracts c
-    JOIN bars b ON b.symbol = c.symbol
-    WHERE b.timeframe='1m' AND b.ts >= ? AND b.ts <= ?
+    SELECT DISTINCT symbol,
+           CASE
+             WHEN symbol GLOB '*C[0-9]*' THEN 'call'
+             ELSE 'put'
+           END as type,
+           CAST(substr(symbol, -8) AS INTEGER) / 1000.0 as strike,
+           '20' || substr(symbol, 5, 2) || '-' || substr(symbol, 7, 2) || '-' || substr(symbol, 9, 2) as expiry
+    FROM ${REPLAY_DATA_SOURCE}
+    WHERE timeframe='1m' AND ts >= ? AND ts <= ? AND symbol LIKE 'SPXW%'
   `).all(sessionStart, sessionEnd) as ReplayContract[];
 
   return {
@@ -131,7 +139,7 @@ export function createReplayContext(db: Database.Database, date: string): Replay
 export function getAvailableDays(db: Database.Database): string[] {
   const rows = db.prepare(`
     SELECT DISTINCT date(ts, 'unixepoch', '-5 hours') as d
-    FROM bars WHERE symbol='SPX' AND timeframe='1m'
+    FROM ${REPLAY_DATA_SOURCE} WHERE symbol='SPX' AND timeframe='1m'
     ORDER BY d
   `).all() as { d: string }[];
   return rows.map(r => r.d);

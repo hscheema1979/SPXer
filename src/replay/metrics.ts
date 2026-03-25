@@ -74,13 +74,28 @@ export function buildSymbolFilter(date: string): string {
 }
 
 /**
+ * Convert an ET time string to a Unix timestamp, handling DST correctly.
+ * Uses Intl to determine whether a given date falls in EDT or EST.
+ */
+export function etToUnix(date: string, timeET: string): number {
+  const [h, m] = timeET.split(':').map(Number);
+  // Determine UTC offset for this date by comparing UTC noon to ET noon
+  const testDate = new Date(`${date}T12:00:00Z`);
+  const etHour = parseInt(
+    testDate.toLocaleString('en-US', { timeZone: 'America/New_York', hour: 'numeric', hour12: false })
+  );
+  const offset = 12 - etHour; // 5 for EST, 4 for EDT
+  return Math.floor(new Date(`${date}T${String(h + offset).padStart(2, '0')}:${String(m).padStart(2, '0')}:00Z`).getTime() / 1000);
+}
+
+/**
  * Build session timestamps from a date string.
  * Returns Unix timestamps for session start (09:30 ET) and end (16:00 ET).
+ * Handles EDT/EST correctly via Intl timezone resolution.
  */
 export function buildSessionTimestamps(date: string): { start: number; end: number; closeCutoff: number } {
-  const dateObj = new Date(`${date}T09:30:00-04:00`);
-  const start = Math.floor(dateObj.getTime() / 1000);
-  const end = start + 390 * 60;
-  const closeCutoff = end - 15 * 60;
+  const start = etToUnix(date, '09:30');
+  const end = start + 390 * 60;      // 6.5 hours
+  const closeCutoff = end - 15 * 60;  // 15 min before close
   return { start, end, closeCutoff };
 }

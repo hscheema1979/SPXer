@@ -1,14 +1,14 @@
 /**
  * Replay store — persistent storage for configs, runs, and results.
- * Uses a SEPARATE database (replay.db) from the production data (spxer.db).
+ * Uses the unified spxer.db database (replay tables created by config migration).
  */
 
 import Database from 'better-sqlite3';
 import * as path from 'path';
 import type { ReplayConfig, ReplayRun, ReplayResult } from './types';
 
-// Use process.cwd() to resolve from actual working directory, not __dirname (breaks in bundled code)
-const REPLAY_DB_PATH = path.resolve(process.cwd(), 'data/replay.db');
+// Unified database — replay tables live in spxer.db alongside market data and configs
+const REPLAY_DB_PATH = path.resolve(process.cwd(), 'data/spxer.db');
 
 export class ReplayStore {
   private db: Database.Database;
@@ -76,7 +76,7 @@ export class ReplayStore {
       INSERT OR REPLACE INTO replay_configs
       (id, name, description, config_json, baselineConfigId, createdAt, updatedAt)
       VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(config.id, config.name, config.description || '', JSON.stringify(config), config.baselineConfigId || null, config.createdAt, Date.now());
+    `).run(config.id, config.name, config.description || '', JSON.stringify(config), config.baselineId || null, config.createdAt, Date.now());
   }
 
   getConfig(id: string): ReplayConfig | null {
