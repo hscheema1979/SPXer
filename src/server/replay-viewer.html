@@ -707,11 +707,8 @@ const CONFIG_SECTIONS = [
   ]},
   { key: 'strikeSelector', title: 'Strike Selection', fields: [
     { path: 'strikeSelector.strikeSearchRange', label: 'Strike Search Range ($)', type: 'num', min: 10, max: 300 },
-    { path: 'strikeSelector.otmDistanceMin', label: 'OTM Distance Min ($)', type: 'num', min: 0, max: 20, step: 0.1 },
-    { path: 'strikeSelector.otmDistanceMax', label: 'OTM Distance Max ($)', type: 'num', min: 0, max: 50, step: 0.1 },
-    { path: 'strikeSelector.emergencyStrikeRange', label: 'Emergency Strike Range ($)', type: 'num', min: 50, max: 500 },
-    { path: 'strikeSelector.emergencyOtmMin', label: 'Emergency OTM Min ($)', type: 'num', min: 0, max: 20, step: 0.1 },
-    { path: 'strikeSelector.emergencyOtmMax', label: 'Emergency OTM Max ($)', type: 'num', min: 0, max: 50, step: 0.1 },
+    { path: 'strikeSelector.contractPriceMin', label: 'Contract Price Min ($)', type: 'num', min: 0, max: 20, step: 0.05 },
+    { path: 'strikeSelector.contractPriceMax', label: 'Contract Price Max ($)', type: 'num', min: 0, max: 50, step: 0.5 },
   ]},
   { key: 'timeWindows', title: 'Time Windows', fields: [
     { path: 'timeWindows.activeStart', label: 'Active Start (ET)', type: 'time' },
@@ -737,10 +734,6 @@ const CONFIG_SECTIONS = [
     { path: 'regime.timeWindows.middayEnd', label: 'Midday End (ET)', type: 'time' },
     { path: 'regime.timeWindows.gammaExpiryStart', label: 'Gamma Expiry Start', type: 'time' },
     { path: 'regime.timeWindows.noTradeStart', label: 'No-Trade Start', type: 'time' },
-    { path: 'regime.emergencyRsi.oversold', label: 'Emergency RSI Oversold', type: 'num', min: 1, max: 30 },
-    { path: 'regime.emergencyRsi.overbought', label: 'Emergency RSI Overbought', type: 'num', min: 70, max: 99 },
-    { path: 'regime.emergencyRsi.morningOversold', label: 'Morning Emergency Oversold', type: 'num', min: 1, max: 30 },
-    { path: 'regime.emergencyRsi.morningOverbought', label: 'Morning Emergency Overbought', type: 'num', min: 70, max: 99 },
   ]},
   { key: 'sizing', title: 'Position Sizing', collapsed: true, fields: [
     { path: 'sizing.baseDollarsPerTrade', label: 'Base $/Trade', type: 'num', min: 50, max: 10000 },

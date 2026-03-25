@@ -1,19 +1,11 @@
 /**
  * Deterministic OTM Strike Selector — no LLM involved.
  *
- * Per trader mandate: "We're ONLY trading out-of-the-money. The goal is
- * aggressive — not safe. Otherwise we'd be collecting dividends."
- *
  * Rules:
- *   - ONLY select OTM strikes priced $0.50-$3.00
- *   - On EMERGENCY signals (RSI <15 or >85): prefer 20-30pts OTM
- *   - On EXTREME signals (RSI <20 or >80): prefer 15-25pts OTM
- *   - Risk is controlled by position SIZE (1-2 contracts), not strike proximity
- *   - Deterministic: same inputs → same output. No hallucination risk.
- *
- * Per Gemini 3.1 Pro + Opus consensus: "Never ask an LLM to pick a strike.
- * Write a deterministic function that instantly grabs the first strike
- * priced $1.50-$2.00 when the trigger fires."
+ *   - ONLY select OTM strikes within the configured price band
+ *   - Prefer contracts priced near the ideal price point
+ *   - Risk is controlled by position SIZE, not strike proximity
+ *   - Deterministic: same inputs → same output
  */
 
 export interface ContractCandidate {
@@ -58,7 +50,7 @@ const DEFAULT_CONFIG: SelectionConfig = {
  * @param contracts - available option contracts with current prices
  * @param direction - 'bullish' (buy calls) or 'bearish' (buy puts)
  * @param spxPrice  - current SPX price
- * @param rsi       - current RSI (used to adjust OTM distance preference)
+ * @param rsi       - current RSI (unused, kept for API compatibility)
  * @param config    - optional override for selection parameters
  */
 export function selectStrike(
@@ -82,27 +74,13 @@ export function selectStrike(
 
   if (candidates.length === 0) return null;
 
-  // Score each candidate: prefer price closest to ideal ($1.50)
-  // On emergency signals, prefer FURTHER OTM (cheaper, more gamma leverage)
-  const isEmergency = rsi !== null && (rsi < 15 || rsi > 85);
-  const isExtreme = rsi !== null && (rsi < 20 || rsi > 80);
-
-  const targetPrice = isEmergency
-    ? Math.min(config.idealPrice, 1.00)     // prefer ~$1.00 on emergency
-    : isExtreme
-      ? config.idealPrice                    // prefer ~$1.50 on extreme
-      : Math.min(config.priceMax, 2.50);     // prefer ~$2.50 on normal
-
+  // Score each candidate: prefer price closest to ideal
   const scored = candidates.map(c => {
-    const priceScore = 1 - Math.abs(c.price - targetPrice) / config.priceMax;
+    const priceScore = 1 - Math.abs(c.price - config.idealPrice) / config.priceMax;
     const otmDistance = Math.abs(c.strike - spxPrice);
 
-    // Prefer further OTM on emergency (more gamma leverage)
-    const distanceScore = isEmergency
-      ? Math.min(1, otmDistance / 30)         // reward 20-30pts OTM
-      : isExtreme
-        ? Math.min(1, otmDistance / 25)       // reward 15-25pts OTM
-        : 1 - Math.min(1, otmDistance / 40);  // normal: don't go too far
+    // Prefer moderate OTM distance (not too close, not too far)
+    const distanceScore = 1 - Math.min(1, otmDistance / 40);
 
     // Volume bonus — prefer contracts with some liquidity
     const volScore = c.volume > 0 ? 0.1 : 0;
@@ -118,7 +96,6 @@ export function selectStrike(
   const best = scored[0].contract;
 
   // Position sizing: risk = contracts × price × 100 (multiplier)
-  // Target: maxRiskPerTrade / (price × 100 × stopPct)
   const riskPerContract = best.price * 100 * config.stopPct;
   const positionSize = Math.max(1, Math.min(3, Math.floor(config.maxRiskPerTrade / riskPerContract)));
 

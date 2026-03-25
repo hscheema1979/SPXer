@@ -193,40 +193,8 @@ export function classify(
 }
 
 /** Get the signal gate rules for the current regime.
- *  Config parameter required — all gate rules and RSI thresholds come from config.
- *  rsi parameter enables emergency overrides — forces gate open at extremes. */
+ *  Config parameter required — all gate rules come from config. */
 export function getSignalGate(regime: Regime, rsi: number | null = null, config: RegimeConfig): SignalGate {
-  // Morning requires MORE extreme readings to override (momentum dominates early)
-  const isMorning = regime === 'MORNING_MOMENTUM';
-  const emergencyOversoldThreshold = isMorning ? config.emergencyRsi.morningOversold : config.emergencyRsi.oversold;
-  const emergencyOverboughtThreshold = isMorning ? config.emergencyRsi.morningOverbought : config.emergencyRsi.overbought;
-
-  const isEmergencyOversold = rsi !== null && rsi < emergencyOversoldThreshold;
-  const isEmergencyOverbought = rsi !== null && rsi > emergencyOverboughtThreshold;
-
-  // Emergency override: extreme RSI forces the gate open
-  if (isEmergencyOversold && regime !== 'NO_TRADE') {
-    return {
-      allowOverboughtFade: false,
-      allowOversoldFade: true,        // FORCED OPEN — emergency oversold
-      allowBreakoutFollow: true,
-      allowVReversal: true,
-      overboughtMeaning: 'momentum',
-      oversoldMeaning: 'reversal',    // emergency = mean reversion
-    };
-  }
-  if (isEmergencyOverbought && regime !== 'NO_TRADE') {
-    return {
-      allowOverboughtFade: true,      // FORCED OPEN — emergency overbought
-      allowOversoldFade: false,
-      allowBreakoutFollow: true,
-      allowVReversal: true,
-      overboughtMeaning: 'reversal',  // emergency = mean reversion
-      oversoldMeaning: 'momentum',
-    };
-  }
-
-  // Return gate rules from config (NO hardcoded values)
   return config.signalGates[regime];
 }
 

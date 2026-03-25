@@ -47,12 +47,6 @@ export const DEFAULT_CONFIG: Config = {
       gammaExpiryStart: '14:00',
       noTradeStart: '15:30',
     },
-    emergencyRsi: {
-      oversold: 15,
-      overbought: 85,
-      morningOversold: 10,
-      morningOverbought: 92,
-    },
     signalGates: {
       MORNING_MOMENTUM: {
         allowOverboughtFade: false,
@@ -141,11 +135,8 @@ export const DEFAULT_CONFIG: Config = {
 
   strikeSelector: {
     strikeSearchRange: 80,
-    otmDistanceMin: 0.2,
-    otmDistanceMax: 8.0,
-    emergencyStrikeRange: 200,
-    emergencyOtmMin: 1.0,
-    emergencyOtmMax: 10.0,
+    contractPriceMin: 0.2,
+    contractPriceMax: 8.0,
   },
 
   timeWindows: {

@@ -68,12 +68,6 @@ export interface Config {
       gammaExpiryStart: string;
       noTradeStart: string;
     };
-    emergencyRsi: {
-      oversold: number;              // forces gates open for calls
-      overbought: number;            // forces gates open for puts
-      morningOversold: number;       // more stringent during morning
-      morningOverbought: number;
-    };
     signalGates: Record<string, SignalGate>;
   };
 
@@ -113,11 +107,8 @@ export interface Config {
 
   strikeSelector: {
     strikeSearchRange: number;
-    otmDistanceMin: number;
-    otmDistanceMax: number;
-    emergencyStrikeRange: number;
-    emergencyOtmMin: number;
-    emergencyOtmMax: number;
+    contractPriceMin: number;        // min option premium to consider ($)
+    contractPriceMax: number;        // max option premium to consider ($)
   };
 
   timeWindows: {
