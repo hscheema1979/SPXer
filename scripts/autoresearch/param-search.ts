@@ -1,8 +1,8 @@
 /**
  * param-search.ts — Multi-dimensional parameter optimizer for replay config.
  *
- * Searches across: strike range × RSI thresholds × stop/TP × time windows
- * Runs the actual replay engine (not shell scripts) for each config variant.
+ * Searches across: strike range × RSI × HMA/EMA periods × timeframe × stop/TP × time windows
+ * Runs the core replay engine (shared with live agent via src/core/) for each variant.
  * Tracks all results in TSV for analysis.
  *
  * Usage:
@@ -17,9 +17,9 @@ dotenv.config();
 import * as fs from 'fs';
 import * as path from 'path';
 import { runReplay } from '../../src/replay/machine';
-import { DEFAULT_CONFIG, mergeConfig } from '../../src/replay/config';
+import { DEFAULT_CONFIG, mergeConfig } from '../../src/config/defaults';
 import { ReplayStore } from '../../src/replay/store';
-import type { ReplayConfig, ReplayResult } from '../../src/replay/types';
+import type { Config } from '../../src/config/types';
 
 // ── Configuration ──────────────────────────────────────────────────────────
 
@@ -29,9 +29,9 @@ const ALL_DATES = [
   '2026-03-02', '2026-03-03', '2026-03-04', '2026-03-05', '2026-03-06',
   '2026-03-09', '2026-03-10', '2026-03-11', '2026-03-12', '2026-03-13',
   '2026-03-16', '2026-03-17', '2026-03-18', '2026-03-19', '2026-03-20',
+  '2026-03-23',
 ];
 
-// Parse CLI flags
 const args = process.argv.slice(2);
 const flags: Record<string, string> = {};
 for (const a of args) {
@@ -50,6 +50,8 @@ interface ParamSet {
   id: string;
   label: string;
   strikeSearchRange: number;
+  contractPriceMin: number;
+  contractPriceMax: number;
   rsiOversold: number;
   rsiOverbought: number;
   optionRsiOversold: number;
@@ -59,226 +61,178 @@ interface ParamSet {
   tradingStartEt: string;
   tradingEndEt: string;
   maxPositionsOpen: number;
+  hmaCrossFast: number;
+  hmaCrossSlow: number;
+  emaCrossFast: number;
+  emaCrossSlow: number;
+  enableHmaCrosses: boolean;
+  enableEmaCrosses: boolean;
+  timeframe: string;
 }
 
 function generateParamSets(): ParamSet[] {
   const sets: ParamSet[] = [];
 
-  // Dimension 1: Strike range
-  const strikeRanges = [40, 60, 80, 100, 120, 150];
+  const baseline: ParamSet = {
+    id: 'baseline',
+    label: 'Baseline',
+    strikeSearchRange: 80,
+    contractPriceMin: 0.2,
+    contractPriceMax: 8.0,
+    rsiOversold: 20,
+    rsiOverbought: 80,
+    optionRsiOversold: 40,
+    optionRsiOverbought: 60,
+    stopLossPercent: 0,
+    takeProfitMultiplier: 3,
+    tradingStartEt: '09:30',
+    tradingEndEt: '15:45',
+    maxPositionsOpen: 3,
+    hmaCrossFast: 5,
+    hmaCrossSlow: 19,
+    emaCrossFast: 9,
+    emaCrossSlow: 21,
+    enableHmaCrosses: true,
+    enableEmaCrosses: false,
+    timeframe: '1m',
+  };
+  sets.push(baseline);
 
-  // Dimension 2: RSI thresholds (SPX-level)
-  const rsiPairs: [number, number][] = [
-    [15, 85], [20, 80], [25, 75], [30, 70],
+  // ── Sweep 1: HMA period combos ──────────────────────────────────────────
+  const hmaCombos: [number, number, string][] = [
+    [5, 19, 'HMA 5×19'],
+    [5, 25, 'HMA 5×25'],
+    [19, 25, 'HMA 19×25'],
   ];
+  for (const [fast, slow, label] of hmaCombos) {
+    if (fast === baseline.hmaCrossFast && slow === baseline.hmaCrossSlow) continue;
+    sets.push({ ...baseline, id: `hma-${fast}x${slow}`, label, hmaCrossFast: fast, hmaCrossSlow: slow });
+  }
 
-  // Dimension 3: Option RSI thresholds
-  const optRsiPairs: [number, number][] = [
-    [25, 75], [30, 70], [35, 65],
+  // ── Sweep 2: EMA period combos ──────────────────────────────────────────
+  const emaCombos: [number, number, string][] = [
+    [9, 21, 'EMA 9×21'],
+    [9, 50, 'EMA 9×50'],
+    [21, 50, 'EMA 21×50'],
   ];
+  for (const [fast, slow, label] of emaCombos) {
+    sets.push({ ...baseline, id: `ema-${fast}x${slow}`, label, enableEmaCrosses: true, emaCrossFast: fast, emaCrossSlow: slow });
+  }
 
-  // Dimension 4: Stop loss / Take profit combos
-  const stopTpCombos: [number, number][] = [
-    [40, 3], [50, 5], [60, 5], [70, 5], [70, 8], [80, 8], [80, 10],
+  // ── Sweep 3: Timeframe ──────────────────────────────────────────────────
+  for (const tf of ['2m', '3m', '5m']) {
+    sets.push({ ...baseline, id: `tf-${tf}`, label: `Timeframe ${tf}`, timeframe: tf });
+  }
+
+  // ── Sweep 4: Contract price band ────────────────────────────────────────
+  const priceBands: [number, number, string][] = [
+    [0.2, 3.0,  'Price $0.20-$3'],
+    [0.2, 5.0,  'Price $0.20-$5'],
+    [0.5, 8.0,  'Price $0.50-$8'],
+    [1.0, 10.0, 'Price $1-$10'],
+    [0.2, 15.0, 'Price $0.20-$15'],
   ];
+  for (const [min, max, label] of priceBands) {
+    if (min === baseline.contractPriceMin && max === baseline.contractPriceMax) continue;
+    sets.push({ ...baseline, id: `price-${min}-${max}`, label, contractPriceMin: min, contractPriceMax: max });
+  }
 
-  // Dimension 5: Time windows
+  // ── Sweep 5: Strike range ──────────────────────────────────────────────
+  for (const sr of [40, 60, 100, 120, 150]) {
+    if (sr === baseline.strikeSearchRange) continue;
+    sets.push({ ...baseline, id: `strike-${sr}`, label: `Strike ±${sr}`, strikeSearchRange: sr });
+  }
+
+  // ── Sweep 6: RSI thresholds ─────────────────────────────────────────────
+  const rsiPairs: [number, number][] = [[15, 85], [25, 75], [30, 70]];
+  for (const [os, ob] of rsiPairs) {
+    if (os === baseline.rsiOversold && ob === baseline.rsiOverbought) continue;
+    sets.push({ ...baseline, id: `rsi-${os}-${ob}`, label: `RSI ${os}/${ob}`, rsiOversold: os, rsiOverbought: ob });
+  }
+
+  // ── Sweep 7: Option RSI thresholds ──────────────────────────────────────
+  const optRsiPairs: [number, number][] = [[25, 75], [30, 70], [35, 65]];
+  for (const [os, ob] of optRsiPairs) {
+    if (os === baseline.optionRsiOversold && ob === baseline.optionRsiOverbought) continue;
+    sets.push({ ...baseline, id: `optrsi-${os}-${ob}`, label: `Opt RSI ${os}/${ob}`, optionRsiOversold: os, optionRsiOverbought: ob });
+  }
+
+  // ── Sweep 8: Stop/TP combos ─────────────────────────────────────────────
+  const stopTpCombos: [number, number][] = [[0, 5], [50, 3], [50, 5], [80, 5], [80, 10], [0, 2]];
+  for (const [sl, tp] of stopTpCombos) {
+    if (sl === baseline.stopLossPercent && tp === baseline.takeProfitMultiplier) continue;
+    sets.push({ ...baseline, id: `sl${sl}-tp${tp}`, label: `SL ${sl}% / TP ${tp}x`, stopLossPercent: sl, takeProfitMultiplier: tp });
+  }
+
+  // ── Sweep 9: Time windows ──────────────────────────────────────────────
   const timeWindows: [string, string, string][] = [
-    ['all-day',    '09:30', '15:45'],
     ['morning',    '09:30', '11:30'],
     ['midday',     '11:00', '14:00'],
     ['afternoon',  '13:00', '15:45'],
     ['power-hour', '14:00', '15:45'],
   ];
-
-  // Dimension 6: Max positions
-  const maxPositions = [2, 3, 5];
-
-  // Full grid would be 6 × 4 × 3 × 7 × 5 × 3 = 7,560 combos — too many.
-  // Use smart sampling: vary one dimension at a time from baseline, then targeted combos.
-
-  const baseline: ParamSet = {
-    id: 'baseline',
-    label: 'Baseline (DEFAULT_CONFIG)',
-    strikeSearchRange: 60,
-    rsiOversold: 20,
-    rsiOverbought: 80,
-    optionRsiOversold: 30,
-    optionRsiOverbought: 70,
-    stopLossPercent: 50,
-    takeProfitMultiplier: 5,
-    tradingStartEt: '09:30',
-    tradingEndEt: '15:45',
-    maxPositionsOpen: 3,
-  };
-  sets.push(baseline);
-
-  // Sweep 1: Strike range (keep everything else at baseline)
-  for (const sr of strikeRanges) {
-    if (sr === baseline.strikeSearchRange) continue;
-    sets.push({
-      ...baseline,
-      id: `strike-${sr}`,
-      label: `Strike range ±${sr}`,
-      strikeSearchRange: sr,
-    });
-  }
-
-  // Sweep 2: RSI thresholds
-  for (const [os, ob] of rsiPairs) {
-    if (os === baseline.rsiOversold && ob === baseline.rsiOverbought) continue;
-    sets.push({
-      ...baseline,
-      id: `rsi-${os}-${ob}`,
-      label: `RSI ${os}/${ob}`,
-      rsiOversold: os,
-      rsiOverbought: ob,
-    });
-  }
-
-  // Sweep 3: Option RSI thresholds
-  for (const [os, ob] of optRsiPairs) {
-    if (os === baseline.optionRsiOversold && ob === baseline.optionRsiOverbought) continue;
-    sets.push({
-      ...baseline,
-      id: `optrsi-${os}-${ob}`,
-      label: `Option RSI ${os}/${ob}`,
-      optionRsiOversold: os,
-      optionRsiOverbought: ob,
-    });
-  }
-
-  // Sweep 4: Stop/TP combos
-  for (const [sl, tp] of stopTpCombos) {
-    if (sl === baseline.stopLossPercent && tp === baseline.takeProfitMultiplier) continue;
-    sets.push({
-      ...baseline,
-      id: `stop${sl}-tp${tp}`,
-      label: `SL ${sl}% / TP ${tp}x`,
-      stopLossPercent: sl,
-      takeProfitMultiplier: tp,
-    });
-  }
-
-  // Sweep 5: Time windows
   for (const [name, start, end] of timeWindows) {
-    if (start === baseline.tradingStartEt && end === baseline.tradingEndEt) continue;
-    sets.push({
-      ...baseline,
-      id: `time-${name}`,
-      label: `Time: ${name} (${start}-${end})`,
-      tradingStartEt: start,
-      tradingEndEt: end,
-    });
+    sets.push({ ...baseline, id: `time-${name}`, label: `Time: ${name}`, tradingStartEt: start, tradingEndEt: end });
   }
 
-  // Sweep 6: Max positions
-  for (const mp of maxPositions) {
+  // ── Sweep 10: Max positions ─────────────────────────────────────────────
+  for (const mp of [1, 2, 5, 10]) {
     if (mp === baseline.maxPositionsOpen) continue;
-    sets.push({
-      ...baseline,
-      id: `maxpos-${mp}`,
-      label: `Max positions: ${mp}`,
-      maxPositionsOpen: mp,
-    });
+    sets.push({ ...baseline, id: `maxpos-${mp}`, label: `Max ${mp} positions`, maxPositionsOpen: mp });
   }
 
-  // Targeted combos: best-of-each combined
-  // Wide strike + tight RSI + wide stop
+  // ── Targeted combos ────────────────────────────────────────────────────
+  // Best of HMA 5×25 + 3m timeframe
   sets.push({
-    ...baseline,
-    id: 'combo-wide-tight',
-    label: 'Wide strike(120) + RSI 15/85 + SL 70%/TP 8x',
-    strikeSearchRange: 120,
-    rsiOversold: 15,
-    rsiOverbought: 85,
-    stopLossPercent: 70,
-    takeProfitMultiplier: 8,
+    ...baseline, id: 'combo-hma5x25-3m', label: 'HMA 5×25 | 3m',
+    hmaCrossFast: 5, hmaCrossSlow: 25, timeframe: '3m',
   });
 
-  // Morning-only with tight strikes
+  // HMA 5×25 + tight price band
   sets.push({
-    ...baseline,
-    id: 'combo-morning-tight',
-    label: 'Morning only + Strike 60 + RSI 25/75',
-    strikeSearchRange: 60,
-    rsiOversold: 25,
-    rsiOverbought: 75,
-    tradingStartEt: '09:30',
-    tradingEndEt: '11:30',
+    ...baseline, id: 'combo-hma5x25-tight', label: 'HMA 5×25 | $0.50-$5',
+    hmaCrossFast: 5, hmaCrossSlow: 25, contractPriceMin: 0.5, contractPriceMax: 5.0,
   });
 
-  // Afternoon with wide strikes
+  // 3m + tight option RSI
   sets.push({
-    ...baseline,
-    id: 'combo-afternoon-wide',
-    label: 'Afternoon + Strike 120 + RSI 20/80 + SL 80%/TP 10x',
-    strikeSearchRange: 120,
-    rsiOversold: 20,
-    rsiOverbought: 80,
-    stopLossPercent: 80,
-    takeProfitMultiplier: 10,
-    tradingStartEt: '13:00',
-    tradingEndEt: '15:45',
+    ...baseline, id: 'combo-3m-optrsi', label: '3m | Opt RSI 35/65',
+    timeframe: '3m', optionRsiOversold: 35, optionRsiOverbought: 65,
   });
 
-  // Power hour aggressive
+  // HMA + EMA dual signals
   sets.push({
-    ...baseline,
-    id: 'combo-power-hour',
-    label: 'Power hour + Strike 150 + RSI 15/85 + SL 80%/TP 10x + 5 pos',
-    strikeSearchRange: 150,
-    rsiOversold: 15,
-    rsiOverbought: 85,
-    stopLossPercent: 80,
-    takeProfitMultiplier: 10,
-    tradingStartEt: '14:00',
-    tradingEndEt: '15:45',
-    maxPositionsOpen: 5,
+    ...baseline, id: 'combo-hma-ema', label: 'HMA 5×19 + EMA 9×21',
+    enableEmaCrosses: true,
   });
 
-  // Conservative: narrow everything
+  // Conservative: 3m + tight everything
   sets.push({
-    ...baseline,
-    id: 'combo-conservative',
-    label: 'Conservative: Strike 40 + RSI 30/70 + SL 40%/TP 3x + 2 pos',
-    strikeSearchRange: 40,
-    rsiOversold: 30,
-    rsiOverbought: 70,
-    optionRsiOversold: 35,
-    optionRsiOverbought: 65,
-    stopLossPercent: 40,
-    takeProfitMultiplier: 3,
-    maxPositionsOpen: 2,
-  });
-
-  // Wide strike + option RSI 25/75 (more signals from wider band)
-  sets.push({
-    ...baseline,
-    id: 'combo-wide-optrsi',
-    label: 'Strike 120 + OptionRSI 25/75 + SL 60%/TP 5x',
-    strikeSearchRange: 120,
-    optionRsiOversold: 25,
-    optionRsiOverbought: 75,
-    stopLossPercent: 60,
+    ...baseline, id: 'combo-conservative-3m', label: '3m | SL 50% | TP 5x | MaxPos 2',
+    timeframe: '3m', stopLossPercent: 50, takeProfitMultiplier: 5, maxPositionsOpen: 2,
   });
 
   return sets;
 }
 
-// ── Build ReplayConfig from ParamSet ───────────────────────────────────────
+// ── Build Config from ParamSet ────────────────────────────────────────────
 
-function buildConfig(params: ParamSet): ReplayConfig {
+function buildConfig(params: ParamSet): Config {
   return mergeConfig(DEFAULT_CONFIG, {
     id: `search-${params.id}`,
     name: `Search: ${params.label}`,
-    description: `Autoresearch param search variant: ${params.label}`,
     signals: {
       ...DEFAULT_CONFIG.signals,
       rsiOversold: params.rsiOversold,
       rsiOverbought: params.rsiOverbought,
       optionRsiOversold: params.optionRsiOversold,
       optionRsiOverbought: params.optionRsiOverbought,
+      enableHmaCrosses: params.enableHmaCrosses,
+      enableEmaCrosses: params.enableEmaCrosses,
+      hmaCrossFast: params.hmaCrossFast,
+      hmaCrossSlow: params.hmaCrossSlow,
+      emaCrossFast: params.emaCrossFast,
+      emaCrossSlow: params.emaCrossSlow,
     },
     position: {
       ...DEFAULT_CONFIG.position,
@@ -289,16 +243,26 @@ function buildConfig(params: ParamSet): ReplayConfig {
     strikeSelector: {
       ...DEFAULT_CONFIG.strikeSelector,
       strikeSearchRange: params.strikeSearchRange,
+      contractPriceMin: params.contractPriceMin,
+      contractPriceMax: params.contractPriceMax,
     },
     timeWindows: {
       ...DEFAULT_CONFIG.timeWindows,
       activeStart: params.tradingStartEt,
       activeEnd: params.tradingEndEt,
     },
+    pipeline: {
+      ...DEFAULT_CONFIG.pipeline,
+      timeframe: params.timeframe as any,
+    },
+    // Disable scanners/judges for fast deterministic runs
+    scanners: { ...DEFAULT_CONFIG.scanners, enabled: false },
+    judges: { ...DEFAULT_CONFIG.judges, enabled: false },
+    regime: { ...DEFAULT_CONFIG.regime, enabled: false },
   });
 }
 
-// ── Result tracking ────────────────────────────────────────────────────────
+// ── Result tracking ──────────────────────────────────────────────────────
 
 interface SearchResult {
   paramId: string;
@@ -312,11 +276,15 @@ interface SearchResult {
   maxWin: number;
   maxLoss: number;
   sharpe: number;
+  // Params for logging
   strikeRange: number;
+  priceMin: number;
+  priceMax: number;
+  hmaCross: string;
+  emaCross: string;
+  timeframe: string;
   rsiOs: number;
   rsiOb: number;
-  optRsiOs: number;
-  optRsiOb: number;
   stopLoss: number;
   tpMult: number;
   timeStart: string;
@@ -328,8 +296,8 @@ function initTsv() {
   const header = [
     'param_id', 'label', 'dates', 'trades', 'wins', 'win_rate', 'total_pnl',
     'avg_daily_pnl', 'max_win', 'max_loss', 'sharpe',
-    'strike_range', 'rsi_os', 'rsi_ob', 'opt_rsi_os', 'opt_rsi_ob',
-    'stop_loss', 'tp_mult', 'time_start', 'time_end', 'max_pos',
+    'strike_range', 'price_min', 'price_max', 'hma_cross', 'ema_cross', 'timeframe',
+    'rsi_os', 'rsi_ob', 'stop_loss', 'tp_mult', 'time_start', 'time_end', 'max_pos',
   ].join('\t');
   fs.writeFileSync(RESULTS_FILE, header + '\n');
 }
@@ -339,13 +307,13 @@ function appendResult(r: SearchResult) {
     r.paramId, r.label, r.dates, r.trades, r.wins, r.winRate.toFixed(3),
     r.totalPnl.toFixed(0), r.avgDailyPnl.toFixed(0), r.maxWin.toFixed(0),
     r.maxLoss.toFixed(0), (r.sharpe || 0).toFixed(3),
-    r.strikeRange, r.rsiOs, r.rsiOb, r.optRsiOs, r.optRsiOb,
-    r.stopLoss, r.tpMult, r.timeStart, r.timeEnd, r.maxPos,
+    r.strikeRange, r.priceMin, r.priceMax, r.hmaCross, r.emaCross, r.timeframe,
+    r.rsiOs, r.rsiOb, r.stopLoss, r.tpMult, r.timeStart, r.timeEnd, r.maxPos,
   ].join('\t');
   fs.appendFileSync(RESULTS_FILE, row + '\n');
 }
 
-// ── Logging ────────────────────────────────────────────────────────────────
+// ── Logging ──────────────────────────────────────────────────────────────
 
 function log(msg: string) {
   const ts = new Date().toISOString();
@@ -354,13 +322,13 @@ function log(msg: string) {
   fs.appendFileSync(LOG_FILE, line + '\n');
 }
 
-// ── Main ───────────────────────────────────────────────────────────────────
+// ── Main ─────────────────────────────────────────────────────────────────
 
 async function main() {
   const paramSets = generateParamSets();
 
   log('═══════════════════════════════════════════════════════════');
-  log('  SPXer Parameter Search — Autoresearch');
+  log('  SPXer Parameter Search v2 — Core Modules');
   log('═══════════════════════════════════════════════════════════');
   log(`  Variants: ${paramSets.length}`);
   log(`  Dates: ${DATES.length} (${DATES[0]} → ${DATES[DATES.length - 1]})`);
@@ -375,33 +343,19 @@ async function main() {
     const params = paramSets[pi];
     const config = buildConfig(params);
 
-    log(`────────────────────────────────────────────────────────────`);
-    log(`  [${pi + 1}/${paramSets.length}] ${params.label}`);
-    log(`────────────────────────────────────────────────────────────`);
+    log(`─── [${pi + 1}/${paramSets.length}] ${params.label} ───`);
 
-    // Save config to store so runReplay can create runs (FK constraint)
     const store = new ReplayStore();
     store.saveConfig(config);
     store.close();
 
-    let totalTrades = 0;
-    let totalWins = 0;
-    let totalPnl = 0;
-    let maxWin = 0;
-    let maxLoss = 0;
-    let completedDates = 0;
+    let totalTrades = 0, totalWins = 0, totalPnl = 0;
+    let maxWin = 0, maxLoss = 0, completedDates = 0;
     const dailyPnls: number[] = [];
 
     for (const date of DATES) {
       try {
-        // Set date on config
-        const dateConfig = { ...config, date };
-
-        const result = await runReplay(dateConfig, date, {
-          verbose: false,
-          noJudge: true,
-        });
-
+        const result = await runReplay(config, date, { verbose: false, noJudge: true });
         totalTrades += result.trades;
         totalWins += result.wins;
         totalPnl += result.totalPnl;
@@ -409,10 +363,6 @@ async function main() {
         if (result.maxWin > maxWin) maxWin = result.maxWin;
         if (result.maxLoss < maxLoss) maxLoss = result.maxLoss;
         completedDates++;
-
-        if (result.trades > 0) {
-          log(`    ${date}: ${result.trades} trades, ${result.wins} wins, $${result.totalPnl.toFixed(0)}`);
-        }
       } catch (err: any) {
         log(`    ${date}: ERROR — ${err.message}`);
       }
@@ -421,13 +371,11 @@ async function main() {
     const winRate = totalTrades > 0 ? totalWins / totalTrades : 0;
     const avgDailyPnl = completedDates > 0 ? totalPnl / completedDates : 0;
 
-    // Compute Sharpe ratio (daily)
     let sharpe = 0;
     if (dailyPnls.length > 1) {
       const mean = dailyPnls.reduce((s, v) => s + v, 0) / dailyPnls.length;
       const variance = dailyPnls.reduce((s, v) => s + (v - mean) ** 2, 0) / (dailyPnls.length - 1);
-      const std = Math.sqrt(variance);
-      sharpe = std > 0 ? mean / std : 0;
+      sharpe = Math.sqrt(variance) > 0 ? mean / Math.sqrt(variance) : 0;
     }
 
     const searchResult: SearchResult = {
@@ -443,10 +391,13 @@ async function main() {
       maxLoss,
       sharpe,
       strikeRange: params.strikeSearchRange,
+      priceMin: params.contractPriceMin,
+      priceMax: params.contractPriceMax,
+      hmaCross: `${params.hmaCrossFast}×${params.hmaCrossSlow}`,
+      emaCross: params.enableEmaCrosses ? `${params.emaCrossFast}×${params.emaCrossSlow}` : 'off',
+      timeframe: params.timeframe,
       rsiOs: params.rsiOversold,
       rsiOb: params.rsiOverbought,
-      optRsiOs: params.optionRsiOversold,
-      optRsiOb: params.optionRsiOverbought,
       stopLoss: params.stopLossPercent,
       tpMult: params.takeProfitMultiplier,
       timeStart: params.tradingStartEt,
@@ -457,66 +408,37 @@ async function main() {
     allResults.push(searchResult);
     appendResult(searchResult);
 
-    log(`  → ${totalTrades} trades | ${(winRate * 100).toFixed(1)}% WR | $${totalPnl.toFixed(0)} P&L | $${avgDailyPnl.toFixed(0)}/day | Sharpe ${sharpe.toFixed(2)}`);
-    log('');
+    log(`  → ${totalTrades} trades | ${(winRate * 100).toFixed(1)}% WR | $${totalPnl.toFixed(0)} | Sharpe ${sharpe.toFixed(2)}`);
   }
 
-  // ── Summary: top N by Sharpe ratio ────────────────────────────────────
+  // ── Rankings ────────────────────────────────────────────────────────────
   log('');
   log('════════════════════════════════════════════════════════════');
-  log('  TOP CONFIGS BY SHARPE RATIO');
+  log('  TOP BY SHARPE (min 5 trades)');
   log('════════════════════════════════════════════════════════════');
 
-  const ranked = [...allResults]
-    .filter(r => r.trades >= 5) // minimum 5 trades to be meaningful
-    .sort((a, b) => b.sharpe - a.sharpe);
-
-  for (let i = 0; i < Math.min(TOP_N, ranked.length); i++) {
-    const r = ranked[i];
-    log(`  #${i + 1}: ${r.label}`);
-    log(`      Sharpe=${r.sharpe.toFixed(3)} | WR=${(r.winRate * 100).toFixed(1)}% | P&L=$${r.totalPnl.toFixed(0)} | ${r.trades} trades`);
-    log(`      Strike=±${r.strikeRange} RSI=${r.rsiOs}/${r.rsiOb} SL=${r.stopLoss}% TP=${r.tpMult}x Time=${r.timeStart}-${r.timeEnd} MaxPos=${r.maxPos}`);
+  const bySharpe = [...allResults].filter(r => r.trades >= 5).sort((a, b) => b.sharpe - a.sharpe);
+  for (let i = 0; i < Math.min(TOP_N, bySharpe.length); i++) {
+    const r = bySharpe[i];
+    log(`  #${i + 1}: ${r.label} | Sharpe=${r.sharpe.toFixed(3)} WR=${(r.winRate * 100).toFixed(1)}% P&L=$${r.totalPnl.toFixed(0)} (${r.trades} trades)`);
   }
 
   log('');
   log('════════════════════════════════════════════════════════════');
-  log('  TOP CONFIGS BY WIN RATE (min 10 trades)');
+  log('  TOP BY TOTAL P&L');
   log('════════════════════════════════════════════════════════════');
 
-  const byWinRate = [...allResults]
-    .filter(r => r.trades >= 10)
-    .sort((a, b) => b.winRate - a.winRate);
-
-  for (let i = 0; i < Math.min(TOP_N, byWinRate.length); i++) {
-    const r = byWinRate[i];
-    log(`  #${i + 1}: ${r.label}`);
-    log(`      WR=${(r.winRate * 100).toFixed(1)}% | Sharpe=${r.sharpe.toFixed(3)} | P&L=$${r.totalPnl.toFixed(0)} | ${r.trades} trades`);
-  }
-
-  log('');
-  log('════════════════════════════════════════════════════════════');
-  log('  TOP CONFIGS BY TOTAL P&L');
-  log('════════════════════════════════════════════════════════════');
-
-  const byPnl = [...allResults]
-    .filter(r => r.trades >= 5)
-    .sort((a, b) => b.totalPnl - a.totalPnl);
-
+  const byPnl = [...allResults].filter(r => r.trades >= 5).sort((a, b) => b.totalPnl - a.totalPnl);
   for (let i = 0; i < Math.min(TOP_N, byPnl.length); i++) {
     const r = byPnl[i];
-    log(`  #${i + 1}: ${r.label}`);
-    log(`      P&L=$${r.totalPnl.toFixed(0)} | WR=${(r.winRate * 100).toFixed(1)}% | Sharpe=${r.sharpe.toFixed(3)} | ${r.trades} trades | $${r.avgDailyPnl.toFixed(0)}/day`);
+    log(`  #${i + 1}: ${r.label} | P&L=$${r.totalPnl.toFixed(0)} WR=${(r.winRate * 100).toFixed(1)}% Sharpe=${r.sharpe.toFixed(3)} (${r.trades} trades)`);
   }
 
   log('');
-  log('════════════════════════════════════════════════════════════');
-  log(`  SEARCH COMPLETE — ${allResults.length} variants tested`);
-  log(`  Results: ${RESULTS_FILE}`);
-  log('════════════════════════════════════════════════════════════');
+  log(`  DONE — ${allResults.length} variants tested | Results: ${RESULTS_FILE}`);
 }
 
 main().catch(err => {
   log(`FATAL: ${err.message}`);
-  console.error(err);
   process.exit(1);
 });
