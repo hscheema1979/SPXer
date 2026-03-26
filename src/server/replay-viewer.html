@@ -260,9 +260,11 @@ async function loadDay() {
   // Set ET offset for this date (EST=-5h or EDT=-4h)
   etOffsetSec = isDST(date) ? -4 * 3600 : -5 * 3600;
 
-  // Fetch everything in parallel (SPX with 50-bar warmup for HMA seeding)
-  const [spxBars, results, contracts] = await Promise.all([
-    fetch(`${API}/bars?date=${date}&symbol=SPX&warmup=50`).then(r => r.json()),
+  // Fetch everything in parallel — 1m bars + 3m/5m bars from DB (pre-computed with continuity)
+  const [spxBars, spx3m, spx5m, results, contracts] = await Promise.all([
+    fetch(`${API}/bars?date=${date}&symbol=SPX`).then(r => r.json()),
+    fetch(`${API}/bars?date=${date}&symbol=SPX&tf=3m`).then(r => r.json()),
+    fetch(`${API}/bars?date=${date}&symbol=SPX&tf=5m`).then(r => r.json()),
     fetch(`${API}/results?date=${date}&configId=${configId}`).then(r => r.json()),
     fetch(`${API}/contracts?date=${date}`).then(r => r.json()),
   ]);
@@ -271,7 +273,7 @@ async function loadDay() {
   allTrades = results.trades || [];
 
   renderSummary(results.summary);
-  renderSpxChart(spxBars, allTrades);
+  renderSpxChart(spxBars, allTrades, spx3m, spx5m);
   renderTradesTable(allTrades);
   closeExpanded();
   renderMiniCharts(date);
@@ -375,7 +377,7 @@ function computeMultiTfHma(bars1m, period, tfMinutes) {
 
 // ── SPX Chart ──────────────────────────────────────────────────────────────
 
-function renderSpxChart(bars, trades) {
+function renderSpxChart(bars, trades, bars3m, bars5m) {
   const container = document.getElementById('spx-chart');
   container.innerHTML = '';
 
@@ -424,41 +426,38 @@ function renderSpxChart(bars, trades) {
     }).setData(hma19Data);
   }
 
-  // Multi-timeframe HMA overlays — 3m and 5m computed client-side
-  // HMA5 on 3m bars (thicker, brighter — shows smoothed trend)
-  const hma5_3m = computeMultiTfHma(bars, 5, 3);
-  if (hma5_3m.length) {
-    spxChart.addSeries(LightweightCharts.LineSeries, {
-      color: '#f59e0b88', lineWidth: 2, lineStyle: 0, priceLineVisible: false,
-      lastValueVisible: false, crosshairMarkerVisible: false,
-      title: 'HMA5 3m',
-    }).setData(hma5_3m);
+  // Multi-timeframe HMA overlays — from pre-computed DB bars (with cross-day continuity)
+  if (bars3m && bars3m.length) {
+    const hma5_3m = bars3m.filter(b => b.ind.hma5).map(b => ({ time: toEtDisplay(b.ts), value: b.ind.hma5 }));
+    const hma19_3m = bars3m.filter(b => b.ind.hma19).map(b => ({ time: toEtDisplay(b.ts), value: b.ind.hma19 }));
+    if (hma5_3m.length) {
+      spxChart.addSeries(LightweightCharts.LineSeries, {
+        color: '#f59e0b88', lineWidth: 2, lineStyle: 0, priceLineVisible: false,
+        lastValueVisible: false, crosshairMarkerVisible: false, title: 'HMA5 3m',
+      }).setData(hma5_3m);
+    }
+    if (hma19_3m.length) {
+      spxChart.addSeries(LightweightCharts.LineSeries, {
+        color: '#f59e0b55', lineWidth: 2, lineStyle: 2, priceLineVisible: false,
+        lastValueVisible: false, crosshairMarkerVisible: false, title: 'HMA19 3m',
+      }).setData(hma19_3m);
+    }
   }
-  const hma19_3m = computeMultiTfHma(bars, 19, 3);
-  if (hma19_3m.length) {
-    spxChart.addSeries(LightweightCharts.LineSeries, {
-      color: '#f59e0b55', lineWidth: 2, lineStyle: 2, priceLineVisible: false,
-      lastValueVisible: false, crosshairMarkerVisible: false,
-      title: 'HMA19 3m',
-    }).setData(hma19_3m);
-  }
-
-  // HMA5 on 5m bars (thickest — slow trend)
-  const hma5_5m = computeMultiTfHma(bars, 5, 5);
-  if (hma5_5m.length) {
-    spxChart.addSeries(LightweightCharts.LineSeries, {
-      color: '#a78bfa99', lineWidth: 2, lineStyle: 0, priceLineVisible: false,
-      lastValueVisible: false, crosshairMarkerVisible: false,
-      title: 'HMA5 5m',
-    }).setData(hma5_5m);
-  }
-  const hma19_5m = computeMultiTfHma(bars, 19, 5);
-  if (hma19_5m.length) {
-    spxChart.addSeries(LightweightCharts.LineSeries, {
-      color: '#a78bfa55', lineWidth: 2, lineStyle: 2, priceLineVisible: false,
-      lastValueVisible: false, crosshairMarkerVisible: false,
-      title: 'HMA19 5m',
-    }).setData(hma19_5m);
+  if (bars5m && bars5m.length) {
+    const hma5_5m = bars5m.filter(b => b.ind.hma5).map(b => ({ time: toEtDisplay(b.ts), value: b.ind.hma5 }));
+    const hma19_5m = bars5m.filter(b => b.ind.hma19).map(b => ({ time: toEtDisplay(b.ts), value: b.ind.hma19 }));
+    if (hma5_5m.length) {
+      spxChart.addSeries(LightweightCharts.LineSeries, {
+        color: '#a78bfa99', lineWidth: 2, lineStyle: 0, priceLineVisible: false,
+        lastValueVisible: false, crosshairMarkerVisible: false, title: 'HMA5 5m',
+      }).setData(hma5_5m);
+    }
+    if (hma19_5m.length) {
+      spxChart.addSeries(LightweightCharts.LineSeries, {
+        color: '#a78bfa55', lineWidth: 2, lineStyle: 2, priceLineVisible: false,
+        lastValueVisible: false, crosshairMarkerVisible: false, title: 'HMA19 5m',
+      }).setData(hma19_5m);
+    }
   }
 
   // Entry/exit markers on SPX chart
