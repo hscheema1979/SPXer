@@ -1,0 +1,44 @@
+{
+  "signals": {
+    "enableRsiCrosses": true,
+    "enableHmaCrosses": true,
+    "enablePriceCrossHma": false,
+    "enableEmaCrosses": false,
+    "requireUnderlyingHmaCross": true,
+    "hmaCrossFast": 5,
+    "hmaCrossSlow": 19,
+    "emaCrossFast": 9,
+    "emaCrossSlow": 21,
+    "rsiOversold": 20,
+    "rsiOverbought": 80,
+    "optionRsiOversold": 40,
+    "optionRsiOverbought": 60
+  },
+  "position": {
+    "stopLossPercent": 0,
+    "takeProfitMultiplier": 3,
+    "maxPositionsOpen": 3
+  },
+  "strikeSelector": {
+    "strikeSearchRange": 80,
+    "contractPriceMin": 0.2,
+    "contractPriceMax": 8.0
+  },
+  "timeWindows": {
+    "activeStart": "09:30",
+    "activeEnd": "15:45"
+  },
+  "risk": {
+    "maxDailyLoss": 500,
+    "maxTradesPerDay": 20
+  },
+  "sizing": {
+    "baseDollarsPerTrade": 250,
+    "sizeMultiplier": 1.0,
+    "minContracts": 1,
+    "maxContracts": 10
+  },
+  "scanners": { "enabled": false },
+  "judges": { "enabled": false },
+  "regime": { "enabled": false }
+}

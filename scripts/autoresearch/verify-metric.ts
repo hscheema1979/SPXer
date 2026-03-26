@@ -40,6 +40,8 @@
 import * as dotenv from 'dotenv';
 dotenv.config();
 
+import * as fs from 'fs';
+import * as path from 'path';
 import { runReplay } from '../../src/replay/machine';
 import { DEFAULT_CONFIG, mergeConfig } from '../../src/config/defaults';
 import { ReplayStore } from '../../src/replay/store';
@@ -65,6 +67,15 @@ const DATES = flags.dates ? flags.dates.split(',') : ALL_DATES;
 
 async function main() {
   let config: Config = { ...DEFAULT_CONFIG };
+
+  // Load config from file if --config-file is specified
+  // This is the primary mode for autoresearch: the loop modifies the JSON file,
+  // then runs this command to measure the score.
+  if (flags['config-file']) {
+    const configPath = path.resolve(flags['config-file']);
+    const fileConfig = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    config = mergeConfig(config, fileConfig);
+  }
 
   // Scanner/judge control
   const noScanners = flags['no-scanners'] === 'true';
