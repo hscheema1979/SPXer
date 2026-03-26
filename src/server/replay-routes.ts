@@ -107,27 +107,46 @@ export function createReplayRoutes(): Router {
     }
   });
 
-  // ── GET /replay/api/bars?date=&symbol=&tf= — OHLCV bars for a symbol ───
+  // ── GET /replay/api/bars?date=&symbol=&tf=&warmup=N — OHLCV bars ────────
+  // warmup=N includes N bars from the prior trading day for indicator seeding
   router.get('/api/bars', (req, res) => {
-    const { date, symbol, tf } = req.query as { date?: string; symbol?: string; tf?: string };
+    const { date, symbol, tf, warmup } = req.query as { date?: string; symbol?: string; tf?: string; warmup?: string };
     if (!date || !symbol) {
       return res.status(400).json({ error: 'date and symbol required' });
     }
     const timeframe = tf || '1m';
+    const warmupBars = parseInt(warmup || '0');
 
     const db = getDb();
     try {
-      // Compute session window for the date (9:30 AM - 4:15 PM ET)
-      // Use a broad UTC window to capture the full session regardless of DST
       const dayStart = Math.floor(new Date(date + 'T00:00:00Z').getTime() / 1000);
-      const dayEnd = dayStart + 86400 + 3600; // +25h to cover timezone edge
+      const dayEnd = dayStart + 86400 + 3600;
 
-      const rows = db.prepare(`
-        SELECT ts, open, high, low, close, volume, indicators
-        FROM ${REPLAY_DATA_SOURCE}
-        WHERE symbol = ? AND timeframe = ? AND ts >= ? AND ts <= ?
-        ORDER BY ts ASC
-      `).all(symbol, timeframe, dayStart, dayEnd) as any[];
+      let rows: any[];
+
+      if (warmupBars > 0 && symbol === 'SPX') {
+        // Include last N bars from the prior trading day for HMA warmup
+        rows = db.prepare(`
+          SELECT ts, open, high, low, close, volume, indicators FROM (
+            SELECT ts, open, high, low, close, volume, indicators
+            FROM ${REPLAY_DATA_SOURCE}
+            WHERE symbol = ? AND timeframe = ? AND ts < ?
+            ORDER BY ts DESC LIMIT ?
+          )
+          UNION ALL
+          SELECT ts, open, high, low, close, volume, indicators
+          FROM ${REPLAY_DATA_SOURCE}
+          WHERE symbol = ? AND timeframe = ? AND ts >= ? AND ts <= ?
+          ORDER BY ts ASC
+        `).all(symbol, timeframe, dayStart, warmupBars, symbol, timeframe, dayStart, dayEnd) as any[];
+      } else {
+        rows = db.prepare(`
+          SELECT ts, open, high, low, close, volume, indicators
+          FROM ${REPLAY_DATA_SOURCE}
+          WHERE symbol = ? AND timeframe = ? AND ts >= ? AND ts <= ?
+          ORDER BY ts ASC
+        `).all(symbol, timeframe, dayStart, dayEnd) as any[];
+      }
 
       res.json(rows.map(r => ({
         ts: r.ts,

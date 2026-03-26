@@ -260,9 +260,9 @@ async function loadDay() {
   // Set ET offset for this date (EST=-5h or EDT=-4h)
   etOffsetSec = isDST(date) ? -4 * 3600 : -5 * 3600;
 
-  // Fetch everything in parallel
+  // Fetch everything in parallel (SPX with 50-bar warmup for HMA seeding)
   const [spxBars, results, contracts] = await Promise.all([
-    fetch(`${API}/bars?date=${date}&symbol=SPX`).then(r => r.json()),
+    fetch(`${API}/bars?date=${date}&symbol=SPX&warmup=50`).then(r => r.json()),
     fetch(`${API}/results?date=${date}&configId=${configId}`).then(r => r.json()),
     fetch(`${API}/contracts?date=${date}`).then(r => r.json()),
   ]);
@@ -293,6 +293,86 @@ function renderSummary(s) {
   `;
 }
 
+// ── Multi-Timeframe HMA Computation ───────────────────────────────────────
+
+function computeWMA(values, period) {
+  if (values.length < period) return null;
+  const slice = values.slice(-period);
+  let num = 0, den = 0;
+  for (let i = 0; i < period; i++) {
+    const w = i + 1;
+    num += slice[i] * w;
+    den += w;
+  }
+  return num / den;
+}
+
+function computeHMASeries(closes, period) {
+  const halfPeriod = Math.floor(period / 2);
+  const sqrtPeriod = Math.round(Math.sqrt(period));
+  const results = [];
+  const diffSeries = [];
+
+  for (let i = 0; i < closes.length; i++) {
+    const slice = closes.slice(0, i + 1);
+    const wmaHalf = computeWMA(slice, halfPeriod);
+    const wmaFull = computeWMA(slice, period);
+    if (wmaHalf != null && wmaFull != null) {
+      diffSeries.push(2 * wmaHalf - wmaFull);
+    } else {
+      diffSeries.push(null);
+    }
+  }
+
+  for (let i = 0; i < diffSeries.length; i++) {
+    const validDiffs = diffSeries.slice(0, i + 1).filter(v => v != null);
+    const hma = computeWMA(validDiffs, sqrtPeriod);
+    results.push(hma);
+  }
+  return results;
+}
+
+function aggregateBarsClient(bars1m, tfMinutes) {
+  if (tfMinutes <= 1) return bars1m;
+  const result = [];
+  let bucket = [];
+  let bucketStart = 0;
+
+  for (const bar of bars1m) {
+    const barMinute = Math.floor(bar.ts / (tfMinutes * 60)) * (tfMinutes * 60);
+    if (bucket.length === 0) bucketStart = barMinute;
+    if (barMinute !== bucketStart && bucket.length > 0) {
+      result.push({
+        ts: bucketStart,
+        o: bucket[0].o,
+        h: Math.max(...bucket.map(b => b.h)),
+        l: Math.min(...bucket.map(b => b.l)),
+        c: bucket[bucket.length - 1].c,
+      });
+      bucket = [];
+      bucketStart = barMinute;
+    }
+    bucket.push(bar);
+  }
+  if (bucket.length > 0) {
+    result.push({
+      ts: bucketStart,
+      o: bucket[0].o,
+      h: Math.max(...bucket.map(b => b.h)),
+      l: Math.min(...bucket.map(b => b.l)),
+      c: bucket[bucket.length - 1].c,
+    });
+  }
+  return result;
+}
+
+function computeMultiTfHma(bars1m, period, tfMinutes) {
+  const aggBars = aggregateBarsClient(bars1m, tfMinutes);
+  const closes = aggBars.map(b => b.c);
+  const hmaValues = computeHMASeries(closes, period);
+  return aggBars.map((b, i) => hmaValues[i] != null ? { time: toEtDisplay(b.ts), value: hmaValues[i] } : null).filter(Boolean);
+}
+
 // ── SPX Chart ──────────────────────────────────────────────────────────────
 
 function renderSpxChart(bars, trades) {
@@ -311,7 +391,9 @@ function renderSpxChart(bars, trades) {
     grid: { vertLines: { color: '#151520' }, horzLines: { color: '#151520' } },
     crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
     timeScale: { timeVisible: true, secondsVisible: false, borderColor: '#222' },
-    rightPriceScale: { borderColor: '#222' },
+    rightPriceScale: { borderColor: '#222', autoScale: true },
+    handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: true },
+    handleScale: { mouseWheel: true, pinch: true, axisPressedMouseMove: true },
   });
 
   spxCandleSeries = spxChart.addSeries(LightweightCharts.CandlestickSeries, {
@@ -323,23 +405,60 @@ function renderSpxChart(bars, trades) {
   const candleData = bars.map(b => ({ time: toEtDisplay(b.ts), open: b.o, high: b.h, low: b.l, close: b.c }));
   spxCandleSeries.setData(candleData);
 
-  // HMA overlays
+  // HMA overlays — 1m (from pre-computed indicators)
   const hma5Data = bars.filter(b => b.ind.hma5).map(b => ({ time: toEtDisplay(b.ts), value: b.ind.hma5 }));
   const hma19Data = bars.filter(b => b.ind.hma19).map(b => ({ time: toEtDisplay(b.ts), value: b.ind.hma19 }));
 
   if (hma5Data.length) {
-    const hma5Series = spxChart.addSeries(LightweightCharts.LineSeries, {
-      color: '#10b98166', lineWidth: 1, lineStyle: 0, priceLineVisible: false,
+    spxChart.addSeries(LightweightCharts.LineSeries, {
+      color: '#10b98155', lineWidth: 1, lineStyle: 0, priceLineVisible: false,
       lastValueVisible: false, crosshairMarkerVisible: false,
-    });
-    hma5Series.setData(hma5Data);
+      title: 'HMA5 1m',
+    }).setData(hma5Data);
   }
   if (hma19Data.length) {
-    const hma19Series = spxChart.addSeries(LightweightCharts.LineSeries, {
-      color: '#3b82f666', lineWidth: 1, lineStyle: 0, priceLineVisible: false,
+    spxChart.addSeries(LightweightCharts.LineSeries, {
+      color: '#3b82f655', lineWidth: 1, lineStyle: 0, priceLineVisible: false,
       lastValueVisible: false, crosshairMarkerVisible: false,
-    });
-    hma19Series.setData(hma19Data);
+      title: 'HMA19 1m',
+    }).setData(hma19Data);
+  }
+
+  // Multi-timeframe HMA overlays — 3m and 5m computed client-side
+  // HMA5 on 3m bars (thicker, brighter — shows smoothed trend)
+  const hma5_3m = computeMultiTfHma(bars, 5, 3);
+  if (hma5_3m.length) {
+    spxChart.addSeries(LightweightCharts.LineSeries, {
+      color: '#f59e0b88', lineWidth: 2, lineStyle: 0, priceLineVisible: false,
+      lastValueVisible: false, crosshairMarkerVisible: false,
+      title: 'HMA5 3m',
+    }).setData(hma5_3m);
+  }
+  const hma19_3m = computeMultiTfHma(bars, 19, 3);
+  if (hma19_3m.length) {
+    spxChart.addSeries(LightweightCharts.LineSeries, {
+      color: '#f59e0b55', lineWidth: 2, lineStyle: 2, priceLineVisible: false,
+      lastValueVisible: false, crosshairMarkerVisible: false,
+      title: 'HMA19 3m',
+    }).setData(hma19_3m);
+  }
+
+  // HMA5 on 5m bars (thickest — slow trend)
+  const hma5_5m = computeMultiTfHma(bars, 5, 5);
+  if (hma5_5m.length) {
+    spxChart.addSeries(LightweightCharts.LineSeries, {
+      color: '#a78bfa99', lineWidth: 2, lineStyle: 0, priceLineVisible: false,
+      lastValueVisible: false, crosshairMarkerVisible: false,
+      title: 'HMA5 5m',
+    }).setData(hma5_5m);
+  }
+  const hma19_5m = computeMultiTfHma(bars, 19, 5);
+  if (hma19_5m.length) {
+    spxChart.addSeries(LightweightCharts.LineSeries, {
+      color: '#a78bfa55', lineWidth: 2, lineStyle: 2, priceLineVisible: false,
+      lastValueVisible: false, crosshairMarkerVisible: false,
+      title: 'HMA19 5m',
+    }).setData(hma19_5m);
   }
 
   // Entry/exit markers on SPX chart
