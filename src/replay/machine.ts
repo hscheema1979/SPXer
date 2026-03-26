@@ -613,12 +613,18 @@ export async function runReplay(
       }
 
       // ── Underlying HMA cross requirement ───────────────────────────────
+      // SPX direction determines call vs put:
+      //   SPX bullish → buy calls (call prices rise)
+      //   SPX bearish → buy puts (put prices rise when SPX drops)
+      // Option signal direction should be bullish (contract price going up = buy opportunity)
       if (config.signals.requireUnderlyingHmaCross && optionSignals.length > 0) {
         if (spxHmaCrossDirection == null) {
-          optionSignals = []; // no underlying cross this bar → suppress all option signals
+          optionSignals = [];
         } else {
-          // Only keep signals matching the underlying direction
-          optionSignals = optionSignals.filter(sig => sig.direction === spxHmaCrossDirection);
+          const wantSide = spxHmaCrossDirection === 'bullish' ? 'call' : 'put';
+          optionSignals = optionSignals.filter(sig =>
+            sig.side === wantSide && sig.direction === 'bullish'
+          );
         }
       }
 
