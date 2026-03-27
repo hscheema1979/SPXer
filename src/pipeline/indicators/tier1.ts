@@ -139,3 +139,140 @@ export function computeVWAP(
   const newVol = cumVol + volume;
   return { vwap: newVol > 0 ? newTPV / newVol : close, cumTPV: newTPV, cumVol: newVol };
 }
+
+/**
+ * Keltner Channel computation for trend filtering.
+ * - Middle line = EMA(period)
+ * - Bands = middle ± multiplier × ATR
+ * - Slope = rate of change of middle line (pts/bar)
+ */
+export interface KeltnerChannel {
+  upper: number;
+  middle: number;  // EMA(period)
+  lower: number;
+  width: number;   // (upper - lower) / middle (normalized)
+  slope: number;   // rate of change of middle line (pts/bar)
+}
+
+export function computeKeltnerChannel(
+  closes: number[],
+  highs: number[],
+  lows: number[],
+  emaPeriod: number = 20,
+  atrPeriod: number = 14,
+  multiplier: number = 2.5,
+  slopeLookback: number = 5
+): KeltnerChannel | null {
+  if (closes.length < Math.max(emaPeriod, atrPeriod, slopeLookback + 1)) return null;
+
+  // Compute EMA for middle line
+  const k = 2 / (emaPeriod + 1);
+  let ema = closes[0];
+  for (let i = 1; i < closes.length; i++) {
+    ema = closes[i] * k + ema * (1 - k);
+  }
+
+  // Compute ATR
+  const trs: number[] = [];
+  for (let i = 1; i < highs.length; i++) {
+    const tr = Math.max(
+      highs[i] - lows[i],
+      Math.abs(highs[i] - closes[i - 1]),
+      Math.abs(lows[i] - closes[i - 1])
+    );
+    trs.push(tr);
+  }
+  const atr = trs.slice(-atrPeriod).reduce((a, b) => a + b, 0) / atrPeriod;
+
+  // Compute bands
+  const upper = ema + multiplier * atr;
+  const lower = ema - multiplier * atr;
+  const width = (upper - lower) / ema;
+
+  // Compute slope: look back N bars and calculate rate of change of EMA
+  // We need to compute historical EMA values for slope
+  const emaHistory: number[] = [];
+  let histEma = closes[0];
+  for (let i = 1; i < closes.length; i++) {
+    histEma = closes[i] * k + histEma * (1 - k);
+    emaHistory.push(histEma);
+  }
+
+  const slope = emaHistory.length >= slopeLookback
+    ? (emaHistory[emaHistory.length - 1] - emaHistory[emaHistory.length - 1 - slopeLookback]) / slopeLookback
+    : 0;
+
+  return { upper, middle: ema, lower, width, slope };
+}
+
+/** State for incremental Keltner Channel computation */
+export interface KCState {
+  emaValue: number | null;
+  emaHistory: number[];  // circular buffer for slope calculation
+  atrValues: number[];   // circular buffer for ATR
+  emaPeriod: number;
+  atrPeriod: number;
+  multiplier: number;
+  slopeLookback: number;
+}
+
+export function makeKCState(
+  emaPeriod: number = 20,
+  atrPeriod: number = 14,
+  multiplier: number = 2.5,
+  slopeLookback: number = 5
+): KCState {
+  return {
+    emaValue: null,
+    emaHistory: [],
+    atrValues: [],
+    emaPeriod,
+    atrPeriod,
+    multiplier,
+    slopeLookback,
+  };
+}
+
+/**
+ * Incremental Keltner Channel step.
+ * Feed one bar at a time, returns null until enough data.
+ */
+export function kcStep(state: KCState, close: number, high: number, low: number, prevClose: number | null): KeltnerChannel | null {
+  const k = 2 / (state.emaPeriod + 1);
+
+  // Update EMA
+  if (state.emaValue === null) {
+    state.emaValue = close;
+  } else {
+    state.emaValue = close * k + state.emaValue * (1 - k);
+  }
+
+  // Track EMA history for slope
+  state.emaHistory.push(state.emaValue);
+  if (state.emaHistory.length > state.slopeLookback + 1) {
+    state.emaHistory.shift();
+  }
+
+  // Compute and track TR
+  if (prevClose !== null) {
+    const tr = Math.max(high - low, Math.abs(high - prevClose), Math.abs(low - prevClose));
+    state.atrValues.push(tr);
+    if (state.atrValues.length > state.atrPeriod) {
+      state.atrValues.shift();
+    }
+  }
+
+  // Need enough data
+  if (state.emaHistory.length < state.slopeLookback + 1 || state.atrValues.length < state.atrPeriod) {
+    return null;
+  }
+
+  const atr = state.atrValues.reduce((a, b) => a + b, 0) / state.atrValues.length;
+  const middle = state.emaValue;
+  const upper = middle + state.multiplier * atr;
+  const lower = middle - state.multiplier * atr;
+  const width = (upper - lower) / middle;
+  const slope = (state.emaHistory[state.emaHistory.length - 1] - state.emaHistory[0]) / (state.emaHistory.length - 1);
+
+  return { upper, middle, lower, width, slope };
+}

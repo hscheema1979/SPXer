@@ -1,45 +1,46 @@
-import type { OpenPosition } from './types';
-
-export interface RiskConfig {
-  maxDailyLoss: number;       // dollars — circuit breaker
-  maxPositions: number;       // concurrent open positions
-  maxRiskPerTrade: number;    // dollars at risk per trade
-  cutoffTimeET: string;       // 'HH:MM' — no new entries after this (ET)
-  minMinutesToClose: number;  // skip signals with fewer than this many minutes until 4 PM
-  paperMode: boolean;
-}
-
-export function defaultRiskConfig(): RiskConfig {
-  return {
-    maxDailyLoss: parseFloat(process.env.AGENT_MAX_DAILY_LOSS || '2000'),
-    maxPositions: parseInt(process.env.AGENT_MAX_POSITIONS || '2'),
-    maxRiskPerTrade: parseFloat(process.env.AGENT_MAX_RISK_PER_TRADE || '500'),
-    cutoffTimeET: process.env.AGENT_CUTOFF_ET || '15:45',
-    minMinutesToClose: parseInt(process.env.AGENT_MIN_MINS_TO_CLOSE || '15'),
-    paperMode: process.env.AGENT_PAPER !== 'false',  // paper by default
-  };
-}
+/**
+ * RiskGuard — stateful wrapper around core risk-guard logic.
+ *
+ * Maintains daily loss state and position tracking.
+ * Delegates core risk evaluation to src/core/risk-guard.isRiskBlocked()
+ * so that live agent and replay use the same risk rules.
+ */
+import type { Config } from '../config/types';
+import { isRiskBlocked, type RiskState } from '../core/risk-guard';
 
 export class RiskGuard {
   private dailyLoss = 0;
   private dailyDate = '';
+  private lastEscalationTs = 0;
+  private tradesCompleted = 0;
+  private paperMode: boolean;
 
-  constructor(private cfg: RiskConfig) {}
+  constructor(private cfg: Config) {
+    this.paperMode = process.env.AGENT_PAPER !== 'false';
+  }
 
   resetIfNewDay(): void {
     const today = new Date().toISOString().split('T')[0];
     if (this.dailyDate !== today) {
       this.dailyLoss = 0;
+      this.tradesCompleted = 0;
       this.dailyDate = today;
     }
   }
 
   recordLoss(amount: number): void {
-    this.dailyLoss += amount;  // pass negative number for a loss
+    this.dailyLoss += amount;
+  }
+
+  recordTrade(): void {
+    this.tradesCompleted++;
+  }
+
+  recordEscalation(): void {
+    this.lastEscalationTs = Math.floor(Date.now() / 1000);
   }
 
   minutesToMarketClose(): number {
-    // Use Intl to correctly handle EST/EDT automatically
     const now = new Date();
     const etStr = now.toLocaleString('en-US', { timeZone: 'America/New_York', hour12: false });
     const timePart = etStr.split(', ')[1];
@@ -47,33 +48,44 @@ export class RiskGuard {
     return Math.max(0, 16 * 60 - (h * 60 + m));
   }
 
+  /**
+   * Check whether trading is blocked by any risk rule.
+   * Delegates to core isRiskBlocked() for consistent behavior with replay.
+   */
   check(
-    openPositions: OpenPosition[],
+    openPositions: { id: string }[],
     minutesToClose: number,
   ): { allowed: boolean; reason?: string } {
     this.resetIfNewDay();
 
-    if (this.dailyLoss <= -this.cfg.maxDailyLoss) {
-      return { allowed: false, reason: `Daily loss limit reached ($${Math.abs(this.dailyLoss).toFixed(2)})` };
+    // Build core RiskState from internal state
+    const closeCutoffTs = this.computeCloseCutoffTs();
+    const state: RiskState = {
+      openPositions: openPositions.length,
+      tradesCompleted: this.tradesCompleted,
+      dailyPnl: this.dailyLoss,
+      currentTs: Math.floor(Date.now() / 1000),
+      closeCutoffTs,
+      lastEscalationTs: this.lastEscalationTs,
+    };
+
+    const result = isRiskBlocked(state, this.cfg);
+    if (result.blocked) {
+      return { allowed: false, reason: result.reason };
     }
 
-    if (openPositions.length >= this.cfg.maxPositions) {
-      return { allowed: false, reason: `Max positions (${this.cfg.maxPositions}) already open` };
+    // Live-agent specific: minutes-to-close check (not in core — replay uses bar timestamps)
+    if (minutesToClose < this.cfg.risk.minMinutesToClose) {
+      return { allowed: false, reason: `Only ${minutesToClose}m until close (min: ${this.cfg.risk.minMinutesToClose}m)` };
     }
 
-    if (minutesToClose < this.cfg.minMinutesToClose) {
-      return { allowed: false, reason: `Only ${minutesToClose}m until close (min: ${this.cfg.minMinutesToClose}m)` };
-    }
-
-    // Check cutoff time — use Intl to handle EST/EDT correctly
-    const [cutH, cutM] = this.cfg.cutoffTimeET.split(':').map(Number);
+    // Live-agent specific: cutoff time check (core uses closeCutoffTs)
+    const [cutH, cutM] = this.cfg.risk.cutoffTimeET.split(':').map(Number);
     const etStr = new Date().toLocaleString('en-US', { timeZone: 'America/New_York', hour12: false });
     const timePart = etStr.split(', ')[1];
     const [nowH, nowM] = timePart.split(':').map(Number);
-    const cutoffMins = cutH * 60 + cutM;
-    const nowMins = nowH * 60 + nowM;
-    if (nowMins >= cutoffMins) {
-      return { allowed: false, reason: `Past cutoff time ${this.cfg.cutoffTimeET} ET` };
+    if (nowH * 60 + nowM >= cutH * 60 + cutM) {
+      return { allowed: false, reason: `Past cutoff time ${this.cfg.risk.cutoffTimeET} ET` };
     }
 
     return { allowed: true };
@@ -81,12 +93,20 @@ export class RiskGuard {
 
   /** Maximum contracts given stop distance and max risk */
   maxContracts(entryPrice: number, stopLoss: number): number {
-    const riskPerContract = (entryPrice - stopLoss) * 100; // 1 contract = 100 shares
+    const riskPerContract = (entryPrice - stopLoss) * 100;
     if (riskPerContract <= 0) return 0;
-    return Math.max(1, Math.floor(this.cfg.maxRiskPerTrade / riskPerContract));
+    return Math.max(1, Math.floor(this.cfg.risk.maxRiskPerTrade / riskPerContract));
   }
 
-  get isPaper(): boolean { return this.cfg.paperMode; }
+  private computeCloseCutoffTs(): number {
+    const now = new Date();
+    const etStr = now.toLocaleString('en-US', { timeZone: 'America/New_York', hour12: false });
+    const datePart = etStr.split(', ')[0];
+    const closeET = new Date(`${datePart} 16:00:00`);
+    return Math.floor(closeET.getTime() / 1000);
+  }
+
+  get isPaper(): boolean { return this.paperMode; }
   get currentDailyLoss(): number { return this.dailyLoss; }
-  get config(): RiskConfig { return this.cfg; }
+  get config(): Config { return this.cfg; }
 }

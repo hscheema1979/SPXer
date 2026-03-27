@@ -1,9 +1,9 @@
 /**
  * Core indicator engine — shared by both live pipeline and replay.
- * Computes HMA, EMA, RSI, BB, ATR, VWAP and tier-2 indicators incrementally.
+ * Computes HMA, EMA, RSI, BB, ATR, VWAP, KC and tier-2 indicators incrementally.
  */
 import type { Bar, IndicatorState, Timeframe } from '../types';
-import { computeEMA, computeRSI, computeBB, computeATR, computeVWAP, makeHMAState, hmaStep } from '../pipeline/indicators/tier1';
+import { computeEMA, computeRSI, computeBB, computeATR, computeVWAP, makeHMAState, hmaStep, makeKCState, kcStep } from '../pipeline/indicators/tier1';
 import { computeMACD, computeStochastic, computeADX, computeMomentum, computeCCI } from '../pipeline/indicators/tier2';
 import { MAX_BARS_MEMORY } from '../config';
 
@@ -20,6 +20,7 @@ function getState(symbol: string, tf: Timeframe): IndicatorState {
       emaState: {}, macdState: { fastEma: null, slowEma: null, signalEma: null },
       atrState: null, adxState: { plusDM: null, minusDM: null, tr: null, adx: null },
       hmaState: {},
+      kcState: null,
     });
   }
   return states.get(k)!;
@@ -74,6 +75,11 @@ export function computeIndicators(bar: Bar, tier: 1 | 2 = 1): Record<string, num
 
   const bb = computeBB(s.closes, 20, 2);
 
+  // Incremental Keltner Channel computation
+  if (!s.kcState) s.kcState = makeKCState(20, 14, 2.5, 5);
+  const prevClose = s.closes.length > 1 ? s.closes[s.closes.length - 2] : null;
+  const kc = kcStep(s.kcState, bar.close, bar.high, bar.low, prevClose);
+
   const ind: Record<string, number | null> = {
     hma5,
     hma19,
@@ -88,6 +94,11 @@ export function computeIndicators(bar: Bar, tier: 1 | 2 = 1): Record<string, num
     atr14: computeATR(s.highs, s.lows, s.closes, 14),
     atrPct: s.closes.length > 1 ? (computeATR(s.highs, s.lows, s.closes, 14) / bar.close) * 100 : null,
     vwap: vwapResult.vwap,
+    kcUpper: kc?.upper ?? null,
+    kcMiddle: kc?.middle ?? null,
+    kcLower: kc?.lower ?? null,
+    kcWidth: kc?.width ?? null,
+    kcSlope: kc?.slope ?? null,
   };
 
   if (tier === 2) {

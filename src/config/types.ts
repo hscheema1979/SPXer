@@ -81,12 +81,38 @@ export interface Config {
     hmaCrossSlow: number;   // slow HMA period for cross detection (default 19)
     emaCrossFast: number;   // fast EMA period for cross detection (default 9)
     emaCrossSlow: number;   // slow EMA period for cross detection (default 21)
-    targetOtmDistance: number | null;    // if set, only trade the strike closest to this OTM distance (e.g. 25 = $25 OTM)
-    targetContractPrice: number | null;  // if set, only trade contracts priced near this $ (e.g. 3.00 = ~$3.00 premium)
+
+    // ── Multi-timeframe control ──────────────────────────────────────
+    // Each signal type can read from a different TF bar cache.
+    // 'signalTimeframe' is the default for option contract signal detection.
+    // 'directionTimeframe' is for SPX HMA direction filter (entry gate).
+    // 'exitTimeframe' is for SPX HMA used in exit reversal detection.
+    // Per-indicator TF overrides let you mix: e.g. RSI from 1m + HMA from 5m.
+    signalTimeframe: string;        // default TF for option contract signals (default '1m')
+    directionTimeframe: string;     // TF for SPX HMA direction filter on entry (default '1m')
+    exitTimeframe: string;          // TF for SPX HMA reversal detection on exit (default same as directionTimeframe)
+
+    // Per-signal-type TF overrides (null = use signalTimeframe)
+    hmaCrossTimeframe: string | null;     // TF for HMA cross signals (null = signalTimeframe)
+    rsiCrossTimeframe: string | null;     // TF for RSI cross signals (null = signalTimeframe)
+    emaCrossTimeframe: string | null;     // TF for EMA cross signals (null = signalTimeframe)
+    priceCrossHmaTimeframe: string | null; // TF for price-cross-HMA signals (null = signalTimeframe)
+
+    targetOtmDistance: number | null;
+    targetContractPrice: number | null;
+    maxEntryPrice: number | null;        // Filter: skip trades above this price
     rsiOversold: number;
     rsiOverbought: number;
     optionRsiOversold: number;
     optionRsiOverbought: number;
+
+    // ── Keltner Channel Trend Filter ──────────────────────────────────────
+    enableKeltnerGate: boolean;           // master toggle for KC trend gate
+    kcEmaPeriod: number;                  // default 20
+    kcAtrPeriod: number;                  // default 14
+    kcMultiplier: number;                 // default 2.5
+    kcSlopeLookback: number;              // default 5 (bars)
+    kcSlopeThreshold: number;             // default 0.3 (pts/bar) — below this = range
   };
 
   position: {

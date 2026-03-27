@@ -109,40 +109,43 @@ function runConfigMigrations(): void {
   createConfigTables(db);
 
   // Create replay tables (migrated from replay.db)
+  // NOTE: Uses camelCase columns to match existing DB schema and query code
+  // in replay/store.ts and server/replay-routes.ts
   db.exec(`
     CREATE TABLE IF NOT EXISTS replay_runs (
       id          TEXT PRIMARY KEY,
-      config_id   TEXT NOT NULL,
+      configId    TEXT NOT NULL,
       date        TEXT NOT NULL,
-      started_at  INTEGER NOT NULL,
-      completed_at INTEGER,
+      startedAt   INTEGER NOT NULL,
+      completedAt INTEGER,
       status      TEXT NOT NULL,
       error       TEXT,
-      FOREIGN KEY(config_id) REFERENCES configs(id)
+      FOREIGN KEY(configId) REFERENCES replay_configs(id),
+      UNIQUE(configId, date)
     );
-    CREATE INDEX IF NOT EXISTS idx_replay_runs_config ON replay_runs(config_id);
-    CREATE INDEX IF NOT EXISTS idx_replay_runs_date ON replay_runs(date);
+    CREATE INDEX IF NOT EXISTS idx_runs_config ON replay_runs(configId);
+    CREATE INDEX IF NOT EXISTS idx_runs_date ON replay_runs(date);
 
     CREATE TABLE IF NOT EXISTS replay_results (
-      run_id      TEXT NOT NULL,
-      config_id   TEXT NOT NULL,
+      runId       TEXT PRIMARY KEY,
+      configId    TEXT NOT NULL,
       date        TEXT NOT NULL,
-      trades      INTEGER,
-      wins        INTEGER,
-      win_rate    REAL,
-      total_pnl   REAL,
-      avg_pnl     REAL,
-      max_win     REAL,
-      max_loss    REAL,
-      max_consecutive_wins INTEGER,
-      max_consecutive_losses INTEGER,
-      sharpe      REAL,
-      trades_json TEXT,
-      PRIMARY KEY(run_id, date),
-      FOREIGN KEY(config_id) REFERENCES configs(id)
+      trades      INTEGER NOT NULL,
+      wins        INTEGER NOT NULL,
+      winRate     REAL NOT NULL,
+      totalPnl    REAL NOT NULL,
+      avgPnlPerTrade REAL,
+      maxWin      REAL,
+      maxLoss     REAL,
+      maxConsecutiveWins INTEGER,
+      maxConsecutiveLosses INTEGER,
+      sharpeRatio REAL,
+      trades_json TEXT NOT NULL,
+      FOREIGN KEY(runId) REFERENCES replay_runs(id),
+      FOREIGN KEY(configId) REFERENCES replay_configs(id)
     );
-    CREATE INDEX IF NOT EXISTS idx_replay_results_config ON replay_results(config_id);
-    CREATE INDEX IF NOT EXISTS idx_replay_results_date ON replay_results(date);
+    CREATE INDEX IF NOT EXISTS idx_results_config ON replay_results(configId);
+    CREATE INDEX IF NOT EXISTS idx_results_date ON replay_results(date);
   `);
 
   // Seed defaults if models table is empty (first run)

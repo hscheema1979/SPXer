@@ -1,0 +1,7 @@
+[     854ms] [ERROR] Failed to load resource: the server responded with a status of 404 (Not Found) @ http://localhost:3601/favicon.ico:0
+[     869ms] TypeError: spxCandleSeries.setMarkers is not a function
+    at renderSpxChart (http://localhost:3601/replay/:260:39)
+    at loadDay (http://localhost:3601/replay/:169:3)
+[    8291ms] TypeError: spxCandleSeries.setMarkers is not a function
+    at renderSpxChart (http://localhost:3601/replay/:260:39)
+    at HTMLSelectElement.loadDay (http://localhost:3601/replay/:169:3)

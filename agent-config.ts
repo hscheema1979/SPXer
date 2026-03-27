@@ -26,6 +26,12 @@ export const AGENT_CONFIG: Config = {
     enablePriceCrossHma: true,
     enableEmaCrosses: false,  // Hurts (s8: on drops score 83→54)
     requireUnderlyingHmaCross: false,
+    hmaCrossFast: 5,
+    hmaCrossSlow: 19,
+    emaCrossFast: 9,
+    emaCrossSlow: 21,
+    signalTimeframe: '1m',
+    directionTimeframe: '1m',
     targetOtmDistance: null,
     targetContractPrice: null,
     rsiOversold: 20,          // RSI threshold doesn't matter much (s2: all equal)
@@ -37,11 +43,8 @@ export const AGENT_CONFIG: Config = {
   // Strike selection — s1: morning ±75-100 is optimal
   strikeSelector: {
     strikeSearchRange: 80,
-    otmDistanceMin: 0.2,
-    otmDistanceMax: 8.0,
-    emergencyStrikeRange: 200,
-    emergencyOtmMin: 1.0,
-    emergencyOtmMax: 10.0,
+    contractPriceMin: 0.2,
+    contractPriceMax: 8.0,
   },
 
   // Position management — s3: SL 80% slightly better, s4: TP 2x highest WR
@@ -166,13 +169,6 @@ export const AGENT_CONFIG: Config = {
       middayEnd: '14:00',
       gammaExpiryStart: '14:00',
       noTradeStart: '15:30',
-    },
-
-    emergencyRsi: {
-      oversold: 15,
-      overbought: 85,
-      morningOversold: 10,
-      morningOverbought: 92,
     },
 
     signalGates: {

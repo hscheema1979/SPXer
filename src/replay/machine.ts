@@ -25,14 +25,13 @@ import { computeQty } from '../core/position-sizer';
 import { isRiskBlocked, type RiskState } from '../core/risk-guard';
 import { isRegimeBlocked } from '../core/regime-gate';
 import type { Signal, CoreBar } from '../core/types';
+import { makeHMAState, hmaStep, makeKCState, kcStep } from '../pipeline/indicators/tier1';
 
 const DATA_DB_PATH = path.resolve(process.cwd(), 'data/spxer.db');
 
 // Configurable data source: 'bars' (live) or 'replay_bars' (sanitized Polygon)
 const REPLAY_DATA_SOURCE = process.env.REPLAY_DATA_SOURCE || 'replay_bars';
 
-// Import indicator engine for recomputing indicators on aggregated bars
-import { computeIndicators, seedState } from '../pipeline/indicator-engine';
 
 // ── Internal types ─────────────────────────────────────────────────────────
 
@@ -46,6 +45,7 @@ interface SimPosition {
   symbol: string; side: 'call' | 'put'; strike: number; qty: number;
   entryPrice: number; stopLoss: number; takeProfit: number;
   entryTs: number; entryET: string;
+  highWaterPrice: number; // tracks peak price for trailing stop
 }
 
 // ── In-memory bar cache (loaded once per replay) ───────────────────────────
@@ -60,44 +60,38 @@ interface BarCache {
 function loadBarCache(
   db: Database.Database, start: number, end: number, symbolFilter: string, timeframe: string = '1m',
 ): BarCache {
-  const tfMinutes = TF_MINUTES[timeframe] || 1;
+  // Load bars at the requested timeframe directly from DB (pre-computed by build-mtf-bars.ts)
+  const tf = timeframe || '1m';
 
-  // Always load 1m bars from DB — aggregate to target timeframe if needed
   const spxRows = db.prepare(`
     SELECT ts, open, high, low, close, volume, indicators
-    FROM ${REPLAY_DATA_SOURCE} WHERE symbol='SPX' AND timeframe='1m'
+    FROM ${REPLAY_DATA_SOURCE} WHERE symbol='SPX' AND timeframe=?
     AND ts >= ? AND ts <= ? ORDER BY ts
-  `).all(start, end) as any[];
+  `).all(tf, start, end) as any[];
 
-  let spxBars = spxRows.map((r: any) => ({
+  const spxBars = spxRows.map((r: any) => ({
     ts: r.ts, open: r.open, high: r.high, low: r.low,
     close: r.close, volume: r.volume,
     indicators: JSON.parse(r.indicators || '{}'),
   }));
 
-  // Aggregate SPX bars if timeframe > 1m
-  if (tfMinutes > 1) {
-    spxBars = aggregateBars(spxBars, tfMinutes, 'SPX', timeframe);
-  }
-
   const timestamps = spxBars.map(b => b.ts);
 
-  // Load all contract 1m bars for the session
+  // Load contract bars at the requested timeframe
   const contractRows = db.prepare(`
     SELECT b.symbol, b.ts, b.open, b.high, b.low, b.close, b.volume, b.indicators,
            CAST(substr(b.symbol, -8) AS INTEGER) / 1000.0 as strike
     FROM ${REPLAY_DATA_SOURCE} b
-    WHERE b.symbol LIKE ? AND b.timeframe = '1m'
+    WHERE b.symbol LIKE ? AND b.timeframe = ?
       AND b.ts >= ? AND b.ts <= ?
     ORDER BY b.symbol, b.ts
-  `).all(symbolFilter, start, end) as any[];
+  `).all(symbolFilter, tf, start, end) as any[];
 
-  // Group by symbol first, then aggregate each
-  const rawContractBars = new Map<string, Bar[]>();
+  const contractBars = new Map<string, Bar[]>();
   const contractStrikes = new Map<string, number>();
   for (const r of contractRows) {
-    if (!rawContractBars.has(r.symbol)) rawContractBars.set(r.symbol, []);
-    rawContractBars.get(r.symbol)!.push({
+    if (!contractBars.has(r.symbol)) contractBars.set(r.symbol, []);
+    contractBars.get(r.symbol)!.push({
       ts: r.ts, open: r.open, high: r.high, low: r.low,
       close: r.close, volume: r.volume,
       indicators: JSON.parse(r.indicators || '{}'),
@@ -105,79 +99,233 @@ function loadBarCache(
     if (!contractStrikes.has(r.symbol)) contractStrikes.set(r.symbol, r.strike);
   }
 
-  // Aggregate contract bars if timeframe > 1m
-  const contractBars = new Map<string, Bar[]>();
-  for (const [symbol, bars] of rawContractBars) {
-    contractBars.set(symbol, tfMinutes > 1 ? aggregateBars(bars, tfMinutes, symbol, timeframe) : bars);
-  }
-
   return { spxBars, contractBars, contractStrikes, timestamps };
 }
 
-// ── Timeframe aggregation ─────────────────────────────────────────────────
 
-const TF_MINUTES: Record<string, number> = {
-  '1m': 1, '2m': 2, '3m': 3, '5m': 5, '10m': 10, '15m': 15, '30m': 30, '1h': 60,
-};
+// ── On-the-fly HMA computation & DB caching ────────────────────────────────
+// Checks if the required HMA periods exist in the loaded bars. If missing,
+// computes them incrementally from close prices and writes back to the DB.
+// Next load of the same date+tf will have them pre-cached.
 
-function aggregateBars(bars1m: Bar[], tfMinutes: number, symbol: string, tf: string): Bar[] {
-  if (tfMinutes <= 1 || bars1m.length === 0) return bars1m;
+/**
+ * Ensure all required HMA periods exist in the bar cache's indicator fields.
+ * If missing, computes them on-the-fly from close prices WITH cross-day warmup
+ * (loads prior bars from DB to seed the HMA state), then caches back to DB.
+ *
+ * @param warmupBars - Number of prior bars to load for HMA warmup (3x period)
+ */
+function ensureHmaPeriods(cache: BarCache, periods: number[], tf: string, verbose: boolean): void {
+  if (periods.length === 0) return;
 
-  const result: Bar[] = [];
-  let bucket: Bar[] = [];
-  let bucketStart = 0;
+  // Check which periods are missing from SPX bars (spot-check a bar with indicators)
+  const sampleBar = cache.spxBars.find(b => Object.keys(b.indicators).length > 0);
+  if (!sampleBar) return;
 
-  for (const bar of bars1m) {
-    // Bucket by rounding down to tfMinutes boundary
-    const barMinute = Math.floor(bar.ts / (tfMinutes * 60)) * (tfMinutes * 60);
-    if (bucket.length === 0) {
-      bucketStart = barMinute;
-    }
-    if (barMinute !== bucketStart && bucket.length > 0) {
-      // Flush the bucket
-      result.push(mergeBucket(bucket, bucketStart));
-      bucket = [];
-      bucketStart = barMinute;
-    }
-    bucket.push(bar);
-  }
-  if (bucket.length > 0) {
-    result.push(mergeBucket(bucket, bucketStart));
-  }
+  // Check multiple bars — a period may be "present" as null in early bars (warmup)
+  // but should have real values in later bars. If ALL bars are null/undefined, it's missing.
+  const lateBars = cache.spxBars.slice(-Math.min(10, cache.spxBars.length));
+  const missing = periods.filter(p => {
+    const key = `hma${p}`;
+    // If the key doesn't exist at all, definitely missing
+    if (!(key in sampleBar.indicators)) return true;
+    // If all late-session bars have null, the warmup wasn't sufficient — recompute with prior data
+    return lateBars.every(b => b.indicators[key] == null);
+  });
+  if (missing.length === 0) return;
 
-  // Recompute indicators on the aggregated bars
-  // Use seedState to init, then compute incrementally
-  const fullBars = result.map(b => ({
-    symbol, timeframe: tf, ts: b.ts,
-    open: b.open, high: b.high, low: b.low, close: b.close,
-    volume: b.volume, synthetic: false, gapType: null as any,
-  }));
-
-  // Seed with first few bars then compute
-  if (fullBars.length > 0) {
-    seedState(symbol, tf as any, []);
-    for (const fb of fullBars) {
-      const ind = computeIndicators(fb, symbol.startsWith('SPXW') ? 1 : 2);
-      // Find the matching aggregated bar and set indicators
-      const agg = result.find(r => r.ts === fb.ts);
-      if (agg) agg.indicators = ind;
-    }
+  if (verbose) {
+    console.log(`  Computing HMA periods [${missing.join(', ')}] on-the-fly for ${tf}...`);
   }
 
-  return result;
+  // Load prior bars from DB for warmup (need ~3x the max period for a stable HMA)
+  const maxPeriod = Math.max(...missing);
+  const warmupCount = maxPeriod * 3;
+  const earliestTs = cache.spxBars.length > 0 ? cache.spxBars[0].ts : 0;
+
+  let priorCloses = new Map<string, number[]>(); // symbol → prior close prices
+  try {
+    const warmupDb = new Database(DATA_DB_PATH, { readonly: true });
+    // SPX warmup
+    const spxWarmup = warmupDb.prepare(`
+      SELECT close FROM ${REPLAY_DATA_SOURCE}
+      WHERE symbol='SPX' AND timeframe=? AND ts < ?
+      ORDER BY ts DESC LIMIT ?
+    `).all(tf, earliestTs, warmupCount) as { close: number }[];
+    priorCloses.set('SPX', spxWarmup.reverse().map(r => r.close));
+
+    // Contract warmup — batch query for all symbols
+    for (const [symbol] of cache.contractBars) {
+      const rows = warmupDb.prepare(`
+        SELECT close FROM ${REPLAY_DATA_SOURCE}
+        WHERE symbol=? AND timeframe=? AND ts < ?
+        ORDER BY ts DESC LIMIT ?
+      `).all(symbol, tf, earliestTs, warmupCount) as { close: number }[];
+      if (rows.length > 0) {
+        priorCloses.set(symbol, rows.reverse().map(r => r.close));
+      }
+    }
+    warmupDb.close();
+  } catch {
+    // If warmup load fails, compute without it (first bars will be null)
+  }
+
+  // Compute missing HMAs for SPX bars (with warmup seeding)
+  for (const period of missing) {
+    const key = `hma${period}`;
+    const state = makeHMAState(period);
+    // Seed with prior closes
+    const prior = priorCloses.get('SPX') || [];
+    for (const c of prior) hmaStep(state, c);
+    // Now compute on session bars
+    for (const bar of cache.spxBars) {
+      bar.indicators[key] = hmaStep(state, bar.close);
+    }
+  }
+
+  // Compute missing HMAs for all contract bars (with warmup seeding)
+  for (const period of missing) {
+    const key = `hma${period}`;
+    for (const [symbol, bars] of cache.contractBars) {
+      const state = makeHMAState(period);
+      const prior = priorCloses.get(symbol) || [];
+      for (const c of prior) hmaStep(state, c);
+      for (const bar of bars) {
+        bar.indicators[key] = hmaStep(state, bar.close);
+      }
+    }
+  }
+
+  // Write back to DB so next run loads them instantly
+  try {
+    const writeDb = new Database(DATA_DB_PATH);
+    writeDb.pragma('journal_mode = WAL');
+    writeDb.pragma('busy_timeout = 5000');
+    const updateStmt = writeDb.prepare(`
+      UPDATE ${REPLAY_DATA_SOURCE} SET indicators = ? WHERE symbol = ? AND timeframe = ? AND ts = ?
+    `);
+
+    const writeTxn = writeDb.transaction((allBars: { symbol: string; bars: Bar[] }[]) => {
+      for (const { symbol, bars } of allBars) {
+        for (const bar of bars) {
+          updateStmt.run(JSON.stringify(bar.indicators), symbol, tf, bar.ts);
+        }
+      }
+    });
+
+    const allBars: { symbol: string; bars: Bar[] }[] = [
+      { symbol: 'SPX', bars: cache.spxBars },
+    ];
+    for (const [symbol, bars] of cache.contractBars) {
+      allBars.push({ symbol, bars });
+    }
+    writeTxn(allBars);
+    writeDb.close();
+
+    if (verbose) {
+      const totalBars = allBars.reduce((s, b) => s + b.bars.length, 0);
+      console.log(`  Cached HMA [${missing.join(', ')}] → ${totalBars} bars saved to DB`);
+    }
+  } catch (err: any) {
+    if (verbose) console.log(`  Warning: failed to cache HMA to DB: ${err.message}`);
+  }
 }
 
-function mergeBucket(bucket: Bar[], ts: number): Bar {
-  return {
-    ts,
-    open: bucket[0].open,
-    high: Math.max(...bucket.map(b => b.high)),
-    low: Math.min(...bucket.map(b => b.low)),
-    close: bucket[bucket.length - 1].close,
-    volume: bucket.reduce((sum, b) => sum + b.volume, 0),
-    indicators: {}, // will be recomputed
-  };
+
+// ── On-the-fly KC computation ──────────────────────────────────────────────
+// Computes Keltner Channel indicators if missing from bars.
+
+function ensureKcFields(cache: BarCache, tf: string, config: Config, verbose: boolean): void {
+  if (!config.signals.enableKeltnerGate) {
+    if (verbose) console.log(`  KC gate disabled, skipping KC computation`);
+    return;
+  }
+
+  // Check if KC slope already exists
+  const sampleBar = cache.spxBars.find(b => Object.keys(b.indicators).length > 0);
+  if (sampleBar && sampleBar.indicators.kcSlope != null) {
+    if (verbose) console.log(`  KC slope already computed, skipping`);
+    return;
+  }
+
+  if (verbose) {
+    console.log(`  Computing KC indicators on-the-fly for ${tf}... (enableKeltnerGate=${config.signals.enableKeltnerGate})`);
+  }
+
+  const { kcEmaPeriod = 20, kcAtrPeriod = 14, kcMultiplier = 2.5, kcSlopeLookback = 5 } = config.signals;
+
+  // Load prior bars for warmup
+  const warmupCount = Math.max(kcEmaPeriod, kcAtrPeriod, kcSlopeLookback + 1) * 2;
+  const earliestTs = cache.spxBars.length > 0 ? cache.spxBars[0].ts : 0;
+
+  let priorCloses: number[] = [];
+  let priorHighs: number[] = [];
+  let priorLows: number[] = [];
+
+  try {
+    const warmupDb = new Database(DATA_DB_PATH, { readonly: true });
+    const rows = warmupDb.prepare(`
+      SELECT close, high, low FROM ${REPLAY_DATA_SOURCE}
+      WHERE symbol='SPX' AND timeframe=? AND ts < ?
+      ORDER BY ts DESC LIMIT ?
+    `).all(tf, earliestTs, warmupCount) as { close: number; high: number; low: number }[];
+    priorCloses = rows.reverse().map(r => r.close);
+    priorHighs = rows.map(r => r.high);
+    priorLows = rows.map(r => r.low);
+    warmupDb.close();
+  } catch {
+    // Warmup failed, proceed without it
+  }
+
+  // Compute KC for SPX bars
+  const kcState = makeKCState(kcEmaPeriod, kcAtrPeriod, kcMultiplier, kcSlopeLookback);
+
+  // Seed with prior data
+  for (let i = 0; i < priorCloses.length; i++) {
+    const prevClose = i > 0 ? priorCloses[i - 1] : null;
+    kcStep(kcState, priorCloses[i], priorHighs[i], priorLows[i], prevClose);
+  }
+
+  // Compute on session bars
+  let prevClose = priorCloses.length > 0 ? priorCloses[priorCloses.length - 1] : null;
+  for (const bar of cache.spxBars) {
+    const kc = kcStep(kcState, bar.close, bar.high, bar.low, prevClose);
+    if (kc) {
+      bar.indicators.kcUpper = kc.upper;
+      bar.indicators.kcMiddle = kc.middle;
+      bar.indicators.kcLower = kc.lower;
+      bar.indicators.kcWidth = kc.width;
+      bar.indicators.kcSlope = kc.slope;
+    }
+    prevClose = bar.close;
+  }
+
+  // Cache to DB
+  try {
+    const writeDb = new Database(DATA_DB_PATH);
+    writeDb.pragma('journal_mode = WAL');
+    writeDb.pragma('busy_timeout = 5000');
+    const updateStmt = writeDb.prepare(`
+      UPDATE ${REPLAY_DATA_SOURCE} SET indicators = ? WHERE symbol = ? AND timeframe = ? AND ts = ?
+    `);
+
+    const writeTxn = writeDb.transaction((bars: Bar[]) => {
+      for (const bar of bars) {
+        updateStmt.run(JSON.stringify(bar.indicators), 'SPX', tf, bar.ts);
+      }
+    });
+
+    writeTxn(cache.spxBars);
+    writeDb.close();
+
+    if (verbose) {
+      console.log(`  Cached KC indicators → ${cache.spxBars.length} SPX bars saved to DB`);
+    }
+  } catch (err: any) {
+    if (verbose) console.log(`  Warning: failed to cache KC to DB: ${err.message}`);
+  }
 }
+
 
 // ── In-memory lookups (no SQL per tick) ────────────────────────────────────
 
@@ -492,9 +640,65 @@ export async function runReplay(
     const { start: SESSION_START, end: SESSION_END, closeCutoff: CLOSE_CUTOFF } = buildSessionTimestamps(targetDate);
     const SYMBOL_FILTER = buildSymbolFilter(targetDate);
 
-    // Pre-load ALL bars into memory once — no SQL per tick
-    const timeframe = config.pipeline?.timeframe || '1m';
-    const cache = loadBarCache(dataDb, SESSION_START, SESSION_END, SYMBOL_FILTER, timeframe);
+    // Pre-load bars into memory — multiple timeframes from DB
+    // 1m cache: always loaded for price lookups and position management
+    const cache1m = loadBarCache(dataDb, SESSION_START, SESSION_END, SYMBOL_FILTER, '1m');
+
+    // ── MTF cache loader — deduplicates so each TF is loaded at most once ──
+    const tfCacheMap = new Map<string, BarCache>();
+    tfCacheMap.set('1m', cache1m);
+
+    function getTfCache(tf: string): BarCache {
+      if (!tf || tf === '1m') return cache1m;
+      if (tfCacheMap.has(tf)) return tfCacheMap.get(tf)!;
+      const c = loadBarCache(dataDb, SESSION_START, SESSION_END, SYMBOL_FILTER, tf);
+      tfCacheMap.set(tf, c);
+      return c;
+    }
+
+    // Resolve all timeframes from config
+    const signalTf = config.signals.signalTimeframe || '1m';
+    const directionTf = config.signals.directionTimeframe || '1m';
+    const exitTf = config.signals.exitTimeframe || directionTf;  // default: same as direction
+
+    // Per-signal-type TF overrides (null = use signalTimeframe)
+    const hmaCrossTf = config.signals.hmaCrossTimeframe || signalTf;
+    const rsiCrossTf = config.signals.rsiCrossTimeframe || signalTf;
+    const emaCrossTf = config.signals.emaCrossTimeframe || signalTf;
+    const priceCrossHmaTf = config.signals.priceCrossHmaTimeframe || signalTf;
+
+    // Collect all unique TFs we need and pre-load them
+    const allTfs = new Set([signalTf, directionTf, exitTf, hmaCrossTf, rsiCrossTf, emaCrossTf, priceCrossHmaTf]);
+    for (const tf of allTfs) getTfCache(tf);
+
+    // Ensure all configured HMA periods exist in every loaded cache.
+    // Pre-baked periods in DB: [5, 19, 25]. Anything else gets computed on-the-fly
+    // from close prices and cached back to the DB for next run.
+    const neededHmaPeriods = new Set<number>();
+    neededHmaPeriods.add(config.signals.hmaCrossFast ?? 5);
+    neededHmaPeriods.add(config.signals.hmaCrossSlow ?? 19);
+    const hmaPeriods = [...neededHmaPeriods];
+    for (const tf of allTfs) {
+      ensureHmaPeriods(getTfCache(tf), hmaPeriods, tf, verbose);
+    }
+    // Also ensure 1m cache has them (used for price lookups / position management)
+    ensureHmaPeriods(cache1m, hmaPeriods, '1m', verbose);
+
+    const signalCache = getTfCache(signalTf);
+    const directionCache = getTfCache(directionTf);
+    const exitCache = getTfCache(exitTf);
+
+    // Ensure KC indicators are computed for the direction timeframe (used by KC trend gate)
+    ensureKcFields(directionCache, directionTf, config, verbose);
+
+    // Per-signal-type caches for MTF signal detection
+    const hmaCrossCache = getTfCache(hmaCrossTf);
+    const rsiCrossCache = getTfCache(rsiCrossTf);
+    const emaCrossCache = getTfCache(emaCrossTf);
+    const priceCrossHmaCache = getTfCache(priceCrossHmaTf);
+
+    // Primary iteration on 1m timestamps (finest granularity for price tracking)
+    const cache = cache1m;
     const { timestamps } = cache;
 
     if (timestamps.length === 0) {
@@ -505,6 +709,12 @@ export async function runReplay(
       console.log(`\n${'='.repeat(72)}`);
       console.log(`  Replay: ${config.name} | ${targetDate}`);
       console.log(`  Config: ${config.id} | Bars: ${timestamps.length} | Contracts: ${cache.contractBars.size}`);
+      const tfParts = [`Signal: ${signalTf}`, `Direction: ${directionTf}`, `Exit: ${exitTf}`];
+      if (hmaCrossTf !== signalTf) tfParts.push(`HMA: ${hmaCrossTf}`);
+      if (rsiCrossTf !== signalTf) tfParts.push(`RSI: ${rsiCrossTf}`);
+      if (emaCrossTf !== signalTf) tfParts.push(`EMA: ${emaCrossTf}`);
+      if (priceCrossHmaTf !== signalTf) tfParts.push(`PxHMA: ${priceCrossHmaTf}`);
+      console.log(`  TF: ${tfParts.join(' | ')}`);
       console.log('='.repeat(72));
     }
 
@@ -530,7 +740,8 @@ export async function runReplay(
     const strikeRange = config.strikeSelector.strikeSearchRange;
     let prevSpxHmaFast: number | null = null;
     let prevSpxHmaSlow: number | null = null;
-    let spxHmaCrossDirection: 'bullish' | 'bearish' | null = null;
+    let spxDirectionCross: 'bullish' | 'bearish' | null = null;  // entry gating (directionTf)
+    let spxExitCross: 'bullish' | 'bearish' | null = null;       // exit reversal (exitTf)
     const spxHmaFastKey = `hma${config.signals.hmaCrossFast ?? 5}`;
     const spxHmaSlowKey = `hma${config.signals.hmaCrossSlow ?? 19}`;
 
@@ -539,22 +750,52 @@ export async function runReplay(
       if (spxBars.length < 5) continue;
       const spx = spxBars[spxBars.length - 1];
 
-      // ── Underlying HMA cross detection (uses same configurable periods) ──
-      spxHmaCrossDirection = null;
-      const currSpxHmaFast = spx.indicators[spxHmaFastKey] ?? null;
-      const currSpxHmaSlow = spx.indicators[spxHmaSlowKey] ?? null;
-      if (prevSpxHmaFast != null && prevSpxHmaSlow != null && currSpxHmaFast != null && currSpxHmaSlow != null) {
-        if (prevSpxHmaFast < prevSpxHmaSlow && currSpxHmaFast >= currSpxHmaSlow) spxHmaCrossDirection = 'bullish';
-        if (prevSpxHmaFast >= prevSpxHmaSlow && currSpxHmaFast < currSpxHmaSlow) spxHmaCrossDirection = 'bearish';
+      // ── Helper: detect HMA cross on a given TF cache ──
+      function detectHmaCross(tfCache: BarCache): 'bullish' | 'bearish' | null {
+        const bars = getSpxBarsAt(tfCache, ts);
+        if (bars.length < 2) return null;
+        const curr = bars[bars.length - 1];
+        const prev = bars[bars.length - 2];
+        const cF = curr.indicators[spxHmaFastKey] ?? null;
+        const cS = curr.indicators[spxHmaSlowKey] ?? null;
+        const pF = prev.indicators[spxHmaFastKey] ?? null;
+        const pS = prev.indicators[spxHmaSlowKey] ?? null;
+        if (pF == null || pS == null || cF == null || cS == null) return null;
+        if (pF < pS && cF >= cS) return 'bullish';
+        if (pF >= pS && cF < cS) return 'bearish';
+        return null;
       }
-      prevSpxHmaFast = currSpxHmaFast;
+
+      // ── Direction cross (for entry gating) — uses directionTimeframe ──
+      spxDirectionCross = detectHmaCross(directionCache);
+      // Track current direction values for logging/filtering
+      const dirSpxBars = getSpxBarsAt(directionCache, ts);
+      if (dirSpxBars.length >= 1) {
+        const dirSpx = dirSpxBars[dirSpxBars.length - 1];
+        const f = dirSpx.indicators[spxHmaFastKey] ?? null;
+        const s = dirSpx.indicators[spxHmaSlowKey] ?? null;
+        if (f != null && s != null) { prevSpxHmaFast = f; prevSpxHmaSlow = s; }
+      }
+
+      // ── Exit cross (for position reversal exit) — uses exitTimeframe ──
+      // If exitTf === directionTf, reuse the same result to avoid double-computing
+      spxExitCross = (exitTf === directionTf) ? spxDirectionCross : detectHmaCross(exitCache);
 
       // ── Position monitoring ────────────────────────────────────────────
+      const reversalFlips: { side: 'call' | 'put'; ts: number }[] = [];
       for (const [posId, openPos] of openPositions.entries()) {
         const curPrice = getPosPriceAt(cache, openPos.side, openPos.strike, SYMBOL_FILTER, ts);
         if (curPrice === null) continue;
 
-        const exitCtx: ExitContext = { ts, closeCutoffTs: CLOSE_CUTOFF, hmaCrossDirection: spxHmaCrossDirection };
+        // Track high-water mark for trailing stop
+        if (curPrice > openPos.highWaterPrice) {
+          openPos.highWaterPrice = curPrice;
+        }
+
+        const exitCtx: ExitContext = {
+          ts, closeCutoffTs: CLOSE_CUTOFF, hmaCrossDirection: spxExitCross,
+          highWaterPrice: openPos.highWaterPrice,
+        };
         const exitResult = checkExit(openPos, curPrice, config, exitCtx);
         const closeReason = exitResult.reason;
 
@@ -571,14 +812,155 @@ export async function runReplay(
             const emoji = pnlPct >= 0 ? '+' : '';
             console.log(`  CLOSE [${etLabel(ts)}] ${openPos.symbol} ${closeReason}: ${emoji}${pnlPct.toFixed(0)}%`);
           }
+
+          // Track reversal exits for flip-to-opposite logic
+          if (closeReason === 'signal_reversal') {
+            const flipSide: 'call' | 'put' = openPos.side === 'call' ? 'put' : 'call';
+            reversalFlips.push({ side: flipSide, ts });
+          }
+
           openPositions.delete(posId);
         }
       }
-      prevSpxHmaSlow = currSpxHmaSlow;
+      // ── Flip-on-reversal: when exit.strategy='scannerReverse', enter opposite side ──
+      // Dedupe: only flip once per side per bar (multiple positions may reverse at same time)
+      const uniqueFlips = new Map<string, { side: 'call' | 'put'; ts: number }>();
+      for (const flip of reversalFlips) {
+        uniqueFlips.set(flip.side, flip);
+      }
 
-      // ── Signal detection (core module — OTM + price band filtering built in) ──
-      const contractBars = getContractBarsAt(cache, spx.close, strikeRange, ts);
-      let optionSignals: Signal[] = detectSignals(contractBars as Map<string, CoreBar[]>, spx.close, config);
+      if (uniqueFlips.size > 0 && config.exit?.strategy === 'scannerReverse') {
+        for (const [, flip] of uniqueFlips) {
+          // Check risk limits before flipping
+          const flipRiskState: RiskState = {
+            openPositions: openPositions.size,
+            tradesCompleted: trades.length,
+            dailyPnl: trades.reduce((sum, t) => sum + t.pnl$, 0),
+            currentTs: ts,
+            closeCutoffTs: CLOSE_CUTOFF,
+            lastEscalationTs,
+          };
+          if (isRiskBlocked(flipRiskState, config).blocked) continue;
+
+          // Find best contract on the flip side near the configured OTM distance
+          const flipContracts = getContractBarsAt(cache1m, spx.close, strikeRange, ts);
+          const spxRounded = Math.round(spx.close / 5) * 5;
+          const targetDist = config.signals.targetOtmDistance ?? 25;
+          const targetStrike = flip.side === 'call'
+            ? spxRounded + targetDist
+            : spxRounded - targetDist;
+
+          let bestSymbol: string | null = null;
+          let bestPrice = 0;
+          let bestStrikeDist = Infinity;
+
+          const cpPattern = flip.side === 'call' ? /C\d/ : /P\d/;
+          for (const [sym, bars] of flipContracts) {
+            if (!cpPattern.test(sym)) continue;
+            const strike = cache.contractStrikes.get(sym) ?? cache1m.contractStrikes.get(sym);
+            if (strike == null) continue;
+
+            // OTM/ITM filter — skip ITM contracts unless targeting ITM (negative targetOtmDistance)
+            if (targetDist >= 0) {
+              if (flip.side === 'call' && strike <= spx.close) continue;
+              if (flip.side === 'put' && strike >= spx.close) continue;
+            }
+
+            const curBar = bars[bars.length - 1];
+            if (!curBar) continue;
+            const price = curBar.close;
+            if (price < (config.strikeSelector?.contractPriceMin ?? 0.2)) continue;
+            if (price > (config.strikeSelector?.contractPriceMax ?? 9999)) continue;
+
+            const dist = Math.abs(strike - targetStrike);
+            if (dist < bestStrikeDist || (dist === bestStrikeDist && config.signals.targetContractPrice != null && Math.abs(price - config.signals.targetContractPrice) < Math.abs(bestPrice - config.signals.targetContractPrice))) {
+              bestStrikeDist = dist;
+              bestSymbol = sym;
+              bestPrice = price;
+            }
+          }
+
+          if (bestSymbol && bestPrice > 0) {
+            const parsed = parseOptionSymbol(bestSymbol);
+            if (parsed) {
+              const stopLoss = config.position.stopLossPercent > 0
+                ? bestPrice * (1 - config.position.stopLossPercent / 100)
+                : 0;
+              const takeProfit = bestPrice * config.position.takeProfitMultiplier;
+              const qty = computeQty(bestPrice, config);
+
+              openPositions.set(`${bestSymbol}_${ts}`, {
+                id: `${bestSymbol}_${ts}`,
+                symbol: bestSymbol,
+                side: flip.side,
+                strike: parsed.strike,
+                qty, entryPrice: bestPrice, stopLoss, takeProfit,
+                entryTs: ts, entryET: etLabel(ts),
+                highWaterPrice: bestPrice,
+              });
+              if (verbose) {
+                console.log(`  FLIP → ${flip.side.toUpperCase()} ${bestSymbol} x${qty} @ $${bestPrice.toFixed(2)} | stop=$${stopLoss.toFixed(2)} tp=$${takeProfit.toFixed(2)}`);
+              }
+            }
+          }
+        }
+      }
+
+      // ── Signal detection — MTF-aware ──────────────────────────────────
+      // If all signal types use the same TF, one call suffices.
+      // If per-signal TF overrides are set, run detectSignals per TF with only
+      // the relevant signal types enabled, then merge results.
+      const allSameTf = (hmaCrossTf === signalTf && rsiCrossTf === signalTf &&
+                          emaCrossTf === signalTf && priceCrossHmaTf === signalTf);
+
+      let optionSignals: Signal[];
+      // contractBars from the default signal TF — also used for price filtering below
+      const contractBars = getContractBarsAt(signalCache, spx.close, strikeRange, ts);
+
+      if (allSameTf) {
+        // Fast path: all signal types use the same timeframe
+        optionSignals = detectSignals(contractBars as Map<string, CoreBar[]>, spx.close, config);
+      } else {
+        // MTF path: run each signal type against its own TF cache
+        optionSignals = [];
+        const signalTypes: { tf: string; cache: BarCache; overrides: Partial<typeof config.signals> }[] = [];
+
+        // Group by TF to minimize detectSignals calls
+        const tfGroups = new Map<string, { enableHma: boolean; enableRsi: boolean; enableEma: boolean; enablePxHma: boolean }>();
+        function getGroup(tf: string) {
+          if (!tfGroups.has(tf)) tfGroups.set(tf, { enableHma: false, enableRsi: false, enableEma: false, enablePxHma: false });
+          return tfGroups.get(tf)!;
+        }
+        if (config.signals.enableHmaCrosses) getGroup(hmaCrossTf).enableHma = true;
+        if (config.signals.enableRsiCrosses) getGroup(rsiCrossTf).enableRsi = true;
+        if (config.signals.enableEmaCrosses) getGroup(emaCrossTf).enableEma = true;
+        if (config.signals.enablePriceCrossHma) getGroup(priceCrossHmaTf).enablePxHma = true;
+
+        for (const [tf, group] of tfGroups) {
+          const tfBars = getContractBarsAt(getTfCache(tf), spx.close, strikeRange, ts);
+          const subConfig = {
+            ...config,
+            signals: {
+              ...config.signals,
+              enableHmaCrosses: group.enableHma,
+              enableRsiCrosses: group.enableRsi,
+              enableEmaCrosses: group.enableEma,
+              enablePriceCrossHma: group.enablePxHma,
+            },
+          };
+          const sigs = detectSignals(tfBars as Map<string, CoreBar[]>, spx.close, subConfig);
+          optionSignals.push(...sigs);
+        }
+
+        // Dedupe: same symbol + signal type from different TF groups shouldn't appear twice
+        const seen = new Set<string>();
+        optionSignals = optionSignals.filter(s => {
+          const key = `${s.symbol}:${s.signalType}:${s.direction}`;
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        });
+      }
 
       // ── Target OTM distance filter ─────────────────────────────────────
       // When set, only keep signals on the strike closest to the target OTM distance
@@ -618,13 +1000,36 @@ export async function runReplay(
       //   SPX bearish → buy puts (put prices rise when SPX drops)
       // Option signal direction should be bullish (contract price going up = buy opportunity)
       if (config.signals.requireUnderlyingHmaCross && optionSignals.length > 0) {
-        if (spxHmaCrossDirection == null) {
+        if (spxDirectionCross == null) {
           optionSignals = [];
         } else {
-          const wantSide = spxHmaCrossDirection === 'bullish' ? 'call' : 'put';
+          const wantSide = spxDirectionCross === 'bullish' ? 'call' : 'put';
           optionSignals = optionSignals.filter(sig =>
             sig.side === wantSide && sig.direction === 'bullish'
           );
+        }
+      }
+
+      // ── Keltner Channel trend gate ───────────────────────────────────────
+      // Macro trend filter using KC midline slope:
+      //   kcSlope < -threshold → DOWNTREND → block calls, allow puts only
+      //   kcSlope > +threshold → UPTREND   → block puts, allow calls only
+      //   |kcSlope| < threshold → RANGE    → allow both (no filter)
+      if (config.signals.enableKeltnerGate && optionSignals.length > 0) {
+        // Read kcSlope from the direction timeframe (where KC was computed)
+        const dirBars = getSpxBarsAt(directionCache, ts);
+        const dirSpx = dirBars.length > 0 ? dirBars[dirBars.length - 1] : null;
+        const kcSlope = dirSpx?.indicators?.kcSlope;
+        if (kcSlope != null) {
+          const threshold = config.signals.kcSlopeThreshold ?? 0.3;
+          if (kcSlope < -threshold) {
+            // DOWNTREND: block calls, keep puts only
+            optionSignals = optionSignals.filter(s => s.side === 'put');
+          } else if (kcSlope > threshold) {
+            // UPTREND: block puts, keep calls only
+            optionSignals = optionSignals.filter(s => s.side === 'call');
+          }
+          // RANGE: no filter
         }
       }
 
@@ -818,6 +1223,7 @@ export async function runReplay(
               strike: parsed.strike,
               qty, entryPrice, stopLoss, takeProfit,
               entryTs: ts, entryET: etLabel(ts),
+              highWaterPrice: entryPrice,
             });
             if (verbose) {
               console.log(`  ENTER ${judgeTarget} x${qty} @ $${entryPrice.toFixed(2)} | stop=$${stopLoss.toFixed(2)} tp=$${takeProfit.toFixed(2)}`);

@@ -71,7 +71,7 @@ export function detectSignals(
   const emaSlowKey = `ema${emaSlow}`;
 
   const priceMin = config.strikeSelector?.contractPriceMin ?? 0.2;
-  const priceMax = config.strikeSelector?.contractPriceMax ?? 8.0;
+  const priceMax = config.strikeSelector?.contractPriceMax ?? 9999;
 
   for (const [symbol, bars] of contractBars) {
     if (bars.length < 2) continue;

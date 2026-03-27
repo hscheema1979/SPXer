@@ -65,7 +65,7 @@ export interface OpenPosition {
 export interface PositionClose {
   position: OpenPosition;
   closePrice: number;
-  reason: 'stop_loss' | 'take_profit' | 'time_exit' | 'manual';
+  reason: 'stop_loss' | 'take_profit' | 'time_exit' | 'signal_reversal' | 'manual';
   pnl: number;
   closedAt: number;
 }

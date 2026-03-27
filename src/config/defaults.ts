@@ -29,13 +29,13 @@ export const DEFAULT_CONFIG: Config = {
     activeJudge: 'sonnet',
     consensusRule: 'primary-decides',
     confidenceThreshold: 0.5,
-    escalationCooldownSec: 180,
+    escalationCooldownSec: 0,
     promptId: 'judge-regime-advisor-v1',
   },
 
   regime: {
-    enabled: true,
-    mode: 'enforce',
+    enabled: false,
+    mode: 'disabled',
     classification: {
       trendThreshold: 0.15,
       lookbackBars: 20,
@@ -45,7 +45,7 @@ export const DEFAULT_CONFIG: Config = {
       morningEnd: '10:15',
       middayEnd: '14:00',
       gammaExpiryStart: '14:00',
-      noTradeStart: '15:30',
+      noTradeStart: '15:55',
     },
     signalGates: {
       MORNING_MOMENTUM: {
@@ -109,34 +109,50 @@ export const DEFAULT_CONFIG: Config = {
     hmaCrossSlow: 19,
     emaCrossFast: 9,
     emaCrossSlow: 21,
+    signalTimeframe: '1m',
+    directionTimeframe: '1m',
+    exitTimeframe: '',              // empty = same as directionTimeframe
+    hmaCrossTimeframe: null,        // null = use signalTimeframe
+    rsiCrossTimeframe: null,
+    emaCrossTimeframe: null,
+    priceCrossHmaTimeframe: null,
     targetOtmDistance: null,
     targetContractPrice: null,
+    maxEntryPrice: null,           // Filter: skip trades above this price
     rsiOversold: 20,
     rsiOverbought: 80,
     optionRsiOversold: 40,
     optionRsiOverbought: 60,
+
+    // Keltner Channel trend filter
+    enableKeltnerGate: false,
+    kcEmaPeriod: 20,
+    kcAtrPeriod: 14,
+    kcMultiplier: 2.5,
+    kcSlopeLookback: 5,
+    kcSlopeThreshold: 0.3,
   },
 
   position: {
     stopLossPercent: 80,
     takeProfitMultiplier: 5,
-    maxPositionsOpen: 3,
+    maxPositionsOpen: 100,
     defaultQuantity: 1,
     positionSizeMultiplier: 1.0,
   },
 
   risk: {
-    maxDailyLoss: 500,
-    maxTradesPerDay: 10,
+    maxDailyLoss: 999999,
+    maxTradesPerDay: 999,
     maxRiskPerTrade: 2000,
-    cutoffTimeET: '15:45',
+    cutoffTimeET: '16:00',
     minMinutesToClose: 15,
   },
 
   strikeSelector: {
     strikeSearchRange: 80,
     contractPriceMin: 0.2,
-    contractPriceMax: 8.0,
+    contractPriceMax: 9999,  // no ceiling — all OTM contracts eligible; filter at analysis time
   },
 
   timeWindows: {
@@ -159,8 +175,8 @@ export const DEFAULT_CONFIG: Config = {
     strategy: 'takeProfit',
     trailingStopEnabled: false,
     trailingStopPercent: 20,
-    timeBasedExitEnabled: true,
-    timeBasedExitMinutes: 5,
+    timeBasedExitEnabled: false,
+    timeBasedExitMinutes: 30,
     reversalSizeMultiplier: 1.0,
   },
 

@@ -54,6 +54,16 @@ export interface HMAState {
   wmaSqrt:  WMAState; // WMA(round(sqrt(period))) applied to the (2*wmaHalf - wmaFull) series
 }
 
+export interface KCState {
+  emaValue: number | null;
+  emaHistory: number[];
+  atrValues: number[];
+  emaPeriod: number;
+  atrPeriod: number;
+  multiplier: number;
+  slopeLookback: number;
+}
+
 export interface IndicatorState {
   closes: number[];
   highs: number[];
@@ -67,6 +77,7 @@ export interface IndicatorState {
   atrState: number | null;
   adxState: { plusDM: number | null; minusDM: number | null; tr: number | null; adx: number | null };
   hmaState: Record<number, HMAState>; // keyed by HMA period
+  kcState: KCState | null; // Keltner Channel state for trend filtering
 }
 
 export interface ChainContract {

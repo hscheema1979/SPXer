@@ -38,7 +38,7 @@ export function startHttpServer(port: number): { app: Express; httpServer: Serve
     const activeCount = active.filter(c => c.state === 'ACTIVE').length;
 
     res.json({
-      // New health report fields
+      // Health report — 'n/a' when no providers tracked, 'healthy'/'degraded'/'critical' otherwise
       status: report.status,
       uptimeSec: report.uptimeSec,
       providers: report.providers,

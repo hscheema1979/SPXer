@@ -1,28 +1,54 @@
-export interface HealthReport {
-  status: 'healthy' | 'degraded' | 'critical';
-  uptimeSec: number;
-  providers: Record<string, {
-    lastSuccess: string | null;
-    staleSec: number | null;
-    consecutiveFailures: number;
-    healthy: boolean;
-  }>;
-  data: Record<string, {
-    lastBarTs: string;
-    staleSec: number;
-  }>;
+/**
+ * Health monitoring — tracks provider status, data freshness, and overall system health.
+ *
+ * Status semantics:
+ *   'ok'       — no providers registered yet (startup/test) OR all providers healthy
+ *   'healthy'  — all registered providers are healthy and responding
+ *   'degraded' — some providers healthy, some failing
+ *   'critical' — all registered providers are unhealthy
+ */
+
+export type HealthStatus = 'n/a' | 'healthy' | 'degraded' | 'critical';
+
+export interface ProviderHealth {
+  lastSuccess: string | null;
+  staleSec: number | null;
+  consecutiveFailures: number;
+  healthy: boolean;
 }
 
-interface ProviderStatus {
+export interface DataHealth {
+  lastBarTs: string;
+  staleSec: number;
+}
+
+export interface HealthReport {
+  status: HealthStatus;
+  uptimeSec: number;
+  providers: Record<string, ProviderHealth>;
+  data: Record<string, DataHealth>;
+}
+
+export interface ProviderStatus {
   lastSuccessTs: number | null;
   lastFailureTs: number | null;
   consecutiveFailures: number;
 }
 
-class HealthTracker {
+/** Max staleness before a provider is considered unhealthy (ms) */
+const STALE_THRESHOLD_MS = 120_000;
+
+/** Max consecutive failures before a provider is considered unhealthy */
+const FAILURE_THRESHOLD = 3;
+
+export class HealthTracker {
   private providers = new Map<string, ProviderStatus>();
   private lastBarTs = new Map<string, number>();
-  private startTime = Date.now();
+  private startTime: number;
+
+  constructor(startTime?: number) {
+    this.startTime = startTime ?? Date.now();
+  }
 
   recordSuccess(provider: string): void {
     const s = this.getOrCreate(provider);
@@ -40,34 +66,46 @@ class HealthTracker {
     this.lastBarTs.set(symbol, ts);
   }
 
-  getStatus(): HealthReport {
-    const now = Date.now();
+  /** Reset all state — useful in tests */
+  reset(): void {
+    this.providers.clear();
+    this.lastBarTs.clear();
+    this.startTime = Date.now();
+  }
+
+  get providerCount(): number {
+    return this.providers.size;
+  }
+
+  getProviderStatus(provider: string): ProviderStatus | undefined {
+    return this.providers.get(provider);
+  }
+
+  getStatus(now?: number): HealthReport {
+    const ts = now ?? Date.now();
     const providers: HealthReport['providers'] = {};
 
     for (const [name, status] of this.providers) {
+      const healthy = isProviderHealthy(status, ts);
       providers[name] = {
         lastSuccess: status.lastSuccessTs ? new Date(status.lastSuccessTs).toISOString() : null,
-        staleSec: status.lastSuccessTs ? Math.round((now - status.lastSuccessTs) / 1000) : null,
+        staleSec: status.lastSuccessTs ? Math.round((ts - status.lastSuccessTs) / 1000) : null,
         consecutiveFailures: status.consecutiveFailures,
-        healthy: status.consecutiveFailures < 3 && (status.lastSuccessTs ? (now - status.lastSuccessTs) < 120_000 : false),
+        healthy,
       };
     }
 
     const data: HealthReport['data'] = {};
-    for (const [symbol, ts] of this.lastBarTs) {
+    for (const [symbol, barTs] of this.lastBarTs) {
       data[symbol] = {
-        lastBarTs: new Date(ts).toISOString(),
-        staleSec: Math.round((now - ts) / 1000),
+        lastBarTs: new Date(barTs).toISOString(),
+        staleSec: Math.round((ts - barTs) / 1000),
       };
     }
 
-    const providerValues = Object.values(providers);
-    const allHealthy = providerValues.length > 0 && providerValues.every(p => p.healthy);
-    const anyHealthy = providerValues.some(p => p.healthy);
-
     return {
-      status: allHealthy ? 'healthy' : anyHealthy ? 'degraded' : 'critical',
-      uptimeSec: Math.round((now - this.startTime) / 1000),
+      status: computeOverallStatus(providers),
+      uptimeSec: Math.round((ts - this.startTime) / 1000),
       providers,
       data,
     };
@@ -80,5 +118,32 @@ class HealthTracker {
     return this.providers.get(provider)!;
   }
 }
+
+// ── Pure helper functions (testable independently) ─────────────────────────
+
+export function isProviderHealthy(status: ProviderStatus, now: number): boolean {
+  if (status.consecutiveFailures >= FAILURE_THRESHOLD) return false;
+  if (!status.lastSuccessTs) return false;
+  if (now - status.lastSuccessTs >= STALE_THRESHOLD_MS) return false;
+  return true;
+}
+
+export function computeOverallStatus(
+  providers: Record<string, ProviderHealth>,
+): HealthStatus {
+  const values = Object.values(providers);
+
+  // No providers registered yet — nothing to report
+  if (values.length === 0) return 'n/a';
+
+  const allHealthy = values.every(p => p.healthy);
+  const anyHealthy = values.some(p => p.healthy);
+
+  if (allHealthy) return 'healthy';
+  if (anyHealthy) return 'degraded';
+  return 'critical';
+}
+
+// ── Singleton instance for production use ──────────────────────────────────
 
 export const healthTracker = new HealthTracker();

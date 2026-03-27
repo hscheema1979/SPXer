@@ -1,9 +1,14 @@
 /**
- * PositionManager: tracks open positions and monitors them for
- * stop-loss / take-profit / time-exit conditions every ~30s.
+ * PositionManager: tracks open positions and monitors them for exit conditions.
+ *
+ * Exit logic delegates to src/core/position-manager.checkExit() so that
+ * live agent and replay evaluate the same exit conditions.
  */
 import axios from 'axios';
 import type { OpenPosition, PositionClose } from './types';
+import type { Config } from '../config/types';
+import type { Position } from '../core/types';
+import { checkExit, type ExitContext } from '../core/position-manager';
 import { closePosition } from './trade-executor';
 import { logClose } from './audit-log';
 
@@ -12,8 +17,10 @@ const SPXER_BASE = process.env.SPXER_URL || 'http://localhost:3600';
 export class PositionManager {
   private positions: Map<string, OpenPosition> = new Map();
   private paper: boolean;
+  private cfg: Config;
 
-  constructor(paper: boolean) {
+  constructor(config: Config, paper: boolean) {
+    this.cfg = config;
     this.paper = paper;
   }
 
@@ -34,8 +41,6 @@ export class PositionManager {
   async monitor(dailyLossCallback: (loss: number) => void): Promise<void> {
     if (this.positions.size === 0) return;
 
-    const symbols = Array.from(this.positions.keys()).map(id => this.positions.get(id)!.symbol);
-
     // Fetch latest bars from SPXer for current prices
     const priceMap = new Map<string, number>();
     await Promise.allSettled(
@@ -50,52 +55,57 @@ export class PositionManager {
     );
 
     const now = Date.now();
-    const minutesToClose = this.minutesToClose();
+    const closeCutoffTs = this.computeCloseCutoffTs();
 
     for (const [id, pos] of this.positions) {
       const currentPrice = priceMap.get(pos.symbol);
       if (currentPrice === undefined) continue;
 
-      let reason: PositionClose['reason'] | null = null;
+      // Map OpenPosition → core Position for checkExit
+      const corePosition: Position = {
+        id: pos.id,
+        symbol: pos.symbol,
+        side: pos.side,
+        strike: pos.strike,
+        qty: pos.quantity,
+        entryPrice: pos.entryPrice,
+        stopLoss: pos.stopLoss,
+        takeProfit: pos.takeProfit ?? pos.entryPrice * this.cfg.position.takeProfitMultiplier,
+        entryTs: pos.openedAt,
+        entryET: '',
+      };
 
-      // Stop loss
-      if (currentPrice <= pos.stopLoss) {
-        reason = 'stop_loss';
-      }
-      // Take profit
-      else if (pos.takeProfit && currentPrice >= pos.takeProfit) {
-        reason = 'take_profit';
-      }
-      // Time exit: close 15 minutes before market close to avoid expiry whipsaw
-      else if (minutesToClose <= 15) {
-        reason = 'time_exit';
-      }
+      const context: ExitContext = {
+        ts: Math.floor(now / 1000),
+        closeCutoffTs,
+        hmaCrossDirection: null,  // TODO: pass live HMA cross state when available
+      };
 
-      if (reason) {
+      const exitCheck = checkExit(corePosition, currentPrice, this.cfg, context);
+
+      if (exitCheck.shouldExit && exitCheck.reason) {
         const pnl = (currentPrice - pos.entryPrice) * pos.quantity * 100;
         const closeRecord: PositionClose = {
           position: pos,
           closePrice: currentPrice,
-          reason,
+          reason: exitCheck.reason,
           pnl,
           closedAt: now,
         };
 
-        await closePosition(pos, reason, currentPrice, this.paper);
+        await closePosition(pos, exitCheck.reason, currentPrice, this.paper);
         logClose(closeRecord);
-        dailyLossCallback(pnl);  // pnl negative = loss
+        dailyLossCallback(pnl);
         this.positions.delete(id);
       }
     }
   }
 
-  private minutesToClose(): number {
-    // Use Intl to correctly handle EST/EDT automatically
+  private computeCloseCutoffTs(): number {
     const now = new Date();
     const etStr = now.toLocaleString('en-US', { timeZone: 'America/New_York', hour12: false });
-    const timePart = etStr.split(', ')[1];
-    const [h, m] = timePart.split(':').map(Number);
-    const minsNow = h * 60 + m;
-    return Math.max(0, 16 * 60 - minsNow);
+    const datePart = etStr.split(', ')[0];
+    const closeET = new Date(`${datePart} 16:00:00`);
+    return Math.floor(closeET.getTime() / 1000);
   }
 }

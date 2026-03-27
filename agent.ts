@@ -6,7 +6,8 @@
  *   Parallel oversight: LLM scanners (Kimi, GLM, MiniMax) — catch what deterministic misses
  *   Judge: escalation only when scanners flag high-confidence setups
  *
- * Scanners run every ~30s cycle alongside price-action — both independent, both parallel.
+ * Core trading logic (signal detection, strike selection, position exit, risk guard)
+ * is shared with the replay system via src/core/. Same Config → same decisions.
  *
  * Usage:
  *   npm run agent              # paper mode (default)
@@ -20,23 +21,24 @@ import { assess, getHttpScannerConfigs } from './src/agent/judgment-engine';
 import type { ScannerResult, Assessment, JudgeResult } from './src/agent/judgment-engine';
 import { openPosition, closePosition } from './src/agent/trade-executor';
 import { PositionManager } from './src/agent/position-manager';
-import { getConfigManager } from './src/config/manager';
 import { AGENT_CONFIG } from './agent-config';
-import { RiskGuard, defaultRiskConfig } from './src/agent/risk-guard';
+import { RiskGuard } from './src/agent/risk-guard';
 import { logEntry, logClose, logRejected } from './src/agent/audit-log';
 import { writeStatus, logActivity } from './src/agent/reporter';
 import { askModel } from './src/agent/model-clients';
 import type { AgentSignal, AgentDecision } from './src/agent/types';
 import { runPreSessionAgent } from './src/agent/pre-session-agent';
 import { config } from './src/config';
-import { selectStrike, type ContractCandidate } from './src/agent/strike-selector';
+import { selectStrike, type StrikeCandidate } from './src/core/strike-selector';
+import { computeQty } from './src/core/position-sizer';
 import { initPriceAction, processBar, getRecentSignals, type ConfluenceResult } from './src/agent/price-action';
-import { detectSignals, clearState as clearSignalState } from './src/agent/signal-detector';
 import { MarketNarrative } from './src/agent/market-narrative';
 import { initSession, getState as getRegimeState } from './src/agent/regime-classifier';
 
-const guard = new RiskGuard(defaultRiskConfig());
-const positions = new PositionManager(guard.isPaper);
+// ── Initialize with unified Config ──────────────────────────────────────────
+
+const guard = new RiskGuard(AGENT_CONFIG);
+const positions = new PositionManager(AGENT_CONFIG, guard.isPaper);
 
 let cycleCount = 0;
 let nextCheckSecs = 30;
@@ -52,20 +54,78 @@ const narratives = new Map<string, MarketNarrative>([
   ['haiku',   new MarketNarrative('haiku',   'Claude Haiku')],
 ]);
 
+// ── Helpers: convert snapshot contracts → core StrikeCandidate[] ─────────────
+
+function buildCandidates(snap: Awaited<ReturnType<typeof fetchMarketSnapshot>>): StrikeCandidate[] {
+  return snap.contracts.map(c => ({
+    symbol: c.meta.symbol,
+    side: c.meta.side,
+    strike: c.meta.strike,
+    price: c.quote.last ?? c.quote.mid ?? 0,
+    volume: c.greeks.volume ?? 0,
+  }));
+}
+
+/** Compute stop loss and take profit from config + entry price */
+function computeSlTp(entryPrice: number): { stopLoss: number; takeProfit: number } {
+  const slPct = AGENT_CONFIG.position.stopLossPercent / 100;
+  return {
+    stopLoss: entryPrice * (1 - slPct),
+    takeProfit: entryPrice * AGENT_CONFIG.position.takeProfitMultiplier,
+  };
+}
+
+interface TradeSelection {
+  symbol: string;
+  side: 'call' | 'put';
+  strike: number;
+  price: number;
+  positionSize: number;
+  stopLoss: number;
+  takeProfit: number;
+  reason: string;
+}
+
+/** Select strike using core module, compute SL/TP/qty from config */
+function selectTradeStrike(
+  candidates: StrikeCandidate[],
+  direction: 'bullish' | 'bearish',
+  spxPrice: number,
+): TradeSelection | null {
+  const result = selectStrike(candidates, direction, spxPrice, AGENT_CONFIG);
+  if (!result) return null;
+
+  const { candidate, reason } = result;
+  const positionSize = computeQty(candidate.price, AGENT_CONFIG);
+  const { stopLoss, takeProfit } = computeSlTp(candidate.price);
+
+  return {
+    symbol: candidate.symbol,
+    side: candidate.side,
+    strike: candidate.strike,
+    price: candidate.price,
+    positionSize,
+    stopLoss,
+    takeProfit,
+    reason: `${reason} | ${positionSize} contracts, stop=$${stopLoss.toFixed(2)}, tp=$${takeProfit.toFixed(2)}`,
+  };
+}
+
+// ── Execute Buy ─────────────────────────────────────────────────────────────
+
 async function executeBuy(
-  selection: ReturnType<typeof selectStrike>,
+  selection: TradeSelection,
   snap: Awaited<ReturnType<typeof fetchMarketSnapshot>>,
   spxRsi: number | null,
 ): Promise<void> {
-  if (!selection) return;
-  const contractState = snap.contracts.find(c => c.meta.symbol === selection.contract.symbol);
+  const contractState = snap.contracts.find(c => c.meta.symbol === selection.symbol);
   if (!contractState) {
-    console.warn(`[agent] Selected contract ${selection.contract.symbol} not in snapshot — skipping`);
+    console.warn(`[agent] Selected contract ${selection.symbol} not in snapshot — skipping`);
     return;
   }
   const recheck = guard.check(positions.getAll(), snap.minutesToClose);
   if (!recheck.allowed) {
-    logRejected(recheck.reason!, selection.contract.symbol, 'buy');
+    logRejected(recheck.reason!, selection.symbol, 'buy');
     return;
   }
   const signal: AgentSignal = {
@@ -102,7 +162,10 @@ async function executeBuy(
   };
   try {
     const { position, execution } = await openPosition(signal, decision, guard.isPaper);
-    if (!execution.error) positions.add(position);
+    if (!execution.error) {
+      positions.add(position);
+      guard.recordTrade();
+    }
     logEntry({ ts: Date.now(), signal, decision, execution });
   } catch (e) {
     console.error('[agent] Execution error:', e);
@@ -123,8 +186,8 @@ function banner(): void {
     console.log(`║    • ${(s.label + ' (' + s.model + ')').padEnd(50)}║`);
   }
   console.log('║  ESCALATION: Judge on high-confidence scanner signals    ║');
-  console.log(`║  Risk/trade: $${guard.config.maxRiskPerTrade} | Daily limit: $${guard.config.maxDailyLoss}            ║`);
-  console.log(`║  Max positions: ${guard.config.maxPositions} | Cutoff: ${guard.config.cutoffTimeET} ET                  ║`);
+  console.log(`║  Risk/trade: $${AGENT_CONFIG.risk.maxRiskPerTrade} | Daily limit: $${AGENT_CONFIG.risk.maxDailyLoss}            ║`);
+  console.log(`║  Max positions: ${AGENT_CONFIG.position.maxPositionsOpen} | Cutoff: ${AGENT_CONFIG.risk.cutoffTimeET} ET                  ║`);
   console.log('╚══════════════════════════════════════════════════════════╝\n');
 }
 
@@ -191,16 +254,8 @@ async function runCycle(): Promise<void> {
       for (const s of confluence.signals) {
         console.log(`[agent]   → ${s.type} ${s.direction} ${s.detail}`);
       }
-      const candidates: ContractCandidate[] = snap.contracts.map(c => ({
-        symbol: c.meta.symbol,
-        side: c.meta.side,
-        strike: c.meta.strike,
-        price: c.quote.last ?? c.quote.mid ?? 0,
-        volume: c.greeks.volume ?? 0,
-        delta: c.greeks.delta,
-        gamma: c.greeks.gamma,
-      }));
-      const selection = selectStrike(candidates, confluence.direction, snap.spx.price, spxRsi);
+      const candidates = buildCandidates(snap);
+      const selection = selectTradeStrike(candidates, confluence.direction, snap.spx.price);
       if (selection) {
         console.log(`[agent]   strike: ${selection.reason}`);
         await executeBuy(selection, snap, spxRsi);
@@ -280,7 +335,7 @@ async function runCycle(): Promise<void> {
     );
   }
 
-  // Always log scanner reads — this is the raw intelligence we need for review
+  // Always log scanner reads
   const allSetups = scannerResults.flatMap(sr => sr.setups);
   const hotSetups = allSetups.filter(s => s.confidence >= 0.5);
   logActivity({
@@ -320,31 +375,23 @@ async function runCycle(): Promise<void> {
   // 5. Execute if judge recommends a trade
   if (assessment.action === 'buy' && assessment.direction && assessment.positionSize > 0) {
     const spxRsi = snap.spx.bars1m[snap.spx.bars1m.length - 1]?.rsi14 ?? null;
-    const candidates: ContractCandidate[] = snap.contracts.map(c => ({
-      symbol: c.meta.symbol,
-      side: c.meta.side,
-      strike: c.meta.strike,
-      price: c.quote.last ?? c.quote.mid ?? 0,
-      volume: c.greeks.volume ?? 0,
-      delta: c.greeks.delta,
-      gamma: c.greeks.gamma,
-    }));
+    const candidates = buildCandidates(snap);
+    const selection = selectTradeStrike(candidates, assessment.direction, snap.spx.price);
 
-    const selection = selectStrike(candidates, assessment.direction, snap.spx.price, spxRsi);
     if (!selection) {
       console.warn(`[agent] No qualifying OTM contract found for ${assessment.direction} — skipping`);
       return;
     }
 
-    const contractState = snap.contracts.find(c => c.meta.symbol === selection.contract.symbol);
+    const contractState = snap.contracts.find(c => c.meta.symbol === selection.symbol);
     if (!contractState) {
-      console.warn(`[agent] Selected contract ${selection.contract.symbol} not in snapshot — skipping`);
+      console.warn(`[agent] Selected contract ${selection.symbol} not in snapshot — skipping`);
       return;
     }
 
     const recheck = guard.check(positions.getAll(), snap.minutesToClose);
     if (!recheck.allowed) {
-      logRejected(recheck.reason!, selection.contract.symbol, 'buy');
+      logRejected(recheck.reason!, selection.symbol, 'buy');
       return;
     }
 
@@ -383,7 +430,10 @@ async function runCycle(): Promise<void> {
 
     try {
       const { position, execution } = await openPosition(signal, decision, guard.isPaper);
-      if (!execution.error) positions.add(position);
+      if (!execution.error) {
+        positions.add(position);
+        guard.recordTrade();
+      }
       logEntry({ ts: Date.now(), signal, decision, execution });
     } catch (e) {
       console.error('[agent] Execution error:', e);
@@ -407,7 +457,7 @@ async function main(): Promise<void> {
   banner();
 
   if (!process.env.ANTHROPIC_API_KEY) {
-    console.error('[agent] ANTHROPIC_API_KEY not set (needed for Opus judge)');
+    console.error('[agent] ANTHROPIC_API_KEY not set (needed for judge)');
     process.exit(1);
   }
   if (!guard.isPaper && !process.env.TRADIER_ACCOUNT_ID) {
@@ -510,7 +560,6 @@ async function runMorningSequence(): Promise<void> {
   }
 
   initPriceAction();
-  clearSignalState();
   const snap = await fetchMarketSnapshot();
   const lastClose = snap.spx.price;
   const firstBar = snap.spx.bars1m[snap.spx.bars1m.length - 1];

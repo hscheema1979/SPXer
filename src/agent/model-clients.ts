@@ -1,20 +1,20 @@
 /**
- * Model Clients — ALL models use Claude Agent SDK (query()).
+ * Model Clients — Uses pi SDK for all Claude models (OAuth from ~/.pi/agent/auth.json).
  *
- * This gives us session JSONL logs for every single model call,
- * enabling full post-market review of what each scanner saw.
+ * This gives us access to your Anthropic Max subscription without API keys.
+ * Third-party models (Kimi, GLM, MiniMax) use direct HTTP with their API keys.
  *
  * Scanners (Tier 1):
- *   - Kimi K2.5   → api.kimi.com/coding/
- *   - GLM-5       → api.z.ai/api/anthropic
- *   - MiniMax M2.7 → api.minimax.io/anthropic
+ *   - Kimi K2.5   → pi SDK (kimi-coding provider from auth.json)
+ *   - GLM-5       → direct HTTP (api.z.ai)
+ *   - MiniMax M2.7 → direct HTTP (api.minimax.io)
+ *   - Claude Haiku → pi SDK (Anthropic OAuth subscription)
  *
  * Judge (Tier 2):
- *   - Claude Opus  → default Anthropic endpoint (Pro subscription)
+ *   - Claude Haiku/Sonnet/Opus → pi SDK (Anthropic OAuth subscription)
  *
  * No per-token billing — everything covered by subscriptions.
  */
-import { query } from '@anthropic-ai/claude-agent-sdk';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -24,21 +24,23 @@ export interface ModelConfig {
   id: string;
   label: string;
   model: string;
-  env?: Record<string, string>;  // ANTHROPIC_BASE_URL + ANTHROPIC_API_KEY overrides
+  provider: string;  // pi provider name
+  env?: Record<string, string>;  // For third-party direct HTTP
 }
 
 // ---------------------------------------------------------------------------
-// Scanner configs (Tier 1) — all via Claude Agent SDK
+// Scanner configs (Tier 1)
 // ---------------------------------------------------------------------------
 
 export function getScannerConfigs(): ModelConfig[] {
   const configs: ModelConfig[] = [];
 
-  // Kimi K2.5 via Claude Agent SDK
+  // Kimi K2.5 via pi SDK (kimi-coding provider from auth.json)
   if (process.env.KIMI_API_KEY) {
     configs.push({
       id: 'kimi',
       label: 'Kimi K2.5',
+      provider: 'kimi-coding',
       model: process.env.KIMI_MODEL || 'kimi-k2',
       env: {
         ANTHROPIC_BASE_URL: process.env.KIMI_BASE_URL || 'https://api.kimi.com/coding/',
@@ -47,11 +49,12 @@ export function getScannerConfigs(): ModelConfig[] {
     });
   }
 
-  // ZAI GLM-5 via Claude Agent SDK
+  // ZAI GLM-5 via direct HTTP
   if (process.env.GLM_API_KEY) {
     configs.push({
       id: 'glm',
       label: 'ZAI GLM-5',
+      provider: 'glm',
       model: process.env.GLM_MODEL || 'glm-5',
       env: {
         ANTHROPIC_BASE_URL: process.env.GLM_BASE_URL || 'https://api.z.ai/api/anthropic',
@@ -60,11 +63,12 @@ export function getScannerConfigs(): ModelConfig[] {
     });
   }
 
-  // MiniMax M2.7 via Claude Agent SDK
+  // MiniMax M2.7 via direct HTTP
   if (process.env.MINIMAX_API_KEY) {
     configs.push({
       id: 'minimax',
       label: 'MiniMax M2.7',
+      provider: 'minimax',
       model: process.env.MINIMAX_MODEL || 'MiniMax-M2.7',
       env: {
         ANTHROPIC_BASE_URL: process.env.MINIMAX_BASE_URL || 'https://api.minimax.io/anthropic',
@@ -73,32 +77,29 @@ export function getScannerConfigs(): ModelConfig[] {
     });
   }
 
-  // Claude Haiku via Claude Agent SDK (Pro subscription, fast + cheap)
+  // Claude Haiku via pi SDK (Anthropic OAuth subscription)
   configs.push({
     id: 'haiku',
     label: 'Claude Haiku',
+    provider: 'anthropic',
     model: process.env.HAIKU_MODEL || 'claude-haiku-4-5-20251001',
-    // No env override — uses default Pro subscription
   });
-
-  if (configs.length === 0) {
-    throw new Error('No scanner credentials configured. Set KIMI_API_KEY, GLM_API_KEY, or MINIMAX_API_KEY in .env');
-  }
 
   return configs;
 }
 
 // ---------------------------------------------------------------------------
-// Judge panel — multiple judges evaluate in parallel, we log all and compare
+// Judge panel — multiple judges evaluate in parallel
 // ---------------------------------------------------------------------------
 
 export function getJudgeConfigs(): ModelConfig[] {
   const judges: ModelConfig[] = [];
 
-  // Claude Haiku — fast, cheap, acts as a tiebreaker / momentum reader
+  // Claude Haiku — fast, cheap, acts as a tiebreaker
   judges.push({
     id: 'haiku',
     label: 'Claude Haiku',
+    provider: 'anthropic',
     model: process.env.HAIKU_MODEL || 'claude-haiku-4-5-20251001',
   });
 
@@ -106,21 +107,24 @@ export function getJudgeConfigs(): ModelConfig[] {
   judges.push({
     id: 'sonnet',
     label: 'Claude Sonnet',
-    model: process.env.SONNET_MODEL || 'claude-sonnet-4-6',
+    provider: 'anthropic',
+    model: process.env.SONNET_MODEL || 'claude-sonnet-4-20250514',
   });
 
   // Claude Opus — deep reasoning, but can be overly cautious
   judges.push({
     id: 'opus',
     label: 'Claude Opus',
-    model: process.env.OPUS_MODEL || 'claude-opus-4-6',
+    provider: 'anthropic',
+    model: process.env.OPUS_MODEL || 'claude-opus-4-5',
   });
 
-  // Kimi K2.5 as judge — different perspective from its scanner role
+  // Kimi K2.5 as judge
   if (process.env.KIMI_API_KEY) {
     judges.push({
       id: 'kimi-judge',
       label: 'Kimi K2.5 (Judge)',
+      provider: 'kimi-coding',
       model: process.env.KIMI_MODEL || 'kimi-k2',
       env: {
         ANTHROPIC_BASE_URL: process.env.KIMI_BASE_URL || 'https://api.kimi.com/coding/',
@@ -134,6 +138,7 @@ export function getJudgeConfigs(): ModelConfig[] {
     judges.push({
       id: 'glm-judge',
       label: 'ZAI GLM-5 (Judge)',
+      provider: 'glm',
       model: process.env.GLM_MODEL || 'glm-5',
       env: {
         ANTHROPIC_BASE_URL: process.env.GLM_BASE_URL || 'https://api.z.ai/api/anthropic',
@@ -142,11 +147,12 @@ export function getJudgeConfigs(): ModelConfig[] {
     });
   }
 
-  // MiniMax as judge — via Claude Agent SDK like the others
+  // MiniMax as judge
   if (process.env.MINIMAX_API_KEY) {
     judges.push({
       id: 'minimax-judge',
       label: 'MiniMax M2.7 (Judge)',
+      provider: 'minimax',
       model: process.env.MINIMAX_MODEL || 'MiniMax-M2.7',
       env: {
         ANTHROPIC_BASE_URL: process.env.MINIMAX_BASE_URL || 'https://api.minimax.io/anthropic',
@@ -165,23 +171,59 @@ export function getActiveJudgeId(): string {
 }
 
 // ---------------------------------------------------------------------------
-// Unified query helper — all models go through Claude Agent SDK
+// Unified query helper
 // ---------------------------------------------------------------------------
 
-export async function askModel(config: ModelConfig, systemPrompt: string, userPrompt: string, timeoutMs = 45000, forceDirect = false): Promise<string> {
+// Lazy-loaded pi SDK (ESM module loaded dynamically)
+let _piSdk: {
+  AuthStorage: typeof import('@mariozechner/pi-coding-agent').AuthStorage;
+  ModelRegistry: typeof import('@mariozechner/pi-coding-agent').ModelRegistry;
+  SessionManager: typeof import('@mariozechner/pi-coding-agent').SessionManager;
+  SettingsManager: typeof import('@mariozechner/pi-coding-agent').SettingsManager;
+  createAgentSession: typeof import('@mariozechner/pi-coding-agent').createAgentSession;
+  createExtensionRuntime: typeof import('@mariozechner/pi-coding-agent').createExtensionRuntime;
+} | null = null;
+
+let _authStorage: InstanceType<typeof import('@mariozechner/pi-coding-agent').AuthStorage> | null = null;
+let _modelRegistry: InstanceType<typeof import('@mariozechner/pi-coding-agent').ModelRegistry> | null = null;
+
+async function loadPiSdk() {
+  if (!_piSdk) {
+    _piSdk = await import('@mariozechner/pi-coding-agent');
+  }
+  return _piSdk;
+}
+
+async function getAuthStorage() {
+  if (!_authStorage) {
+    const { AuthStorage } = await loadPiSdk();
+    _authStorage = AuthStorage.create();  // Uses ~/.pi/agent/auth.json
+  }
+  return _authStorage;
+}
+
+async function getModelRegistry() {
+  if (!_modelRegistry) {
+    const { ModelRegistry } = await loadPiSdk();
+    _modelRegistry = new ModelRegistry(await getAuthStorage());
+  }
+  return _modelRegistry;
+}
+
+export async function askModel(config: ModelConfig, systemPrompt: string, userPrompt: string, timeoutMs = 60000): Promise<string> {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    // When forced or using third-party models, use direct HTTP (proper cancellation support)
-    if (forceDirect || config.env) {
+    // Third-party models with env config use direct HTTP
+    if (config.env && config.provider !== 'anthropic') {
       const result = await askModelDirect(config, systemPrompt, userPrompt, controller.signal);
       clearTimeout(timeoutId);
       return result;
     }
 
-    // For Claude models via SDK, use Agent SDK (limited cancellation support)
-    const result = await askModelInner(config, systemPrompt, userPrompt, controller.signal);
+    // Claude models use pi SDK with OAuth
+    const result = await askModelViaPiSdk(config, systemPrompt, userPrompt, controller.signal);
     clearTimeout(timeoutId);
     return result;
   } catch (err) {
@@ -193,60 +235,101 @@ export async function askModel(config: ModelConfig, systemPrompt: string, userPr
   }
 }
 
-async function askModelInner(config: ModelConfig, systemPrompt: string, userPrompt: string, signal?: AbortSignal): Promise<string> {
-  let result = '';
-  let lastAssistantText = '';
+// ---------------------------------------------------------------------------
+// pi SDK implementation for Claude models (OAuth subscription)
+// ---------------------------------------------------------------------------
 
-  // Embed system prompt into the user prompt to override any default system prompts
-  // that the SDK injects (which can confuse third-party models).
-  const combinedPrompt = `INSTRUCTIONS:\n${systemPrompt}\n\n---\n\n${userPrompt}`;
-
+async function askModelViaPiSdk(config: ModelConfig, systemPrompt: string, userPrompt: string, signal?: AbortSignal): Promise<string> {
   // Check if aborted before starting
   if (signal?.aborted) {
     throw new Error('Aborted before query started');
   }
 
-  for await (const message of query({
-    prompt: combinedPrompt,
-    options: {
-      model: config.model,
-      maxTurns: 1,
-      allowedTools: [],
-      ...(config.env ? { env: config.env } : {}),
-    },
-  })) {
-    // Capture text from assistant messages (works for thinking models like Kimi)
-    if (message.type === 'assistant' && (message as any).message?.content) {
-      for (const block of (message as any).message.content) {
-        if (block.type === 'text' && block.text) {
-          lastAssistantText = block.text;
-        }
-      }
-    }
-    // Also capture from result (works for standard models)
-    if ('result' in message && (message as any).result) {
-      result = (message as any).result;
-    }
+  const { createAgentSession, SessionManager, SettingsManager, createExtensionRuntime } = await loadPiSdk();
+  const authStorage = await getAuthStorage();
+  const modelRegistry = await getModelRegistry();
+
+  // Get the model from pi's model registry
+  const model = modelRegistry.find(config.provider, config.model);
+  if (!model) {
+    throw new Error(`Model not found: ${config.provider}/${config.model}`);
   }
 
-  return result || lastAssistantText;
+  // Minimal resource loader for pi SDK (no tools, no extensions)
+  const resourceLoader = {
+    getExtensions: () => ({ extensions: [], errors: [], runtime: createExtensionRuntime() }),
+    getSkills: () => ({ skills: [], diagnostics: [] }),
+    getPrompts: () => ({ prompts: [], diagnostics: [] }),
+    getThemes: () => ({ themes: [], diagnostics: [] }),
+    getAgentsFiles: () => ({ agentsFiles: [] }),
+    getSystemPrompt: () => systemPrompt,
+    getAppendSystemPrompt: () => [],
+    extendResources: () => {},
+    reload: async () => {},
+  };
+
+  // In-memory settings (no compaction, no retry)
+  const settingsManager = SettingsManager.inMemory({
+    compaction: { enabled: false },
+    retry: { enabled: false },
+  });
+
+  // Create the session
+  const { session } = await createAgentSession({
+    model,
+    thinkingLevel: 'off',
+    authStorage,
+    modelRegistry,
+    resourceLoader,
+    tools: [],  // No tools for scanner/judge calls
+    sessionManager: SessionManager.inMemory(),
+    settingsManager,
+  });
+
+  // Collect the response
+  let result = '';
+  
+  return new Promise((resolve, reject) => {
+    const abortHandler = () => {
+      session.dispose();
+      reject(new Error('Aborted during query'));
+    };
+    signal?.addEventListener('abort', abortHandler);
+
+    session.subscribe((event: any) => {
+      if (signal?.aborted) return;
+
+      if (event.type === 'message_update' && event.assistantMessageEvent?.type === 'text_delta') {
+        result += event.assistantMessageEvent.delta;
+      }
+
+      if (event.type === 'agent_end') {
+        signal?.removeEventListener('abort', abortHandler);
+        session.dispose();
+        resolve(result);
+      }
+    });
+
+    session.prompt(userPrompt).catch((err: Error) => {
+      signal?.removeEventListener('abort', abortHandler);
+      session.dispose();
+      reject(err);
+    });
+  });
 }
 
 // ---------------------------------------------------------------------------
-// Direct HTTP implementation for third-party APIs with proper cancellation
+// Direct HTTP implementation for third-party APIs
 // ---------------------------------------------------------------------------
 
 async function askModelDirect(config: ModelConfig, systemPrompt: string, userPrompt: string, signal?: AbortSignal): Promise<string> {
-  // Determine base URL and API key
-  // Priority: config.env > process.env > defaults
-  const baseUrl = config.env?.ANTHROPIC_BASE_URL || process.env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com';
-  const apiKey = config.env?.ANTHROPIC_API_KEY || process.env.ANTHROPIC_API_KEY;
+  const baseUrl = config.env?.ANTHROPIC_BASE_URL;
+  const apiKey = config.env?.ANTHROPIC_API_KEY;
 
-  if (!apiKey) {
-    throw new Error(`ANTHROPIC_API_KEY required for ${config.id}`);
+  if (!apiKey || !baseUrl) {
+    throw new Error(`API key and base URL required for ${config.id}`);
   }
 
-  // Check if aborted before starting
   if (signal?.aborted) {
     throw new Error('Aborted before request started');
   }
@@ -272,6 +355,20 @@ async function askModelDirect(config: ModelConfig, systemPrompt: string, userPro
     throw new Error(`HTTP ${response.status}: ${errorText}`);
   }
 
-  const data = await response.json() as { content?: Array<{ text?: string }> };
+  const data = await response.json() as { 
+    content?: Array<{ 
+      type?: string;
+      text?: string;
+      thinking?: string;
+    }> 
+  };
+
+  // MiniMax returns thinking block first, then text block - find the text block
+  const textBlock = data?.content?.find(b => b.type === 'text' && b.text);
+  if (textBlock?.text) {
+    return textBlock.text;
+  }
+
+  // Fallback: first block with text field (works for standard Anthropic format)
   return data?.content?.[0]?.text || '';
 }

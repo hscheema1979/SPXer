@@ -255,12 +255,12 @@ SPX UNDERLYING:
   3m [trend:${spx.trend3m}]: ${formatBar(curr3m)}
   5m [trend:${spx.trend5m}]: ${formatBar(curr5m)}
 
-OPEN POSITIONS (${positions.length}/${guard.config.maxPositions} max):
+OPEN POSITIONS (${positions.length}/${guard.config.position.maxPositionsOpen} max):
 ${posBlock}
 
 RISK:
-  Daily P&L: $${guard.currentDailyLoss >= 0 ? '+' : ''}${guard.currentDailyLoss.toFixed(2)} | Daily loss limit: $${guard.config.maxDailyLoss}
-  Max risk/trade: $${guard.config.maxRiskPerTrade} | Paper mode: ${guard.isPaper}
+  Daily P&L: $${guard.currentDailyLoss >= 0 ? '+' : ''}${guard.currentDailyLoss.toFixed(2)} | Daily loss limit: $${guard.config.risk.maxDailyLoss}
+  Max risk/trade: $${guard.config.risk.maxRiskPerTrade} | Paper mode: ${guard.isPaper}
 
 TRACKED CONTRACTS (${snap.contracts.length}, sorted by 1m RSI desc):
 ${contractBlock}
@@ -382,8 +382,8 @@ async function runSdkScanner(
   const timeoutMs = 120000; // 2 minutes for all scanners - removed timeout constraint to see actual response times
   try {
     console.log(`[scanner] Starting ${config.id} scan with ${timeoutMs}ms timeout`);
-    // ALWAYS use direct HTTP for scanners (forceDirect=true) - consistent behavior, predictable timeouts
-    const text = await askModel(config, SCANNER_SYSTEM, prompt, timeoutMs, true);
+    // askModel now auto-detects direct HTTP vs pi SDK based on config
+    const text = await askModel(config, SCANNER_SYSTEM, prompt, timeoutMs);
     const clean = extractJSON(text);
 
     let parsed: any;

@@ -227,8 +227,13 @@ export function createReplayRoutes(): Router {
       // Build the full config
       let fullConfig: Config;
 
-      if (configId && !config) {
-        // Load existing config (no overrides — just re-run it)
+      if (config) {
+        // Client sent a full config object — use it directly.
+        // mergeConfig with DEFAULT_CONFIG ensures any missing keys get defaults,
+        // but the client's values always win (no stale DB bleed-through).
+        fullConfig = mergeConfig(DEFAULT_CONFIG, config as Partial<Config>);
+      } else if (configId) {
+        // No config body — load existing config from DB (re-run scenario)
         const db = getDb();
         try {
           const row = db.prepare('SELECT config_json FROM replay_configs WHERE id = ?')
@@ -238,19 +243,6 @@ export function createReplayRoutes(): Router {
         } finally {
           db.close();
         }
-      } else if (configId && config) {
-        // Try loading existing config as base, fall back to defaults
-        const db = getDb();
-        try {
-          const row = db.prepare('SELECT config_json FROM replay_configs WHERE id = ?')
-            .get(configId) as { config_json: string } | undefined;
-          const base = row ? JSON.parse(row.config_json) as Config : DEFAULT_CONFIG;
-          fullConfig = mergeConfig(base, config);
-        } finally {
-          db.close();
-        }
-      } else if (config) {
-        fullConfig = mergeConfig(DEFAULT_CONFIG, config);
       } else {
         fullConfig = { ...DEFAULT_CONFIG };
       }
@@ -299,6 +291,197 @@ export function createReplayRoutes(): Router {
     } catch (err: any) {
       console.error('[replay-run] Error:', err.message);
       res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ── GET /replay/api/sweep — leaderboard aggregated from replay_results ───
+  // Supports ?maxEntryPrice=N to recompute metrics using only trades with entry ≤ $N
+  router.get('/api/sweep', (req, res) => {
+    const { sort, limit, dir, minDays, maxEntryPrice, maxConcurrent, maxTradesPerDay } = req.query as Record<string, string | undefined>;
+    const allowedSorts = ['compositeScore', 'totalPnl', 'sharpe', 'winRate', 'worstDay', 'profitDays', 'trades', 'avgDailyPnl', 'bestDay', 'days', 'avgEntryPrice'];
+    const sortCol = allowedSorts.includes(sort || '') ? sort : 'compositeScore';
+    const sortDir = dir === 'ASC' ? 'ASC' : 'DESC';
+    const maxRows = Math.min(parseInt(limit || '500'), 2000);
+    const entryPriceCap = maxEntryPrice ? parseFloat(maxEntryPrice) : 0;  // 0 = no filter
+    const concurrentCap = maxConcurrent ? parseInt(maxConcurrent) : 0;    // 0 = no filter
+    const dailyTradeCap = maxTradesPerDay ? parseInt(maxTradesPerDay) : 0; // 0 = no filter
+
+    const db = getDb();
+    try {
+      // Load all configs + their daily results (with trades JSON for price filtering)
+      const configRows = db.prepare(`
+        SELECT
+          r.configId,
+          c.name,
+          c.config_json,
+          r.date,
+          r.trades_json
+        FROM replay_results r
+        JOIN replay_configs c ON c.id = r.configId
+        ORDER BY r.configId, r.date
+      `).all() as { configId: string; name: string; config_json: string; date: string; trades_json: string }[];
+
+      // Group by configId
+      const configMap = new Map<string, {
+        name: string; config_json: string;
+        dailyResults: { date: string; trades: any[] }[];
+      }>();
+
+      for (const row of configRows) {
+        if (!configMap.has(row.configId)) {
+          configMap.set(row.configId, { name: row.name, config_json: row.config_json, dailyResults: [] });
+        }
+        let trades: any[] = [];
+        try { trades = JSON.parse(row.trades_json || '[]'); } catch {}
+        configMap.get(row.configId)!.dailyResults.push({ date: row.date, trades });
+      }
+
+      // Compute metrics per config (with optional entry price filter)
+      const minDaysVal = Math.max(1, parseInt(minDays || '2'));
+      const enriched: any[] = [];
+
+      for (const [configId, data] of configMap) {
+        if (data.dailyResults.length < minDaysVal) continue;
+
+        // Recompute metrics from trades, optionally filtering by entry price
+        const dailyPnls: number[] = [];
+        let totalTrades = 0, totalWins = 0, totalPnl = 0;
+        let entryPriceSum = 0, entryPriceCount = 0;
+
+        for (const day of data.dailyResults) {
+          // Step 1: filter by entry price
+          let filtered = entryPriceCap > 0
+            ? day.trades.filter((t: any) => t.entryPrice <= entryPriceCap)
+            : [...day.trades];
+
+          // Step 2: sort by entry time for chronological processing
+          filtered.sort((a: any, b: any) => (a.entryTs || 0) - (b.entryTs || 0));
+
+          // Step 3: enforce max concurrent positions — skip trades that would exceed the cap
+          if (concurrentCap > 0) {
+            const accepted: any[] = [];
+            for (const t of filtered) {
+              // Count how many accepted trades are still open when this trade enters
+              const openAtEntry = accepted.filter((a: any) => a.exitTs > t.entryTs).length;
+              if (openAtEntry < concurrentCap) {
+                accepted.push(t);
+              }
+            }
+            filtered = accepted;
+          }
+
+          // Step 4: enforce max trades per day — take only the first N
+          if (dailyTradeCap > 0 && filtered.length > dailyTradeCap) {
+            filtered = filtered.slice(0, dailyTradeCap);
+          }
+
+          let dayPnl = 0;
+          for (const t of filtered) {
+            const pnl = t['pnl$'] ?? t.pnl$ ?? 0;
+            dayPnl += pnl;
+            totalTrades++;
+            if (pnl > 0) totalWins++;
+            entryPriceSum += t.entryPrice || 0;
+            entryPriceCount++;
+          }
+          totalPnl += dayPnl;
+          dailyPnls.push(dayPnl);
+        }
+
+        const days = dailyPnls.length;
+        const winRate = totalTrades > 0 ? totalWins / totalTrades : 0;
+        const avgDailyPnl = days > 0 ? totalPnl / days : 0;
+        const worstDay = dailyPnls.length > 0 ? Math.min(...dailyPnls) : 0;
+        const bestDay = dailyPnls.length > 0 ? Math.max(...dailyPnls) : 0;
+        const profitDays = dailyPnls.filter(p => p > 0).length;
+        const avgEntryPrice = entryPriceCount > 0 ? entryPriceSum / entryPriceCount : 0;
+
+        let sharpe = 0;
+        if (dailyPnls.length > 1) {
+          const mean = dailyPnls.reduce((s, v) => s + v, 0) / dailyPnls.length;
+          const variance = dailyPnls.reduce((s, v) => s + (v - mean) ** 2, 0) / (dailyPnls.length - 1);
+          sharpe = variance > 0 ? mean / Math.sqrt(variance) : 0;
+        }
+
+        const compositeScore =
+          (winRate * 40) +
+          (Math.max(0, Math.min(sharpe, 1)) * 30) +
+          (avgDailyPnl > 0 ? 20 : 0) +
+          (worstDay > -500 ? 10 : 0);
+
+        // Extract config params
+        let params: any = {};
+        try {
+          const cfg = JSON.parse(data.config_json);
+          params = {
+            hmaFast: cfg.signals?.hmaCrossFast ?? 5,
+            hmaSlow: cfg.signals?.hmaCrossSlow ?? 19,
+            dirTf: cfg.signals?.directionTimeframe ?? '1m',
+            exitTf: cfg.signals?.exitTimeframe || cfg.signals?.directionTimeframe || '1m',
+            signalTf: cfg.signals?.signalTimeframe ?? '1m',
+            exitStrategy: cfg.exit?.strategy ?? 'takeProfit',
+            stopLoss: cfg.position?.stopLossPercent ?? 80,
+            tpMult: cfg.position?.takeProfitMultiplier ?? 5,
+            requireDir: cfg.signals?.requireUnderlyingHmaCross ?? false,
+            enableHma: cfg.signals?.enableHmaCrosses ?? true,
+            enableRsi: cfg.signals?.enableRsiCrosses ?? true,
+            enablePxHma: cfg.signals?.enablePriceCrossHma ?? true,
+            enableEma: cfg.signals?.enableEmaCrosses ?? false,
+            regimeEnabled: cfg.regime?.enabled ?? false,
+            scannersEnabled: cfg.scanners?.enabled ?? false,
+            maxPositions: cfg.position?.maxPositionsOpen ?? 3,
+            strikeRange: cfg.strikeSelector?.strikeSearchRange ?? 80,
+            contractPriceMax: cfg.strikeSelector?.contractPriceMax ?? 8,
+          };
+        } catch {}
+
+        enriched.push({
+          configId, name: data.name, params,
+          days, trades: totalTrades, wins: totalWins, winRate,
+          totalPnl, avgDailyPnl, worstDay, bestDay,
+          sharpe, profitDays, compositeScore, avgEntryPrice,
+        });
+      }
+
+      // Sort
+      const validSort = allowedSorts.includes(sortCol!) ? sortCol! : 'compositeScore';
+      enriched.sort((a: any, b: any) => {
+        const av = a[validSort] ?? 0, bv = b[validSort] ?? 0;
+        return sortDir === 'DESC' ? bv - av : av - bv;
+      });
+
+      const trimmed = enriched.slice(0, maxRows);
+      res.json({ rows: trimmed, total: enriched.length });
+    } finally {
+      db.close();
+    }
+  });
+
+  // ── GET /replay/api/sweep/:configId/daily — per-day breakdown ────────────
+  router.get('/api/sweep/:configId/daily', (req, res) => {
+    const { configId } = req.params;
+    const db = getDb();
+    try {
+      const rows = db.prepare(`
+        SELECT date, trades, wins, winRate, totalPnl, avgPnlPerTrade, maxWin, maxLoss, sharpeRatio
+        FROM replay_results
+        WHERE configId = ?
+        ORDER BY date ASC
+      `).all(configId);
+      res.json(rows);
+    } finally {
+      db.close();
+    }
+  });
+
+  // ── Serve the sweep leaderboard HTML ─────────────────────────────────────
+  router.get('/sweep', (_req, res) => {
+    const htmlPath = path.resolve(__dirname, 'sweep-viewer.html');
+    if (fs.existsSync(htmlPath)) {
+      res.sendFile(htmlPath);
+    } else {
+      const altPath = path.resolve(process.cwd(), 'src/server/sweep-viewer.html');
+      res.sendFile(altPath);
     }
   });
 

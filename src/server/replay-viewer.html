@@ -64,6 +64,15 @@
   .mini-card-header .traded-badge { color: #8b8bff; font-size: 10px; }
   .mini-card-chart { height: 100px; }
 
+  /* ── Trade Filters Bar ── */
+  .trade-filters { display: flex; gap: 10px; padding: 6px 16px; background: #0d0d14; border-bottom: 1px solid #1a1a24; align-items: center; font-size: 11px; }
+  .trade-filters label { color: #555; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; white-space: nowrap; }
+  .trade-filters select { background: #1a1a24; color: #e0e0e0; border: 1px solid #333; padding: 3px 6px; border-radius: 3px; font-family: inherit; font-size: 11px; cursor: pointer; }
+  .trade-filters select:focus { border-color: #8b8bff; outline: none; }
+  .trade-filters .filter-active { border-color: #8b8bff; color: #8b8bff; }
+  .trade-filters .filter-summary { color: #666; margin-left: auto; font-size: 10px; }
+  .trade-filters .filter-summary .num { color: #a78bfa; }
+
   /* ── Loading ── */
   .loading { display: flex; align-items: center; justify-content: center; height: 200px; color: #444; font-size: 14px; }
   .no-data { text-align: center; padding: 40px; color: #444; }
@@ -120,6 +129,7 @@
 
 <div class="header">
   <h1>SPXer Replay</h1>
+  <a href="/replay/sweep" style="color:#666;text-decoration:none;font-size:12px;margin-left:-8px">🏆 Sweep Leaderboard</a>
   <select id="date-select"><option>Loading...</option></select>
   <span style="color:#444">to</span>
   <select id="date-end-select"><option value="">same</option></select>
@@ -156,6 +166,41 @@
   </div>
 </div>
 
+<div class="trade-filters">
+  <span id="filter-sync-indicator" style="color:#8b8bff;font-size:10px;margin-right:8px;display:none">↳ synced</span>
+  <label>Max Entry $</label>
+  <select id="tf-max-entry" onchange="applyTradeFilters()">
+    <option value="0" selected>No limit</option>
+    <option value="5">≤ $5</option>
+    <option value="8">≤ $8</option>
+    <option value="10">≤ $10</option>
+    <option value="15">≤ $15</option>
+    <option value="20">≤ $20</option>
+    <option value="25">≤ $25</option>
+    <option value="50">≤ $50</option>
+  </select>
+  <label>Max Concurrent</label>
+  <select id="tf-max-concurrent" onchange="applyTradeFilters()">
+    <option value="0" selected>No limit</option>
+    <option value="1">1</option>
+    <option value="2">2</option>
+    <option value="3">3</option>
+    <option value="5">5</option>
+    <option value="10">10</option>
+  </select>
+  <label>Max Trades/Day</label>
+  <select id="tf-max-trades" onchange="applyTradeFilters()">
+    <option value="0" selected>No limit</option>
+    <option value="3">3</option>
+    <option value="5">5</option>
+    <option value="10">10</option>
+    <option value="15">15</option>
+    <option value="20">20</option>
+    <option value="30">30</option>
+  </select>
+  <span class="filter-summary" id="filter-summary"></span>
+</div>
+
 <div id="spx-chart"><div class="loading">Select a date and config...</div></div>
 
 <div class="trades-section">
@@ -187,7 +232,11 @@
 <script>
 const API = '/replay/api';
 let allContracts = [];
-let allTrades = [];
+let allTrades = [];      // filtered trades (displayed)
+let rawTrades = [];      // unfiltered trades from DB
+let lastSpxBars = [];
+let lastSpx3m = [];
+let lastSpx5m = [];
 let spxChart = null;
 let spxCandleSeries = null;
 let spxMarkers = [];
@@ -260,6 +309,12 @@ async function loadDay() {
   // Set ET offset for this date (EST=-5h or EDT=-4h)
   etOffsetSec = isDST(date) ? -4 * 3600 : -5 * 3600;
 
+  // Fetch config to sync trade filters with config settings
+  const config = await fetch(`${API}/config/${configId}`).then(r => r.json()).catch(() => null);
+  if (config) {
+    syncTradeFiltersFromConfig(config);
+  }
+
   // Fetch everything in parallel — 1m bars + 3m/5m bars from DB (pre-computed with continuity)
   const [spxBars, spx3m, spx5m, results, contracts] = await Promise.all([
     fetch(`${API}/bars?date=${date}&symbol=SPX`).then(r => r.json()),
@@ -270,13 +325,115 @@ async function loadDay() {
   ]);
 
   allContracts = contracts;
-  allTrades = results.trades || [];
+  rawTrades = results.trades || [];
+  lastSpxBars = spxBars;
+  lastSpx3m = spx3m;
+  lastSpx5m = spx5m;
 
-  renderSummary(results.summary);
-  renderSpxChart(spxBars, allTrades, spx3m, spx5m);
+  applyTradeFilters();
+}
+
+// ── Sync trade filters from config ─────────────────────────────────────────
+
+function syncTradeFiltersFromConfig(config) {
+  // Map config values to trade filter dropdowns
+  const maxConcurrent = config?.position?.maxPositionsOpen || 0;
+  const maxTradesDay = config?.risk?.maxTradesPerDay || 0;
+  const maxEntry = config?.signals?.maxEntryPrice || config?.strikeSelector?.contractPriceMax || 0;
+
+  // Set dropdowns to match config (find closest match in options)
+  setClosestOption('tf-max-concurrent', maxConcurrent);
+  setClosestOption('tf-max-trades', maxTradesDay);
+  setClosestOption('tf-max-entry', maxEntry);
+
+  // Show indicator that filters are synced from config
+  const indicator = document.getElementById('filter-sync-indicator');
+  if (indicator && (maxConcurrent || maxTradesDay || maxEntry)) {
+    indicator.style.display = 'inline';
+    indicator.title = `Synced: max ${maxConcurrent || '∞'} concurrent, ${maxTradesDay || '∞'} trades/day, $${maxEntry || '∞'} entry`;
+  }
+}
+
+function setClosestOption(selectId, value) {
+  const select = document.getElementById(selectId);
+  if (!select || !value) return;
+
+  const options = Array.from(select.options).map(o => parseFloat(o.value) || 0);
+  if (options.includes(value)) {
+    select.value = value;
+  } else if (value > 0) {
+    // Find closest option (round up to available values)
+    const sorted = options.filter(v => v > 0).sort((a, b) => a - b);
+    const closest = sorted.find(v => v >= value) || sorted[sorted.length - 1];
+    if (closest) select.value = closest;
+  }
+}
+
+// ── Trade Filters ──────────────────────────────────────────────────────────
+
+function applyTradeFilters() {
+  const maxEntry = parseFloat(document.getElementById('tf-max-entry').value) || 0;
+  const maxConcurrent = parseInt(document.getElementById('tf-max-concurrent').value) || 0;
+  const maxTradesDay = parseInt(document.getElementById('tf-max-trades').value) || 0;
+
+  // Highlight active filters
+  for (const id of ['tf-max-entry', 'tf-max-concurrent', 'tf-max-trades']) {
+    const el = document.getElementById(id);
+    el.classList.toggle('filter-active', el.value !== '0');
+  }
+
+  let filtered = [...rawTrades];
+
+  // Step 1: entry price filter
+  if (maxEntry > 0) {
+    filtered = filtered.filter(t => t.entryPrice <= maxEntry);
+  }
+
+  // Step 2: sort by entry time
+  filtered.sort((a, b) => (a.entryTs || 0) - (b.entryTs || 0));
+
+  // Step 3: max concurrent positions — skip trades that would exceed the cap
+  if (maxConcurrent > 0) {
+    const accepted = [];
+    for (const t of filtered) {
+      const openAtEntry = accepted.filter(a => a.exitTs > t.entryTs).length;
+      if (openAtEntry < maxConcurrent) {
+        accepted.push(t);
+      }
+    }
+    filtered = accepted;
+  }
+
+  // Step 4: max trades per day
+  if (maxTradesDay > 0 && filtered.length > maxTradesDay) {
+    filtered = filtered.slice(0, maxTradesDay);
+  }
+
+  allTrades = filtered;
+
+  // Build summary from filtered trades
+  const totalPnl = filtered.reduce((s, t) => s + (t['pnl$'] || 0), 0);
+  const wins = filtered.filter(t => (t['pnl$'] || 0) > 0).length;
+  const summary = filtered.length > 0 ? {
+    trades: filtered.length,
+    wins,
+    winRate: wins / filtered.length,
+    totalPnl,
+  } : null;
+
+  // Update filter summary
+  const summaryEl = document.getElementById('filter-summary');
+  if (rawTrades.length !== filtered.length) {
+    summaryEl.innerHTML = `Showing <span class="num">${filtered.length}</span> of <span class="num">${rawTrades.length}</span> trades`;
+  } else {
+    summaryEl.innerHTML = '';
+  }
+
+  renderSummary(summary);
+  renderSpxChart(lastSpxBars, allTrades, lastSpx3m, lastSpx5m);
   renderTradesTable(allTrades);
   closeExpanded();
-  renderMiniCharts(date);
+  renderMiniCharts(document.getElementById('date-select').value);
 }
 
 // ── Summary ────────────────────────────────────────────────────────────────
@@ -794,20 +951,28 @@ let currentConfig = null; // full config object
 const CONFIG_SECTIONS = [
   { key: 'signals', title: 'Signals', fields: [
     { path: 'signals.enableHmaCrosses', label: 'HMA Crosses', type: 'bool' },
-    { path: 'signals.hmaCrossFast', label: 'HMA Fast Period', type: 'select', options: ['5', '19', '25'] },
-    { path: 'signals.hmaCrossSlow', label: 'HMA Slow Period', type: 'select', options: ['19', '25', '5'] },
+    { path: 'signals.hmaCrossFast', label: 'HMA Fast Period', type: 'num', min: 2, max: 100 },
+    { path: 'signals.hmaCrossSlow', label: 'HMA Slow Period', type: 'num', min: 2, max: 200 },
     { path: 'signals.enableRsiCrosses', label: 'RSI Crosses', type: 'bool' },
     { path: 'signals.enablePriceCrossHma', label: 'Price Cross HMA', type: 'bool' },
     { path: 'signals.enableEmaCrosses', label: 'EMA Crosses', type: 'bool' },
     { path: 'signals.emaCrossFast', label: 'EMA Fast Period', type: 'select', options: ['9', '21', '50'] },
     { path: 'signals.emaCrossSlow', label: 'EMA Slow Period', type: 'select', options: ['21', '50', '200'] },
     { path: 'signals.requireUnderlyingHmaCross', label: 'Require SPX HMA Cross', type: 'bool' },
+    { path: 'signals.signalTimeframe', label: 'Signal Timeframe (default)', type: 'select', options: ['1m', '3m', '5m'] },
+    { path: 'signals.directionTimeframe', label: 'Direction TF (entry gate)', type: 'select', options: ['1m', '3m', '5m'] },
+    { path: 'signals.exitTimeframe', label: 'Exit TF (reversal detect)', type: 'select', options: ['', '1m', '3m', '5m'] },
+    { path: 'signals.hmaCrossTimeframe', label: 'HMA Cross TF override', type: 'select', options: ['', '1m', '3m', '5m'] },
+    { path: 'signals.rsiCrossTimeframe', label: 'RSI Cross TF override', type: 'select', options: ['', '1m', '3m', '5m'] },
+    { path: 'signals.emaCrossTimeframe', label: 'EMA Cross TF override', type: 'select', options: ['', '1m', '3m', '5m'] },
+    { path: 'signals.priceCrossHmaTimeframe', label: 'Price×HMA TF override', type: 'select', options: ['', '1m', '3m', '5m'] },
     { path: 'signals.rsiOversold', label: 'RSI Oversold', type: 'num', min: 1, max: 50 },
     { path: 'signals.rsiOverbought', label: 'RSI Overbought', type: 'num', min: 50, max: 99 },
     { path: 'signals.optionRsiOversold', label: 'Option RSI Oversold', type: 'num', min: 1, max: 50 },
     { path: 'signals.optionRsiOverbought', label: 'Option RSI Overbought', type: 'num', min: 50, max: 99 },
-    { path: 'signals.targetOtmDistance', label: 'Target OTM Distance ($)', type: 'num-null', min: 0, max: 200 },
+    { path: 'signals.targetOtmDistance', label: 'Target OTM/ITM Distance ($)', type: 'num-null', min: -100, max: 200 },
     { path: 'signals.targetContractPrice', label: 'Target Contract Price ($)', type: 'num-null', min: 0, max: 50 },
+    { path: 'signals.maxEntryPrice', label: 'Max Entry Price ($)', type: 'num-null', min: 0, max: 50, hint: 'Filter: skip trades above this price' },
   ]},
   { key: 'position', title: 'Position Management', fields: [
     { path: 'position.stopLossPercent', label: 'Stop Loss %', type: 'num', min: 0, max: 100 },
@@ -946,12 +1111,17 @@ function renderConfigForm() {
           <label for="${inputId}">${f.label}</label>
         </div>`;
       } else if (f.type === 'select') {
-        const isNumeric = f.options.every(o => !isNaN(Number(o)));
-        const valStr = String(val);
+        const isNumeric = f.options.every(o => o !== '' && !isNaN(Number(o)));
+        const valStr = (val === null || val === undefined) ? '' : String(val);
+        // For nullable selects (empty '' option means "use default"), convert '' back to null
+        const hasNullOption = f.options.includes('');
+        const changeHandler = hasNullOption
+          ? `cfgChanged('${f.path}', this.value === '' ? null : ${isNumeric ? 'parseFloat(this.value)' : 'this.value'})`
+          : `cfgChanged('${f.path}', ${isNumeric ? 'parseFloat(this.value)' : 'this.value'})`;
         html += `<div class="cfg-row">
           <span class="cfg-label">${f.label}</span>
-          <select id="${inputId}" class="cfg-input" onchange="cfgChanged('${f.path}', ${isNumeric ? 'parseFloat(this.value)' : 'this.value'})">
-            ${f.options.map(o => `<option value="${o}" ${valStr === o ? 'selected' : ''}>${o}</option>`).join('')}
+          <select id="${inputId}" class="cfg-input" onchange="${changeHandler}">
+            ${f.options.map(o => `<option value="${o}" ${valStr === o ? 'selected' : ''}>${o || '(default)'}</option>`).join('')}
           </select>
         </div>`;
       } else if (f.type === 'num') {
@@ -1016,7 +1186,7 @@ function updateAutoName() {
   if (s.enableEmaCrosses) parts.push(`EMA${s.emaCrossFast || 9}x${s.emaCrossSlow || 21}`);
   if (s.enablePriceCrossHma) parts.push('PxHMA');
   if (s.requireUnderlyingHmaCross) parts.push('UndHMA');
-  if (s.targetOtmDistance != null) parts.push(`OTM${s.targetOtmDistance}`);
+  if (s.targetOtmDistance != null) parts.push(s.targetOtmDistance >= 0 ? `OTM${s.targetOtmDistance}` : `ITM${Math.abs(s.targetOtmDistance)}`);
   if (s.targetContractPrice != null) parts.push(`$${s.targetContractPrice}`);
   const p = currentConfig.position || {};
   if (p.takeProfitMultiplier) parts.push(`TP${p.takeProfitMultiplier}x`);
@@ -1173,7 +1343,45 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 // ── Boot ───────────────────────────────────────────────────────────────────
-init().catch(err => console.error('Init failed:', err));
+// Handle URL params from sweep leaderboard links
+async function boot() {
+  await init();
+  const urlParams = new URLSearchParams(window.location.search);
+  const paramDate = urlParams.get('date');
+  const paramConfig = urlParams.get('config');
+  const paramMaxEntry = urlParams.get('maxEntry');
+  const paramMaxConcurrent = urlParams.get('maxConcurrent');
+  const paramMaxTradesDay = urlParams.get('maxTradesDay');
+
+  if (paramDate) {
+    const dateSel = document.getElementById('date-select');
+    if (dateSel) dateSel.value = paramDate;
+  }
+  if (paramConfig) {
+    const configSel = document.getElementById('config-select');
+    if (configSel) {
+      const exists = Array.from(configSel.options).some(o => o.value === paramConfig);
+      if (exists) configSel.value = paramConfig;
+    }
+  }
+
+  // Apply trade filter params from URL
+  if (paramMaxEntry) {
+    const el = document.getElementById('tf-max-entry');
+    if (el) { el.value = paramMaxEntry; el.classList.add('filter-active'); }
+  }
+  if (paramMaxConcurrent) {
+    const el = document.getElementById('tf-max-concurrent');
+    if (el) { el.value = paramMaxConcurrent; el.classList.add('filter-active'); }
+  }
+  if (paramMaxTradesDay) {
+    const el = document.getElementById('tf-max-trades');
+    if (el) { el.value = paramMaxTradesDay; el.classList.add('filter-active'); }
+  }
+
+  if (paramDate || paramConfig) loadDay();
+}
+boot().catch(err => console.error('Init failed:', err));
 </script>
 </body>
 </html>

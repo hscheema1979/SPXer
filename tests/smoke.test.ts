@@ -4,6 +4,7 @@ import { upsertBar, getBars } from '../src/storage/queries';
 import { buildBars } from '../src/pipeline/bar-builder';
 import { computeIndicators } from '../src/pipeline/indicator-engine';
 import { startHttpServer } from '../src/server/http';
+import { healthTracker } from '../src/utils/health';
 import axios from 'axios';
 import type { OHLCVRaw } from '../src/types';
 
@@ -12,6 +13,7 @@ const PORT = 3698;
 
 beforeAll(() => {
   initDb(':memory:');
+  healthTracker.reset();
   const { httpServer } = startHttpServer(PORT);
   server = httpServer;
 });
@@ -63,10 +65,11 @@ describe('smoke: bar pipeline produces indicator-enriched bars', () => {
 });
 
 describe('smoke: REST server starts and responds to /health', () => {
-  it('responds to GET /health with status ok', async () => {
+  it('responds to GET /health with n/a status when no providers registered', async () => {
     const { data, status } = await axios.get(`http://localhost:${PORT}/health`);
     expect(status).toBe(200);
-    expect(data.status).toBe('ok');
+    // No providers registered in smoke test → 'n/a'
+    expect(data.status).toBe('n/a');
     expect(typeof data.uptime).toBe('number');
     expect(typeof data.dbSizeMb).toBe('number');
   });
