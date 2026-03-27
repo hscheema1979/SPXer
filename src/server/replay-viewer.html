@@ -64,6 +64,34 @@
   .mini-card-header .traded-badge { color: #8b8bff; font-size: 10px; }
   .mini-card-chart { height: 100px; }
 
+  /* ── Strategy Analysis Panel ── */
+  .analysis-panel { background: #0d0d14; border-bottom: 1px solid #1a1a24; padding: 0; overflow: hidden; transition: max-height 0.25s ease; }
+  .analysis-panel.collapsed { max-height: 0 !important; padding: 0; border: none; }
+  .analysis-toggle { display: flex; align-items: center; gap: 8px; padding: 6px 16px; cursor: pointer; user-select: none; border-bottom: 1px solid #1a1a24; background: #0d0d14; }
+  .analysis-toggle:hover { background: #111118; }
+  .analysis-toggle .label { font-size: 11px; color: #8b8bff; text-transform: uppercase; letter-spacing: 0.5px; }
+  .analysis-toggle .chevron { font-size: 10px; color: #555; transition: transform 0.2s; }
+  .analysis-toggle.open .chevron { transform: rotate(90deg); }
+  .analysis-content { padding: 10px 16px 12px; }
+  .analysis-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+  @media (max-width: 900px) { .analysis-grid { grid-template-columns: 1fr 1fr; } }
+  .analysis-card { background: #111118; border: 1px solid #1a1a24; border-radius: 4px; padding: 8px 10px; }
+  .analysis-card h4 { font-size: 10px; color: #555; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
+  .analysis-card .stat-row { display: flex; justify-content: space-between; padding: 2px 0; font-size: 11px; }
+  .analysis-card .stat-label { color: #888; }
+  .analysis-card .stat-value { color: #e0e0e0; font-weight: 600; }
+  .analysis-card .stat-value.pos { color: #10b981; }
+  .analysis-card .stat-value.neg { color: #f43f5e; }
+  .analysis-card .stat-value.hl { color: #8b8bff; }
+  .analysis-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
+  .analysis-tag { font-size: 10px; padding: 2px 8px; border-radius: 3px; }
+  .analysis-tag.strength { background: #10b98118; color: #10b981; border: 1px solid #10b98133; }
+  .analysis-tag.explore { background: #f59e0b18; color: #f59e0b; border: 1px solid #f59e0b33; }
+  .analysis-setup { font-size: 11px; color: #aaa; padding: 4px 0 8px; }
+  .analysis-setup b { color: #e0e0e0; }
+  .analysis-loading { text-align: center; padding: 20px; color: #444; font-size: 12px; }
+  .equity-sparkline { width: 100%; height: 40px; margin-top: 4px; }
+
   /* ── Trade Filters Bar ── */
   .trade-filters { display: flex; gap: 10px; padding: 6px 16px; background: #0d0d14; border-bottom: 1px solid #1a1a24; align-items: center; font-size: 11px; }
   .trade-filters label { color: #555; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; white-space: nowrap; }
@@ -163,6 +191,17 @@
       <button class="config-btn" onclick="closeConfigModal()">Cancel</button>
       <button class="run-btn" onclick="saveAndRun()">Save &amp; Run</button>
     </div>
+  </div>
+</div>
+
+<div class="analysis-toggle" id="analysis-toggle" onclick="toggleAnalysis()">
+  <span class="chevron">▶</span>
+  <span class="label">📊 Strategy Analysis</span>
+  <span id="analysis-summary-inline" style="font-size:11px;color:#666;margin-left:auto"></span>
+</div>
+<div class="analysis-panel collapsed" id="analysis-panel">
+  <div class="analysis-content" id="analysis-content">
+    <div class="analysis-loading">Select a config to see analysis...</div>
   </div>
 </div>
 
@@ -1332,12 +1371,130 @@ async function runReplayWithConfig(dates, config, configId, configName) {
   }
 }
 
+// ── Strategy Analysis Panel ─────────────────────────────────────────────────
+
+let analysisOpen = false;
+let lastAnalysisConfigId = null;
+
+function toggleAnalysis() {
+  analysisOpen = !analysisOpen;
+  document.getElementById('analysis-panel').classList.toggle('collapsed', !analysisOpen);
+  document.getElementById('analysis-toggle').classList.toggle('open', analysisOpen);
+  if (analysisOpen) loadAnalysis();
+}
+
+async function loadAnalysis() {
+  const configId = document.getElementById('config-select').value;
+  if (!configId || configId === lastAnalysisConfigId) return;
+  lastAnalysisConfigId = configId;
+
+  const content = document.getElementById('analysis-content');
+  content.innerHTML = '<div class="analysis-loading">Loading analysis...</div>';
+
+  try {
+    const res = await fetch(`${API}/config/${configId}/analysis`);
+    const a = await res.json();
+    if (a.error) { content.innerHTML = `<div class="analysis-loading">${a.error}</div>`; return; }
+    renderAnalysis(a);
+  } catch (err) {
+    content.innerHTML = `<div class="analysis-loading">Analysis unavailable</div>`;
+  }
+}
+
+function renderAnalysis(a) {
+  const p = a.performance;
+  const s = a.setup;
+  const content = document.getElementById('analysis-content');
+
+  // Inline summary in the toggle bar
+  const inl = document.getElementById('analysis-summary-inline');
+  const wrClass = p.winRate >= 0.55 ? 'pos' : p.winRate < 0.45 ? 'neg' : '';
+  inl.innerHTML = `<span style="color:#10b981">$${(p.totalPnl/1000).toFixed(0)}K</span> · ${(p.winRate*100).toFixed(0)}% WR · ${p.sharpe.toFixed(2)} Sharpe · ${p.greenDays}/${p.days} green`;
+
+  // Setup line
+  const sigStr = s.signals.length ? s.signals.join('+') : 'none';
+  const setupHtml = `<div class="analysis-setup">
+    <b>HMA ${s.hma}</b> · ${s.timeframes} · ${sigStr} · ${s.otm} · SL${s.stopLoss}% TP${s.tpMult}x · MaxPos=${s.maxPositions} · ${s.exitStrategy} · $${s.contractPriceMax} cap · $${s.baseDollarsPerTrade}/trade
+  </div>`;
+
+  // Helper
+  const sr = (label, val, cls='') => `<div class="stat-row"><span class="stat-label">${label}</span><span class="stat-value ${cls}">${val}</span></div>`;
+  const pnlCls = v => v > 0 ? 'pos' : v < 0 ? 'neg' : '';
+
+  // Exit reasons
+  const totalExits = Object.values(a.exitReasons).reduce((s, v) => s + (v as number), 0) as number;
+  const exitHtml = Object.entries(a.exitReasons)
+    .sort((a, b) => (b[1] as number) - (a[1] as number))
+    .map(([reason, count]) => {
+      const pct = ((count as number) / totalExits * 100).toFixed(0);
+      const labels: Record<string,string> = { take_profit: 'Take Profit', stop_loss: 'Stop Loss', signal_reversal: 'Reversal', time_exit: 'Time Exit' };
+      return sr(labels[reason] || reason, `${count} (${pct}%)`);
+    }).join('');
+
+  // Equity sparkline via inline SVG
+  const eq = a.equityCurve || [];
+  let sparkHtml = '';
+  if (eq.length > 1) {
+    const vals = eq.map((e: any) => e.equity);
+    const minE = Math.min(0, ...vals);
+    const maxE = Math.max(...vals);
+    const range = maxE - minE || 1;
+    const w = 200, h = 36;
+    const points = vals.map((v: number, i: number) => `${(i / (vals.length - 1)) * w},${h - ((v - minE) / range) * h}`).join(' ');
+    sparkHtml = `<svg class="equity-sparkline" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">
+      <polyline points="${points}" fill="none" stroke="#10b981" stroke-width="1.5"/>
+      <line x1="0" y1="${h - ((0 - minE) / range) * h}" x2="${w}" y2="${h - ((0 - minE) / range) * h}" stroke="#333" stroke-width="0.5" stroke-dasharray="3,3"/>
+    </svg>`;
+  }
+
+  // Tags
+  const strengthTags = (a.strengths || []).map((s: string) => `<span class="analysis-tag strength">✅ ${s}</span>`).join('');
+  const exploreTags = (a.explore || []).map((s: string) => `<span class="analysis-tag explore">🔬 ${s}</span>`).join('');
+
+  content.innerHTML = `
+    ${setupHtml}
+    <div class="analysis-grid">
+      <div class="analysis-card">
+        <h4>Performance</h4>
+        ${sr('Total P&L', '$' + p.totalPnl.toLocaleString(undefined, {maximumFractionDigits:0}), pnlCls(p.totalPnl))}
+        ${sr('Expectancy', '$' + p.expectancy.toFixed(0) + '/trade', pnlCls(p.expectancy))}
+        ${sr('Sharpe', p.sharpe.toFixed(3), p.sharpe >= 1.0 ? 'pos' : '')}
+        ${sr('Max Drawdown', '$' + p.maxDrawdown.toLocaleString(undefined, {maximumFractionDigits:0}), p.maxDrawdown > 0 ? 'neg' : 'pos')}
+        ${sr('Green Days', p.greenDays + '/' + p.days, p.greenDays >= p.days - 1 ? 'pos' : '')}
+        ${sparkHtml}
+      </div>
+      <div class="analysis-card">
+        <h4>Win/Loss</h4>
+        ${sr('Win Rate', (p.winRate * 100).toFixed(1) + '%', p.winRate >= 0.55 ? 'pos' : '')}
+        ${sr('Avg Win', '$' + p.avgWin.toFixed(0) + ' (' + p.avgWinPct.toFixed(0) + '%)', 'pos')}
+        ${sr('Avg Loss', '$' + p.avgLoss.toFixed(0) + ' (' + p.avgLossPct.toFixed(0) + '%)', 'neg')}
+        ${sr('W/L Ratio', p.winLossRatio.toFixed(2) + 'x', p.winLossRatio >= 2 ? 'pos' : '')}
+        ${sr('Worst Day', '$' + p.worstDay.toLocaleString(undefined, {maximumFractionDigits:0}), pnlCls(p.worstDay))}
+        ${sr('Best Day', '$' + p.bestDay.toLocaleString(undefined, {maximumFractionDigits:0}), 'pos')}
+      </div>
+      <div class="analysis-card">
+        <h4>Execution</h4>
+        ${sr('Total Trades', p.trades)}
+        ${sr('Avg Hold', p.avgHoldMin.toFixed(0) + 'm (med ' + p.medianHoldMin.toFixed(0) + 'm)')}
+        ${sr('Avg Entry', '$' + p.avgEntryPrice.toFixed(2))}
+        ${sr('Peak BP Needed', '$' + p.peakBuyingPower.toLocaleString(undefined, {maximumFractionDigits:0}), 'hl')}
+        ${exitHtml}
+      </div>
+    </div>
+    <div class="analysis-tags">
+      ${strengthTags}${exploreTags}
+    </div>
+  `;
+}
+
 // Load config when config dropdown changes
 document.addEventListener('DOMContentLoaded', () => {
   const configSel = document.getElementById('config-select');
   if (configSel) {
     configSel.addEventListener('change', () => {
       currentConfig = null; // reset so modal reloads
+      lastAnalysisConfigId = null; // force analysis reload
+      if (analysisOpen) loadAnalysis();
     });
   }
 });

@@ -361,16 +361,87 @@ async function toggleDaily(configId, rowEl) {
   }
 
   rowEl.classList.add('hl');
-  const res = await fetch(`${API}/sweep/${configId}/daily`);
-  const daily = await res.json();
+
+  // Fetch both daily breakdown and analysis in parallel
+  const [dailyRes, analysisRes] = await Promise.all([
+    fetch(`${API}/sweep/${configId}/daily`).then(r => r.json()),
+    fetch(`${API}/config/${configId}/analysis`).then(r => r.json()).catch(() => null),
+  ]);
+  const daily = dailyRes;
+  const a = analysisRes;
 
   const tr = document.createElement('tr');
   tr.className = 'daily-row';
   tr.dataset.config = configId;
   const td = document.createElement('td');
   td.colSpan = 14;
+
+  // Build analysis summary if available
+  let analysisHtml = '';
+  if (a && !a.error) {
+    const p = a.performance;
+    const s = a.setup;
+    const pnlCls = v => v > 0 ? 'pnl-pos' : v < 0 ? 'pnl-neg' : '';
+
+    // Equity sparkline SVG
+    const eq = a.equityCurve || [];
+    let sparkSvg = '';
+    if (eq.length > 1) {
+      const vals = eq.map(e => e.equity);
+      const minE = Math.min(0, ...vals), maxE = Math.max(...vals), range = maxE - minE || 1;
+      const w = 160, h = 30;
+      const pts = vals.map((v, i) => `${(i/(vals.length-1))*w},${h-((v-minE)/range)*h}`).join(' ');
+      sparkSvg = `<svg style="width:100%;height:30px" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none"><polyline points="${pts}" fill="none" stroke="#10b981" stroke-width="1.5"/></svg>`;
+    }
+
+    const tags = [
+      ...(a.strengths || []).map(s => `<span style="background:#10b98118;color:#10b981;border:1px solid #10b98133;font-size:10px;padding:1px 6px;border-radius:3px">✅ ${s}</span>`),
+      ...(a.explore || []).map(s => `<span style="background:#f59e0b18;color:#f59e0b;border:1px solid #f59e0b33;font-size:10px;padding:1px 6px;border-radius:3px">🔬 ${s}</span>`),
+    ].join(' ');
+
+    const stat = (l, v, c='') => `<span style="color:#666">${l}</span> <span style="color:${c||'#e0e0e0'};font-weight:600">${v}</span>`;
+    const exitEntries = Object.entries(a.exitReasons).sort((a,b) => b[1]-a[1]);
+    const exitStr = exitEntries.map(([r,c]) => {
+      const labels = {take_profit:'TP',stop_loss:'SL',signal_reversal:'REV',time_exit:'EOD'};
+      return `${labels[r]||r}:${c}`;
+    }).join(' · ');
+
+    analysisHtml = `
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:10px;font-size:11px">
+      <div style="background:#111118;border:1px solid #1a1a24;border-radius:4px;padding:6px 8px">
+        <div style="font-size:9px;color:#555;text-transform:uppercase;margin-bottom:4px">Performance</div>
+        <div style="display:flex;flex-wrap:wrap;gap:8px 16px">
+          ${stat('Expectancy', '$'+p.expectancy.toFixed(0)+'/t', p.expectancy>0?'#10b981':'#f43f5e')}
+          ${stat('W/L Ratio', p.winLossRatio.toFixed(2)+'x', p.winLossRatio>=2?'#10b981':'')}
+          ${stat('Max DD', '$'+p.maxDrawdown.toLocaleString(undefined,{maximumFractionDigits:0}), p.maxDrawdown>0?'#f43f5e':'#10b981')}
+          ${stat('Worst Streak', p.worstStreak+'d', p.worstStreak>=3?'#f43f5e':'')}
+        </div>
+        ${sparkSvg}
+      </div>
+      <div style="background:#111118;border:1px solid #1a1a24;border-radius:4px;padding:6px 8px">
+        <div style="font-size:9px;color:#555;text-transform:uppercase;margin-bottom:4px">Execution</div>
+        <div style="display:flex;flex-wrap:wrap;gap:8px 16px">
+          ${stat('Avg Hold', p.avgHoldMin.toFixed(0)+'m')}
+          ${stat('Avg Entry', '$'+p.avgEntryPrice.toFixed(2))}
+          ${stat('Peak BP', '$'+p.peakBuyingPower.toLocaleString(undefined,{maximumFractionDigits:0}), '#8b8bff')}
+          ${stat('Exits', exitStr)}
+        </div>
+      </div>
+      <div style="background:#111118;border:1px solid #1a1a24;border-radius:4px;padding:6px 8px">
+        <div style="font-size:9px;color:#555;text-transform:uppercase;margin-bottom:4px">Setup</div>
+        <div style="font-size:11px;color:#aaa;line-height:1.6">
+          <b style="color:#e0e0e0">HMA ${s.hma}</b> · ${s.timeframes} · ${s.signals.join('+')||'—'}<br>
+          ${s.otm} · SL${s.stopLoss}% TP${s.tpMult}x · Pos=${s.maxPositions} · $${s.contractPriceMax} cap
+        </div>
+      </div>
+    </div>
+    <div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:8px">${tags}</div>`;
+  }
+
   td.innerHTML = `<div class="daily-wrap">
-    <h3>${configId} — Daily Breakdown</h3>
+    <h3>${configId} — Strategy Analysis</h3>
+    ${analysisHtml}
+    <h3 style="margin-top:8px">Daily Breakdown</h3>
     <div class="daily-grid">
       ${daily.map(d => {
         const pc = d.totalPnl > 0 ? 'pnl-pos' : d.totalPnl < 0 ? 'pnl-neg' : 'pnl-zero';

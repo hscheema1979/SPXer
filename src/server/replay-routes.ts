@@ -457,6 +457,206 @@ export function createReplayRoutes(): Router {
     }
   });
 
+  // ── GET /replay/api/config/:configId/analysis — rich strategy analysis ───
+  router.get('/api/config/:configId/analysis', (req, res) => {
+    const { configId } = req.params;
+    const db = getDb();
+    try {
+      // Get config details
+      const cfgRow = db.prepare('SELECT config_json, name FROM replay_configs WHERE id = ?').get(configId) as any;
+      
+      // Get all daily results with trades
+      const results = db.prepare(`
+        SELECT date, trades, wins, winRate, totalPnl, trades_json
+        FROM replay_results WHERE configId = ? ORDER BY date ASC
+      `).all(configId) as any[];
+
+      if (!results.length) return res.json({ error: 'No results for this config' });
+
+      // Parse config
+      let params: any = {};
+      if (cfgRow?.config_json) {
+        try {
+          const cfg = JSON.parse(cfgRow.config_json);
+          params = {
+            hmaFast: cfg.signals?.hmaCrossFast ?? '?',
+            hmaSlow: cfg.signals?.hmaCrossSlow ?? '?',
+            dirTf: cfg.signals?.directionTimeframe ?? '1m',
+            exitTf: cfg.signals?.exitTimeframe ?? '1m',
+            signalTf: cfg.signals?.signalTimeframe ?? '1m',
+            enableHma: cfg.signals?.enableHmaCrosses ?? true,
+            enableRsi: cfg.signals?.enableRsiCrosses ?? false,
+            enablePxHma: cfg.signals?.enablePriceCrossHma ?? false,
+            enableEma: cfg.signals?.enableEmaCrosses ?? false,
+            enableKc: cfg.signals?.enableKeltnerGate ?? false,
+            requireUndHma: cfg.signals?.requireUnderlyingHmaCross ?? false,
+            targetOtmDistance: cfg.signals?.targetOtmDistance,
+            stopLoss: cfg.position?.stopLossPercent ?? 0,
+            tpMult: cfg.position?.takeProfitMultiplier ?? 5,
+            maxPositions: cfg.position?.maxPositionsOpen ?? 3,
+            contractPriceMax: cfg.strikeSelector?.contractPriceMax ?? 8,
+            exitStrategy: cfg.exit?.strategy ?? 'takeProfit',
+            baseDollarsPerTrade: cfg.sizing?.baseDollarsPerTrade ?? 250,
+            maxContracts: cfg.sizing?.maxContracts ?? 10,
+          };
+        } catch {}
+      }
+
+      // Aggregate all trades
+      const allTrades: any[] = [];
+      const dailyPnls: number[] = [];
+      for (const r of results) {
+        dailyPnls.push(r.totalPnl);
+        try {
+          const trades = JSON.parse(r.trades_json || '[]');
+          for (const t of trades) { t._date = r.date; }
+          allTrades.push(...trades);
+        } catch {}
+      }
+
+      const wins = allTrades.filter((t: any) => t['pnl$'] > 0);
+      const losses = allTrades.filter((t: any) => t['pnl$'] < 0);
+      const breakeven = allTrades.filter((t: any) => t['pnl$'] === 0);
+
+      const totalPnl = dailyPnls.reduce((s, v) => s + v, 0);
+      const days = results.length;
+      const greenDays = dailyPnls.filter(p => p > 0).length;
+      const worstDay = Math.min(...dailyPnls);
+      const bestDay = Math.max(...dailyPnls);
+
+      // Win/loss stats
+      const avgWin = wins.length > 0 ? wins.reduce((s: number, t: any) => s + t['pnl$'], 0) / wins.length : 0;
+      const avgLoss = losses.length > 0 ? losses.reduce((s: number, t: any) => s + t['pnl$'], 0) / losses.length : 0;
+      const avgWinPct = wins.length > 0 ? wins.reduce((s: number, t: any) => s + (t.pnlPct || 0), 0) / wins.length : 0;
+      const avgLossPct = losses.length > 0 ? losses.reduce((s: number, t: any) => s + (t.pnlPct || 0), 0) / losses.length : 0;
+      const winLossRatio = losses.length > 0 && avgLoss !== 0 ? Math.abs(avgWin / avgLoss) : 0;
+
+      // Hold times
+      const holdMins = allTrades.map((t: any) => ((t.exitTs || 0) - (t.entryTs || 0)) / 60).filter((h: number) => h > 0);
+      const avgHold = holdMins.length > 0 ? holdMins.reduce((s: number, v: number) => s + v, 0) / holdMins.length : 0;
+      const medianHold = holdMins.length > 0 ? holdMins.sort((a: number, b: number) => a - b)[Math.floor(holdMins.length / 2)] : 0;
+
+      // Entry prices
+      const entryPrices = allTrades.map((t: any) => t.entryPrice || 0).filter((p: number) => p > 0);
+      const avgEntry = entryPrices.length > 0 ? entryPrices.reduce((s: number, v: number) => s + v, 0) / entryPrices.length : 0;
+
+      // Exit reasons
+      const exitReasons: Record<string, number> = {};
+      for (const t of allTrades) {
+        const r = t.reason || 'unknown';
+        exitReasons[r] = (exitReasons[r] || 0) + 1;
+      }
+
+      // Sharpe
+      let sharpe = 0;
+      if (dailyPnls.length > 1) {
+        const mean = dailyPnls.reduce((s, v) => s + v, 0) / dailyPnls.length;
+        const variance = dailyPnls.reduce((s, v) => s + (v - mean) ** 2, 0) / (dailyPnls.length - 1);
+        sharpe = variance > 0 ? mean / Math.sqrt(variance) : 0;
+      }
+
+      // Max drawdown (equity curve)
+      let equity = 0, peak = 0, maxDrawdown = 0;
+      const equityCurve: { date: string; equity: number }[] = [];
+      for (const r of results) {
+        equity += r.totalPnl;
+        if (equity > peak) peak = equity;
+        const dd = peak - equity;
+        if (dd > maxDrawdown) maxDrawdown = dd;
+        equityCurve.push({ date: r.date, equity });
+      }
+
+      // Consecutive losing days
+      let worstStreak = 0, streak = 0;
+      for (const p of dailyPnls) {
+        if (p < 0) { streak++; if (streak > worstStreak) worstStreak = streak; }
+        else streak = 0;
+      }
+
+      // Buying power needed
+      let peakBP = 0;
+      for (const t of allTrades) {
+        const cost = (t.entryPrice || 0) * (t.qty || 1) * 100;
+        if (cost > peakBP) peakBP = cost;
+      }
+
+      // Build setup description
+      const signals: string[] = [];
+      if (params.enableHma) signals.push('HMA');
+      if (params.enableRsi) signals.push('RSI');
+      if (params.enablePxHma) signals.push('PxHMA');
+      if (params.enableEma) signals.push('EMA');
+      if (params.enableKc) signals.push('KC');
+      if (params.requireUndHma) signals.push('UndHMA');
+
+      let otmLabel = 'auto';
+      if (params.targetOtmDistance != null) {
+        otmLabel = params.targetOtmDistance < 0
+          ? `ITM $${Math.abs(params.targetOtmDistance)}`
+          : params.targetOtmDistance === 0 ? 'ATM' : `OTM $${params.targetOtmDistance}`;
+      }
+
+      // Strengths & explore suggestions
+      const strengths: string[] = [];
+      if (greenDays >= 22) strengths.push(`${greenDays}/${days} green days`);
+      else if (greenDays >= 19) strengths.push(`${greenDays}/${days} green days`);
+      if (sharpe >= 1.4) strengths.push(`Elite Sharpe ${sharpe.toFixed(2)}`);
+      else if (sharpe >= 1.0) strengths.push(`Strong Sharpe ${sharpe.toFixed(2)}`);
+      if (wins.length / allTrades.length >= 0.60) strengths.push(`${(wins.length / allTrades.length * 100).toFixed(0)}% win rate`);
+      if (worstDay >= 0) strengths.push('Zero losing days');
+      if (winLossRatio >= 2.5) strengths.push(`${winLossRatio.toFixed(1)}x win/loss ratio`);
+      if (maxDrawdown === 0) strengths.push('No drawdown');
+
+      const explore: string[] = [];
+      if (params.stopLoss === 0 || params.stopLoss >= 80) explore.push('Sweep SL 25–50%');
+      if (params.targetOtmDistance == null) explore.push('Test OTM -10 to +10');
+      if (params.maxPositions > 1) explore.push('Try maxPos=1');
+      if (sharpe < 1.0) explore.push('Add KC gate');
+      if (allTrades.length > 400) explore.push('Cap trades/day');
+      if (maxDrawdown > 2000) explore.push('Add trailing stop');
+      if (params.tpMult >= 5) explore.push('Try TP 1.4–2x');
+      if (params.tpMult <= 1.1) explore.push('Try TP 1.4–3x');
+      if (!params.enableRsi && !params.enablePxHma) explore.push('Try adding RSI+PxHMA');
+      if (params.enableRsi && params.enablePxHma) explore.push('Try HMA-only');
+
+      res.json({
+        configId,
+        name: cfgRow?.name || configId,
+        setup: {
+          hma: `${params.hmaFast}×${params.hmaSlow}`,
+          timeframes: `${params.dirTf}D/${params.exitTf}E`,
+          signals,
+          otm: otmLabel,
+          stopLoss: params.stopLoss,
+          tpMult: params.tpMult,
+          maxPositions: params.maxPositions,
+          exitStrategy: params.exitStrategy,
+          contractPriceMax: params.contractPriceMax,
+          baseDollarsPerTrade: params.baseDollarsPerTrade,
+          maxContracts: params.maxContracts,
+        },
+        performance: {
+          totalPnl, days, trades: allTrades.length,
+          wins: wins.length, losses: losses.length, breakeven: breakeven.length,
+          winRate: allTrades.length > 0 ? wins.length / allTrades.length : 0,
+          avgWin, avgLoss, avgWinPct, avgLossPct, winLossRatio,
+          expectancy: allTrades.length > 0 ? totalPnl / allTrades.length : 0,
+          sharpe, greenDays, worstDay, bestDay,
+          maxDrawdown, worstStreak,
+          avgHoldMin: avgHold, medianHoldMin: medianHold,
+          avgEntryPrice: avgEntry,
+          peakBuyingPower: peakBP,
+        },
+        exitReasons,
+        equityCurve,
+        strengths,
+        explore,
+      });
+    } finally {
+      db.close();
+    }
+  });
+
   // ── GET /replay/api/sweep/:configId/daily — per-day breakdown ────────────
   router.get('/api/sweep/:configId/daily', (req, res) => {
     const { configId } = req.params;
