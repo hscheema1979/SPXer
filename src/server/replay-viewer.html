@@ -1422,12 +1422,12 @@ function renderAnalysis(a) {
   const pnlCls = v => v > 0 ? 'pos' : v < 0 ? 'neg' : '';
 
   // Exit reasons
-  const totalExits = Object.values(a.exitReasons).reduce((s, v) => s + (v as number), 0) as number;
+  const totalExits = Object.values(a.exitReasons).reduce((s, v) => s + v, 0);
   const exitHtml = Object.entries(a.exitReasons)
-    .sort((a, b) => (b[1] as number) - (a[1] as number))
+    .sort((a, b) => b[1] - a[1])
     .map(([reason, count]) => {
-      const pct = ((count as number) / totalExits * 100).toFixed(0);
-      const labels: Record<string,string> = { take_profit: 'Take Profit', stop_loss: 'Stop Loss', signal_reversal: 'Reversal', time_exit: 'Time Exit' };
+      const pct = (count / totalExits * 100).toFixed(0);
+      const labels = { take_profit: 'Take Profit', stop_loss: 'Stop Loss', signal_reversal: 'Reversal', time_exit: 'Time Exit' };
       return sr(labels[reason] || reason, `${count} (${pct}%)`);
     }).join('');
 
@@ -1435,12 +1435,12 @@ function renderAnalysis(a) {
   const eq = a.equityCurve || [];
   let sparkHtml = '';
   if (eq.length > 1) {
-    const vals = eq.map((e: any) => e.equity);
+    const vals = eq.map(e => e.equity);
     const minE = Math.min(0, ...vals);
     const maxE = Math.max(...vals);
     const range = maxE - minE || 1;
     const w = 200, h = 36;
-    const points = vals.map((v: number, i: number) => `${(i / (vals.length - 1)) * w},${h - ((v - minE) / range) * h}`).join(' ');
+    const points = vals.map((v, i) => `${(i / (vals.length - 1)) * w},${h - ((v - minE) / range) * h}`).join(' ');
     sparkHtml = `<svg class="equity-sparkline" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">
       <polyline points="${points}" fill="none" stroke="#10b981" stroke-width="1.5"/>
       <line x1="0" y1="${h - ((0 - minE) / range) * h}" x2="${w}" y2="${h - ((0 - minE) / range) * h}" stroke="#333" stroke-width="0.5" stroke-dasharray="3,3"/>
@@ -1448,8 +1448,8 @@ function renderAnalysis(a) {
   }
 
   // Tags
-  const strengthTags = (a.strengths || []).map((s: string) => `<span class="analysis-tag strength">✅ ${s}</span>`).join('');
-  const exploreTags = (a.explore || []).map((s: string) => `<span class="analysis-tag explore">🔬 ${s}</span>`).join('');
+  const strengthTags = (a.strengths || []).map(s => `<span class="analysis-tag strength">✅ ${s}</span>`).join('');
+  const exploreTags = (a.explore || []).map(s => `<span class="analysis-tag explore">🔬 ${s}</span>`).join('');
 
   content.innerHTML = `
     ${setupHtml}
