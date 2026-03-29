@@ -35,7 +35,7 @@ export const AGENT_XSP_CONFIG: Config = {
     signalTimeframe: '1m',
     directionTimeframe: '3m',
     exitTimeframe: '5m',
-    targetOtmDistance: 15,        // $15 OTM on SPX = $1.50 OTM on XSP
+    targetOtmDistance: 10,        // $10 OTM on SPX = $1 OTM on XSP
     targetContractPrice: null,
     maxEntryPrice: null,
     rsiOversold: 20,
