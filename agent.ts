@@ -26,6 +26,7 @@ import type { AgentSignal, AgentDecision } from './src/agent/types';
 import { selectStrike, type StrikeCandidate } from './src/core/strike-selector';
 import { computeQty } from './src/core/position-sizer';
 import { frictionEntry } from './src/core/friction';
+import { computeTradeSize } from './src/agent/account-balance';
 
 // ── Initialize ──────────────────────────────────────────────────────────────
 
@@ -188,11 +189,21 @@ async function runCycle(): Promise<number> {
   cycleCount++;
   const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
 
-  // Reset daily stats
+  // Reset daily stats + refresh account-based sizing
   const today = new Date().toISOString().split('T')[0];
   if (dailyDate !== today) {
     dailyPnl = 0;
     dailyDate = today;
+
+    // Dynamic sizing: update baseDollarsPerTrade from account balance
+    if (AGENT_CONFIG.sizing.riskPercentOfAccount) {
+      const tradeSize = await computeTradeSize(
+        AGENT_CONFIG.sizing.riskPercentOfAccount,
+        AGENT_CONFIG.execution?.accountId,
+      );
+      AGENT_CONFIG.sizing.baseDollarsPerTrade = tradeSize;
+      console.log(`[agent] Daily sizing: $${tradeSize} per trade (${AGENT_CONFIG.sizing.riskPercentOfAccount}% of account)`);
+    }
   }
 
   // 1. Fetch market state

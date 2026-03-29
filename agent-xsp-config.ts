@@ -157,12 +157,13 @@ export const AGENT_XSP_CONFIG: Config = {
     ],
   },
 
-  // $1,200 account — 1 contract only
+  // Cash account — 15% of buying power, 1 contract only
   sizing: {
-    baseDollarsPerTrade: 1200,
+    baseDollarsPerTrade: 200,          // fallback if account balance fetch fails
     sizeMultiplier: 1.0,
     minContracts: 1,
     maxContracts: 1,
+    riskPercentOfAccount: 15,          // 15% of cash buying power per trade
   },
 
   // XSP execution on cash account

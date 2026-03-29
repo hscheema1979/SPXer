@@ -168,12 +168,13 @@ export const AGENT_CONFIG: Config = {
     ],
   },
 
-  // Sizing — $10k base, max 10 contracts
+  // Sizing — 15% of account buying power, max 10 contracts
   sizing: {
-    baseDollarsPerTrade: 10000,
+    baseDollarsPerTrade: 10000,        // fallback if account balance fetch fails
     sizeMultiplier: 1.0,
     minContracts: 1,
     maxContracts: 10,
+    riskPercentOfAccount: 15,          // 15% of margin buying power per trade
   },
 
   // Regime: DISABLED — trade all conditions

@@ -26,6 +26,7 @@ import { logEntry, logRejected } from './src/agent/audit-log';
 import { writeStatus, logActivity } from './src/agent/reporter';
 import type { AgentSignal, AgentDecision } from './src/agent/types';
 import { selectStrike, type StrikeCandidate } from './src/core/strike-selector';
+import { computeTradeSize } from './src/agent/account-balance';
 
 // ── Initialize ──────────────────────────────────────────────────────────────
 
@@ -70,12 +71,22 @@ async function runCycle(): Promise<number> {
   cycleCount++;
   const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
 
-  // Reset daily state
+  // Reset daily state + refresh account-based sizing
   const today = new Date().toISOString().split('T')[0];
   if (dailyDate !== today) {
     dailyPnl = 0;
     tradedToday = false;
     dailyDate = today;
+
+    // Dynamic sizing: update baseDollarsPerTrade from account balance
+    if (CFG.sizing.riskPercentOfAccount) {
+      const tradeSize = await computeTradeSize(
+        CFG.sizing.riskPercentOfAccount,
+        EXEC.accountId,
+      );
+      CFG.sizing.baseDollarsPerTrade = tradeSize;
+      console.log(`[xsp] Daily sizing: $${tradeSize} per trade (${CFG.sizing.riskPercentOfAccount}% of account)`);
+    }
   }
 
   // Already traded today — just monitor the open position if any

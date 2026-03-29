@@ -195,6 +195,10 @@ export interface Config {
     sizeMultiplier: number;
     minContracts: number;
     maxContracts: number;
+    /** If set, overrides baseDollarsPerTrade with this % of account buying power.
+     *  Fetched from Tradier at startup and refreshed every 5 minutes.
+     *  e.g., 15 = use 15% of buying power per trade. */
+    riskPercentOfAccount?: number;
   };
 
   /** Execution target — controls which symbol/account orders are placed against.
