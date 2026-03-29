@@ -32,7 +32,9 @@ function aggregateBars(bars: ReplayBar[], periodMins: number): BarSummary[] {
       rsi14: ind.rsi14 ?? null,
       ema9: ind.ema9 ?? null,
       ema21: ind.ema21 ?? null,
+      hma3: ind.hma3 ?? null,
       hma5: ind.hma5 ?? null,
+      hma17: ind.hma17 ?? null,
       hma19: ind.hma19 ?? null,
     });
   }

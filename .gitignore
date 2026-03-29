@@ -13,3 +13,5 @@ build/
 .claude/plans/
 data/spxer.db.backup
 data/spxer.db.pre-utc-fix
+data/spxer.db.backup-shm
+data/spxer.db.backup-wal

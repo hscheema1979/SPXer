@@ -48,7 +48,9 @@ function aggregate(bars1m: BarSummary[], periodMins: number): BarSummary[] {
       rsi14: last.rsi14,
       ema9: last.ema9,
       ema21: last.ema21,
+      hma3: last.hma3,
       hma5: last.hma5,
+      hma17: last.hma17,
       hma19: last.hma19,
     });
   }
@@ -252,7 +254,9 @@ export async function fetchMarketSnapshot(): Promise<MarketSnapshot> {
     rsi14: b.indicators?.rsi14 ?? null,
     ema9: b.indicators?.ema9 ?? null,
     ema21: b.indicators?.ema21 ?? null,
+    hma3: b.indicators?.hma3 ?? null,
     hma5: b.indicators?.hma5 ?? null,
+    hma17: b.indicators?.hma17 ?? null,
     hma19: b.indicators?.hma19 ?? null,
   }));
   const latestSpxPrice = spxBars1m.length > 0 ? spxBars1m[spxBars1m.length - 1].close : 0;
@@ -326,7 +330,9 @@ export async function fetchMarketSnapshot(): Promise<MarketSnapshot> {
       rsi14: b.indicators?.rsi14 ?? null,
       ema9: b.indicators?.ema9 ?? null,
       ema21: b.indicators?.ema21 ?? null,
+      hma3: b.indicators?.hma3 ?? null,
       hma5: b.indicators?.hma5 ?? null,
+      hma17: b.indicators?.hma17 ?? null,
       hma19: b.indicators?.hma19 ?? null,
     }));
 

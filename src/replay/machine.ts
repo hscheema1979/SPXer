@@ -236,7 +236,7 @@ function ensureHmaPeriods(cache: BarCache, periods: number[], tf: string, verbos
 // ── On-the-fly KC computation ──────────────────────────────────────────────
 // Computes Keltner Channel indicators if missing from bars.
 
-function ensureKcFields(cache: BarCache, tf: string, config: Config, verbose: boolean): void {
+function ensureKcFields(cache: BarCache, tf: string, config: ReplayConfig, verbose: boolean): void {
   if (!config.signals.enableKeltnerGate) {
     if (verbose) console.log(`  KC gate disabled, skipping KC computation`);
     return;
@@ -519,7 +519,7 @@ async function runReplayScanners(
   const results = await Promise.allSettled(
     enabled.map(async (scannerCfg: ModelConfig) => {
       const systemPrompt = getScannerPrompt(config, scannerCfg.id) || libraryPrompt;
-      const text = await askModel(scannerCfg, systemPrompt, scannerPrompt, 60000, true);
+      const text = await askModel(scannerCfg, systemPrompt, scannerPrompt, 60000);
       const clean = extractJSON(text);
       const parsed = JSON.parse(clean);
 
@@ -1159,7 +1159,7 @@ export async function runReplay(
 
         // Run all judges IN PARALLEL with separate Agent SDK instances
         const judgeResults = await Promise.allSettled(
-          judges.map(cfg => askModel(cfg, judgeSystem, prompt, 90000, true))
+          judges.map(cfg => askModel(cfg, judgeSystem, prompt, 90000))
         );
 
         judges.forEach((cfg, i) => {

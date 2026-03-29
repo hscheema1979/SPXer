@@ -8,7 +8,9 @@ export interface BarSummary {
   rsi14: number | null;
   ema9: number | null;
   ema21: number | null;
+  hma3: number | null;
   hma5: number | null;
+  hma17: number | null;
   hma19: number | null;
 }
 

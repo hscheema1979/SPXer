@@ -39,7 +39,7 @@ export function seedIndicatorState(symbol: string, tf: Timeframe, bars: Bar[]): 
   s.lows = bars.map(b => b.low).slice(-MAX_BARS_MEMORY);
   s.volumes = bars.map(b => b.volume).slice(-MAX_BARS_MEMORY);
   // Re-seed incremental HMA state by replaying closes through hmaStep
-  for (const period of [5, 19, 25]) {
+  for (const period of [3, 5, 15, 17, 19, 25]) {
     const hma = makeHMAState(period);
     for (const c of s.closes) hmaStep(hma, c);
     s.hmaState[period] = hma;

@@ -1,58 +1,71 @@
 /**
- * Agent Configuration for Overnight/Morning Trading Readiness
+ * Agent Configuration — HMA3x17 ScannerReverse
  *
- * Based on best param-search combo: 100% WR, $17,324 P&L
- * Scanner prompt: original-1 (neutral, no regime guidance)
- * Paper mode: no trade execution
+ * Backtested config: hma3x17-undhma-otm15-tp14x-sl70
+ * Full year results (249 days, with friction):
+ *   $2,008,890 total P&L | 59.2% win rate | 88% green days
+ *   2,862 trades | 2.17:1 avg win/loss ratio
+ *   Sharpe 16.39 | Max DD $11,904
  *
- * TODO: migrate to DB-backed config via ConfigManager.
- * This file exists as a transitional bridge — agent.ts will
- * eventually load config via getConfigManager().loadForSubsystem('live-agent').
+ * Strategy:
+ *   - HMA 3×17 fast crossover on SPX underlying (catches small moves)
+ *   - scannerReverse exit (flip on HMA reversal — always in a trade)
+ *   - TP 1.4x (small take-profit), SL 70% (deep stop, rarely hit)
+ *   - $15 OTM contracts, $10k base sizing, max 10 contracts
+ *   - No scanners/judges/regime — pure deterministic signal execution
  */
 
 import type { Config } from './src/config/types';
 
 export const AGENT_CONFIG: Config = {
-  id: 'paper-mode-live',
-  name: 'Paper Mode Live',
-  description: 'Live agent paper mode config from autoresearch findings',
+  id: 'hma3x17-scannerReverse-live',
+  name: 'HMA3x17 ScannerReverse Live',
+  description: 'Backtested winner: HMA3x17 | UndHMA | OTM15 | TP1.4x | SL70% | scannerReverse',
   createdAt: Date.now(),
   updatedAt: Date.now(),
 
-  // Signal detection — autoresearch session 2,7,8 findings
+  // Signal detection — HMA 3×17 cross with underlying confirmation
   signals: {
-    enableRsiCrosses: true,
-    enableHmaCrosses: true,   // Essential (s7: off drops score 83→49)
-    enablePriceCrossHma: true,
-    enableEmaCrosses: false,  // Hurts (s8: on drops score 83→54)
-    requireUnderlyingHmaCross: false,
-    hmaCrossFast: 5,
-    hmaCrossSlow: 19,
+    enableRsiCrosses: false,
+    enableHmaCrosses: true,
+    enablePriceCrossHma: false,
+    enableEmaCrosses: false,
+    requireUnderlyingHmaCross: true,   // Key: must see SPX HMA3 cross HMA17
+    hmaCrossFast: 3,                   // HMA(3) — very fast
+    hmaCrossSlow: 17,                  // HMA(17) — medium
     emaCrossFast: 9,
     emaCrossSlow: 21,
     signalTimeframe: '1m',
-    directionTimeframe: '1m',
-    targetOtmDistance: null,
+    directionTimeframe: '3m',          // Direction from 3m bars
+    exitTimeframe: '5m',               // Exit reversal from 5m bars (not in Config type yet, tracked in agent)
+    targetOtmDistance: 15,             // $15 OTM contracts
     targetContractPrice: null,
-    rsiOversold: 20,          // RSI threshold doesn't matter much (s2: all equal)
+    maxEntryPrice: null,
+    rsiOversold: 20,
     rsiOverbought: 80,
-    optionRsiOversold: 40,    // Tighter = better quality (s5: 86.67 score)
+    optionRsiOversold: 40,
     optionRsiOverbought: 60,
+    enableKeltnerGate: false,
+    kcEmaPeriod: 20,
+    kcAtrPeriod: 14,
+    kcMultiplier: 2.5,
+    kcSlopeLookback: 5,
+    kcSlopeThreshold: 0.3,
   },
 
-  // Strike selection — s1: morning ±75-100 is optimal
+  // Strike selection
   strikeSelector: {
     strikeSearchRange: 80,
     contractPriceMin: 0.2,
-    contractPriceMax: 8.0,
+    contractPriceMax: 99,              // No upper limit — OTM distance handles targeting
   },
 
-  // Position management — s3: SL 80% slightly better, s4: TP 2x highest WR
+  // Position management — TP 1.4x, SL 70%
   position: {
-    stopLossPercent: 80,      // Hold winners longer (s3: 85.26 score)
-    takeProfitMultiplier: 5,  // 5x is baseline; 2x has highest WR but lower P&L per trade
+    stopLossPercent: 70,               // Deep stop — rarely hit with scannerReverse exits
+    takeProfitMultiplier: 1.4,         // Small take-profit — compound many small wins
     defaultQuantity: 1,
-    maxPositionsOpen: 3,
+    maxPositionsOpen: 1,               // One position at a time (flip model)
     positionSizeMultiplier: 1.0,
   },
 
@@ -68,45 +81,45 @@ export const AGENT_CONFIG: Config = {
 
   // Risk limits
   risk: {
-    maxDailyLoss: 500,
-    maxTradesPerDay: 10,
+    maxDailyLoss: 9999,               // Match backtest: no daily loss cap
+    maxTradesPerDay: 999,              // Match backtest: no trade limit
     maxRiskPerTrade: 2000,
-    cutoffTimeET: '15:30',
+    cutoffTimeET: '15:45',
     minMinutesToClose: 15,
   },
 
-  // Scanners: enabled for overnight narrative building
+  // Scanners: DISABLED — pure deterministic execution
   scanners: {
-    enabled: true,
-    models: ['kimi', 'glm', 'haiku'],  // minimax disabled — empty responses
+    enabled: false,
+    models: [],
     cycleIntervalSec: 60,
     minConfidenceToEscalate: 0.5,
     promptAssignments: {},
     defaultPromptId: 'scanner-baseline-v1',
   },
 
-  // Escalation: scanners feed judge, enabled to test judge reactions
+  // Escalation: disabled
   escalation: {
-    signalTriggersJudge: true,
-    scannerTriggersJudge: true,
+    signalTriggersJudge: false,
+    scannerTriggersJudge: false,
     requireScannerAgreement: false,
     requireSignalAgreement: false,
   },
 
-  // Judge: enabled to observe and test judge reactions
+  // Judge: DISABLED — no LLM in the loop
   judges: {
-    enabled: true,
-    models: ['sonnet'],
+    enabled: false,
+    models: [],
     activeJudge: 'sonnet',
     consensusRule: 'primary-decides',
     confidenceThreshold: 0.5,
-    escalationCooldownSec: 180,  // s6: 180s is optimal (92.73 score, 81.8% WR)
+    escalationCooldownSec: 180,
     promptId: 'judge-regime-advisor-v1',
   },
 
-  // Exit strategy
+  // Exit strategy — scannerReverse: exit on HMA reversal, then flip to opposite side
   exit: {
-    strategy: 'takeProfit',
+    strategy: 'scannerReverse',
     trailingStopEnabled: false,
     trailingStopPercent: 20,
     timeBasedExitEnabled: false,
@@ -114,11 +127,11 @@ export const AGENT_CONFIG: Config = {
     reversalSizeMultiplier: 1.0,
   },
 
-  // Narrative
+  // Narrative: disabled (no scanners)
   narrative: {
-    buildOvernightContext: true,
+    buildOvernightContext: false,
     barHistoryDepth: 60,
-    trackTrajectory: true,
+    trackTrajectory: false,
   },
 
   // Pipeline defaults
@@ -141,27 +154,37 @@ export const AGENT_CONFIG: Config = {
 
   // Calendar
   calendar: {
-    holidays: [],
-    earlyCloseDays: [],
+    holidays: [
+      '2025-01-01','2025-01-20','2025-02-17','2025-04-18',
+      '2025-05-26','2025-06-19','2025-07-04','2025-09-01',
+      '2025-11-27','2025-12-25',
+      '2026-01-01','2026-01-19','2026-02-16','2026-04-03',
+      '2026-05-25','2026-06-19','2026-07-03','2026-08-31',
+      '2026-11-26','2026-12-25',
+    ],
+    earlyCloseDays: [
+      '2025-07-03','2025-11-28',
+      '2026-07-02','2026-11-27',
+    ],
   },
 
-  // Sizing
+  // Sizing — $10k base, max 10 contracts
   sizing: {
-    baseDollarsPerTrade: 500,
+    baseDollarsPerTrade: 10000,
     sizeMultiplier: 1.0,
     minContracts: 1,
     maxContracts: 10,
   },
 
-  // Regime system — ALL parameters configurable, nothing hardcoded
+  // Regime: DISABLED — trade all conditions
   regime: {
-    enabled: true,
-    mode: 'enforce',
+    enabled: false,
+    mode: 'disabled',
 
     classification: {
-      trendThreshold: 0.15,        // pts/bar — ~$9/5min sustained move
+      trendThreshold: 0.15,
       lookbackBars: 20,
-      openingRangeMinutes: 15,     // Opening range duration (09:30-09:45)
+      openingRangeMinutes: 15,
     },
 
     timeWindows: {
@@ -173,52 +196,34 @@ export const AGENT_CONFIG: Config = {
 
     signalGates: {
       MORNING_MOMENTUM: {
-        allowOverboughtFade: false,
-        allowOversoldFade: false,
-        allowBreakoutFollow: true,
-        allowVReversal: false,
-        overboughtMeaning: 'momentum',
-        oversoldMeaning: 'momentum',
+        allowOverboughtFade: false, allowOversoldFade: false,
+        allowBreakoutFollow: true, allowVReversal: false,
+        overboughtMeaning: 'momentum', oversoldMeaning: 'momentum',
       },
       MEAN_REVERSION: {
-        allowOverboughtFade: true,
-        allowOversoldFade: true,
-        allowBreakoutFollow: false,
-        allowVReversal: true,
-        overboughtMeaning: 'reversal',
-        oversoldMeaning: 'reversal',
+        allowOverboughtFade: true, allowOversoldFade: true,
+        allowBreakoutFollow: false, allowVReversal: true,
+        overboughtMeaning: 'reversal', oversoldMeaning: 'reversal',
       },
       TRENDING_UP: {
-        allowOverboughtFade: false,
-        allowOversoldFade: true,
-        allowBreakoutFollow: true,
-        allowVReversal: false,
-        overboughtMeaning: 'momentum',
-        oversoldMeaning: 'reversal',
+        allowOverboughtFade: false, allowOversoldFade: true,
+        allowBreakoutFollow: true, allowVReversal: false,
+        overboughtMeaning: 'momentum', oversoldMeaning: 'reversal',
       },
       TRENDING_DOWN: {
-        allowOverboughtFade: true,
-        allowOversoldFade: false,
-        allowBreakoutFollow: true,
-        allowVReversal: false,
-        overboughtMeaning: 'reversal',
-        oversoldMeaning: 'momentum',
+        allowOverboughtFade: true, allowOversoldFade: false,
+        allowBreakoutFollow: true, allowVReversal: false,
+        overboughtMeaning: 'reversal', oversoldMeaning: 'momentum',
       },
       GAMMA_EXPIRY: {
-        allowOverboughtFade: false,
-        allowOversoldFade: false,
-        allowBreakoutFollow: true,
-        allowVReversal: false,
-        overboughtMeaning: 'momentum',
-        oversoldMeaning: 'momentum',
+        allowOverboughtFade: false, allowOversoldFade: false,
+        allowBreakoutFollow: true, allowVReversal: false,
+        overboughtMeaning: 'momentum', oversoldMeaning: 'momentum',
       },
       NO_TRADE: {
-        allowOverboughtFade: false,
-        allowOversoldFade: false,
-        allowBreakoutFollow: false,
-        allowVReversal: false,
-        overboughtMeaning: 'momentum',
-        oversoldMeaning: 'momentum',
+        allowOverboughtFade: false, allowOversoldFade: false,
+        allowBreakoutFollow: false, allowVReversal: false,
+        overboughtMeaning: 'momentum', oversoldMeaning: 'momentum',
       },
     },
   },
