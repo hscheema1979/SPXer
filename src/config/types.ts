@@ -196,6 +196,25 @@ export interface Config {
     minContracts: number;
     maxContracts: number;
   };
+
+  /** Execution target — controls which symbol/account orders are placed against.
+   *  If omitted, defaults to SPX options on the primary TRADIER_ACCOUNT_ID. */
+  execution?: {
+    /** Root symbol for order placement: 'SPX' (default), 'XSP', 'SPY' */
+    symbol: string;
+    /** Option symbol prefix: 'SPXW' (default), 'XSP', 'SPY' */
+    optionPrefix: string;
+    /** Strike divisor relative to SPX: 1 for SPX, 10 for XSP, ~10 for SPY */
+    strikeDivisor: number;
+    /** Strike interval in the target product: 5 for SPX, 1 for XSP/SPY */
+    strikeInterval: number;
+    /** Tradier account ID override (for multi-account setups) */
+    accountId?: string;
+    /** Use 1DTE instead of 0DTE */
+    use1dte?: boolean;
+    /** Wider friction for less-liquid products */
+    halfSpread?: number;
+  };
 }
 
 // ── Model Registry (models table) ──────────────────────────────────────────

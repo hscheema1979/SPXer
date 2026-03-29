@@ -166,7 +166,7 @@ export class PositionManager {
           closedAt: now,
         };
 
-        await closePosition(pos, exitCheck.reason, currentPrice, this.paper);
+        await closePosition(pos, exitCheck.reason, currentPrice, this.paper, this.cfg.execution);
         logClose(closeRecord);
         dailyLossCallback(pnl);
         this.positions.delete(id);

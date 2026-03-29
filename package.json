@@ -10,6 +10,8 @@
     "dev": "tsx src/index.ts",
     "agent": "tsx agent.ts",
     "agent:live": "AGENT_PAPER=false tsx agent.ts",
+    "agent:xsp": "tsx agent-xsp.ts",
+    "agent:xsp:live": "AGENT_PAPER=false tsx agent-xsp.ts",
     "build": "tsc",
     "start": "node dist/index.js",
     "test": "vitest run",
