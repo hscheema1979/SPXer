@@ -24,6 +24,7 @@ import { checkExit, type ExitContext } from '../core/position-manager';
 import { computeQty } from '../core/position-sizer';
 import { isRiskBlocked, type RiskState } from '../core/risk-guard';
 import { isRegimeBlocked } from '../core/regime-gate';
+import { computeRealisticPnl, frictionEntry } from '../core/friction';
 import type { Signal, CoreBar } from '../core/types';
 import { makeHMAState, hmaStep, makeKCState, kcStep } from '../pipeline/indicators/tier1';
 
@@ -800,8 +801,7 @@ export async function runReplay(
         const closeReason = exitResult.reason;
 
         if (exitResult.shouldExit && closeReason) {
-          const pnlPct = ((curPrice - openPos.entryPrice) / openPos.entryPrice) * 100;
-          const pnl$ = (curPrice - openPos.entryPrice) * openPos.qty * 100;
+          const { pnlPct, 'pnl$': pnl$ } = computeRealisticPnl(openPos.entryPrice, curPrice, openPos.qty);
           trades.push({
             symbol: openPos.symbol, side: openPos.side, strike: openPos.strike, qty: openPos.qty,
             entryTs: openPos.entryTs, entryET: openPos.entryET, entryPrice: openPos.entryPrice,
@@ -883,11 +883,12 @@ export async function runReplay(
           if (bestSymbol && bestPrice > 0) {
             const parsed = parseOptionSymbol(bestSymbol);
             if (parsed) {
+              const effEntry = frictionEntry(bestPrice);
               const stopLoss = config.position.stopLossPercent > 0
-                ? bestPrice * (1 - config.position.stopLossPercent / 100)
+                ? effEntry * (1 - config.position.stopLossPercent / 100)
                 : 0;
-              const takeProfit = bestPrice * config.position.takeProfitMultiplier;
-              const qty = computeQty(bestPrice, config);
+              const takeProfit = effEntry * config.position.takeProfitMultiplier;
+              const qty = computeQty(effEntry, config);
 
               openPositions.set(`${bestSymbol}_${ts}`, {
                 id: `${bestSymbol}_${ts}`,
@@ -899,7 +900,7 @@ export async function runReplay(
                 highWaterPrice: bestPrice,
               });
               if (verbose) {
-                console.log(`  FLIP → ${flip.side.toUpperCase()} ${bestSymbol} x${qty} @ $${bestPrice.toFixed(2)} | stop=$${stopLoss.toFixed(2)} tp=$${takeProfit.toFixed(2)}`);
+                console.log(`  FLIP → ${flip.side.toUpperCase()} ${bestSymbol} x${qty} @ $${bestPrice.toFixed(2)} (eff $${effEntry.toFixed(2)}) | stop=$${stopLoss.toFixed(2)} tp=$${takeProfit.toFixed(2)}`);
               }
             }
           }
@@ -1208,13 +1209,14 @@ export async function runReplay(
           const entryPrice = bars?.[bars.length - 1]?.close ?? null;
 
           if (entryPrice && entryPrice > 0) {
-            const stopLoss = judgeStop && judgeStop > 0 && judgeStop < entryPrice
+            const effEntry = frictionEntry(entryPrice);
+            const stopLoss = judgeStop && judgeStop > 0 && judgeStop < effEntry
               ? judgeStop
-              : entryPrice * (1 - config.position.stopLossPercent / 100);
-            const takeProfit = judgeTp && judgeTp > entryPrice
+              : effEntry * (1 - config.position.stopLossPercent / 100);
+            const takeProfit = judgeTp && judgeTp > effEntry
               ? judgeTp
-              : entryPrice * config.position.takeProfitMultiplier;
-            const qty = computeQty(entryPrice, config);
+              : effEntry * config.position.takeProfitMultiplier;
+            const qty = computeQty(effEntry, config);
 
             openPositions.set(`${judgeTarget}_${ts}`, {
               id: `${judgeTarget}_${ts}`,
@@ -1226,7 +1228,7 @@ export async function runReplay(
               highWaterPrice: entryPrice,
             });
             if (verbose) {
-              console.log(`  ENTER ${judgeTarget} x${qty} @ $${entryPrice.toFixed(2)} | stop=$${stopLoss.toFixed(2)} tp=$${takeProfit.toFixed(2)}`);
+              console.log(`  ENTER ${judgeTarget} x${qty} @ $${entryPrice.toFixed(2)} (eff $${effEntry.toFixed(2)}) | stop=$${stopLoss.toFixed(2)} tp=$${takeProfit.toFixed(2)}`);
             }
           }
         }
@@ -1237,8 +1239,7 @@ export async function runReplay(
     const finalTs = timestamps[timestamps.length - 1];
     for (const [, openPos] of openPositions.entries()) {
       const curPrice = getPosPriceAt(cache, openPos.side, openPos.strike, SYMBOL_FILTER, finalTs) ?? openPos.entryPrice;
-      const pnlPct = ((curPrice - openPos.entryPrice) / openPos.entryPrice) * 100;
-      const pnl$ = (curPrice - openPos.entryPrice) * openPos.qty * 100;
+      const { pnlPct, 'pnl$': pnl$ } = computeRealisticPnl(openPos.entryPrice, curPrice, openPos.qty);
       trades.push({
         symbol: openPos.symbol, side: openPos.side, strike: openPos.strike, qty: openPos.qty,
         entryTs: openPos.entryTs, entryET: openPos.entryET, entryPrice: openPos.entryPrice,

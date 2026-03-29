@@ -66,10 +66,14 @@ export function computeIndicators(bar: Bar, tier: 1 | 2 = 1): Record<string, num
   }
 
   // Incremental HMA — O(period) per call, not O(n²)
-  for (const period of [5, 19, 25]) {
+  // Includes all periods used by top replay configs: 3, 5, 15, 17, 19, 25
+  for (const period of [3, 5, 15, 17, 19, 25]) {
     if (!s.hmaState[period]) s.hmaState[period] = makeHMAState(period);
   }
+  const hma3  = hmaStep(s.hmaState[3],  bar.close);
   const hma5  = hmaStep(s.hmaState[5],  bar.close);
+  const hma15 = hmaStep(s.hmaState[15], bar.close);
+  const hma17 = hmaStep(s.hmaState[17], bar.close);
   const hma19 = hmaStep(s.hmaState[19], bar.close);
   const hma25 = hmaStep(s.hmaState[25], bar.close);
 
@@ -81,7 +85,10 @@ export function computeIndicators(bar: Bar, tier: 1 | 2 = 1): Record<string, num
   const kc = kcStep(s.kcState, bar.close, bar.high, bar.low, prevClose);
 
   const ind: Record<string, number | null> = {
+    hma3,
     hma5,
+    hma15,
+    hma17,
     hma19,
     hma25,
     ema9:  s.emaState[9],
