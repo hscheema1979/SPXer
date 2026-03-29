@@ -74,10 +74,10 @@ export const AGENT_XSP_CONFIG: Config = {
     skipHolidays: true,
   },
 
-  // Cash account: 1 trade per day, conservative risk
+  // Cash account: conservative risk, but trade all day
   risk: {
     maxDailyLoss: 500,           // Protect the $1,200 account
-    maxTradesPerDay: 1,          // Cash account: funds locked after sell
+    maxTradesPerDay: 999,        // Trade all day — small contracts don't lock up much capital
     maxRiskPerTrade: 500,
     cutoffTimeET: '15:45',
     minMinutesToClose: 15,
@@ -109,10 +109,9 @@ export const AGENT_XSP_CONFIG: Config = {
     promptId: 'judge-regime-advisor-v1',
   },
 
-  // NO scannerReverse flipping — cash account can only do 1 trade
-  // Use takeProfit: enter once, ride to TP or SL, done for the day
+  // scannerReverse: flip on HMA reversal, same as SPX agent
   exit: {
-    strategy: 'takeProfit',
+    strategy: 'scannerReverse',
     trailingStopEnabled: false,
     trailingStopPercent: 20,
     timeBasedExitEnabled: false,
