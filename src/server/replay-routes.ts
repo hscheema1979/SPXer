@@ -29,6 +29,7 @@ interface ReplayJob {
   startedAt: number;
   completedAt?: number;
 }
+const MAX_CONCURRENT_JOBS = 3;
 const jobs = new Map<string, ReplayJob>();
 
 function getDb(): Database.Database {
@@ -322,6 +323,15 @@ export function createReplayRoutes(): Router {
 
     if (!dates || !dates.length) {
       return res.status(400).json({ error: 'dates[] required' });
+    }
+
+    // Enforce max concurrent jobs
+    const runningJobs = Array.from(jobs.values()).filter(j => j.status === 'running');
+    if (runningJobs.length >= MAX_CONCURRENT_JOBS) {
+      return res.status(429).json({
+        error: `Max ${MAX_CONCURRENT_JOBS} concurrent jobs. ${runningJobs.length} running.`,
+        runningJobs: runningJobs.map(j => ({ id: j.id, configName: j.configName, progress: j.progress })),
+      });
     }
 
     try {
