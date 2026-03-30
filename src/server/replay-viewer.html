@@ -202,6 +202,7 @@
   <button class="config-btn" onclick="openConfigModal()">Settings</button>
   <button class="run-btn" id="run-btn" onclick="runReplay()">Run</button>
   <span class="run-status" id="run-status"></span>
+  <span id="job-indicator" style="display:none;margin-left:8px;padding:2px 8px;background:#1a1a2e;border:1px solid #444;border-radius:4px;font-size:11px;color:#ffa500;cursor:pointer" onclick="showJobStatus()" title="Click for details"></span>
   <div class="summary" id="summary"></div>
   <span class="connection-status disconnected" id="conn-status">WS</span>
 </div>
@@ -392,6 +393,7 @@ async function init() {
 // ── Load a day ─────────────────────────────────────────────────────────────
 
 async function loadDay() {
+  if (typeof currentMode !== 'undefined' && currentMode === 'live') return; // don't load replay data in live mode
   const date = document.getElementById('date-select').value;
   const configId = document.getElementById('config-select').value;
   if (!date || !configId) return;
@@ -1325,6 +1327,84 @@ function getSelectedDates() {
   return allDates.slice(lo, hi + 1);
 }
 
+// ── Background job polling ──────────────────────────────────────────────────
+let activeJobId = null;
+let jobPollTimer = null;
+
+function startJobPoll(jobId, statusEl, runBtn) {
+  activeJobId = jobId;
+  const indicator = document.getElementById('job-indicator');
+
+  function poll() {
+    fetch(`${API}/job/${jobId}`).then(r => r.json()).then(job => {
+      if (!job || job.error === 'Job not found') {
+        stopJobPoll(statusEl, runBtn);
+        return;
+      }
+
+      const totalTrades = job.results.reduce((s, r) => s + r.trades, 0);
+      const totalPnl = job.results.reduce((s, r) => s + r.totalPnl, 0);
+      const pct = Math.round(job.progress.completed / job.progress.total * 100);
+
+      // Update indicator (always visible during job)
+      indicator.style.display = 'inline';
+      indicator.textContent = `⏳ ${job.progress.completed}/${job.progress.total}`;
+
+      if (job.status === 'running') {
+        statusEl.className = 'run-status running';
+        statusEl.textContent = `Running ${job.progress.completed}/${job.progress.total} (${job.progress.currentDate})... ${totalTrades} trades | $${totalPnl.toFixed(0)}`;
+        jobPollTimer = setTimeout(poll, 3000);
+      } else if (job.status === 'completed') {
+        statusEl.className = 'run-status done';
+        statusEl.textContent = `✅ ${job.dates.length} days | ${totalTrades} trades | $${totalPnl.toFixed(0)}`;
+        indicator.textContent = `✅ ${job.dates.length}d`;
+        indicator.style.color = '#4caf50';
+        stopJobPoll(statusEl, runBtn);
+        loadDay(); // refresh chart
+        // Fade out indicator after 30s
+        setTimeout(() => { indicator.style.display = 'none'; indicator.style.color = '#ffa500'; }, 30000);
+      } else if (job.status === 'failed') {
+        statusEl.className = 'run-status error';
+        statusEl.textContent = `❌ Failed: ${job.error}`;
+        indicator.textContent = '❌ Failed';
+        indicator.style.color = '#f44336';
+        stopJobPoll(statusEl, runBtn);
+        setTimeout(() => { indicator.style.display = 'none'; indicator.style.color = '#ffa500'; }, 30000);
+      }
+    }).catch(() => {
+      // Network error — retry
+      jobPollTimer = setTimeout(poll, 5000);
+    });
+  }
+
+  poll();
+}
+
+function stopJobPoll(statusEl, runBtn) {
+  if (jobPollTimer) { clearTimeout(jobPollTimer); jobPollTimer = null; }
+  activeJobId = null;
+  runBtn.disabled = false;
+}
+
+function showJobStatus() {
+  if (!activeJobId) return;
+  fetch(`${API}/job/${activeJobId}`).then(r => r.json()).then(job => {
+    if (!job) return;
+    const totalTrades = job.results.reduce((s, r) => s + r.trades, 0);
+    const totalPnl = job.results.reduce((s, r) => s + r.totalPnl, 0);
+    const elapsed = ((job.completedAt || Date.now()) - job.startedAt) / 1000;
+    const perDay = job.progress.completed > 0 ? elapsed / job.progress.completed : 0;
+    const remaining = (job.progress.total - job.progress.completed) * perDay;
+    alert(
+      `Job: ${job.configName}\n` +
+      `Status: ${job.status}\n` +
+      `Progress: ${job.progress.completed}/${job.progress.total} (${job.progress.currentDate})\n` +
+      `Trades: ${totalTrades} | P&L: $${totalPnl.toFixed(0)}\n` +
+      `Elapsed: ${Math.round(elapsed)}s | ETA: ~${Math.round(remaining)}s`
+    );
+  });
+}
+
 async function runReplay() {
   const dates = getSelectedDates();
   const configId = document.getElementById('config-select').value;
@@ -1334,35 +1414,46 @@ async function runReplay() {
   const runBtn = document.getElementById('run-btn');
   runBtn.disabled = true;
 
-  let totalTrades = 0, totalPnl = 0;
-  try {
-    for (let i = 0; i < dates.length; i++) {
+  // Single day — run synchronously (fast, <5s)
+  if (dates.length === 1) {
+    try {
       statusEl.className = 'run-status running';
-      statusEl.textContent = dates.length > 1
-        ? `Running ${i + 1}/${dates.length} (${dates[i]})...`
-        : 'Running...';
-
+      statusEl.textContent = 'Running...';
       const res = await fetch(`${API}/run`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ date: dates[i], configId }),
+        body: JSON.stringify({ date: dates[0], configId }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error);
-      totalTrades += data.summary.trades;
-      totalPnl += data.summary.totalPnl;
+      statusEl.className = 'run-status done';
+      statusEl.textContent = `${data.summary.trades} trades | $${data.summary.totalPnl.toFixed(0)}`;
+      await loadDay();
+      setTimeout(() => { statusEl.textContent = ''; }, 8000);
+    } catch (err) {
+      statusEl.className = 'run-status error';
+      statusEl.textContent = err.message;
+    } finally {
+      runBtn.disabled = false;
     }
+    return;
+  }
 
-    statusEl.className = 'run-status done';
-    statusEl.textContent = dates.length > 1
-      ? `${dates.length} days | ${totalTrades} trades | $${totalPnl.toFixed(0)}`
-      : `${totalTrades} trades | $${totalPnl.toFixed(0)}`;
-    await loadDay();
-    setTimeout(() => { statusEl.textContent = ''; }, 8000);
+  // Multi-day — launch background job
+  try {
+    statusEl.className = 'run-status running';
+    statusEl.textContent = `Launching ${dates.length}-day batch...`;
+    const res = await fetch(`${API}/run-batch`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dates, configId }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+    startJobPoll(data.jobId, statusEl, runBtn);
   } catch (err) {
     statusEl.className = 'run-status error';
     statusEl.textContent = err.message;
-  } finally {
     runBtn.disabled = false;
   }
 }
@@ -1373,51 +1464,57 @@ async function runReplayWithConfig(dates, config, configId, configName) {
   const runBtn = document.getElementById('run-btn');
   runBtn.disabled = true;
 
-  let totalTrades = 0, totalPnl = 0;
-  let lastConfigId = configId;
-  try {
-    for (let i = 0; i < dates.length; i++) {
+  // Single day — synchronous
+  if (dates.length === 1) {
+    try {
       statusEl.className = 'run-status running';
-      statusEl.textContent = dates.length > 1
-        ? `Running ${i + 1}/${dates.length} (${dates[i]})...`
-        : 'Running...';
-
-      const body = i === 0
-        ? { date: dates[i], config, configId, configName }
-        : { date: dates[i], configId }; // config already saved on first run
+      statusEl.textContent = 'Running...';
       const res = await fetch(`${API}/run`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
+        body: JSON.stringify({ date: dates[0], config, configId, configName }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error);
-      totalTrades += data.summary.trades;
-      totalPnl += data.summary.totalPnl;
-      lastConfigId = data.configId;
+      statusEl.className = 'run-status done';
+      statusEl.textContent = `${data.summary.trades} trades | $${data.summary.totalPnl.toFixed(0)}`;
+
+      // Reload configs dropdown and select the new one
+      const configs = await fetch(`${API}/configs`).then(r => r.json());
+      const configSel = document.getElementById('config-select');
+      const important = configs.filter(c => c.name !== 'Default Configuration');
+      const defaults = configs.filter(c => c.name === 'Default Configuration');
+      const sorted = [...important, ...defaults];
+      configSel.innerHTML = sorted.map(c =>
+        `<option value="${c.id}">${c.id} — ${c.name}</option>`
+      ).join('');
+      configSel.value = data.configId;
+      await loadDay();
+      setTimeout(() => { statusEl.textContent = ''; }, 8000);
+    } catch (err) {
+      statusEl.className = 'run-status error';
+      statusEl.textContent = err.message;
+    } finally {
+      runBtn.disabled = false;
     }
+    return;
+  }
 
-    statusEl.className = 'run-status done';
-    statusEl.textContent = dates.length > 1
-      ? `${dates.length} days | ${totalTrades} trades | $${totalPnl.toFixed(0)}`
-      : `${totalTrades} trades | $${totalPnl.toFixed(0)}`;
-
-    // Reload configs dropdown and select the new one
-    const configs = await fetch(`${API}/configs`).then(r => r.json());
-    const configSel = document.getElementById('config-select');
-    const important = configs.filter(c => c.name !== 'Default Configuration');
-    const defaults = configs.filter(c => c.name === 'Default Configuration');
-    const sorted = [...important, ...defaults];
-    configSel.innerHTML = sorted.map(c =>
-      `<option value="${c.id}">${c.id} — ${c.name}</option>`
-    ).join('');
-    configSel.value = lastConfigId;
-    await loadDay();
-    setTimeout(() => { statusEl.textContent = ''; }, 8000);
+  // Multi-day — launch background job
+  try {
+    statusEl.className = 'run-status running';
+    statusEl.textContent = `Launching ${dates.length}-day batch...`;
+    const res = await fetch(`${API}/run-batch`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dates, config, configId, configName }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+    startJobPoll(data.jobId, statusEl, runBtn);
   } catch (err) {
     statusEl.className = 'run-status error';
     statusEl.textContent = err.message;
-  } finally {
     runBtn.disabled = false;
   }
 }
@@ -1594,7 +1691,18 @@ async function boot() {
     setMode('live');
   }
 }
-boot().catch(err => console.error('Init failed:', err));
+boot().then(() => {
+  // On page load, check if there's an active background job to resume polling
+  fetch(`${API}/jobs`).then(r => r.json()).then(jobList => {
+    const running = jobList.find(j => j.status === 'running');
+    if (running) {
+      const statusEl = document.getElementById('run-status');
+      const runBtn = document.getElementById('run-btn');
+      runBtn.disabled = true;
+      startJobPoll(running.id, statusEl, runBtn);
+    }
+  }).catch(() => {});
+}).catch(err => console.error('Init failed:', err));
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ── LIVE MODE ──────────────────────────────────────────────────────────────

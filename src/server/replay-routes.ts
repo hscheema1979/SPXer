@@ -8,12 +8,28 @@ import Database from 'better-sqlite3';
 import * as path from 'path';
 import * as fs from 'fs';
 import http from 'http';
+import { randomUUID } from 'crypto';
 import { runReplay } from '../replay/machine';
 import { DEFAULT_CONFIG, mergeConfig } from '../config/defaults';
 import type { Config } from '../config/types';
 
 const REPLAY_DATA_SOURCE = process.env.REPLAY_DATA_SOURCE || 'replay_bars';
 const DB_PATH = path.resolve(process.cwd(), process.env.DB_PATH || 'data/spxer.db');
+
+// ── Background job store (in-memory, survives page navigation) ─────────────
+interface ReplayJob {
+  id: string;
+  configId: string;
+  configName: string;
+  dates: string[];
+  status: 'running' | 'completed' | 'failed';
+  progress: { completed: number; total: number; currentDate: string };
+  results: { date: string; trades: number; wins: number; totalPnl: number }[];
+  error?: string;
+  startedAt: number;
+  completedAt?: number;
+}
+const jobs = new Map<string, ReplayJob>();
 
 function getDb(): Database.Database {
   return new Database(DB_PATH, { readonly: true });
@@ -293,6 +309,127 @@ export function createReplayRoutes(): Router {
       console.error('[replay-run] Error:', err.message);
       res.status(500).json({ error: err.message });
     }
+  });
+
+  // ── POST /replay/api/run-batch — background multi-day replay ─────────────
+  router.post('/api/run-batch', (req, res) => {
+    const { dates, config, configId, configName } = req.body as {
+      dates?: string[];
+      config?: Partial<Config>;
+      configId?: string;
+      configName?: string;
+    };
+
+    if (!dates || !dates.length) {
+      return res.status(400).json({ error: 'dates[] required' });
+    }
+
+    try {
+      // Build the full config (same logic as /api/run)
+      let fullConfig: Config;
+      if (config) {
+        fullConfig = mergeConfig(DEFAULT_CONFIG, config as Partial<Config>);
+      } else if (configId) {
+        const db = getDb();
+        try {
+          const row = db.prepare('SELECT config_json FROM replay_configs WHERE id = ?')
+            .get(configId) as { config_json: string } | undefined;
+          if (!row) return res.status(404).json({ error: `Config '${configId}' not found` });
+          fullConfig = JSON.parse(row.config_json) as Config;
+        } finally {
+          db.close();
+        }
+      } else {
+        fullConfig = { ...DEFAULT_CONFIG };
+      }
+
+      const id = configId || `custom-${Date.now()}`;
+      const name = configName || fullConfig.name || 'Custom Config';
+      fullConfig.id = id;
+      fullConfig.name = name;
+
+      // Save config to DB before returning
+      const wdb = getWriteDb();
+      try {
+        wdb.prepare(`
+          INSERT INTO replay_configs (id, name, description, config_json, createdAt, updatedAt)
+          VALUES (?, ?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET
+            name=excluded.name, config_json=excluded.config_json, updatedAt=excluded.updatedAt
+        `).run(id, name, fullConfig.description || '', JSON.stringify(fullConfig), Date.now(), Date.now());
+      } finally {
+        wdb.close();
+      }
+
+      // Create the job
+      const jobId = randomUUID();
+      const job: ReplayJob = {
+        id: jobId,
+        configId: id,
+        configName: name,
+        dates,
+        status: 'running',
+        progress: { completed: 0, total: dates.length, currentDate: dates[0] },
+        results: [],
+        startedAt: Date.now(),
+      };
+      jobs.set(jobId, job);
+
+      // Run in background (NOT awaited)
+      (async () => {
+        for (let i = 0; i < dates.length; i++) {
+          job.progress.currentDate = dates[i];
+          try {
+            const result = await runReplay(fullConfig, dates[i], {
+              dataDbPath: DB_PATH,
+              storeDbPath: DB_PATH,
+              verbose: false,
+              noJudge: true,
+            });
+            job.results.push({
+              date: dates[i],
+              trades: result.trades,
+              wins: result.wins,
+              totalPnl: result.totalPnl,
+            });
+          } catch (err: any) {
+            // Log but continue — don't fail the whole batch for one bad day
+            console.error(`[replay-batch] ${dates[i]} error: ${err.message}`);
+            job.results.push({ date: dates[i], trades: 0, wins: 0, totalPnl: 0 });
+          }
+          job.progress.completed = i + 1;
+        }
+        job.status = 'completed';
+        job.completedAt = Date.now();
+        console.log(`[replay-batch] Job ${jobId} completed: ${dates.length} days, ${job.results.reduce((s, r) => s + r.trades, 0)} trades, $${job.results.reduce((s, r) => s + r.totalPnl, 0).toFixed(0)} P&L`);
+      })().catch(err => {
+        job.status = 'failed';
+        job.error = err.message;
+        job.completedAt = Date.now();
+        console.error(`[replay-batch] Job ${jobId} failed: ${err.message}`);
+      });
+
+      // Return immediately with jobId
+      res.json({ jobId, configId: id, configName: name, totalDates: dates.length });
+    } catch (err: any) {
+      console.error('[replay-batch] Setup error:', err.message);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ── GET /replay/api/job/:jobId — poll job status ─────────────────────────
+  router.get('/api/job/:jobId', (req, res) => {
+    const job = jobs.get(req.params.jobId);
+    if (!job) return res.status(404).json({ error: 'Job not found' });
+    res.json(job);
+  });
+
+  // ── GET /replay/api/jobs — list recent jobs ──────────────────────────────
+  router.get('/api/jobs', (_req, res) => {
+    const all = Array.from(jobs.values())
+      .sort((a, b) => b.startedAt - a.startedAt)
+      .slice(0, 50);
+    res.json(all);
   });
 
   // ── GET /replay/api/sweep — leaderboard aggregated from replay_results ───
