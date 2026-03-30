@@ -157,7 +157,27 @@ export async function openPosition(
     return { position, execution: { fillPrice: entryPrice, paper: true, executedSymbol, orderType: order.type, spread: order.spread } };
   }
 
-  // Live order via Tradier
+  // Live order — try OTOCO bracket (entry + TP + SL) first
+  const hasBracketPrices = decision.takeProfit != null && decision.takeProfit > 0 && decision.stopLoss > 0;
+
+  if (hasBracketPrices) {
+    try {
+      const result = await submitOtocoOrder(
+        rootSymbol, executedSymbol, accountId, qty,
+        order, entryPrice, decision.takeProfit!, decision.stopLoss, spreadStr,
+      );
+      position.tradierOrderId = result.entryOrderId;
+      position.bracketOrderId = result.bracketOrderId;
+      position.tpLegId = result.tpLegId;
+      position.slLegId = result.slLegId;
+      return { position, execution: { orderId: result.entryOrderId, fillPrice: entryPrice, paper: false, executedSymbol, orderType: order.type, spread: order.spread } };
+    } catch (e: any) {
+      console.warn(`[executor] OTOCO failed, falling back to single order: ${e.message}`);
+      // Fall through to single order below
+    }
+  }
+
+  // Fallback: single market/limit order (no server-side TP/SL)
   const orderParams: Record<string, string | number> = {
     class: 'option',
     symbol: rootSymbol,
@@ -189,6 +209,103 @@ export async function openPosition(
     const err = e?.response?.data?.errors?.error || e.message;
     console.error(`[executor] Order failed [${accountId}]: ${err}`);
     return { position, execution: { error: String(err), paper: false, executedSymbol, orderType: order.type, spread: order.spread } };
+  }
+}
+
+/**
+ * Submit a Tradier OTOCO (One-Triggers-OCO) bracket order.
+ * Leg 0: entry (buy_to_open market/limit)
+ * Leg 1: TP (sell_to_close limit)
+ * Leg 2: SL (sell_to_close stop)
+ */
+async function submitOtocoOrder(
+  rootSymbol: string,
+  optionSymbol: string,
+  accountId: string,
+  qty: number,
+  order: { type: 'market' | 'limit'; price?: number; spread: number | null },
+  entryPrice: number,
+  tpPrice: number,
+  slPrice: number,
+  spreadStr: string,
+): Promise<{ bracketOrderId: number; entryOrderId?: number; tpLegId?: number; slLegId?: number }> {
+  // Build OTOCO params with indexed legs
+  const params: Record<string, string | number> = {
+    class: 'otoco',
+    duration: 'day',
+    // Leg 0: entry
+    'type[0]': order.type,
+    'option_symbol[0]': optionSymbol,
+    'side[0]': 'buy_to_open',
+    'quantity[0]': qty,
+    // Leg 1: TP (limit sell)
+    'type[1]': 'limit',
+    'option_symbol[1]': optionSymbol,
+    'side[1]': 'sell_to_close',
+    'quantity[1]': qty,
+    'price[1]': tpPrice.toFixed(2),
+    // Leg 2: SL (stop sell)
+    'type[2]': 'stop',
+    'option_symbol[2]': optionSymbol,
+    'side[2]': 'sell_to_close',
+    'quantity[2]': qty,
+    'stop[2]': slPrice.toFixed(2),
+  };
+
+  // Set entry price for limit orders
+  if (order.type === 'limit' && entryPrice > 0) {
+    params['price[0]'] = entryPrice.toFixed(2);
+  }
+
+  const body = qs(params);
+
+  const { data } = await axios.post(
+    `${TRADIER_BASE}/accounts/${accountId}/orders`,
+    body,
+    { headers: headers(), timeout: 10000 },
+  );
+
+  // Parse response: order.id = parent OTOCO, order.leg[].id = each leg
+  const parentOrder = data?.order;
+  const bracketOrderId = parentOrder?.id;
+  const legs = parentOrder?.leg;
+
+  let entryOrderId: number | undefined;
+  let tpLegId: number | undefined;
+  let slLegId: number | undefined;
+
+  if (Array.isArray(legs)) {
+    // Legs come back in order: [0] entry, [1] TP limit, [2] SL stop
+    entryOrderId = legs[0]?.id;
+    tpLegId = legs[1]?.id;
+    slLegId = legs[2]?.id;
+  }
+
+  console.log(`[executor] LIVE OTOCO [${rootSymbol}→${accountId}] ${qty}x ${optionSymbol} @ ${order.type === 'market' ? 'MARKET' : '$' + entryPrice.toFixed(2)} (spread=${spreadStr}) | TP=$${tpPrice.toFixed(2)} SL=$${slPrice.toFixed(2)} — bracket #${bracketOrderId}`);
+
+  return { bracketOrderId, entryOrderId, tpLegId, slLegId };
+}
+
+/**
+ * Cancel outstanding OCO legs (TP + SL) for a bracket order.
+ * Called when the agent exits a position early (e.g., scannerReverse).
+ * Cancels the parent OTOCO which cancels all pending child legs.
+ */
+export async function cancelOcoLegs(
+  bracketOrderId: number,
+  execCfg?: Config['execution'],
+): Promise<void> {
+  const accountId = getAccountId(execCfg);
+
+  try {
+    await axios.delete(
+      `${TRADIER_BASE}/accounts/${accountId}/orders/${bracketOrderId}`,
+      { headers: headers(), timeout: 10000 },
+    );
+    console.log(`[executor] Cancelled bracket #${bracketOrderId} OCO legs [${accountId}]`);
+  } catch (e: any) {
+    const err = e?.response?.data?.errors?.error || e.message;
+    console.error(`[executor] Failed to cancel bracket #${bracketOrderId} [${accountId}]: ${err}`);
   }
 }
 

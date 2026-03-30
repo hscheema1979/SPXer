@@ -62,6 +62,9 @@ export interface OpenPosition {
   takeProfit: number | null;
   openedAt: number;
   tradierOrderId?: number;
+  bracketOrderId?: number;     // OTOCO parent order ID
+  tpLegId?: number;            // TP limit leg order ID
+  slLegId?: number;            // SL stop leg order ID
 }
 
 export interface PositionClose {

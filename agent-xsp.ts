@@ -276,7 +276,13 @@ async function main(): Promise<void> {
   console.log('[xsp] Waiting for market open...');
   await waitForMarketOpen();
 
-  console.log('[xsp] Market open — starting (first cycle in 5s)...\n');
+  console.log('[xsp] Market open — starting trading loop');
+
+  // Reconcile any open positions from broker (survives restarts)
+  const reconciled = await positions.reconcileFromBroker(EXEC);
+  if (reconciled > 0) console.log(`[xsp] Reconciled ${reconciled} position(s) from broker`);
+
+  console.log('[xsp] First cycle in 5s (letting bars build)...\n');
   await new Promise(r => setTimeout(r, 5000));
 
   while (true) {

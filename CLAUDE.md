@@ -217,6 +217,7 @@ Tests mirror `src/` structure under `tests/`. Uses Vitest with `globals: true` a
 - **Scanner prompts are neutral** — Raw OHLC bars + RSI value + contract chain. No guidance on what RSI means.
 - **LLMs advise, code executes** — Scanners/judges classify regime (advisory). Strike selection and trade execution are deterministic — no LLM in the hot path.
 - **All ET timezone handling goes through `src/utils/et-time.ts`** — The server runs in UTC. Never use the `new Date(date.toLocaleString('en-US', { timeZone: 'America/New_York' }))` round-trip pattern — it silently interprets the ET-formatted string as UTC, causing times to be 4–5 hours off. Use the shared helpers: `getETOffsetMs()`, `todayET()`, `nowET()`, `etTimeToUnixTs()`. These use `Intl.DateTimeFormat` internally and handle EST/EDT automatically.
+- **Bracket orders (OTOCO) for server-side TP/SL** — Live orders use Tradier OTOCO: entry triggers an OCO pair (TP limit + SL stop). If the agent crashes, Tradier enforces exits. On early exit (scannerReverse), the agent cancels OCO legs before selling. Paper mode uses software-only monitoring. On startup, agents reconcile open positions from the broker via `positions.reconcileFromBroker()` — adopting orphaned positions and submitting missing OCO protection.
 
 ## Scanning & Judgment Agents
 

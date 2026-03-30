@@ -363,6 +363,11 @@ async function main(): Promise<void> {
   await waitForMarketOpen();
 
   console.log('[agent] Market open — starting trading loop');
+
+  // Reconcile any open positions from broker (survives restarts)
+  const reconciled = await positions.reconcileFromBroker(AGENT_CONFIG.execution);
+  if (reconciled > 0) console.log(`[agent] Reconciled ${reconciled} position(s) from broker`);
+
   console.log('[agent] First cycle in 5s (letting bars build)...\n');
   await new Promise(r => setTimeout(r, 5000));
 

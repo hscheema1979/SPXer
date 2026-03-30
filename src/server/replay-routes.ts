@@ -7,6 +7,7 @@ import { Router } from 'express';
 import Database from 'better-sqlite3';
 import * as path from 'path';
 import * as fs from 'fs';
+import http from 'http';
 import { runReplay } from '../replay/machine';
 import { DEFAULT_CONFIG, mergeConfig } from '../config/defaults';
 import type { Config } from '../config/types';
@@ -672,6 +673,49 @@ export function createReplayRoutes(): Router {
     } finally {
       db.close();
     }
+  });
+
+  // ── Live View API proxy ─────────────────────────────────────────────────
+  // Forwards requests to the data service (port 3600) so the live view
+  // can access live market data through the /replay/ prefix.
+  // Read-only — does not affect the data service or trading agent.
+  const DATA_SERVICE_PORT = parseInt(process.env.PORT || '3600');
+
+  router.get('/api/live/{*path}', (req, res) => {
+    // Strip /api/live prefix → forward as bare path to data service
+    // e.g. /replay/api/live/spx/bars?tf=1m → http://localhost:3600/spx/bars?tf=1m
+    const queryStr = req.url.includes('?') ? '?' + req.url.split('?')[1] : '';
+    const pathSegments = (req.params as any).path;
+    const pathStr = Array.isArray(pathSegments) ? pathSegments.join('/') : pathSegments;
+    const targetPath = '/' + pathStr + queryStr;
+
+    const opts: http.RequestOptions = {
+      hostname: '127.0.0.1',
+      port: DATA_SERVICE_PORT,
+      path: targetPath,
+      method: 'GET',
+      timeout: 10000,
+    };
+
+    const proxyReq = http.request(opts, (proxyRes) => {
+      res.status(proxyRes.statusCode || 200);
+      // Forward content-type
+      if (proxyRes.headers['content-type']) {
+        res.setHeader('Content-Type', proxyRes.headers['content-type']);
+      }
+      proxyRes.pipe(res);
+    });
+
+    proxyReq.on('error', (err) => {
+      res.status(502).json({ error: 'Data service unavailable', detail: err.message });
+    });
+
+    proxyReq.on('timeout', () => {
+      proxyReq.destroy();
+      res.status(504).json({ error: 'Data service timeout' });
+    });
+
+    proxyReq.end();
   });
 
   // ── Serve the sweep leaderboard HTML ─────────────────────────────────────

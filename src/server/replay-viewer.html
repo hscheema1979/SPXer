@@ -380,10 +380,12 @@ async function init() {
   dateSel.addEventListener('change', loadDay);
   configSel.addEventListener('change', loadDay);
 
-  // Auto-load latest date
+  // Auto-load latest date (skip if we're about to enter live mode)
   if (dates.length) {
     dateSel.value = dates[dates.length - 1];
-    loadDay();
+    if (location.hash !== '#live') {
+      loadDay();
+    }
   }
 }
 
@@ -1694,7 +1696,7 @@ function normalizeLiveBars(bars) {
 async function initLiveMode() {
   try {
     // 1. Fetch SPX bars and render chart (live mode — no trades overlay initially, no 3m/5m)
-    const rawBars = await fetch('/spx/bars?tf=1m&n=390').then(r => r.json()).catch(() => []);
+    const rawBars = await fetch(`${API}/live/spx/bars?tf=1m&n=390`).then(r => r.json()).catch(() => []);
     const bars = normalizeLiveBars(rawBars);
     // Guess ET offset from current time
     etOffsetSec = isDST(new Date().toISOString().slice(0, 10)) ? -4 * 3600 : -5 * 3600;
@@ -1746,7 +1748,8 @@ function teardownLiveMode() {
 
 function connectLiveWs() {
   if (liveWs && liveWs.readyState <= 1) return;
-  const wsUrl = `ws://${location.host}/ws`;
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const wsUrl = `${proto}//${location.host}/spxer-ws`;
   liveWs = new WebSocket(wsUrl);
 
   liveWs.onopen = () => {
@@ -1881,7 +1884,7 @@ function updateStatusBanner(data) {
 
 async function pollAgentStatus() {
   try {
-    const data = await fetch('/agent/status').then(r => r.json());
+    const data = await fetch(`${API}/live/agent/status`).then(r => r.json());
     updateStatusBanner(data);
   } catch {
     updateStatusBanner({ status: 'offline' });
@@ -1890,7 +1893,7 @@ async function pollAgentStatus() {
 
 async function pollActivity() {
   try {
-    const activities = await fetch('/agent/activity?n=50').then(r => r.json());
+    const activities = await fetch(`${API}/live/agent/activity?n=50`).then(r => r.json());
     if (!Array.isArray(activities)) return;
 
     // Convert activities to trade-like objects for display
@@ -1947,7 +1950,7 @@ async function pollActivity() {
 
 async function loadLiveContracts() {
   try {
-    const contracts = await fetch('/contracts/active').then(r => r.json());
+    const contracts = await fetch(`${API}/live/contracts/active`).then(r => r.json());
     if (!Array.isArray(contracts) || contracts.length === 0) {
       document.getElementById('mini-grid').innerHTML = '<div class="no-data">No active contracts</div>';
       return;
@@ -2024,7 +2027,7 @@ async function renderLiveMiniChart(contract) {
   if (!container) return;
 
   try {
-    const rawBars = await fetch(`/contracts/${encodeURIComponent(contract.symbol)}/bars?tf=1m&n=390`).then(r => r.json());
+    const rawBars = await fetch(`${API}/live/contracts/${encodeURIComponent(contract.symbol)}/bars?tf=1m&n=390`).then(r => r.json());
     const bars = normalizeLiveBars(rawBars);
     if (!bars.length) return;
 
