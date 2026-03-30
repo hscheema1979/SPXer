@@ -49,7 +49,7 @@ module.exports = {
       max_memory_restart: '512M',
       env: {
         NODE_ENV: 'production',
-        AGENT_PAPER: 'true',
+        AGENT_PAPER: 'false',
       },
       log_date_format: 'YYYY-MM-DD HH:mm:ss',
       error_file: '/home/ubuntu/.pm2/logs/spxer-agent-error.log',
@@ -72,7 +72,7 @@ module.exports = {
       max_memory_restart: '512M',
       env: {
         NODE_ENV: 'production',
-        AGENT_PAPER: 'true',
+        AGENT_PAPER: 'false',
       },
       log_date_format: 'YYYY-MM-DD HH:mm:ss',
       error_file: '/home/ubuntu/.pm2/logs/spxer-xsp-error.log',

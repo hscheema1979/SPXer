@@ -1,4 +1,5 @@
 import type { Contract, ContractState, OptionType } from '../types';
+import { nowET, todayET } from '../utils/et-time';
 
 interface ChainEntry {
   symbol: string;
@@ -48,9 +49,7 @@ export class ContractTracker {
   }
 
   checkExpiries(): void {
-    // Use ET local date components to avoid UTC vs ET midnight mismatch
-    const etNow = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
-    const today = `${etNow.getFullYear()}-${String(etNow.getMonth() + 1).padStart(2, '0')}-${String(etNow.getDate()).padStart(2, '0')}`;
+    const today = todayET();
     const rthCloseEt = this.isAfterRTHClose();
     for (const [symbol, contract] of this.contracts) {
       if (contract.state === 'EXPIRED') continue;
@@ -84,8 +83,7 @@ export class ContractTracker {
   }
 
   private isAfterRTHClose(): boolean {
-    const now = new Date();
-    const et = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
-    return et.getHours() > 16 || (et.getHours() === 16 && et.getMinutes() >= 15);
+    const et = nowET();
+    return et.h > 16 || (et.h === 16 && et.m >= 15);
   }
 }

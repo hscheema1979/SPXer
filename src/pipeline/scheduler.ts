@@ -1,4 +1,5 @@
 import { MARKET_HOLIDAYS, EARLY_CLOSE_DAYS } from '../config';
+import { nowET, todayET } from '../utils/et-time';
 
 export type MarketMode = 'overnight' | 'preopen' | 'rth' | 'weekend';
 
@@ -10,20 +11,16 @@ export function isEarlyCloseDay(date: string): boolean {
   return EARLY_CLOSE_DAYS.has(date);
 }
 
-function toET(date: Date): Date {
-  return new Date(date.toLocaleString('en-US', { timeZone: 'America/New_York' }));
-}
-
 export function getMarketMode(now: Date = new Date()): MarketMode {
-  const et = toET(now);
-  const day = et.getDay(); // 0=Sun, 6=Sat
-  // Use local date components (not toISOString which returns UTC) to get the ET calendar date
-  const dateStr = `${et.getFullYear()}-${String(et.getMonth() + 1).padStart(2, '0')}-${String(et.getDate()).padStart(2, '0')}`;
+  const et = nowET(now);
+  const dateStr = todayET(now);
+  // Get day of week from the ET date (not from the possibly-shifted Date object)
+  const day = new Date(dateStr + 'T12:00:00Z').getUTCDay(); // 0=Sun, 6=Sat
 
   if (day === 0 || day === 6) return 'weekend';
   if (isMarketHoliday(dateStr)) return 'overnight';
 
-  const h = et.getHours(), m = et.getMinutes();
+  const h = et.h, m = et.m;
   const mins = h * 60 + m;
 
   const rthEnd = isEarlyCloseDay(dateStr) ? 13 * 60 : 16 * 60 + 15;

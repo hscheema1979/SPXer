@@ -7,6 +7,7 @@
  */
 import type { Config } from '../config/types';
 import { isRiskBlocked, type RiskState } from '../core/risk-guard';
+import { etTimeToUnixTs, nowET, todayET } from '../utils/et-time';
 
 export class RiskGuard {
   private dailyLoss = 0;
@@ -20,7 +21,7 @@ export class RiskGuard {
   }
 
   resetIfNewDay(): void {
-    const today = new Date().toISOString().split('T')[0];
+    const today = todayET();
     if (this.dailyDate !== today) {
       this.dailyLoss = 0;
       this.tradesCompleted = 0;
@@ -41,10 +42,7 @@ export class RiskGuard {
   }
 
   minutesToMarketClose(): number {
-    const now = new Date();
-    const etStr = now.toLocaleString('en-US', { timeZone: 'America/New_York', hour12: false });
-    const timePart = etStr.split(', ')[1];
-    const [h, m] = timePart.split(':').map(Number);
+    const { h, m } = nowET();
     return Math.max(0, 16 * 60 - (h * 60 + m));
   }
 
@@ -81,10 +79,8 @@ export class RiskGuard {
 
     // Live-agent specific: cutoff time check (core uses closeCutoffTs)
     const [cutH, cutM] = this.cfg.risk.cutoffTimeET.split(':').map(Number);
-    const etStr = new Date().toLocaleString('en-US', { timeZone: 'America/New_York', hour12: false });
-    const timePart = etStr.split(', ')[1];
-    const [nowH, nowM] = timePart.split(':').map(Number);
-    if (nowH * 60 + nowM >= cutH * 60 + cutM) {
+    const et = nowET();
+    if (et.h * 60 + et.m >= cutH * 60 + cutM) {
       return { allowed: false, reason: `Past cutoff time ${this.cfg.risk.cutoffTimeET} ET` };
     }
 
@@ -99,11 +95,7 @@ export class RiskGuard {
   }
 
   private computeCloseCutoffTs(): number {
-    const now = new Date();
-    const etStr = now.toLocaleString('en-US', { timeZone: 'America/New_York', hour12: false });
-    const datePart = etStr.split(', ')[0];
-    const closeET = new Date(`${datePart} 16:00:00`);
-    return Math.floor(closeET.getTime() / 1000);
+    return etTimeToUnixTs('16:00');
   }
 
   get isPaper(): boolean { return this.paperMode; }

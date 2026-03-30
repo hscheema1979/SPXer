@@ -14,6 +14,7 @@ import type { Position, Direction } from '../core/types';
 import { checkExit, type ExitContext } from '../core/position-manager';
 import { closePosition } from './trade-executor';
 import { logClose } from './audit-log';
+import { etTimeToUnixTs } from '../utils/et-time';
 
 const SPXER_BASE = process.env.SPXER_URL || 'http://localhost:3600';
 
@@ -65,9 +66,11 @@ export class PositionManager {
    * Uses the configured hmaCrossFast/hmaCrossSlow periods.
    */
   updateHmaCross(spxBars: BarSummary[]): void {
-    if (spxBars.length === 0) return;
+    // Need at least 2 bars: use the second-to-last (last closed candle),
+    // since the final bar is the currently forming candle with unstable values
+    if (spxBars.length < 2) return;
 
-    const latest = spxBars[spxBars.length - 1];
+    const latest = spxBars[spxBars.length - 2];
     const fast = this.cfg.signals.hmaCrossFast;
     const slow = this.cfg.signals.hmaCrossSlow;
 
@@ -185,10 +188,6 @@ export class PositionManager {
   }
 
   private computeCloseCutoffTs(): number {
-    const now = new Date();
-    const etStr = now.toLocaleString('en-US', { timeZone: 'America/New_York', hour12: false });
-    const datePart = etStr.split(', ')[0];
-    const closeET = new Date(`${datePart} 16:00:00`);
-    return Math.floor(closeET.getTime() / 1000);
+    return etTimeToUnixTs('16:00');
   }
 }
