@@ -79,6 +79,7 @@ When implementing features in SPXer:
 - **Error handling**: Explicit at boundaries (API calls, file I/O); let internal guarantees work
 - **Configuration**: Use `src/config.ts` for environment-dependent values
 - **Logging**: Use `console.log` with timestamps for simple logging
+- **Timezone handling**: Server runs in UTC. All ET conversions use `src/utils/et-time.ts` helpers (`getETOffsetMs`, `todayET`, `nowET`, `etTimeToUnixTs`). **Never** use `new Date(date.toLocaleString('en-US', { timeZone: 'America/New_York' }))` — it silently misinterprets ET as UTC.
 
 ### Architecture Principles
 

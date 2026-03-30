@@ -60,6 +60,21 @@ src/core/
 └── indicator-engine.ts   — HMA, RSI, Bollinger, EMA, ATR, VWAP (incremental)
 ```
 
+### Timezone Helpers (`src/utils/et-time.ts`)
+
+All UTC↔ET conversions must use these shared helpers. The server runs in UTC — never construct a `Date` from a locale-formatted ET string.
+
+```
+src/utils/
+└── et-time.ts
+    ├── getETOffsetMs(now?)    — UTC minus ET in ms (14.4M for EDT, 18M for EST)
+    ├── todayET(now?)          — today's date in ET as 'YYYY-MM-DD'
+    ├── nowET(now?)            — current ET time as { h, m, s }
+    └── etTimeToUnixTs(time)   — '16:00' ET today → Unix seconds
+```
+
+Used by: `risk-guard.ts`, `position-manager.ts`, `scheduler.ts`, `contract-tracker.ts`. Add new ET-dependent logic here, not inline.
+
 ### Unified Config System (`src/config/`)
 
 ```
@@ -201,6 +216,7 @@ Tests mirror `src/` structure under `tests/`. Uses Vitest with `globals: true` a
 - **Price action first, RSI second** — The system triggers on session high/low breaks, candle range spikes, and V-reversals. RSI is a confirmation filter, not the primary trigger.
 - **Scanner prompts are neutral** — Raw OHLC bars + RSI value + contract chain. No guidance on what RSI means.
 - **LLMs advise, code executes** — Scanners/judges classify regime (advisory). Strike selection and trade execution are deterministic — no LLM in the hot path.
+- **All ET timezone handling goes through `src/utils/et-time.ts`** — The server runs in UTC. Never use the `new Date(date.toLocaleString('en-US', { timeZone: 'America/New_York' }))` round-trip pattern — it silently interprets the ET-formatted string as UTC, causing times to be 4–5 hours off. Use the shared helpers: `getETOffsetMs()`, `todayET()`, `nowET()`, `etTimeToUnixTs()`. These use `Intl.DateTimeFormat` internally and handle EST/EDT automatically.
 
 ## Scanning & Judgment Agents
 

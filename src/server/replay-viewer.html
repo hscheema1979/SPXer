@@ -101,6 +101,39 @@
   .trade-filters .filter-summary { color: #666; margin-left: auto; font-size: 10px; }
   .trade-filters .filter-summary .num { color: #a78bfa; }
 
+  /* ── Mode Toggle (Replay / Live) ── */
+  .mode-toggle { display: flex; gap: 0; border: 1px solid #333; border-radius: 4px; overflow: hidden; }
+  .mode-toggle button { background: #1a1a24; color: #888; border: none; padding: 5px 14px; cursor: pointer; font-family: inherit; font-size: 12px; transition: background 0.15s, color 0.15s; }
+  .mode-toggle button:hover { background: #2a2a3a; color: #ccc; }
+  .mode-toggle button.active { background: #8b8bff22; color: #8b8bff; border-bottom: 2px solid #8b8bff; }
+
+  /* ── Status Banner (Live Mode) ── */
+  .status-banner { display: flex; align-items: center; gap: 16px; padding: 6px 16px; background: #0d0d14; border-bottom: 1px solid #1a1a24; font-size: 12px; flex-wrap: wrap; }
+  .status-banner .stat { display: flex; align-items: center; gap: 4px; color: #aaa; }
+  .status-banner .badge-live { background: #f43f5e22; color: #f43f5e; padding: 2px 8px; border-radius: 3px; font-size: 10px; font-weight: 700; text-transform: uppercase; border: 1px solid #f43f5e44; }
+  .status-banner .badge-paper { background: #f59e0b22; color: #f59e0b; padding: 2px 8px; border-radius: 3px; font-size: 10px; font-weight: 700; text-transform: uppercase; border: 1px solid #f59e0b44; }
+  .status-banner .pnl-pos { color: #10b981; font-weight: 600; }
+  .status-banner .pnl-neg { color: #f43f5e; font-weight: 600; }
+
+  /* ── Connection Status Indicator ── */
+  .connection-status { display: none; align-items: center; gap: 4px; font-size: 10px; color: #666; }
+  .connection-status::before { content: ''; display: inline-block; width: 8px; height: 8px; border-radius: 50%; }
+  .connection-status.connected { color: #10b981; }
+  .connection-status.connected::before { background: #10b981; box-shadow: 0 0 4px #10b98166; }
+  .connection-status.disconnected { color: #f43f5e; }
+  .connection-status.disconnected::before { background: #f43f5e; box-shadow: 0 0 4px #f43f5e66; }
+
+  /* ── Live Mode Utilities ── */
+  .live-hidden { display: none !important; }
+  .trade-new { animation: flash-new 1.2s ease-out; }
+  @keyframes flash-new {
+    0% { background: #10b98133; }
+    100% { background: transparent; }
+  }
+  .auto-scroll-toggle { position: absolute; top: 8px; right: 12px; z-index: 5; background: #1a1a24; color: #888; border: 1px solid #333; padding: 3px 8px; border-radius: 3px; cursor: pointer; font-family: inherit; font-size: 10px; }
+  .auto-scroll-toggle:hover { border-color: #8b8bff; color: #ccc; }
+  .auto-scroll-toggle.active { border-color: #8b8bff; color: #8b8bff; background: #8b8bff11; }
+
   /* ── Loading ── */
   .loading { display: flex; align-items: center; justify-content: center; height: 200px; color: #444; font-size: 14px; }
   .no-data { text-align: center; padding: 40px; color: #444; }
@@ -156,8 +189,12 @@
 <body>
 
 <div class="header">
+  <div class="mode-toggle" id="mode-toggle">
+    <button class="active" onclick="setMode('replay')">Replay</button>
+    <button onclick="setMode('live')">Live</button>
+  </div>
   <h1>SPXer Replay</h1>
-  <a href="/replay/sweep" style="color:#666;text-decoration:none;font-size:12px;margin-left:-8px">🏆 Sweep Leaderboard</a>
+  <a href="/replay/sweep" id="sweep-link" style="color:#666;text-decoration:none;font-size:12px;margin-left:-8px">🏆 Sweep Leaderboard</a>
   <select id="date-select"><option>Loading...</option></select>
   <span style="color:#444">to</span>
   <select id="date-end-select"><option value="">same</option></select>
@@ -166,6 +203,18 @@
   <button class="run-btn" id="run-btn" onclick="runReplay()">Run</button>
   <span class="run-status" id="run-status"></span>
   <div class="summary" id="summary"></div>
+  <span class="connection-status disconnected" id="conn-status">WS</span>
+</div>
+
+<div class="status-banner" id="status-banner" style="display:none">
+  <span class="stat" id="live-mode-badge"></span>
+  <span class="stat" id="live-spx-price"></span>
+  <span class="stat" id="live-daily-pnl"></span>
+  <span class="stat" id="live-open-positions"></span>
+  <span class="stat" id="live-cycle"></span>
+  <span class="stat" id="live-minutes-close"></span>
+  <span class="stat" id="live-hma-dir"></span>
+  <span class="stat" id="live-uptime"></span>
 </div>
 
 <!-- Config Modal -->
@@ -1537,8 +1586,488 @@ async function boot() {
   }
 
   if (paramDate || paramConfig) loadDay();
+
+  // Check hash routing after boot completes
+  if (location.hash === '#live') {
+    setMode('live');
+  }
 }
 boot().catch(err => console.error('Init failed:', err));
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ── LIVE MODE ──────────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════
+
+let currentMode = 'replay'; // 'replay' or 'live'
+let liveWs = null;
+let liveReconnectTimer = null;
+let liveReconnectDelay = 1000;
+let liveAutoScroll = true;
+let liveStatusTimer = null;
+let liveActivityTimer = null;
+let liveContractSymbols = new Set();
+let lastActivityCount = 0;
+
+function setMode(mode) {
+  if (mode === currentMode) return;
+  currentMode = mode;
+
+  // Update toggle buttons
+  const buttons = document.querySelectorAll('#mode-toggle button');
+  buttons.forEach(b => b.classList.remove('active'));
+  if (mode === 'replay') buttons[0].classList.add('active');
+  else buttons[1].classList.add('active');
+
+  if (mode === 'live') {
+    // Hide replay-only elements
+    for (const id of ['date-select', 'config-select', 'run-btn', 'date-end-select', 'run-status', 'sweep-link']) {
+      const el = document.getElementById(id);
+      if (el) el.classList.add('live-hidden');
+    }
+    // Hide Settings button and "to" label
+    document.querySelectorAll('.config-btn').forEach(el => el.classList.add('live-hidden'));
+    const headerSelects = document.querySelectorAll('.header span[style*="color:#444"]');
+    headerSelects.forEach(s => { if (s.textContent.trim() === 'to') s.classList.add('live-hidden'); });
+
+    document.getElementById('analysis-toggle').classList.add('live-hidden');
+    document.getElementById('analysis-panel').classList.add('live-hidden');
+    document.querySelector('.trade-filters').classList.add('live-hidden');
+    document.getElementById('config-modal').classList.add('live-hidden');
+
+    // Show live elements
+    document.getElementById('status-banner').style.display = 'flex';
+    document.getElementById('conn-status').style.display = 'inline-flex';
+
+    // Update page title
+    document.querySelector('.header h1').textContent = 'SPXer Live';
+
+    initLiveMode();
+    location.hash = '#live';
+  } else {
+    // Show replay elements
+    for (const id of ['date-select', 'config-select', 'run-btn', 'date-end-select', 'run-status', 'sweep-link']) {
+      const el = document.getElementById(id);
+      if (el) el.classList.remove('live-hidden');
+    }
+    document.querySelectorAll('.config-btn').forEach(el => el.classList.remove('live-hidden'));
+    const headerSelects = document.querySelectorAll('.header span[style*="color:#444"]');
+    headerSelects.forEach(s => s.classList.remove('live-hidden'));
+
+    document.getElementById('analysis-toggle').classList.remove('live-hidden');
+    document.getElementById('analysis-panel').classList.remove('live-hidden');
+    document.querySelector('.trade-filters').classList.remove('live-hidden');
+    document.getElementById('config-modal').classList.remove('live-hidden');
+
+    // Hide live elements
+    document.getElementById('status-banner').style.display = 'none';
+    document.getElementById('conn-status').style.display = 'none';
+
+    // Restore page title
+    document.querySelector('.header h1').textContent = 'SPXer Replay';
+
+    teardownLiveMode();
+    loadDay();
+    location.hash = '';
+  }
+}
+
+// Normalize live API bar format { open,high,low,close,indicators,ts }
+// to replay format { o,h,l,c,ind,ts } expected by renderSpxChart
+function normalizeLiveBar(b) {
+  if (b.o !== undefined) return b; // already in replay format
+  return {
+    ts: b.ts,
+    o: b.open ?? b.o,
+    h: b.high ?? b.h,
+    l: b.low ?? b.l,
+    c: b.close ?? b.c,
+    v: b.volume ?? b.v ?? 0,
+    ind: b.indicators ?? b.ind ?? {},
+  };
+}
+
+function normalizeLiveBars(bars) {
+  if (!Array.isArray(bars)) return [];
+  return bars.map(normalizeLiveBar);
+}
+
+async function initLiveMode() {
+  try {
+    // 1. Fetch SPX bars and render chart (live mode — no trades overlay initially, no 3m/5m)
+    const rawBars = await fetch('/spx/bars?tf=1m&n=390').then(r => r.json()).catch(() => []);
+    const bars = normalizeLiveBars(rawBars);
+    // Guess ET offset from current time
+    etOffsetSec = isDST(new Date().toISOString().slice(0, 10)) ? -4 * 3600 : -5 * 3600;
+    renderSpxChart(bars, [], [], []);
+
+    // 2. Fetch agent status
+    await pollAgentStatus();
+
+    // 3. Fetch recent activity and render trades
+    await pollActivity();
+
+    // 4. Load active contracts for mini-chart grid
+    await loadLiveContracts();
+
+    // 5. Connect WebSocket for real-time updates
+    connectLiveWs();
+
+    // 6. Start polling timers
+    liveStatusTimer = setInterval(pollAgentStatus, 5000);
+    liveActivityTimer = setInterval(pollActivity, 10000);
+  } catch (err) {
+    console.error('Live mode init failed:', err);
+  }
+}
+
+function teardownLiveMode() {
+  if (liveWs) {
+    liveWs.onclose = null; // prevent reconnect
+    liveWs.close();
+    liveWs = null;
+  }
+  if (liveReconnectTimer) {
+    clearTimeout(liveReconnectTimer);
+    liveReconnectTimer = null;
+  }
+  if (liveStatusTimer) {
+    clearInterval(liveStatusTimer);
+    liveStatusTimer = null;
+  }
+  if (liveActivityTimer) {
+    clearInterval(liveActivityTimer);
+    liveActivityTimer = null;
+  }
+  liveReconnectDelay = 1000;
+  liveContractSymbols.clear();
+  lastActivityCount = 0;
+  setConnectionStatus(false);
+}
+
+function connectLiveWs() {
+  if (liveWs && liveWs.readyState <= 1) return;
+  const wsUrl = `ws://${location.host}/ws`;
+  liveWs = new WebSocket(wsUrl);
+
+  liveWs.onopen = () => {
+    setConnectionStatus(true);
+    liveReconnectDelay = 1000;
+    // Subscribe to SPX bars
+    liveWs.send(JSON.stringify({ action: 'subscribe', channel: 'spx' }));
+    // Subscribe to active contracts
+    for (const sym of liveContractSymbols) {
+      liveWs.send(JSON.stringify({ action: 'subscribe', channel: 'contract', symbol: sym }));
+    }
+  };
+
+  liveWs.onmessage = (evt) => {
+    try {
+      const msg = JSON.parse(evt.data);
+      handleLiveWsMessage(msg);
+    } catch {}
+  };
+
+  liveWs.onclose = () => {
+    setConnectionStatus(false);
+    if (currentMode === 'live') {
+      liveReconnectTimer = setTimeout(() => {
+        liveReconnectDelay = Math.min(liveReconnectDelay * 2, 30000);
+        connectLiveWs();
+      }, liveReconnectDelay);
+    }
+  };
+
+  liveWs.onerror = () => liveWs.close();
+}
+
+function handleLiveWsMessage(msg) {
+  if (msg.type === 'spx_bar' && spxCandleSeries) {
+    // Server sends { type: 'spx_bar', data: { ts, open, high, low, close, ... } }
+    const d = msg.data || msg;
+    const candle = {
+      time: toEtDisplay(d.ts),
+      open: d.open ?? d.o,
+      high: d.high ?? d.h,
+      low: d.low ?? d.l,
+      close: d.close ?? d.c,
+    };
+    if (candle.time && candle.open) {
+      spxCandleSeries.update(candle);
+      if (liveAutoScroll && spxChart) {
+        spxChart.timeScale().scrollToRealTime();
+      }
+    }
+  } else if (msg.type === 'contract_bar') {
+    // Server sends { type: 'contract_bar', symbol, data: { open, high, low, close, ... } }
+    const sym = msg.symbol;
+    const mc = miniCharts.get(sym);
+    if (mc && mc.series) {
+      const d = msg.data || msg;
+      const candle = {
+        time: toEtDisplay(d.ts || d.last_ts || Math.floor(Date.now() / 1000)),
+        open: d.open ?? d.o ?? d.last,
+        high: d.high ?? d.h ?? d.last,
+        low: d.low ?? d.l ?? d.last,
+        close: d.close ?? d.c ?? d.last,
+      };
+      if (candle.time && candle.open) {
+        mc.series.update(candle);
+      }
+    }
+  } else if (msg.type === 'market_context') {
+    // Optionally update HMA direction from context
+    const hmaEl = document.getElementById('live-hma-dir');
+    if (hmaEl && msg.hmaDirection) {
+      const dir = msg.hmaDirection;
+      const color = dir === 'up' ? '#10b981' : dir === 'down' ? '#f43f5e' : '#888';
+      hmaEl.innerHTML = `HMA <span style="color:${color}">${dir.toUpperCase()}</span>`;
+    }
+  }
+}
+
+function updateStatusBanner(data) {
+  const banner = document.getElementById('status-banner');
+  if (!data || data.status === 'offline') {
+    document.getElementById('live-mode-badge').innerHTML = '<span style="color:#666">Agent Offline</span>';
+    document.getElementById('live-spx-price').textContent = '';
+    document.getElementById('live-daily-pnl').textContent = '';
+    document.getElementById('live-open-positions').textContent = '';
+    document.getElementById('live-cycle').textContent = '';
+    document.getElementById('live-minutes-close').textContent = '';
+    document.getElementById('live-hma-dir').textContent = '';
+    document.getElementById('live-uptime').textContent = '';
+    return;
+  }
+
+  const mode = (data.mode || 'PAPER').toUpperCase();
+  const badgeClass = mode === 'LIVE' ? 'badge-live' : 'badge-paper';
+  document.getElementById('live-mode-badge').innerHTML = `<span class="${badgeClass}">${mode}</span>`;
+
+  document.getElementById('live-spx-price').textContent = data.spxPrice
+    ? `SPX $${parseFloat(data.spxPrice).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+    : 'SPX —';
+
+  const pnl = data.dailyPnL ?? data.dailyPnl ?? data.pnl ?? 0;
+  const pnlEl = document.getElementById('live-daily-pnl');
+  pnlEl.textContent = `P&L $${parseFloat(pnl).toFixed(0)}`;
+  pnlEl.className = 'stat ' + (pnl > 0 ? 'pnl-pos' : pnl < 0 ? 'pnl-neg' : '');
+
+  document.getElementById('live-open-positions').textContent = `${data.openPositions || data.positions || 0} open`;
+  document.getElementById('live-cycle').textContent = data.cycle ? `#${data.cycle}` : '';
+  document.getElementById('live-minutes-close').textContent = data.minutesToClose != null ? `${data.minutesToClose}m to close` : '';
+
+  // HMA direction from status data
+  const hmaEl = document.getElementById('live-hma-dir');
+  if (data.hmaDirection) {
+    const dir = data.hmaDirection;
+    const color = dir === 'up' ? '#10b981' : dir === 'down' ? '#f43f5e' : '#888';
+    hmaEl.innerHTML = `HMA <span style="color:${color}">${dir.toUpperCase()}</span>`;
+  }
+
+  // Uptime
+  if (data.upSince || data.startTime) {
+    const started = new Date(data.upSince || data.startTime).getTime();
+    const elapsed = Math.floor((Date.now() - started) / 1000);
+    const hours = Math.floor(elapsed / 3600);
+    const mins = Math.floor((elapsed % 3600) / 60);
+    document.getElementById('live-uptime').textContent = `Up ${hours}h${mins}m`;
+  } else if (data.uptimeSec || data.uptime) {
+    const sec = data.uptimeSec || data.uptime || 0;
+    const hours = Math.floor(sec / 3600);
+    const mins = Math.floor((sec % 3600) / 60);
+    document.getElementById('live-uptime').textContent = `Up ${hours}h${mins}m`;
+  }
+}
+
+async function pollAgentStatus() {
+  try {
+    const data = await fetch('/agent/status').then(r => r.json());
+    updateStatusBanner(data);
+  } catch {
+    updateStatusBanner({ status: 'offline' });
+  }
+}
+
+async function pollActivity() {
+  try {
+    const activities = await fetch('/agent/activity?n=50').then(r => r.json());
+    if (!Array.isArray(activities)) return;
+
+    // Convert activities to trade-like objects for display
+    const trades = activities
+      .filter(a => a.type === 'trade' || a.action === 'trade' || a.entryPrice)
+      .map((a, i) => ({
+        side: a.side || a.direction || 'call',
+        strike: a.strike || 0,
+        entryET: a.entryET || a.entryTime || '—',
+        exitET: a.exitET || a.exitTime || '—',
+        entryPrice: a.entryPrice || 0,
+        exitPrice: a.exitPrice || 0,
+        'pnl$': a['pnl$'] ?? a.pnl ?? 0,
+        pnlPct: a.pnlPct ?? a.pnlPercent ?? 0,
+        reason: a.reason || a.exitReason || '—',
+        symbol: a.symbol || '',
+        entryTs: a.entryTs || 0,
+        exitTs: a.exitTs || 0,
+      }));
+
+    const hasNew = activities.length > lastActivityCount;
+    lastActivityCount = activities.length;
+
+    // Update trades table
+    if (trades.length > 0) {
+      allTrades = trades;
+      renderTradesTable(trades);
+
+      // Flash animation for new trades
+      if (hasNew) {
+        const firstRow = document.querySelector('#trades-body tr');
+        if (firstRow) {
+          firstRow.classList.add('trade-new');
+          setTimeout(() => firstRow.classList.remove('trade-new'), 1200);
+        }
+      }
+    } else {
+      // Show all activities as log entries if no structured trades
+      const tbody = document.getElementById('trades-body');
+      if (activities.length > 0) {
+        tbody.innerHTML = activities.slice(0, 30).map((a, i) => {
+          const time = a.time || a.ts || a.timestamp || '';
+          const timeStr = time ? new Date(typeof time === 'number' ? time * 1000 : time).toLocaleTimeString('en-US', { hour12: false }) : '—';
+          const type = a.type || a.action || '—';
+          const msg = a.message || a.msg || a.detail || JSON.stringify(a).slice(0, 80);
+          return `<tr><td>${i + 1}</td><td>${type}</td><td colspan="6" style="color:#888;font-size:11px">${timeStr} — ${msg}</td></tr>`;
+        }).join('');
+      }
+    }
+  } catch (err) {
+    console.error('Activity poll failed:', err);
+  }
+}
+
+async function loadLiveContracts() {
+  try {
+    const contracts = await fetch('/contracts/active').then(r => r.json());
+    if (!Array.isArray(contracts) || contracts.length === 0) {
+      document.getElementById('mini-grid').innerHTML = '<div class="no-data">No active contracts</div>';
+      return;
+    }
+
+    // Store for WS subscriptions
+    liveContractSymbols.clear();
+    contracts.forEach(c => {
+      if (c.symbol) liveContractSymbols.add(c.symbol);
+    });
+
+    // Map to the format expected by renderMiniCharts
+    allContracts = contracts.map(c => ({
+      symbol: c.symbol,
+      type: c.type || (c.symbol?.includes('C') ? 'call' : 'put'),
+      strike: c.strike || parseFloat(c.symbol?.match(/(\d+)$/)?.[1] || '0'),
+      minPrice: c.minPrice ?? c.low ?? 0,
+      maxPrice: c.maxPrice ?? c.high ?? 0,
+      state: c.state,
+    }));
+
+    // Render mini-chart grid
+    const grid = document.getElementById('mini-grid');
+    grid.innerHTML = '';
+
+    // Clear old mini charts
+    for (const [, mc] of miniCharts) { mc.chart.remove(); }
+    miniCharts.clear();
+
+    const filtered = filterContracts();
+    if (!filtered.length) {
+      grid.innerHTML = '<div class="no-data">No contracts for this tab</div>';
+      return;
+    }
+
+    const displayContracts = filtered.slice(0, 40);
+
+    for (const c of displayContracts) {
+      const card = document.createElement('div');
+      card.className = 'mini-card';
+      const typeLabel = c.type === 'call' ? 'C' : 'P';
+      const priceRange = (c.minPrice || c.maxPrice)
+        ? `$${c.minPrice.toFixed(2)}-${c.maxPrice.toFixed(2)}`
+        : '';
+      card.innerHTML = `
+        <div class="mini-card-header">
+          <span class="strike">${typeLabel}${c.strike}</span>
+          <span class="price">${priceRange}</span>
+          <span style="color:#10b981;font-size:10px">${c.state || ''}</span>
+        </div>
+        <div class="mini-card-chart" id="mc-${c.symbol.replace(/[^a-zA-Z0-9]/g, '')}"></div>
+      `;
+      grid.appendChild(card);
+
+      // Fetch bars for this contract and render
+      renderLiveMiniChart(c);
+    }
+
+    // Subscribe to contract updates via WS
+    if (liveWs && liveWs.readyState === WebSocket.OPEN) {
+      for (const sym of liveContractSymbols) {
+        liveWs.send(JSON.stringify({ action: 'subscribe', channel: 'contract', symbol: sym }));
+      }
+    }
+  } catch (err) {
+    console.error('Live contracts load failed:', err);
+    document.getElementById('mini-grid').innerHTML = '<div class="no-data">Failed to load contracts</div>';
+  }
+}
+
+async function renderLiveMiniChart(contract) {
+  const containerId = `mc-${contract.symbol.replace(/[^a-zA-Z0-9]/g, '')}`;
+  const container = document.getElementById(containerId);
+  if (!container) return;
+
+  try {
+    const rawBars = await fetch(`/contracts/${encodeURIComponent(contract.symbol)}/bars?tf=1m&n=390`).then(r => r.json());
+    const bars = normalizeLiveBars(rawBars);
+    if (!bars.length) return;
+
+    const chart = LightweightCharts.createChart(container, {
+      width: container.clientWidth,
+      height: 100,
+      layout: { background: { color: '#111118' }, textColor: '#444' },
+      grid: { vertLines: { visible: false }, horzLines: { visible: false } },
+      crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+      timeScale: { visible: false, borderVisible: false },
+      rightPriceScale: { visible: false, borderVisible: false },
+      leftPriceScale: { visible: false },
+      handleScroll: false,
+      handleScale: false,
+    });
+
+    const series = chart.addSeries(LightweightCharts.CandlestickSeries, {
+      upColor: '#10b981', downColor: '#f43f5e',
+      borderUpColor: '#10b981', borderDownColor: '#f43f5e',
+      wickUpColor: '#10b98155', wickDownColor: '#f43f5e55',
+    });
+
+    series.setData(bars.map(b => ({ time: toEtDisplay(b.ts), open: b.o, high: b.h, low: b.l, close: b.c })));
+    chart.timeScale().fitContent();
+    miniCharts.set(contract.symbol, { chart, series });
+  } catch {}
+}
+
+function setConnectionStatus(connected) {
+  const el = document.getElementById('conn-status');
+  if (!el) return;
+  el.classList.toggle('connected', connected);
+  el.classList.toggle('disconnected', !connected);
+  el.textContent = connected ? 'WS ✓' : 'WS ✗';
+}
+
+// ── Hash-based URL routing ─────────────────────────────────────────────────
+// Note: #live on initial load is handled inside boot() above.
+
+window.addEventListener('hashchange', () => {
+  if (location.hash === '#live' && currentMode !== 'live') setMode('live');
+  else if (location.hash !== '#live' && currentMode !== 'replay') setMode('replay');
+});
 </script>
 </body>
 </html>
