@@ -15,6 +15,7 @@ export interface AgentStatus {
   timeET: string;
   cycle: number;
   mode: string;
+  paper?: boolean;
   spxPrice: number;
   minutesToClose: number;
   contractsTracked: number;

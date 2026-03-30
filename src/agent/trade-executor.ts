@@ -157,10 +157,11 @@ export async function openPosition(
     return { position, execution: { fillPrice: entryPrice, paper: true, executedSymbol, orderType: order.type, spread: order.spread } };
   }
 
-  // Live order — try OTOCO bracket (entry + TP + SL) first
+  // Live order — try OTOCO bracket (entry + TP + SL) first, unless disabled
   const hasBracketPrices = decision.takeProfit != null && decision.takeProfit > 0 && decision.stopLoss > 0;
+  const bracketDisabled = execCfg?.disableBracketOrders === true;
 
-  if (hasBracketPrices) {
+  if (hasBracketPrices && !bracketDisabled) {
     try {
       const result = await submitOtocoOrder(
         rootSymbol, executedSymbol, accountId, qty,

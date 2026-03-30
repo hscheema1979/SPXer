@@ -218,6 +218,8 @@ export interface Config {
     use1dte?: boolean;
     /** Wider friction for less-liquid products */
     halfSpread?: number;
+    /** Skip OTOCO bracket orders — use simple market entry, agent monitors exits */
+    disableBracketOrders?: boolean;
   };
 }
 

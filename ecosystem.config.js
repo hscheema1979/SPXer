@@ -80,6 +80,28 @@ module.exports = {
       merge_logs: true,
     },
 
+    // ── XSP Monitor (LLM-powered position/order oversight) ───────
+    {
+      name: 'xsp-monitor',
+      script: 'npx',
+      args: 'tsx agent-xsp-monitor.ts',
+      cwd: '/home/ubuntu/SPXer',
+      watch: false,
+      autorestart: true,
+      max_restarts: 10,
+      min_uptime: '10s',
+      restart_delay: 10000,
+      kill_timeout: 5000,
+      max_memory_restart: '256M',
+      env: {
+        NODE_ENV: 'production',
+      },
+      log_date_format: 'YYYY-MM-DD HH:mm:ss',
+      error_file: '/home/ubuntu/.pm2/logs/xsp-monitor-error.log',
+      out_file: '/home/ubuntu/.pm2/logs/xsp-monitor-out.log',
+      merge_logs: true,
+    },
+
     // ── Replay Viewer (port 3601) ─────────────────────────────────
     {
       name: 'replay-viewer',

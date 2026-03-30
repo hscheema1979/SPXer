@@ -184,8 +184,8 @@ let _piSdk: {
   createExtensionRuntime: typeof import('@mariozechner/pi-coding-agent').createExtensionRuntime;
 } | null = null;
 
-let _authStorage: InstanceType<typeof import('@mariozechner/pi-coding-agent').AuthStorage> | null = null;
-let _modelRegistry: InstanceType<typeof import('@mariozechner/pi-coding-agent').ModelRegistry> | null = null;
+let _authStorage: import('@mariozechner/pi-coding-agent').AuthStorage | null = null;
+let _modelRegistry: import('@mariozechner/pi-coding-agent').ModelRegistry | null = null;
 
 async function loadPiSdk() {
   if (!_piSdk) {

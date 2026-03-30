@@ -23,6 +23,8 @@ import { AGENT_XSP_CONFIG } from './agent-xsp-config';
 import { RiskGuard } from './src/agent/risk-guard';
 import { logEntry, logRejected } from './src/agent/audit-log';
 import { writeStatus, logActivity } from './src/agent/reporter';
+import { config as appConfig, TRADIER_BASE } from './src/config';
+import axios from 'axios';
 import type { AgentSignal, AgentDecision } from './src/agent/types';
 import { selectStrike, type StrikeCandidate } from './src/core/strike-selector';
 import { computeTradeSize } from './src/agent/account-balance';
@@ -42,6 +44,48 @@ let winsTotal = 0;
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
+/**
+ * Cancel any open/pending OTOCO bracket orders for a given option symbol.
+ * Called on flip so the old bracket's TP/SL legs don't linger.
+ */
+async function cancelBracketOrdersForSymbol(optionSymbol: string): Promise<void> {
+  const accountId = EXEC.accountId!;
+  const hdrs = {
+    Authorization: `Bearer ${appConfig.tradierToken}`,
+    Accept: 'application/json',
+  };
+
+  try {
+    const { data } = await axios.get(
+      `${TRADIER_BASE}/accounts/${accountId}/orders`,
+      { headers: hdrs, timeout: 10000 },
+    );
+    const raw = data?.orders?.order;
+    const orders = Array.isArray(raw) ? raw : raw ? [raw] : [];
+
+    for (const order of orders) {
+      if (order.status !== 'open' && order.status !== 'pending') continue;
+      if (order.class !== 'otoco' && order.class !== 'oco') continue;
+
+      const legs = Array.isArray(order.leg) ? order.leg : order.leg ? [order.leg] : [];
+      const matchesSymbol = legs.some((l: any) => l.option_symbol === optionSymbol);
+      if (!matchesSymbol) continue;
+
+      try {
+        await axios.delete(
+          `${TRADIER_BASE}/accounts/${accountId}/orders/${order.id}`,
+          { headers: hdrs, timeout: 10000 },
+        );
+        console.log(`[xsp] 🗑️ Cancelled bracket #${order.id} for ${optionSymbol}`);
+      } catch (e: any) {
+        console.warn(`[xsp] ⚠️ Failed to cancel bracket #${order.id}: ${e?.response?.data?.errors?.error || e.message}`);
+      }
+    }
+  } catch (e: any) {
+    console.warn(`[xsp] ⚠️ Failed to fetch orders for bracket cleanup: ${e.message}`);
+  }
+}
+
 function buildCandidates(snap: MarketSnapshot): StrikeCandidate[] {
   return snap.contracts.map(c => ({
     symbol: c.meta.symbol,
@@ -50,6 +94,26 @@ function buildCandidates(snap: MarketSnapshot): StrikeCandidate[] {
     price: c.quote.last ?? c.quote.mid ?? 0,
     volume: c.greeks.volume ?? 0,
   }));
+}
+
+/** Fetch real-time quote from Tradier API (source of truth for execution) */
+async function fetchXspQuote(symbol: string): Promise<{ last: number; bid: number; ask: number } | null> {
+  try {
+    const { data } = await axios.get(`${TRADIER_BASE}/markets/quotes`, {
+      headers: { Authorization: `Bearer ${appConfig.tradierToken}`, Accept: 'application/json' },
+      params: { symbols: symbol, greeks: 'false' },
+      timeout: 5000,
+    });
+    const q = data?.quotes?.quote;
+    if (!q) return null;
+    const bid = q.bid ?? 0;
+    const ask = q.ask ?? 0;
+    const last = q.last ?? (bid + ask) / 2;
+    return { last, bid, ask };
+  } catch (e) {
+    console.error(`[xsp] Quote fetch failed for ${symbol}: ${(e as Error).message}`);
+    return null;
+  }
 }
 
 async function executeEntry(
@@ -69,21 +133,31 @@ async function executeEntry(
 
   const xspSymbol = convertOptionSymbol(result.candidate.symbol, EXEC);
   const xspStrike = result.candidate.strike / EXEC.strikeDivisor;
-  const entryPrice = result.candidate.price;
+
+  // Fetch real XSP quote from Tradier — source of truth for execution prices
+  const xspQuote = await fetchXspQuote(xspSymbol);
+  if (!xspQuote || xspQuote.ask <= 0) {
+    console.log(`[xsp] No valid quote for ${xspSymbol} — skipping entry`);
+    return false;
+  }
+
+  const entryPrice = xspQuote.ask; // worst-case fill for market buy
   const stopLoss = entryPrice * (1 - CFG.position.stopLossPercent / 100);
   const takeProfit = entryPrice * CFG.position.takeProfitMultiplier;
+
+  console.log(`[xsp] Quote ${xspSymbol}: bid=$${xspQuote.bid.toFixed(2)} ask=$${xspQuote.ask.toFixed(2)} last=$${xspQuote.last.toFixed(2)}`);
 
   const contractState = snap.contracts.find(c => c.meta.symbol === result.candidate.symbol);
 
   const signal: AgentSignal = {
     type: 'HMA_CROSS',
-    symbol: result.candidate.symbol,
+    symbol: xspSymbol,           // use XSP symbol, not SPX
     side: result.candidate.side,
-    strike: result.candidate.strike,
+    strike: result.candidate.strike,  // SPX strike — openPosition divides by strikeDivisor
     expiry: contractState?.meta.expiry ?? '',
     currentPrice: entryPrice,
-    bid: contractState?.quote.bid ?? null,
-    ask: contractState?.quote.ask ?? null,
+    bid: xspQuote.bid,
+    ask: xspQuote.ask,
     indicators: contractState?.bars1m[contractState.bars1m.length - 1] ?? {} as any,
     recentBars: contractState?.bars1m ?? [],
     signalBarLow: stopLoss,
@@ -110,16 +184,28 @@ async function executeEntry(
   };
 
   try {
-    const { position, execution } = await openPosition(signal, decision, guard.isPaper, EXEC);
-    if (!execution.error) {
-      positions.add(position);
+    // Leg 1: OTOCO bracket (test — server-side TP/SL)
+    const bracketExec = { ...EXEC, disableBracketOrders: false };
+    const { position: bracketPos, execution: bracketResult } = await openPosition(signal, decision, guard.isPaper, bracketExec);
+    if (!bracketResult.error) {
+      console.log(`[xsp] 🧪 BRACKET ${side.toUpperCase()} ${xspSymbol} x1 @ $${entryPrice.toFixed(2)} | TP=$${takeProfit.toFixed(2)} SL=$${stopLoss.toFixed(2)} (test)`);
+      logEntry({ ts: Date.now(), signal, decision, execution: bracketResult });
+    } else {
+      console.warn(`[xsp] ⚠️ BRACKET order rejected: ${bracketResult.error}`);
+    }
+
+    // Leg 2: Plain market order (agent monitors exits via TP/SL/reversal)
+    const plainExec = { ...EXEC, disableBracketOrders: true };
+    const { position: plainPos, execution: plainResult } = await openPosition(signal, decision, guard.isPaper, plainExec);
+    if (!plainResult.error) {
+      positions.add(plainPos);
       guard.recordTrade();
       tradesTotal++;
-      console.log(`[xsp] ✅ ENTERED ${side.toUpperCase()} ${xspSymbol} x1 @ $${entryPrice.toFixed(2)} | stop=$${stopLoss.toFixed(2)} tp=$${takeProfit.toFixed(2)}`);
-      logEntry({ ts: Date.now(), signal, decision, execution });
+      console.log(`[xsp] ✅ ENTERED ${side.toUpperCase()} ${xspSymbol} x1 @ $${entryPrice.toFixed(2)} | agent-managed exits`);
+      logEntry({ ts: Date.now(), signal, decision, execution: plainResult });
       return true;
     } else {
-      console.error(`[xsp] ❌ Order failed: ${execution.error}`);
+      console.error(`[xsp] ❌ Market order failed: ${plainResult.error}`);
       return false;
     }
   } catch (e) {
@@ -185,7 +271,16 @@ async function runCycle(): Promise<number> {
     console.log(`[xsp] HMA cross: ${arrow} ${hmaCross.toUpperCase()}`);
   }
 
-  // 3. Monitor open position
+  // 3. Pre-close: cancel bracket orders for any position that's about to exit
+  //    Must happen BEFORE monitor() sends sell orders, otherwise Tradier rejects
+  //    the sell because pending bracket sell legs count against position quantity.
+  if (positions.count() > 0) {
+    for (const pos of positions.getAll()) {
+      await cancelBracketOrdersForSymbol(pos.symbol);
+    }
+  }
+
+  // 4. Monitor open position (may close + sell)
   const closeEvents = await positions.monitor(pnl => {
     guard.recordLoss(pnl);
     dailyPnl += pnl;
@@ -226,6 +321,7 @@ async function runCycle(): Promise<number> {
     timeET: snap.timeET,
     cycle: cycleCount,
     mode: snap.mode,
+    paper: guard.isPaper,
     spxPrice,
     minutesToClose: snap.minutesToClose,
     contractsTracked: snap.contracts.length,

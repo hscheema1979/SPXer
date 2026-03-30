@@ -112,16 +112,31 @@ export class PositionManager {
     const closeEvents: PositionCloseEvent[] = [];
     if (this.positions.size === 0) return closeEvents;
 
-    // Fetch latest bars from SPXer for current prices
+    // Fetch latest prices from Tradier API (source of truth for execution),
+    // fall back to pipeline only if API is unavailable
     const priceMap = new Map<string, number>();
     await Promise.allSettled(
       [...this.positions.values()].map(async pos => {
+        // 1. Tradier quotes API — source of truth
+        try {
+          const { data } = await axios.get(
+            `${TRADIER_BASE}/markets/quotes`,
+            {
+              headers: { Authorization: `Bearer ${appConfig.tradierToken}`, Accept: 'application/json' },
+              params: { symbols: pos.symbol, greeks: 'false' },
+              timeout: 5000,
+            },
+          );
+          const quote = data?.quotes?.quote;
+          const price = quote?.last ?? quote?.mid ?? ((quote?.bid ?? 0) + (quote?.ask ?? 0)) / 2;
+          if (price > 0) { priceMap.set(pos.symbol, price); return; }
+        } catch { /* fall through */ }
+
+        // 2. Pipeline fallback (may not have the contract, e.g. XSP)
         try {
           const { data } = await axios.get(`${SPXER_BASE}/contracts/${pos.symbol}/latest`, { timeout: 5000 });
           if (data?.close) priceMap.set(pos.symbol, data.close);
-        } catch {
-          // ignore — keep position open if price unavailable
-        }
+        } catch { /* no price available */ }
       })
     );
 
@@ -130,12 +145,13 @@ export class PositionManager {
 
     for (const [id, pos] of this.positions) {
       const currentPrice = priceMap.get(pos.symbol);
-      if (currentPrice === undefined) continue;
 
-      // Update high-water mark
-      const prevHigh = this.highWaterPrices.get(id) ?? pos.entryPrice;
-      if (currentPrice > prevHigh) {
-        this.highWaterPrices.set(id, currentPrice);
+      // Update high-water mark (only when we have a price)
+      if (currentPrice !== undefined) {
+        const prevHigh = this.highWaterPrices.get(id) ?? pos.entryPrice;
+        if (currentPrice > prevHigh) {
+          this.highWaterPrices.set(id, currentPrice);
+        }
       }
 
       // Map OpenPosition → core Position for checkExit
@@ -159,24 +175,34 @@ export class PositionManager {
         highWaterPrice: this.highWaterPrices.get(id),
       };
 
-      const exitCheck = checkExit(corePosition, currentPrice, this.cfg, context);
+      // Use current price for price-dependent checks, fall back to entry price
+      // for price-independent exits (signal_reversal, time_exit) so they aren't blocked
+      const priceForCheck = currentPrice ?? pos.entryPrice;
+      const exitCheck = checkExit(corePosition, priceForCheck, this.cfg, context);
 
       if (exitCheck.shouldExit && exitCheck.reason) {
-        const pnl = (currentPrice - pos.entryPrice) * pos.quantity * 100;
+        const closePrice = currentPrice ?? pos.entryPrice; // best-effort P&L; market order will get real fill
+        const pnl = (closePrice - pos.entryPrice) * pos.quantity * 100;
+        if (currentPrice === undefined) {
+          console.log(`[positions] ⚠️ No pipeline price for ${pos.symbol} — closing on ${exitCheck.reason} with estimated P&L`);
+        }
         const closeRecord: PositionClose = {
           position: pos,
-          closePrice: currentPrice,
+          closePrice,
           reason: exitCheck.reason,
           pnl,
           closedAt: now,
         };
 
-        // Cancel server-side OCO legs before closing (if they exist)
+        // Cancel ALL open sell orders for this symbol before closing.
+        // Must happen before closePosition() — Tradier rejects sells if
+        // pending bracket sell legs already account for the full position qty.
         if (!this.paper) {
           await this.cancelBracketLegs(pos);
+          await this.cancelOpenSellOrders(pos.symbol);
         }
 
-        await closePosition(pos, exitCheck.reason, currentPrice, this.paper, this.cfg.execution);
+        await closePosition(pos, exitCheck.reason, closePrice, this.paper, this.cfg.execution);
         logClose(closeRecord);
         dailyLossCallback(pnl);
         this.positions.delete(id);
@@ -184,7 +210,7 @@ export class PositionManager {
 
         closeEvents.push({
           position: pos,
-          closePrice: currentPrice,
+          closePrice,
           reason: exitCheck.reason,
           pnl,
         });
@@ -387,6 +413,57 @@ export class PositionManager {
       } catch {
         // cancelOcoLegs already logs errors
       }
+    }
+  }
+
+  /**
+   * Cancel any open/pending orders with sell_to_close legs for a given symbol.
+   * Catches the case where a separate bracket order (not tracked on the position)
+   * has open TP/SL legs that block new sell orders.
+   */
+  private async cancelOpenSellOrders(optionSymbol: string): Promise<void> {
+    const accountId = this.cfg.execution?.accountId || appConfig.tradierAccountId;
+    const hdrs = {
+      Authorization: `Bearer ${appConfig.tradierToken}`,
+      Accept: 'application/json',
+    };
+
+    try {
+      const { data } = await axios.get(
+        `${TRADIER_BASE}/accounts/${accountId}/orders`,
+        { headers: hdrs, timeout: 10000 },
+      );
+      const raw = data?.orders?.order;
+      const orders = Array.isArray(raw) ? raw : raw ? [raw] : [];
+
+      for (const order of orders) {
+        if (order.status !== 'open' && order.status !== 'pending') continue;
+
+        // Check top-level order
+        if (order.option_symbol === optionSymbol && order.side === 'sell_to_close') {
+          try {
+            await axios.delete(`${TRADIER_BASE}/accounts/${accountId}/orders/${order.id}`, { headers: hdrs, timeout: 10000 });
+            console.log(`[positions] 🗑️ Cancelled sell order #${order.id} for ${optionSymbol}`);
+          } catch { /* logged elsewhere */ }
+          continue;
+        }
+
+        // Check legs (OTOCO/OCO)
+        const legs = Array.isArray(order.leg) ? order.leg : order.leg ? [order.leg] : [];
+        const hasOpenSellLeg = legs.some((l: any) =>
+          (l.status === 'open' || l.status === 'pending') &&
+          l.side === 'sell_to_close' &&
+          l.option_symbol === optionSymbol
+        );
+        if (hasOpenSellLeg) {
+          try {
+            await axios.delete(`${TRADIER_BASE}/accounts/${accountId}/orders/${order.id}`, { headers: hdrs, timeout: 10000 });
+            console.log(`[positions] 🗑️ Cancelled bracket #${order.id} with sell legs for ${optionSymbol}`);
+          } catch { /* logged elsewhere */ }
+        }
+      }
+    } catch (e: any) {
+      console.warn(`[positions] ⚠️ Failed to scan open orders for ${optionSymbol}: ${e.message}`);
     }
   }
 

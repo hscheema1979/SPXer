@@ -752,14 +752,17 @@ function renderTradesTable(trades) {
   tbody.innerHTML = trades.map((t, i) => {
     const pnlClass = t['pnl$'] > 0 ? 'pnl-pos' : t['pnl$'] < 0 ? 'pnl-neg' : 'pnl-zero';
     const sideClass = t.side === 'call' ? 'call' : 'put';
+    const entryStr = t.entryPrice > 0 ? `${t.entryET || ''} @ $${t.entryPrice.toFixed(2)}` : (t.entryET || '—');
+    const exitStr = t.exitPrice > 0 ? `${t.exitET || ''} @ $${t.exitPrice.toFixed(2)}` : (t.exitET || '—');
+    const pctStr = t.pnlPct ? `${t.pnlPct >= 0 ? '+' : ''}${t.pnlPct.toFixed(0)}%` : '';
     return `<tr data-idx="${i}" onclick="selectTrade(${i})">
       <td>${i + 1}</td>
       <td class="${sideClass}">${t.side.toUpperCase()}</td>
       <td>${t.strike}</td>
-      <td>${t.entryET} @ $${t.entryPrice.toFixed(2)}</td>
-      <td>${t.exitET} @ $${t.exitPrice.toFixed(2)}</td>
+      <td>${entryStr}</td>
+      <td>${exitStr}</td>
       <td class="${pnlClass}">$${t['pnl$'].toFixed(0)}</td>
-      <td class="${pnlClass}">${t.pnlPct >= 0 ? '+' : ''}${t.pnlPct.toFixed(0)}%</td>
+      <td class="${pnlClass}">${pctStr}</td>
       <td><span class="reason reason-${t.reason}">${formatReason(t.reason)}</span></td>
     </tr>`;
   }).join('');
@@ -1803,11 +1806,13 @@ function normalizeLiveBars(bars) {
 
 async function initLiveMode() {
   try {
-    // 1. Fetch SPX bars and render chart (live mode — no trades overlay initially, no 3m/5m)
-    const rawBars = await fetch(`${API}/live/spx/bars?tf=1m&n=390`).then(r => r.json()).catch(() => []);
-    const bars = normalizeLiveBars(rawBars);
     // Guess ET offset from current time
     etOffsetSec = isDST(new Date().toISOString().slice(0, 10)) ? -4 * 3600 : -5 * 3600;
+
+    // 1. Fetch SPX bars and render chart
+    // Request more bars to cover both premarket ES and RTH SPX
+    const rawBars = await fetch(`${API}/live/spx/bars?tf=1m&n=600`).then(r => r.json()).catch(() => []);
+    const bars = normalizeLiveBars(rawBars);
     renderSpxChart(bars, [], [], []);
 
     // 2. Fetch agent status
@@ -1816,7 +1821,7 @@ async function initLiveMode() {
     // 3. Fetch recent activity and render trades
     await pollActivity();
 
-    // 4. Load active contracts for mini-chart grid
+    // 4. Load active contracts for mini-chart grid (today only)
     await loadLiveContracts();
 
     // 5. Connect WebSocket for real-time updates
@@ -1857,7 +1862,11 @@ function teardownLiveMode() {
 function connectLiveWs() {
   if (liveWs && liveWs.readyState <= 1) return;
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const wsUrl = `${proto}//${location.host}/spxer-ws`;
+  // When accessed via HTTPS (nginx), use /spxer-ws proxy path
+  // When accessed directly (localhost), connect to data service port 3600
+  const wsUrl = location.protocol === 'https:'
+    ? `${proto}//${location.host}/spxer-ws`
+    : `ws://${location.hostname}:3600/ws`;
   liveWs = new WebSocket(wsUrl);
 
   liveWs.onopen = () => {
@@ -1950,9 +1959,12 @@ function updateStatusBanner(data) {
     return;
   }
 
-  const mode = (data.mode || 'PAPER').toUpperCase();
-  const badgeClass = mode === 'LIVE' ? 'badge-live' : 'badge-paper';
-  document.getElementById('live-mode-badge').innerHTML = `<span class="${badgeClass}">${mode}</span>`;
+  // data.mode is market mode (rth/premarket), not trading mode
+  // data.paper indicates paper vs live trading mode
+  const marketMode = (data.mode || '').toUpperCase();
+  const tradingMode = data.paper === true ? 'PAPER' : data.paper === false ? 'LIVE' : 'PAPER';
+  const badgeClass = tradingMode === 'LIVE' ? 'badge-live' : 'badge-paper';
+  document.getElementById('live-mode-badge').innerHTML = `<span class="${badgeClass}">${tradingMode}</span>${marketMode ? ` <span style="color:#555;font-size:10px">${marketMode}</span>` : ''}`;
 
   document.getElementById('live-spx-price').textContent = data.spxPrice
     ? `SPX $${parseFloat(data.spxPrice).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
@@ -1967,12 +1979,17 @@ function updateStatusBanner(data) {
   document.getElementById('live-cycle').textContent = data.cycle ? `#${data.cycle}` : '';
   document.getElementById('live-minutes-close').textContent = data.minutesToClose != null ? `${data.minutesToClose}m to close` : '';
 
-  // HMA direction from status data
+  // HMA direction — derive from lastReasoning or status
   const hmaEl = document.getElementById('live-hma-dir');
-  if (data.hmaDirection) {
+  const reasoning = data.lastReasoning || '';
+  if (reasoning.includes('bullish')) {
+    hmaEl.innerHTML = `HMA <span style="color:#10b981">▲ BULL</span>`;
+  } else if (reasoning.includes('bearish')) {
+    hmaEl.innerHTML = `HMA <span style="color:#f43f5e">▼ BEAR</span>`;
+  } else if (data.hmaDirection) {
     const dir = data.hmaDirection;
     const color = dir === 'up' ? '#10b981' : dir === 'down' ? '#f43f5e' : '#888';
-    hmaEl.innerHTML = `HMA <span style="color:${color}">${dir.toUpperCase()}</span>`;
+    hmaEl.innerHTML = `HMA <span style="color:${color}">${dir === 'up' ? '▲ BULL' : '▼ BEAR'}</span>`;
   }
 
   // Uptime
@@ -2004,31 +2021,49 @@ async function pollActivity() {
     const activities = await fetch(`${API}/live/agent/activity?n=50`).then(r => r.json());
     if (!Array.isArray(activities)) return;
 
-    // Convert activities to trade-like objects for display
-    const trades = activities
-      .filter(a => a.type === 'trade' || a.action === 'trade' || a.entryPrice)
-      .map((a, i) => ({
-        side: a.side || a.direction || 'call',
-        strike: a.strike || 0,
-        entryET: a.entryET || a.entryTime || '—',
-        exitET: a.exitET || a.exitTime || '—',
-        entryPrice: a.entryPrice || 0,
-        exitPrice: a.exitPrice || 0,
-        'pnl$': a['pnl$'] ?? a.pnl ?? 0,
-        pnlPct: a.pnlPct ?? a.pnlPercent ?? 0,
-        reason: a.reason || a.exitReason || '—',
-        symbol: a.symbol || '',
-        entryTs: a.entryTs || 0,
-        exitTs: a.exitTs || 0,
-      }));
+    // Extract actual trade close events from cycle activity entries
+    // Each activity has details.closeEvents[] with { symbol, reason, pnl }
+    const closedTrades = [];
+    for (const a of activities) {
+      const closes = a.details?.closeEvents || [];
+      for (const ce of closes) {
+        // Parse symbol: SPXW260330C06330000 → type=call, strike=6330
+        const sym = ce.symbol || '';
+        const isCall = sym.includes('C0') || sym.includes('C1');
+        const strikeMatch = sym.match(/[CP](\d{5,})$/);
+        const strike = strikeMatch ? parseInt(strikeMatch[1]) / 1000 : 0;
+        const exitTime = a.timeET || '—';
+        closedTrades.push({
+          side: isCall ? 'call' : 'put',
+          strike: strike,
+          entryET: '',
+          exitET: exitTime,
+          entryPrice: ce.entryPrice || 0,
+          exitPrice: ce.exitPrice || 0,
+          'pnl$': ce.pnl ?? 0,
+          pnlPct: ce.pnlPct || 0,
+          reason: ce.reason || '—',
+          symbol: sym,
+          entryTs: 0,
+          exitTs: a.ts ? a.ts / 1000 : 0,
+        });
+      }
+    }
 
-    const hasNew = activities.length > lastActivityCount;
-    lastActivityCount = activities.length;
+    // Also get summary stats from latest activity
+    const latest = activities[activities.length - 1];
+    const totalTrades = latest?.details?.tradesTotal || closedTrades.length;
+    const dailyPnl = latest?.details?.dailyPnl ?? 0;
 
-    // Update trades table
-    if (trades.length > 0) {
-      allTrades = trades;
-      renderTradesTable(trades);
+    const hasNew = closedTrades.length > lastActivityCount;
+    lastActivityCount = closedTrades.length;
+
+    const tbody = document.getElementById('trades-body');
+
+    if (closedTrades.length > 0) {
+      // Show closed trades in the trades table
+      allTrades = closedTrades;
+      renderTradesTable(closedTrades);
 
       // Flash animation for new trades
       if (hasNew) {
@@ -2038,18 +2073,28 @@ async function pollActivity() {
           setTimeout(() => firstRow.classList.remove('trade-new'), 1200);
         }
       }
+    } else if (activities.length > 0) {
+      // No closed trades yet — show a summary row
+      const lastSummary = latest?.summary || 'Scanning...';
+      tbody.innerHTML = `<tr><td colspan="8" style="color:#666;text-align:center;padding:12px">
+        ${totalTrades} trades today · ${lastSummary}
+      </td></tr>`;
+    }
+
+    // Update the summary bar
+    const wins = closedTrades.filter(t => t['pnl$'] > 0).length;
+    const summaryEl = document.getElementById('summary');
+    if (closedTrades.length > 0) {
+      const totalPnl = closedTrades.reduce((s, t) => s + (t['pnl$'] || 0), 0);
+      const winRate = closedTrades.length > 0 ? wins / closedTrades.length : 0;
+      const pnlClass = totalPnl > 0 ? 'win' : totalPnl < 0 ? 'loss' : 'neutral';
+      summaryEl.innerHTML = `
+        <span class="neutral">${closedTrades.length} trades</span>
+        <span class="${winRate >= 0.5 ? 'win' : 'loss'}">${(winRate * 100).toFixed(0)}% WR</span>
+        <span class="${pnlClass}">$${totalPnl.toFixed(0)}</span>
+      `;
     } else {
-      // Show all activities as log entries if no structured trades
-      const tbody = document.getElementById('trades-body');
-      if (activities.length > 0) {
-        tbody.innerHTML = activities.slice(0, 30).map((a, i) => {
-          const time = a.time || a.ts || a.timestamp || '';
-          const timeStr = time ? new Date(typeof time === 'number' ? time * 1000 : time).toLocaleTimeString('en-US', { hour12: false }) : '—';
-          const type = a.type || a.action || '—';
-          const msg = a.message || a.msg || a.detail || JSON.stringify(a).slice(0, 80);
-          return `<tr><td>${i + 1}</td><td>${type}</td><td colspan="6" style="color:#888;font-size:11px">${timeStr} — ${msg}</td></tr>`;
-        }).join('');
-      }
+      summaryEl.innerHTML = '<span class="neutral">No closed trades</span>';
     }
   } catch (err) {
     console.error('Activity poll failed:', err);
@@ -2058,13 +2103,33 @@ async function pollActivity() {
 
 async function loadLiveContracts() {
   try {
-    const contracts = await fetch(`${API}/live/contracts/active`).then(r => r.json());
-    if (!Array.isArray(contracts) || contracts.length === 0) {
+    const allLiveContracts = await fetch(`${API}/live/contracts/active`).then(r => r.json());
+    if (!Array.isArray(allLiveContracts) || allLiveContracts.length === 0) {
       document.getElementById('mini-grid').innerHTML = '<div class="no-data">No active contracts</div>';
       return;
     }
 
-    // Store for WS subscriptions
+    // Filter to today's expiry only (0DTE contracts)
+    // Use ET date since options expire ET, not UTC
+    const nowUTC = new Date();
+    const todayET = new Date(nowUTC.getTime() + etOffsetSec * 1000).toISOString().slice(0, 10);
+    // Try today's expiry first, then fall back to nearest future expiry
+    const expiries = [...new Set(allLiveContracts.map(c => c.expiry).filter(Boolean))].sort();
+    let targetExpiry = todayET;
+    let contracts = allLiveContracts.filter(c => c.expiry === todayET);
+    if (contracts.length === 0) {
+      // No 0DTE contracts — find the nearest future expiry
+      const futureExpiries = expiries.filter(e => e >= todayET);
+      targetExpiry = futureExpiries[0] || expiries[expiries.length - 1] || todayET;
+      contracts = allLiveContracts.filter(c => c.expiry === targetExpiry || !c.expiry);
+    }
+
+    if (contracts.length === 0) {
+      document.getElementById('mini-grid').innerHTML = `<div class="no-data">No contracts for ${todayET} (${allLiveContracts.length} total tracked)</div>`;
+      return;
+    }
+
+    // Store for WS subscriptions (today's contracts only)
     liveContractSymbols.clear();
     contracts.forEach(c => {
       if (c.symbol) liveContractSymbols.add(c.symbol);

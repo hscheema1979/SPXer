@@ -1,179 +1,194 @@
-# SPXer — 0DTE SPX Options Trading Agent
+# SPXer — 0DTE SPX Options Trading System
 
-Autonomous trading agent for S&P 500 (SPX) 0-day-to-expiration options. Collects real-time market data, runs multi-model AI scanners to read market conditions, and executes aggressive OTM option trades targeting asymmetric returns.
+SPXer is three systems sharing a unified core: a **data service** that polls SPX/ES futures and tracks ~250–480 SPXW 0DTE options contracts with 1-minute OHLCV bars and a full indicator battery; **trading agents** that execute a deterministic HMA(3)×HMA(17) crossover strategy on SPX and XSP options via Tradier; and a **replay system** for config-driven backtesting through the same signal → strike selection → exit pipeline used in production.
 
-**Philosophy**: An agentic system that builds a rolling narrative throughout the day. Scanners don't just react to current bars — they track trajectory, record what they see building, and escalate to the judge with the full story of how the session unfolded. The judge doesn't receive isolated signals; it receives context-rich escalations that include overnight setup, session trajectory, and the scanner's own evolving interpretation.
-
-**Status**: Paper trading. Live monitor running with 6 AI models in parallel.
+**Strategy**: HMA(3)×HMA(17) cross on SPX underlying → OTM strike selection → OTOCO bracket order (TP 1.4× / SL 70%) → exit on HMA reversal, immediately flip to opposite side (scannerReverse). Pure deterministic — no LLM in the trading loop.
 
 See [CLAUDE.md](CLAUDE.md) for full technical documentation.
 
 ---
 
-## Today's Goals (March 20, 2026)
+## Architecture
 
-1. **Live monitor running** — 6 models (Haiku, Sonnet, Opus, Kimi, GLM, MiniMax) watching today's session with neutral prompts. Each signal fires 12 parallel calls (6 models x with/without regime). Compare decisions.
-2. **Fix serialization timeout** — Claude models (Haiku/Sonnet/Opus) all timed out at first signal because `query()` serializes through one session. Need to run third-party models (Kimi, GLM, MiniMax) via direct HTTP instead of Claude Agent SDK, or increase timeout.
-3. **Iterate backtester (US-003/US-004)** — Re-run `backtest-multi.ts` with widened price band ($0.20-$8.00). Get win rate from 20% → 40%+. Separate session handling this.
-4. **Collect today's full replay** — At market close, run today's data through backtester and generate `2026-03-20-replay.md`. Compare what the live scanners said vs what the deterministic system would have done.
-5. **Validate MiniMax as lead scanner** — First signal today: MiniMax was the only model that responded in time AND made a call (BUY C6595/C6600 at RSI=11.7). Track if its calls are correct through the day.
+```
+Data Pipeline (spxer, port 3600)
+─────────────────────────────────
+  Tradier ──┐                        SQLite DB (WAL)         REST + WebSocket
+  Yahoo  ───┼──► Bar Builder ──►     1m OHLCV bars    ──►   /spx/snapshot
+  TV Scrn ──┘    Indicators          HMA/RSI/BB/EMA/        /spx/bars
+                 Contract Tracker     VWAP/ATR/MACD/...     /contracts/active
 
----
+Trading Agents (spxer-agent, spxer-xsp)
+────────────────────────────────────────
+  Market Snapshot ──► HMA(3)×HMA(17) cross ──► Strike Selector ($15 OTM)
+       (from data      detection on 1m bars      computeQty (15% buying power)
+        service)              │                         │
+                        scannerReverse:           OTOCO bracket order
+                        exit + flip on              (entry + TP limit + SL stop)
+                        HMA reversal                    │
+                                                  Tradier API (live)
 
-## Scanning Agents & Judge Agents
+Monitor (xsp-monitor)                  Replay (src/replay/)
+──────────────────────                 ─────────────────────
+  Pi SDK LLM agent                     In-memory bar cache
+  reads positions/orders               Same src/core/ logic
+  flags issues, does NOT trade         Config-driven backtesting
+```
 
-### Scanners (Tier 1) — "What do you see?"
-Fast, cheap models that read raw market data every 15-60 seconds. Their job is to assess conditions and flag setups. All use the Claude Agent SDK with `env` overrides to route to third-party APIs.
-
-| Model | Provider | Speed | Personality | API |
-|-------|----------|-------|-------------|-----|
-| **Kimi K2.5** | Moonshot | ~2.6s | Cautious, analytical. Wants confirmation before committing. | api.kimi.com/coding/ |
-| **ZAI GLM-5** | Zhipu AI | ~3-5s | Fundamentals-focused. Considers macro context. Passed on March 20 signal ("too far OTM"). | api.z.ai/api/anthropic |
-| **MiniMax M2.7** | MiniMax | ~40-47s | Aggressive, decisive. Only model to respond AND say BUY on first live signal. Picks specific strikes. | api.minimax.io/anthropic |
-
-### Judges (Tier 2) — "Should we trade?"
-Claude models that review scanner output + full market context and make the final call. Currently all timing out due to `query()` serialization bug — all 3 share one Claude session and each waits for the others.
-
-| Model | Speed | Personality | Status |
-|-------|-------|-------------|--------|
-| **Claude Haiku** | Fast | Quick tiebreaker, momentum reader | TIMEOUT (serialization bug) |
-| **Claude Sonnet** | Medium | Structured, decisive, good at formatted output | TIMEOUT (serialization bug) |
-| **Claude Opus** | Slow | Deep reasoning, considers edge cases, sometimes overly cautious | TIMEOUT (serialization bug) |
-
-### Prompt Philosophy
-All models receive the same neutral prompt — raw OHLC bars, RSI value, and the contract chain. **No guidance on what RSI means, no "emergency" language, no bias.** We're testing whether the models are naturally good market readers or just parroting what we tell them.
-
-Two variants run for each model:
-- **+REGIME**: Prompt includes a one-line tag like `[Regime classifier says: TRENDING_DOWN]`
-- **-REGIME**: No regime context at all
-
-### What We're Testing After Market Close
-
-**Test 1: Model Accuracy Scorecard**
-For every signal that fired today, compare what each model said vs what actually happened in the next 30 minutes. Score each model on:
-- Did it say BUY or PASS? (decisiveness)
-- Did it pick the right direction? (call vs put)
-- Did it pick a strike that would have been profitable? (strike selection)
-- How confident was it? (confidence calibration — was 72% confidence better than 62%?)
-
-**Test 2: Regime Filter Value**
-Compare +REGIME vs -REGIME decisions for every model. Questions:
-- Did the regime tag change any model's decision? (If not, it's useless)
-- When it changed the decision, was the change correct? (Does regime improve accuracy or hurt it?)
-- Does regime make models more conservative? (We don't want that — we're aggressive)
-
-**Test 3: Deterministic vs LLM**
-Run today's bars through `backtest-multi.ts` (deterministic: RSI trigger → regime gate → auto-select cheapest OTM). Compare its trades against what the live scanners recommended. Questions:
-- Did the deterministic system catch the same signals?
-- Did it pick better or worse strikes?
-- Was its P&L higher or lower?
-- Did any LLM catch a signal the deterministic system missed?
-
-**Test 4: Speed vs Quality**
-MiniMax was the only model that responded in time (40-47s). All others timed out at 60s. Questions:
-- Is a 47s response fast enough for 0DTE? (Option prices can move 50% in that time)
-- Would a dumber but instant system (deterministic) outperform a smarter but slow system (LLM)?
-- Can we fix the Claude timeout by running Haiku/Sonnet/Opus via LiteLLM proxy instead of Claude Agent SDK?
-
-**Test 5: MiniMax Deep Dive**
-MiniMax made two calls at the first signal:
-- +REGIME: BUY C6595 @ 62% confidence ("overdue short-covering bounce")
-- -REGIME: BUY C6600 @ 72% confidence ("extreme RSI oversold with 37-point pullback")
-
-After market, we check: Did C6595 or C6600 go up? Was C6600 (no regime, more aggressive) a better pick than C6595 (with regime, more conservative)? Did the regime tag make MiniMax less aggressive — and was that good or bad?
+**Shared core** (`src/core/`): Signal detection, exit conditions, risk checks, strike selection, position sizing, and trade friction — all imported by both the live agents and replay system. Test in replay → deploy live.
 
 ---
 
-## Current Sprint — Backtest & Go-Live
+## PM2 Processes
 
-### US-001: Build multi-day backtester script
-**Status**: DONE
+All processes managed via `ecosystem.config.js`:
 
-- [x] `backtest-multi.ts` exists and runs without errors
-- [x] Accepts date range args or auto-detects all available days in DB
-- [x] For each day: runs regime classifier, applies signal gate, uses deterministic strike selector
-- [x] Generates per-day P&L summary and overall scorecard
-- [x] Outputs to console AND saves per-day replay markdown to `replay-library/`
-
-### US-002: Generate chapter-by-chapter replay logs for each day
-**Status**: DONE
-
-- [x] Each trading day gets a markdown file in `replay-library/` (e.g., `2026-02-18-replay.md`)
-- [x] Each file includes: SPX price timeline, regime classifications, signals fired/blocked, trades taken, P&L
-- [ ] SQL queries included for each chapter so user can reproduce from DB
-- [ ] Escalation events show regime state, gate decision, and strike selection reasoning
-
-### US-003: Run backtest across all 22 backfilled days and score
-**Status**: IN PROGRESS
-
-- [x] Backtest runs successfully across all days with option data in DB
-- [ ] Overall scorecard shows: win rate >40%, total P&L positive, max single-day loss <$500
-- [ ] Emergency oversold signals (RSI <15) are caught on every day they occur
-- [ ] Regime classifier correctly blocks counter-trend signals
-- **Blocker**: 15/20 days had sparse option data (42 contracts/day from Polygon). Price band widened to $0.20-$8.00. Need to re-run and validate.
-
-### US-004: Iterate parameters until targets met
-**Status**: NOT STARTED
-
-- [ ] Win rate > 40% across all tested days
-- [ ] Average P&L positive per day
-- [ ] No single day loses more than $500
-- [ ] Emergency oversold/overbought trades consistently caught and profitable
-- [ ] Parameter changes documented with before/after comparison
-- **Depends on**: US-003 completing with valid data
-
-### US-005: Final validation and live-readiness check
-**Status**: NOT STARTED
-
-- [ ] Final backtest scorecard saved to `replay-library/SCORECARD.md`
-- [ ] All parameter values documented and committed
-- [ ] Live system uses validated parameters
-- [ ] PM2 restart command documented for deployment
-- [ ] `AGENT_PAPER=false` tested in dry-run
-- **Depends on**: US-004 meeting all targets
+| Process | Description |
+|---------|-------------|
+| `spxer` | Data pipeline — SPX/ES bars, options contracts, indicators (port 3600) |
+| `spxer-agent` | SPX 0DTE agent — margin account, up to 10 contracts, 15% of buying power |
+| `spxer-xsp` | XSP 1DTE agent — cash account, 1 contract, SPX→XSP strike conversion |
+| `xsp-monitor` | LLM-powered oversight — monitors positions/orders, flags issues (doesn't trade) |
+| `replay-viewer` | Replay viewer web UI (port 3601) |
 
 ---
 
 ## Quick Start
 
 ```bash
-# Data pipeline (always running)
-pm2 start spxer
+# Prerequisites: Node.js, PM2, .env with TRADIER_TOKEN + TRADIER_ACCOUNT_ID
+npm install
 
-# Live monitor — 6 models in parallel, with/without regime
-pm2 start live-monitor
+# Start everything
+pm2 start ecosystem.config.js
+pm2 save
 
-# Run multi-day backtest
-npx tsx backtest-multi.ts
+# Start individual processes
+pm2 start ecosystem.config.js --only spxer
+pm2 start ecosystem.config.js --only spxer-agent
+pm2 start ecosystem.config.js --only spxer-xsp
 
-# Single day
-npx tsx backtest-multi.ts 2026-03-19
+# Dev mode (data service only)
+npm run dev
 
-# Compare with/without regime filter
-npx tsx backtest-multi.ts        # with regime
-npx tsx backtest-no-regime.ts    # without regime
+# Agent in paper mode
+npm run agent          # SPX paper
+npm run agent:xsp      # XSP paper
+
+# Agent live (AGENT_PAPER=false)
+npm run agent:live
+npm run agent:xsp:live
+
+# Monitor
+pm2 logs spxer-agent --lines 50
+pm2 list
 ```
 
-## Architecture
+---
 
+## Replay & Backtesting
+
+All replay commands go through the unified CLI at `src/replay/cli.ts`:
+
+```bash
+# Single day with AI scanners/judges
+npx tsx src/replay/cli.ts run 2026-03-20
+
+# Single day, deterministic only (no AI)
+npx tsx src/replay/cli.ts run 2026-03-20 --no-scanners --no-judge
+
+# Multi-day batch backtest (deterministic)
+npx tsx src/replay/cli.ts backtest --no-scanners --no-judge
+npx tsx src/replay/cli.ts backtest --dates=2026-03-18,2026-03-19,2026-03-20
+
+# View results
+npx tsx src/replay/cli.ts results --config=default
+
+# List available dates
+npx tsx src/replay/cli.ts days
+
+# 22-day parallel replay
+npm run replay:22day
+
+# npm shortcuts
+npm run replay           # single-day replay
+npm run backtest         # multi-day, no AI
+npm run viewer           # replay viewer UI
 ```
-Data Pipeline (spxer)          Agent Layer                    Execution
-───────────────────          ───────────                    ─────────
-Tradier → SPX/ES bars    →    Scanners (Kimi, GLM, MiniMax) → Regime classifier
-Yahoo  → ES overnight         Judges (Haiku, Sonnet, Opus)    Strike selector
-           ↓                         ↓                         (deterministic)
-        SQLite DB              MarketNarrative (per-scanner)         ↓
-        (1m OHLCV +            — rolling trajectory, session build    Trade executor
-         indicators)           — overnight + pre-mkt + intraday       Stop/TP/time-exit
-                              — escalation with full context
+
+### Config Overrides
+
+```bash
+npx tsx src/replay/cli.ts run 2026-03-20 --no-scanners --no-judge \
+  --cooldownSec=180 --stopLossPercent=70 --takeProfitMultiplier=1.4 \
+  --strikeSearchRange=100 --activeStart=09:30 --activeEnd=15:45 \
+  --enableHmaCrosses=true --enableEmaCrosses=false --label=test1
 ```
+
+### Autoresearch (Parameter Optimization)
+
+```bash
+npx tsx scripts/autoresearch/verify-metric.ts --no-scanners
+npx tsx scripts/autoresearch/verify-metric.ts --dates=2026-03-19 --cooldownSec=180 --label=test1
+```
+
+---
 
 ## Key Principles
 
-> "We're not collecting dividends." — OTM only. Aggressive asymmetric bets.
+**Deterministic execution.** HMA crossover → strike selection → OTOCO bracket order. No LLM latency in the trading loop. Sub-second from signal to order.
 
-**Anticipation over reaction.** A human trader doesn't just react to each bar — they watch a story unfold. They see RSI climbing from 30, notice the trajectory, and anticipate the breakout before it happens. The system should work the same way. Scanners build narrative state across the session: session trajectory (SPX/RSI high/low with timestamps), overnight context, pre-market setup, notable moves, their own notes. When they escalate, it's not "I see something now" — it's "here's how we got here and what I'm watching."
+**Always positioned (scannerReverse).** On HMA reversal, exit current position and immediately flip to the opposite side. The system rides every move — it doesn't wait for "good setups."
 
-**Deterministic execution, agentic oversight.** Strike selection, stops, and position sizing are handled by deterministic code — no hallucination risk. LLM scanners are the eyes: they read the market, build the narrative, and escalate with context. The judge validates or blocks based on the full story. Price-action confluence provides a parallel, instantaneous trigger for when deterministic conditions fire simultaneously.
+**Server-side protection (OTOCO brackets).** Every entry triggers an OCO pair: TP limit + SL stop on the broker. If the agent crashes, Tradier enforces exits.
 
-**LLMs advise, code executes. No AI in the hot path.**
+**Startup reconciliation.** On restart, agents query the broker for open positions, adopt orphaned ones, and submit missing OCO protection. Survives PM2 restarts cleanly.
+
+**LLMs observe, code executes.** The XSP monitor agent uses LLM reasoning to flag issues but cannot place orders. Scanner/judge infrastructure exists in the codebase for replay experiments but is disabled in live trading.
+
+**Single source of truth.** All trading logic lives in `src/core/`. Live agents wrap core functions with stateful classes. Replay calls core functions directly. Never duplicate logic.
+
+**Trade friction model.** $0.05 half-spread + $0.35 commission per side applied to all P&L calculations, both backtest and live.
+
+---
+
+## Testing
+
+```bash
+npm run test              # all tests (vitest)
+npm run test:watch        # watch mode
+npx vitest run tests/pipeline/bar-builder.test.ts   # single file
+```
+
+---
+
+## REST API (port 3600)
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /health` | Service status, uptime, SPX price, DB size |
+| `GET /spx/snapshot` | Latest SPX bar with all indicators |
+| `GET /spx/bars?tf=1m&n=100` | SPX bar history |
+| `GET /contracts/active` | All ACTIVE + STICKY contracts |
+| `GET /contracts/:symbol/bars?tf=1m&n=100` | Contract bar history |
+| `GET /chain?expiry=YYYY-MM-DD` | Full options chain for an expiry |
+| `GET /chain/expirations` | Available tracked expiry dates |
+
+---
+
+## Environment Variables
+
+Required in `.env`:
+
+| Variable | Purpose |
+|----------|---------|
+| `TRADIER_TOKEN` | Tradier API token (data + orders) |
+| `TRADIER_ACCOUNT_ID` | Default Tradier account |
+| `ANTHROPIC_API_KEY` | For judge/monitor LLM calls |
+| `PORT` | Data service port (default 3600) |
+| `DB_PATH` | SQLite path (default `./data/spxer.db`) |
+| `AGENT_PAPER` | `true` for paper mode, `false` for live |
+
+---
+
+*Full architecture details, module reference, config system, and design decisions in [CLAUDE.md](CLAUDE.md).*

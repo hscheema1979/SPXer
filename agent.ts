@@ -285,6 +285,7 @@ async function runCycle(): Promise<number> {
     timeET: snap.timeET,
     cycle: cycleCount,
     mode: snap.mode,
+    paper: guard.isPaper,
     spxPrice,
     minutesToClose: snap.minutesToClose,
     contractsTracked: snap.contracts.length,
