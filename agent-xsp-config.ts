@@ -174,5 +174,6 @@ export const AGENT_XSP_CONFIG: Config = {
     accountId: '6YA58635',        // Cash account
     use1dte: true,                // 1DTE for better premium
     halfSpread: 0.10,             // XSP wider spreads than SPX
+    disableBracketOrders: true,   // Use simple market orders — OTOCO cancel broken
   },
 };

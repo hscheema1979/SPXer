@@ -184,17 +184,8 @@ async function executeEntry(
   };
 
   try {
-    // Leg 1: OTOCO bracket (test — server-side TP/SL)
-    const bracketExec = { ...EXEC, disableBracketOrders: false };
-    const { position: bracketPos, execution: bracketResult } = await openPosition(signal, decision, guard.isPaper, bracketExec);
-    if (!bracketResult.error) {
-      console.log(`[xsp] 🧪 BRACKET ${side.toUpperCase()} ${xspSymbol} x1 @ $${entryPrice.toFixed(2)} | TP=$${takeProfit.toFixed(2)} SL=$${stopLoss.toFixed(2)} (test)`);
-      logEntry({ ts: Date.now(), signal, decision, execution: bracketResult });
-    } else {
-      console.warn(`[xsp] ⚠️ BRACKET order rejected: ${bracketResult.error}`);
-    }
-
-    // Leg 2: Plain market order (agent monitors exits via TP/SL/reversal)
+    // Single market order — agent monitors exits via TP/SL/reversal
+    // (OTOCO brackets disabled — cancel logic broken, causes orphaned TP/SL legs)
     const plainExec = { ...EXEC, disableBracketOrders: true };
     const { position: plainPos, execution: plainResult } = await openPosition(signal, decision, guard.isPaper, plainExec);
     if (!plainResult.error) {

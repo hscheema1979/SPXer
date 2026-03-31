@@ -228,4 +228,12 @@ export const AGENT_CONFIG: Config = {
       },
     },
   },
+
+  // SPX execution on margin account
+  execution: {
+    symbol: 'SPX',
+    optionPrefix: 'SPXW',
+    accountId: '6YA51425',
+    disableBracketOrders: true,   // Use simple market orders — OTOCO cancel broken
+  },
 };

@@ -147,7 +147,7 @@ async function executeBuy(
   };
 
   try {
-    const { position, execution } = await openPosition(signal, decision, guard.isPaper);
+    const { position, execution } = await openPosition(signal, decision, guard.isPaper, AGENT_CONFIG.execution);
     if (!execution.error) {
       positions.add(position);
       guard.recordTrade();
