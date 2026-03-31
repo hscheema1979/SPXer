@@ -158,10 +158,11 @@ async function createSession(
 interface AssessmentResult {
   severity: Severity;
   assessment: string;
+  actionsTaken: string[];
 }
 
 function parseAssessment(text: string): AssessmentResult {
-  // Try to extract JSON { severity, assessment } from the response
+  // Try to extract JSON { severity, assessment, actions_taken } from the response
   try {
     const jsonMatch = text.match(
       /\{[\s\S]*"severity"[\s\S]*"assessment"[\s\S]*\}/,
@@ -171,14 +172,15 @@ function parseAssessment(text: string): AssessmentResult {
       const severity = ['info', 'warn', 'alert'].includes(parsed.severity)
         ? (parsed.severity as Severity)
         : 'info';
-      return { severity, assessment: parsed.assessment || text };
+      const actionsTaken = Array.isArray(parsed.actions_taken) ? parsed.actions_taken : [];
+      return { severity, assessment: parsed.assessment || text, actionsTaken };
     }
   } catch {
     // JSON parsing failed — fall through
   }
 
   // Fallback: use the full text as assessment
-  return { severity: 'info', assessment: text.trim() };
+  return { severity: 'info', assessment: text.trim(), actionsTaken: [] };
 }
 
 // ── Main Loop ───────────────────────────────────────────────────────────────
@@ -284,9 +286,16 @@ async function main(): Promise<void> {
       const responseText = responseAccumulator;
 
       // 4. Parse structured response
-      const { severity, assessment } = parseAssessment(responseText);
+      const { severity, assessment, actionsTaken } = parseAssessment(responseText);
 
-      // 5. Dedup check before logging
+      // 5. Log actions taken (always, never dedup)
+      if (actionsTaken.length > 0) {
+        for (const action of actionsTaken) {
+          logEntry(`ACTION: ${action}`, severity);
+        }
+      }
+
+      // 6. Dedup check before logging assessment
       const dedupResult = dedup.shouldLog(assessment, severity);
       if (dedupResult.log) {
         const logMsg = dedupResult.summary || assessment;
@@ -295,7 +304,7 @@ async function main(): Promise<void> {
         console.log(`[monitor] (suppressed duplicate — same condition persists)`);
       }
 
-      // 6. Store for carryover on session reset
+      // 7. Store for carryover on session reset
       cycleMgr.setLastAssessment(assessment);
     } catch (e: any) {
       logEntry(`Cycle #${cycle} error: ${e.message}`, 'alert');

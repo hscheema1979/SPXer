@@ -491,10 +491,183 @@ const logObservationTool = {
   },
 };
 
+// ── Tool 9: cancel_order ─────────────────────────────────────────────────────
+
+const cancelOrderTool = {
+  name: 'cancel_order',
+  label: 'Cancel Order',
+  description:
+    'Cancel a specific open/pending order by ID. Use to clean up stuck orders, ' +
+    'orphaned bracket legs, or stale orders that should not be active. ' +
+    'Provide the account and order ID.',
+  parameters: Type.Object({
+    account: Type.String({ description: 'Which account: "spx" or "xsp"' }),
+    order_id: Type.String({ description: 'The Tradier order ID to cancel' }),
+  }),
+  execute: async (_id: string, params: any): Promise<ToolResult> => {
+    try {
+      const key = params.account as AccountKey;
+      const acct = ACCOUNTS[key];
+      if (!acct) return textResult(`Unknown account: ${params.account}`);
+
+      await axios.delete(
+        `${TRADIER_BASE}/accounts/${acct.accountId}/orders/${params.order_id}`,
+        { headers: tradierHeaders(), timeout: 10000 },
+      );
+      const msg = `Cancelled order #${params.order_id} on ${acct.label}`;
+      console.log(`[monitor] 🗑️ ${msg}`);
+      return textResult(msg);
+    } catch (e: any) {
+      const err = e?.response?.data?.errors?.error || e.message;
+      return textResult(`Failed to cancel order #${params.order_id}: ${err}`);
+    }
+  },
+};
+
+// ── Tool 10: cancel_all_orders ──────────────────────────────────────────────
+
+const cancelAllOrdersTool = {
+  name: 'cancel_all_orders',
+  label: 'Cancel All Open Orders',
+  description:
+    'Cancel ALL open/pending orders on an account. Use for emergency cleanup — ' +
+    'e.g., agent in a rejection loop, orphaned bracket legs piling up, ' +
+    'or pre-open cleanup of stale orders.',
+  parameters: Type.Object({
+    account: Type.String({ description: 'Which account: "spx", "xsp", or "both"' }),
+  }),
+  execute: async (_id: string, params: any): Promise<ToolResult> => {
+    try {
+      const keys = params.account === 'both' ? ['spx', 'xsp'] as AccountKey[]
+        : [params.account as AccountKey];
+      const lines: string[] = [];
+
+      for (const key of keys) {
+        const acct = ACCOUNTS[key];
+        if (!acct) { lines.push(`Unknown account: ${key}`); continue; }
+
+        const { data } = await axios.get(
+          `${TRADIER_BASE}/accounts/${acct.accountId}/orders`,
+          { headers: tradierHeaders(), timeout: 10000 },
+        );
+        const raw = data?.orders?.order;
+        const orders = normalizeArray(raw);
+        let cancelled = 0;
+
+        for (const order of orders) {
+          if (order.status !== 'open' && order.status !== 'pending' && order.status !== 'partially_filled') continue;
+          try {
+            await axios.delete(
+              `${TRADIER_BASE}/accounts/${acct.accountId}/orders/${order.id}`,
+              { headers: tradierHeaders(), timeout: 10000 },
+            );
+            cancelled++;
+          } catch {
+            // some may already be cancelled/filled
+          }
+        }
+        lines.push(`${acct.label}: cancelled ${cancelled} order(s)`);
+        console.log(`[monitor] 🗑️ Cancelled ${cancelled} orders on ${acct.label}`);
+      }
+
+      return textResult(lines.join('\n'));
+    } catch (e: any) {
+      return textResult(`Error cancelling orders: ${e.message}`);
+    }
+  },
+};
+
+// ── Tool 11: close_position ─────────────────────────────────────────────────
+
+const closePositionTool = {
+  name: 'close_position',
+  label: 'Close Position (Emergency)',
+  description:
+    'Emergency close a position by submitting a market sell_to_close order. ' +
+    'Use when an agent is frozen/crashed but has open positions at the broker that need to be closed ' +
+    'to prevent expiration losses or margin violations. ' +
+    'Provide the account, option symbol, and quantity.',
+  parameters: Type.Object({
+    account: Type.String({ description: 'Which account: "spx" or "xsp"' }),
+    option_symbol: Type.String({ description: 'The option symbol to close, e.g. "SPXW260331C06420000"' }),
+    quantity: Type.Number({ description: 'Number of contracts to sell' }),
+  }),
+  execute: async (_id: string, params: any): Promise<ToolResult> => {
+    try {
+      const key = params.account as AccountKey;
+      const acct = ACCOUNTS[key];
+      if (!acct) return textResult(`Unknown account: ${params.account}`);
+
+      const rootSymbol = key === 'xsp' ? 'XSP' : 'SPX';
+      const body = new URLSearchParams({
+        class: 'option',
+        symbol: rootSymbol,
+        option_symbol: params.option_symbol,
+        side: 'sell_to_close',
+        quantity: String(params.quantity),
+        type: 'market',
+        duration: 'day',
+      }).toString();
+
+      const { data } = await axios.post(
+        `${TRADIER_BASE}/accounts/${acct.accountId}/orders`,
+        body,
+        { headers: { ...tradierHeaders(), 'Content-Type': 'application/x-www-form-urlencoded' }, timeout: 10000 },
+      );
+      const orderId = data?.order?.id;
+      const msg = `EMERGENCY CLOSE: sold ${params.quantity}x ${params.option_symbol} on ${acct.label} — order #${orderId}`;
+      console.log(`[monitor] 🚨 ${msg}`);
+      return textResult(msg);
+    } catch (e: any) {
+      const err = e?.response?.data?.errors?.error || e.message;
+      return textResult(`Failed to close position: ${err}`);
+    }
+  },
+};
+
+// ── Tool 12: stop_agent ─────────────────────────────────────────────────────
+
+const stopAgentTool = {
+  name: 'stop_agent',
+  label: 'Stop Trading Agent',
+  description:
+    'Stop a trading agent via PM2. Use when an agent is in a rejection loop, ' +
+    'trading on expired contracts, account is insolvent, or agent is causing damage. ' +
+    'The agent will NOT auto-restart after being stopped this way.',
+  parameters: Type.Object({
+    agent: Type.String({ description: 'Which agent: "spx" or "xsp"' }),
+    reason: Type.String({ description: 'Why the agent is being stopped — logged for audit' }),
+  }),
+  execute: async (_id: string, params: any): Promise<ToolResult> => {
+    try {
+      const key = params.agent as AccountKey;
+      const acct = ACCOUNTS[key];
+      if (!acct) return textResult(`Unknown agent: ${params.agent}`);
+
+      const { execSync } = await import('child_process');
+
+      // Stop the agent process
+      execSync(`pm2 stop ${acct.agentProcess} 2>/dev/null`, { encoding: 'utf-8', timeout: 10000 });
+
+      const msg = `STOPPED ${acct.agentProcess}: ${params.reason}`;
+      console.log(`[monitor] 🛑 ${msg}`);
+
+      // Log to monitor file
+      fs.mkdirSync('logs', { recursive: true });
+      fs.appendFileSync(MONITOR_LOG_FILE, `[${new Date().toISOString()}] [ACTION] ${msg}\n`);
+
+      return textResult(msg);
+    } catch (e: any) {
+      return textResult(`Failed to stop agent: ${e.message}`);
+    }
+  },
+};
+
 // ── Export all tools ────────────────────────────────────────────────────────
 
-/** All 8 monitor tools as Pi SDK ToolDefinition objects */
+/** All 12 monitor tools as Pi SDK ToolDefinition objects */
 export const MONITOR_TOOLS = [
+  // Read-only observation (tools 1-8)
   getPositionsTool,
   getOrdersTool,
   getBalanceTool,
@@ -503,4 +676,9 @@ export const MONITOR_TOOLS = [
   getAgentStatusTool,
   checkSystemHealthTool,
   logObservationTool,
+  // Remediation actions (tools 9-12)
+  cancelOrderTool,
+  cancelAllOrdersTool,
+  closePositionTool,
+  stopAgentTool,
 ];
