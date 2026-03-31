@@ -5,8 +5,8 @@
  * Strategy: HMA(3) × HMA(17) cross on SPX underlying → enter OTM contract
  *           → exit on reversal cross (scannerReverse) → immediately flip to opposite side
  *
- * Matches the backtested config: hma3x17-undhma-otm15-tp14x-sl70
- * Full year results: $2M P&L, 59.2% WR, 88% green days, 2.17:1 win/loss
+ * HTTP streaming for real-time TP/SL monitoring when holding a position.
+ * Per-cycle broker reconciliation to prevent phantom/orphan positions.
  *
  * Usage:
  *   npm run agent              # paper mode (default)
@@ -16,12 +16,18 @@ import * as dotenv from 'dotenv';
 dotenv.config();
 
 import { fetchMarketSnapshot, type MarketSnapshot } from './src/agent/market-feed';
-import { openPosition } from './src/agent/trade-executor';
+import { openPosition, closePosition } from './src/agent/trade-executor';
 import { PositionManager, type PositionCloseEvent } from './src/agent/position-manager';
 import { AGENT_CONFIG } from './agent-config';
 import { RiskGuard } from './src/agent/risk-guard';
 import { logEntry, logRejected } from './src/agent/audit-log';
 import { writeStatus, logActivity } from './src/agent/reporter';
+import { PriceStream } from './src/agent/price-stream';
+import { nowET, todayET } from './src/utils/et-time';
+import { config as appConfig, TRADIER_BASE } from './src/config';
+import axios from 'axios';
+import * as fs from 'fs';
+import * as path from 'path';
 import type { AgentSignal, AgentDecision } from './src/agent/types';
 import { selectStrike, type StrikeCandidate } from './src/core/strike-selector';
 import { computeQty } from './src/core/position-sizer';
@@ -32,12 +38,95 @@ import { computeTradeSize } from './src/agent/account-balance';
 
 const guard = new RiskGuard(AGENT_CONFIG);
 const positions = new PositionManager(AGENT_CONFIG, guard.isPaper);
+const priceStream = new PriceStream();
 
 let cycleCount = 0;
 let tradesTotal = 0;
 let winsTotal = 0;
 let dailyPnl = 0;
 let dailyDate = '';
+let consecutiveRejections = 0;
+const MAX_REJECTIONS_BEFORE_BACKOFF = 3;
+const REJECTION_BACKOFF_SECS = 300;
+let rejectionBackoffUntil = 0;
+
+// ── Price Stream TP/SL Callback ─────────────────────────────────────────────
+
+let streamExitPending = false;
+
+priceStream.onPrice((symbol, last, bid, ask) => {
+  for (const pos of positions.getAll()) {
+    if (pos.symbol !== symbol) continue;
+    const sellPrice = bid > 0 ? bid : last;
+
+    if (pos.takeProfit && sellPrice >= pos.takeProfit) {
+      console.log(`[stream] 🎯 TP HIT on ${symbol}: $${sellPrice.toFixed(2)} >= TP $${pos.takeProfit.toFixed(2)}`);
+      streamExitPending = true;
+    }
+    if (pos.stopLoss && sellPrice <= pos.stopLoss) {
+      console.log(`[stream] 🛑 SL HIT on ${symbol}: $${sellPrice.toFixed(2)} <= SL $${pos.stopLoss.toFixed(2)}`);
+      streamExitPending = true;
+    }
+  }
+});
+
+// ── Broker Reconciliation ───────────────────────────────────────────────────
+
+async function reconcileBrokerPositions(): Promise<void> {
+  const accountId = AGENT_CONFIG.execution?.accountId || process.env.TRADIER_ACCOUNT_ID || '';
+  const hdrs = {
+    Authorization: `Bearer ${appConfig.tradierToken}`,
+    Accept: 'application/json',
+  };
+
+  try {
+    const { data } = await axios.get(
+      `${TRADIER_BASE}/accounts/${accountId}/positions`,
+      { headers: hdrs, timeout: 10000 },
+    );
+    const raw = data?.positions?.position;
+    const brokerPositions = Array.isArray(raw) ? raw : raw ? [raw] : [];
+    const brokerSymbols = new Set(brokerPositions.map((p: any) => p.symbol));
+    const agentSymbols = new Set(positions.getAll().map(p => p.symbol));
+
+    // Orphaned at broker — close immediately
+    for (const bp of brokerPositions) {
+      if (!agentSymbols.has(bp.symbol)) {
+        console.log(`[agent] ⚠️ ORPHAN at broker: ${bp.symbol} x${bp.quantity} — closing immediately`);
+        try {
+          const rootSymbol = AGENT_CONFIG.execution?.symbol || 'SPX';
+          const body = new URLSearchParams({
+            class: 'option',
+            symbol: rootSymbol,
+            option_symbol: bp.symbol,
+            side: 'sell_to_close',
+            quantity: String(Math.abs(bp.quantity)),
+            type: 'market',
+            duration: 'day',
+          }).toString();
+          const { data: orderData } = await axios.post(
+            `${TRADIER_BASE}/accounts/${accountId}/orders`,
+            body,
+            { headers: { ...hdrs, 'Content-Type': 'application/x-www-form-urlencoded' }, timeout: 10000 },
+          );
+          console.log(`[agent] 🗑️ Closed orphan ${bp.symbol} — order #${orderData?.order?.id}`);
+        } catch (e: any) {
+          console.error(`[agent] Failed to close orphan ${bp.symbol}: ${e?.response?.data?.errors?.error || e.message}`);
+        }
+      }
+    }
+
+    // Phantom in agent — drop it
+    for (const pos of positions.getAll()) {
+      if (!brokerSymbols.has(pos.symbol)) {
+        console.log(`[agent] ⚠️ PHANTOM: ${pos.symbol} — dropping from agent state`);
+        positions.remove(pos.id);
+      }
+    }
+  } catch (e: any) {
+    console.warn(`[agent] Reconciliation check failed: ${e.message}`);
+  }
+}
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -100,6 +189,13 @@ async function executeBuy(
   selection: TradeSelection,
   snap: MarketSnapshot,
 ): Promise<boolean> {
+  // Rejection backoff
+  if (Date.now() < rejectionBackoffUntil) {
+    const remaining = Math.round((rejectionBackoffUntil - Date.now()) / 1000);
+    console.log(`[agent] Rejection backoff — ${remaining}s remaining`);
+    return false;
+  }
+
   const contractState = snap.contracts.find(c => c.meta.symbol === selection.symbol);
   if (!contractState) {
     console.warn(`[agent] Contract ${selection.symbol} not in snapshot — skipping`);
@@ -152,12 +248,22 @@ async function executeBuy(
       positions.add(position);
       guard.recordTrade();
       tradesTotal++;
-      console.log(`[agent] ✅ ENTERED ${selection.side.toUpperCase()} ${selection.symbol} x${selection.qty} @ $${selection.price.toFixed(2)} | stop=$${selection.stopLoss.toFixed(2)} tp=$${selection.takeProfit.toFixed(2)}`);
+      consecutiveRejections = 0;
+      console.log(`[agent] ✅ ENTERED ${selection.side.toUpperCase()} ${selection.symbol} x${selection.qty} @ $${(execution.fillPrice ?? selection.price).toFixed(2)} | SL=$${selection.stopLoss.toFixed(2)} TP=$${selection.takeProfit.toFixed(2)}`);
       logEntry({ ts: Date.now(), signal, decision, execution });
+
+      // Start streaming prices for real-time TP/SL
+      await priceStream.updateSymbols([position.symbol]);
+
       return true;
     } else {
       console.error(`[agent] ❌ Order failed: ${execution.error}`);
       logEntry({ ts: Date.now(), signal, decision, execution });
+      consecutiveRejections++;
+      if (consecutiveRejections >= MAX_REJECTIONS_BEFORE_BACKOFF) {
+        rejectionBackoffUntil = Date.now() + REJECTION_BACKOFF_SECS * 1000;
+        console.log(`[agent] 🚫 ${consecutiveRejections} consecutive rejections — backing off ${REJECTION_BACKOFF_SECS}s`);
+      }
       return false;
     }
   } catch (e) {
@@ -179,7 +285,7 @@ function banner(): void {
   console.log(`║  TP/SL:   ${cfg.position.takeProfitMultiplier}x / ${cfg.position.stopLossPercent}%                                     ║`);
   console.log(`║  Target:  $${cfg.signals.targetOtmDistance} OTM | $${cfg.sizing.baseDollarsPerTrade} base | max ${cfg.sizing.maxContracts} contracts  ║`);
   console.log(`║  Risk:    $${cfg.risk.maxRiskPerTrade}/trade | cutoff ${cfg.risk.cutoffTimeET} ET            ║`);
-  console.log(`║  Scanners: DISABLED  |  Judges: DISABLED               ║`);
+  console.log(`║  Stream:  HTTP streaming for real-time TP/SL            ║`);
   console.log('╚══════════════════════════════════════════════════════════╝\n');
 }
 
@@ -188,8 +294,6 @@ function banner(): void {
 async function runCycle(): Promise<number> {
   cycleCount++;
   const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
-
-  // Daily state is reset in the outer loop (main) at market open
 
   // 1. Fetch market state
   let snap: MarketSnapshot;
@@ -204,7 +308,7 @@ async function runCycle(): Promise<number> {
   const openCount = positions.count();
   console.log(`\n[agent] ═══ #${cycleCount} @ ${ts} | SPX ${spxPrice.toFixed(2)} | ${snap.contracts.length} contracts | ${openCount} open | daily P&L: $${dailyPnl.toFixed(0)} ═══`);
 
-  // 1b. Warmup check — don't trade until activeStart (indicators need bars to compute)
+  // 2. Warmup check
   const { h: etH, m: etM } = nowET();
   const [asH, asM] = AGENT_CONFIG.timeWindows.activeStart.split(':').map(Number);
   if (etH * 60 + etM < asH * 60 + asM) {
@@ -212,20 +316,43 @@ async function runCycle(): Promise<number> {
     return 30;
   }
 
-  // 2. Update HMA cross state from SPX bars
+  // 3. CLOSE FIRST — reconcile broker positions every cycle
+  await reconcileBrokerPositions();
+
+  // 4. Update HMA cross state from SPX bars
   positions.updateHmaCross(snap.spx.bars1m);
   const hmaCross = positions.getHmaCrossDirection();
-
   if (hmaCross) {
     const arrow = hmaCross === 'bullish' ? '🔼' : '🔽';
     console.log(`[agent] HMA cross: ${arrow} ${hmaCross.toUpperCase()}`);
   }
 
-  // 3. Monitor existing positions — may close and return events
+  // 5. Monitor existing positions — may close and return events
   const closeEvents = await positions.monitor(pnl => {
     guard.recordLoss(pnl);
     dailyPnl += pnl;
   });
+
+  // Handle stream-flagged exits that monitor didn't catch
+  if (streamExitPending && closeEvents.length === 0 && positions.count() > 0) {
+    console.log(`[agent] ⚡ Stream flagged exit — force-closing`);
+    for (const pos of positions.getAll()) {
+      const streamPrice = priceStream.getPrice(pos.symbol);
+      const sellPrice = streamPrice?.bid ?? streamPrice?.last ?? pos.entryPrice;
+
+      const result = await closePosition(pos, 'stream_exit', sellPrice, guard.isPaper, AGENT_CONFIG.execution);
+      const pnl = ((result.fillPrice ?? sellPrice) - pos.entryPrice) * pos.quantity * 100;
+      dailyPnl += pnl;
+      guard.recordLoss(pnl);
+      positions.remove(pos.id);
+
+      const emoji = pnl >= 0 ? '💰' : '💸';
+      if (pnl > 0) winsTotal++;
+      console.log(`[agent] ${emoji} STREAM-CLOSED ${pos.symbol} @ $${(result.fillPrice ?? sellPrice).toFixed(2)}: P&L $${pnl.toFixed(0)}`);
+      closeEvents.push({ position: pos, closePrice: result.fillPrice ?? sellPrice, reason: 'stream_exit', pnl });
+    }
+  }
+  streamExitPending = false;
 
   for (const evt of closeEvents) {
     const emoji = evt.pnl >= 0 ? '💰' : '💸';
@@ -233,14 +360,19 @@ async function runCycle(): Promise<number> {
     console.log(`[agent] ${emoji} CLOSED ${evt.position.symbol} (${evt.reason}): P&L $${evt.pnl.toFixed(0)}`);
   }
 
-  // 4. Risk guard check
+  // Stop streaming if no positions
+  if (positions.count() === 0 && priceStream.isConnected()) {
+    priceStream.stop();
+  }
+
+  // 6. Risk guard check
   const riskCheck = guard.check(positions.getAll(), snap.minutesToClose);
   if (!riskCheck.allowed) {
     console.log(`[agent] Risk guard: ${riskCheck.reason}`);
     return 60;
   }
 
-  // 5. Handle flip-on-reversal: if position closed via signal_reversal, enter opposite
+  // 7. Handle flip-on-reversal — CLOSE already happened, now ENTER opposite
   const reversals = closeEvents.filter(e => e.reason === 'signal_reversal');
   for (const rev of reversals) {
     const flipDirection = rev.position.side === 'call' ? 'bearish' : 'bullish';
@@ -256,7 +388,7 @@ async function runCycle(): Promise<number> {
     }
   }
 
-  // 6. If no position open and no flip happened, check for new entry on HMA cross
+  // 8. If no position open and no flip happened, check for new entry
   if (positions.count() === 0 && reversals.length === 0 && hmaCross) {
     const direction = hmaCross;
     const side = direction === 'bullish' ? 'call' : 'put';
@@ -271,7 +403,7 @@ async function runCycle(): Promise<number> {
     }
   }
 
-  // 7. Report status
+  // 9. Report status
   const wr = tradesTotal > 0 ? (winsTotal / tradesTotal * 100).toFixed(0) : '-';
   writeStatus({
     ts: Date.now(),
@@ -289,7 +421,7 @@ async function runCycle(): Promise<number> {
     lastAction: positions.count() > 0 ? 'holding' : 'watching',
     lastReasoning: `HMA ${hmaCross ?? 'none'} | trades: ${tradesTotal} (WR ${wr}%) | daily P&L: $${dailyPnl.toFixed(0)}`,
     scannerReads: [],
-    nextCheckSecs: 15,
+    nextCheckSecs: positions.count() > 0 ? 5 : 30,
     upSince: '',
   });
 
@@ -297,39 +429,23 @@ async function runCycle(): Promise<number> {
     ts: Date.now(),
     timeET: snap.timeET,
     cycle: cycleCount,
-    event: 'cycle',
+    event: 'cycle' as any,
     summary: `SPX ${spxPrice.toFixed(2)} | HMA ${hmaCross ?? '-'} | ${positions.count()} open | P&L $${dailyPnl.toFixed(0)}`,
     details: {
       hmaCross,
       openPositions: positions.count(),
       dailyPnl,
       tradesTotal,
-      closeEvents: closeEvents.map(e => ({
-        symbol: e.position.symbol,
-        reason: e.reason,
-        pnl: e.pnl,
-      })),
+      closeEvents: closeEvents.map(e => ({ symbol: e.position.symbol, reason: e.reason, pnl: e.pnl })),
     },
   });
 
-  // Fast polling when in a trade (15s), slower when watching (30s)
-  return positions.count() > 0 ? 15 : 30;
+  // Poll faster when holding (5s) since stream handles TP/SL in between
+  return positions.count() > 0 ? 5 : 30;
 }
 
-// ── Startup ─────────────────────────────────────────────────────────────────
+// ── Order Cleanup ────────────────────────────────────────────────────────────
 
-// ── Market Hours ─────────────────────────────────────────────────────────────
-
-import { nowET, todayET } from './src/utils/et-time';
-import { config as appConfig, TRADIER_BASE } from './src/config';
-import axios from 'axios';
-import * as fs from 'fs';
-import * as path from 'path';
-
-/**
- * Cancel ALL open/pending orders on the account.
- * Called at market close and before market open to ensure no stale orders linger.
- */
 async function cancelAllOpenOrders(): Promise<number> {
   const accountId = AGENT_CONFIG.execution?.accountId || process.env.TRADIER_ACCOUNT_ID || '';
   const hdrs = {
@@ -348,7 +464,6 @@ async function cancelAllOpenOrders(): Promise<number> {
 
     for (const order of orders) {
       if (order.status !== 'open' && order.status !== 'pending' && order.status !== 'partially_filled') continue;
-
       try {
         await axios.delete(
           `${TRADIER_BASE}/accounts/${accountId}/orders/${order.id}`,
@@ -367,38 +482,32 @@ async function cancelAllOpenOrders(): Promise<number> {
   return cancelled;
 }
 
-/** Get current ET minutes-of-day */
+// ── Market Hours ─────────────────────────────────────────────────────────────
+
 function etMinuteOfDay(): number {
   const { h, m } = nowET();
   return h * 60 + m;
 }
 
-const MARKET_OPEN = 9 * 60 + 30;   // 9:30 AM ET
-const MARKET_CLOSE = 16 * 60;       // 4:00 PM ET
+const MARKET_OPEN = 9 * 60 + 30;
+const MARKET_CLOSE = 16 * 60;
 
-/** Returns true if current ET time is within trading hours */
 function isMarketOpen(): boolean {
   const mins = etMinuteOfDay();
   return mins >= MARKET_OPEN && mins < MARKET_CLOSE;
 }
 
-/** Sleep until next 9:30 AM ET. Returns ms slept. */
 async function sleepUntilMarketOpen(): Promise<void> {
   while (true) {
     const mins = etMinuteOfDay();
     if (mins >= MARKET_OPEN && mins < MARKET_CLOSE) return;
-
-    // Calculate wait time
     let waitMins: number;
     if (mins >= MARKET_CLOSE) {
-      // After close — wait until tomorrow 9:30
       waitMins = (24 * 60 - mins) + MARKET_OPEN;
     } else {
-      // Before open
       waitMins = MARKET_OPEN - mins;
     }
-
-    const waitMs = Math.min(waitMins * 60 * 1000, 5 * 60 * 1000); // check every 5 min max
+    const waitMs = Math.min(waitMins * 60 * 1000, 5 * 60 * 1000);
     console.log(`[agent] Market closed — ${waitMins} min until open. Sleeping...`);
     await new Promise(r => setTimeout(r, waitMs));
   }
@@ -414,7 +523,7 @@ function dailyReview(): void {
 
   const review = [
     `\n${'═'.repeat(70)}`,
-    `  DAILY REVIEW — ${date} — SPX Agent (6YA51425)`,
+    `  DAILY REVIEW — ${date} — SPX Agent (${AGENT_CONFIG.execution?.accountId ?? 'default'})`,
     `${'═'.repeat(70)}`,
     ``,
     `  Trades:     ${tradesTotal} total (${winsTotal} wins, ${losses} losses)`,
@@ -422,36 +531,22 @@ function dailyReview(): void {
     `  Daily P&L:  $${dailyPnl.toFixed(2)}`,
     `  Avg P&L:    $${avgPnl}/trade`,
     `  Paper:      ${guard.isPaper ? 'YES' : 'NO — LIVE'}`,
+    `  Rejections: ${consecutiveRejections} consecutive`,
     ``,
   ];
 
-  // Lessons learned
   const lessons: string[] = [];
-
-  if (tradesTotal === 0) {
-    lessons.push('No trades executed. Check if risk guard or contract selection blocked all signals.');
-  }
-  if (tradesTotal > 30) {
-    lessons.push(`High trade count (${tradesTotal}). HMA whipsawing — consider wider HMA periods or cooldown.`);
-  }
-  if (dailyPnl < -1000) {
-    lessons.push(`Significant loss ($${dailyPnl.toFixed(0)}). Review largest losing trades for pattern.`);
-  }
-  if (tradesTotal > 0 && parseFloat(wr) < 40) {
-    lessons.push(`Low win rate (${wr}%). Signal quality may be poor today — choppy market?`);
-  }
-  if (tradesTotal > 0 && parseFloat(wr) > 70) {
-    lessons.push(`Strong win rate (${wr}%). Trending market favored the strategy.`);
-  }
-  if (dailyPnl > 0 && tradesTotal > 0) {
-    lessons.push(`Profitable day. Strategy worked as designed.`);
-  }
+  if (tradesTotal === 0) lessons.push('No trades executed.');
+  if (tradesTotal > 30) lessons.push(`High trade count (${tradesTotal}). HMA whipsawing.`);
+  if (dailyPnl < -1000) lessons.push(`Significant loss ($${dailyPnl.toFixed(0)}).`);
+  if (tradesTotal > 0 && parseFloat(wr) < 40) lessons.push(`Low win rate (${wr}%).`);
+  if (tradesTotal > 0 && parseFloat(wr) > 70) lessons.push(`Strong win rate (${wr}%).`);
+  if (dailyPnl > 0 && tradesTotal > 0) lessons.push(`Profitable day.`);
+  if (consecutiveRejections > 0) lessons.push(`${consecutiveRejections} rejections — check buying power.`);
 
   if (lessons.length > 0) {
     review.push(`  Lessons:`);
-    for (const l of lessons) {
-      review.push(`    • ${l}`);
-    }
+    for (const l of lessons) review.push(`    • ${l}`);
     review.push(``);
   }
 
@@ -459,17 +554,13 @@ function dailyReview(): void {
   const text = review.join('\n');
   console.log(text);
 
-  // Write to daily review log
   try {
-    const reviewDir = path.join(process.cwd(), 'logs');
-    fs.mkdirSync(reviewDir, { recursive: true });
-    const reviewFile = path.join(reviewDir, 'daily-reviews.log');
-    fs.appendFileSync(reviewFile, text + '\n');
+    fs.mkdirSync(path.join(process.cwd(), 'logs'), { recursive: true });
+    fs.appendFileSync(path.join(process.cwd(), 'logs', 'daily-reviews.log'), text + '\n');
   } catch (e) {
     console.error('[agent] Failed to write daily review:', (e as Error).message);
   }
 
-  // Also log as activity
   logActivity({
     ts: Date.now(),
     timeET: `${nowET().h.toString().padStart(2, '0')}:${nowET().m.toString().padStart(2, '0')} ET`,
@@ -494,14 +585,16 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  // Start price stream (connects on demand)
+  await priceStream.start([]);
+
   // Outer loop: one iteration per trading day
   while (true) {
     console.log('[agent] Waiting for market open...');
     await sleepUntilMarketOpen();
-
     console.log('[agent] Market open — starting trading session');
 
-    // Pre-open: cancel any stale orders from previous session
+    // Pre-open: cancel stale orders
     const cancelledPreOpen = await cancelAllOpenOrders();
     if (cancelledPreOpen > 0) console.log(`[agent] Cancelled ${cancelledPreOpen} stale order(s) pre-open`);
 
@@ -509,10 +602,12 @@ async function main(): Promise<void> {
     dailyPnl = 0;
     tradesTotal = 0;
     winsTotal = 0;
+    consecutiveRejections = 0;
+    rejectionBackoffUntil = 0;
     dailyDate = todayET();
     guard.resetIfNewDay();
 
-    // Dynamic sizing: update baseDollarsPerTrade from account balance
+    // Dynamic sizing
     if (AGENT_CONFIG.sizing.riskPercentOfAccount) {
       const tradeSize = await computeTradeSize(
         AGENT_CONFIG.sizing.riskPercentOfAccount,
@@ -522,11 +617,15 @@ async function main(): Promise<void> {
       console.log(`[agent] Daily sizing: $${tradeSize} per trade (${AGENT_CONFIG.sizing.riskPercentOfAccount}% of account)`);
     }
 
-    // Reconcile any open positions from broker (survives restarts)
+    // Reconcile broker positions
     const reconciled = await positions.reconcileFromBroker(AGENT_CONFIG.execution);
-    if (reconciled > 0) console.log(`[agent] Reconciled ${reconciled} position(s) from broker`);
+    if (reconciled > 0) {
+      console.log(`[agent] Reconciled ${reconciled} position(s) from broker`);
+      const symbols = positions.getAll().map(p => p.symbol);
+      if (symbols.length > 0) await priceStream.updateSymbols(symbols);
+    }
 
-    console.log('[agent] First cycle in 5s (letting bars build)...\n');
+    console.log('[agent] First cycle in 5s...\n');
     await new Promise(r => setTimeout(r, 5000));
 
     // Inner loop: trade until market close
@@ -540,8 +639,9 @@ async function main(): Promise<void> {
       await new Promise(r => setTimeout(r, nextCheckSecs * 1000));
     }
 
-    // Market closed — cancel all orders + daily review
+    // Market closed
     console.log('\n[agent] 🔔 Market closed — ending trading session');
+    priceStream.stop();
     const cancelledAtClose = await cancelAllOpenOrders();
     if (cancelledAtClose > 0) console.log(`[agent] Cancelled ${cancelledAtClose} open order(s) at market close`);
     dailyReview();
@@ -549,7 +649,7 @@ async function main(): Promise<void> {
   }
 }
 
-process.on('SIGTERM', () => { console.log('\n[agent] Shutting down (SIGTERM)'); process.exit(0); });
-process.on('SIGINT',  () => { console.log('\n[agent] Shutting down (SIGINT)');  process.exit(0); });
+process.on('SIGTERM', () => { priceStream.stop(); console.log('\n[agent] Shutting down (SIGTERM)'); process.exit(0); });
+process.on('SIGINT',  () => { priceStream.stop(); console.log('\n[agent] Shutting down (SIGINT)');  process.exit(0); });
 
 main().catch(e => { console.error('[agent] Fatal:', e); process.exit(1); });

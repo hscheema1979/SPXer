@@ -57,6 +57,12 @@ export class PositionManager {
     return this.positions.size;
   }
 
+  /** Remove a position by ID (e.g., phantom position detected during reconciliation) */
+  remove(id: string): void {
+    this.positions.delete(id);
+    this.highWaterPrices.delete(id);
+  }
+
   /** Get the current HMA cross direction (for agent.ts to use in entry decisions) */
   getHmaCrossDirection(): Direction | null {
     return this.hmaCrossDirection;
