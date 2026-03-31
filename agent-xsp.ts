@@ -195,6 +195,14 @@ async function runCycle(): Promise<number> {
   const wr = tradesTotal > 0 ? (winsTotal / tradesTotal * 100).toFixed(0) : '-';
   console.log(`\n[xsp] ═══ #${cycleCount} @ ${ts} | SPX ${spxPrice.toFixed(2)} | ${positions.count()} open | trades: ${tradesTotal} (WR ${wr}%) | P&L: $${dailyPnl.toFixed(0)} ═══`);
 
+  // 1b. Warmup check — don't trade until activeStart (indicators need bars to compute)
+  const { h: etH, m: etM } = nowET();
+  const [asH, asM] = CFG.timeWindows.activeStart.split(':').map(Number);
+  if (etH * 60 + etM < asH * 60 + asM) {
+    console.log(`[xsp] Warming up — waiting until ${CFG.timeWindows.activeStart} ET for indicator stabilization`);
+    return 30;
+  }
+
   // 2. Update HMA cross state
   positions.updateHmaCross(snap.spx.bars1m);
   const hmaCross = positions.getHmaCrossDirection();

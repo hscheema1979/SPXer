@@ -204,6 +204,14 @@ async function runCycle(): Promise<number> {
   const openCount = positions.count();
   console.log(`\n[agent] ═══ #${cycleCount} @ ${ts} | SPX ${spxPrice.toFixed(2)} | ${snap.contracts.length} contracts | ${openCount} open | daily P&L: $${dailyPnl.toFixed(0)} ═══`);
 
+  // 1b. Warmup check — don't trade until activeStart (indicators need bars to compute)
+  const { h: etH, m: etM } = nowET();
+  const [asH, asM] = AGENT_CONFIG.timeWindows.activeStart.split(':').map(Number);
+  if (etH * 60 + etM < asH * 60 + asM) {
+    console.log(`[agent] Warming up — waiting until ${AGENT_CONFIG.timeWindows.activeStart} ET for indicator stabilization`);
+    return 30;
+  }
+
   // 2. Update HMA cross state from SPX bars
   positions.updateHmaCross(snap.spx.bars1m);
   const hmaCross = positions.getHmaCrossDirection();

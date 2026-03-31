@@ -68,7 +68,7 @@ export const AGENT_XSP_CONFIG: Config = {
   timeWindows: {
     sessionStart: '09:30',
     sessionEnd: '15:45',
-    activeStart: '09:30',
+    activeStart: '09:45',
     activeEnd: '15:45',
     skipWeekends: true,
     skipHolidays: true,
