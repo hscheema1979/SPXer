@@ -152,15 +152,18 @@ Same HMA3×17 strategy, signals from SPX data pipeline, but executes on XSP (Min
 - **Two orders per signal**: 1 OTOCO bracket (server-side TP/SL) + 1 plain market (agent-managed exits)
 - **Config**: `agent-xsp-config.ts` — $10 OTM, TP 1.4x, SL 70%, max 1 contract
 
-#### XSP Monitor (`agent-xsp-monitor.ts`)
+#### Account Monitor (`account-monitor.ts`)
 
-LLM-powered oversight agent using the Pi SDK — does NOT trade, only monitors and reports:
-- Uses DeepSeek V3 via LiteLLM proxy for reasoning
-- Custom tools: `get_positions`, `get_orders`, `get_quotes`, `get_balance`, `get_spx_snapshot`, `get_agent_status`, `log_observation` (all query Tradier API directly)
-- Runs every 30 seconds — checks for orphaned positions, rejected orders, signal/position mismatches, P&L drift
-- Logs observations to `logs/xsp-monitor.log` with severity levels (info/warn/alert)
-- Has `read` and `bash` tools to inspect PM2 logs and agent status files
-- Uses `src/monitor/` for shared infrastructure (see below)
+Unified LLM-powered oversight agent using the Pi SDK — monitors BOTH accounts, does NOT trade:
+- Uses Claude Haiku 4.5 for fast, structured assessments
+- Pre-collects all data via `collectPreLLMData()` (no expensive LLM tool round-trips)
+- Market-hours-aware scheduling: 30s RTH, 5min pre-market, 2min post-close, 30min overnight, off weekends/holidays
+- Alert deduplication: suppresses identical alerts within 5-min windows, emits summaries for persistent conditions
+- Session reset every 20 cycles to prevent context window bloat (was causing OOM/restarts)
+- 8 tools: `get_positions`, `get_orders`, `get_quotes`, `get_balance`, `get_market_snapshot`, `get_agent_status`, `check_system_health`, `log_observation` (all query both accounts)
+- Logs to `logs/account-monitor.log` with severity levels (info/warn/alert)
+- Has `read` and `bash` tools for ad-hoc investigation
+- Uses `src/monitor/` for all infrastructure (see below)
 
 ### Unified Account Monitor (`src/monitor/`)
 
@@ -174,7 +177,7 @@ src/monitor/
 └── types.ts      — AccountKey, Severity, AccountConfig, ACCOUNTS map (SPX + XSP)
 ```
 
-The engine determines monitor mode (`pre-market`, `rth`, `post-close`, `overnight`, `closed`) based on ET time and adjusts polling intervals accordingly. Tool definitions query Tradier, the data service, and agent status files. `agent-xsp-monitor.ts` is the entry point that wires these together with the Pi SDK.
+The engine determines monitor mode (`pre-market`, `rth`, `post-close`, `overnight`, `closed`) based on ET time and adjusts polling intervals accordingly. Tool definitions query Tradier, the data service, and agent status files. `account-monitor.ts` is the entry point that wires these together with the Pi SDK.
 
 #### Modules still in codebase (used by replay/monitoring, NOT by live agents)
 
@@ -369,7 +372,7 @@ All processes managed via `ecosystem.config.js`. Start with `pm2 start ecosystem
 | spxer | Data pipeline — collects SPX/ES/options bars, serves REST + WebSocket (port 3600) |
 | spxer-agent | SPX 0DTE trading agent — margin account 6YA51425 (`AGENT_PAPER=false`) |
 | spxer-xsp | XSP 1DTE trading agent — cash account 6YA58635 (`AGENT_PAPER=false`) |
-| xsp-monitor | LLM-powered position/order oversight agent (Pi SDK, doesn't trade) |
+| account-monitor | Unified LLM-powered oversight — both accounts (Pi SDK, doesn't trade) |
 | replay-viewer | Replay viewer web UI (port 3601) |
 
 ## Replay Library

@@ -80,11 +80,11 @@ module.exports = {
       merge_logs: true,
     },
 
-    // ── XSP Monitor (LLM-powered position/order oversight) ───────
+    // ── Account Monitor (LLM-powered oversight — both accounts) ──
     {
-      name: 'xsp-monitor',
+      name: 'account-monitor',
       script: 'npx',
-      args: 'tsx agent-xsp-monitor.ts',
+      args: 'tsx account-monitor.ts',
       cwd: '/home/ubuntu/SPXer',
       watch: false,
       autorestart: true,
@@ -92,7 +92,7 @@ module.exports = {
       min_uptime: '10s',
       restart_delay: 10000,
       kill_timeout: 5000,
-      max_memory_restart: '256M',
+      max_memory_restart: '512M',
       env: {
         NODE_ENV: 'production',
       },

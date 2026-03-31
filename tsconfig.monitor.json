@@ -8,5 +8,5 @@
     "skipLibCheck": true,
     "outDir": "./dist-monitor"
   },
-  "include": ["agent-xsp-monitor.ts"]
+  "include": ["account-monitor.ts"]
 }

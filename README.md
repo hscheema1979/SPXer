@@ -28,7 +28,7 @@ Trading Agents (spxer-agent, spxer-xsp)
                         HMA reversal                    │
                                                   Tradier API (live)
 
-Monitor (xsp-monitor)                  Replay (src/replay/)
+Monitor (account-monitor)               Replay (src/replay/)
 ──────────────────────                 ─────────────────────
   Pi SDK LLM agent                     In-memory bar cache
   reads positions/orders               Same src/core/ logic
@@ -48,7 +48,7 @@ All processes managed via `ecosystem.config.js`:
 | `spxer` | Data pipeline — SPX/ES bars, options contracts, indicators (port 3600) |
 | `spxer-agent` | SPX 0DTE agent — margin account, up to 10 contracts, 15% of buying power |
 | `spxer-xsp` | XSP 1DTE agent — cash account, 1 contract, SPX→XSP strike conversion |
-| `xsp-monitor` | LLM-powered oversight — monitors positions/orders, flags issues (doesn't trade) |
+| `account-monitor` | LLM-powered oversight — monitors both accounts, positions/orders, flags issues (doesn't trade) |
 | `replay-viewer` | Replay viewer web UI (port 3601) |
 
 ---
