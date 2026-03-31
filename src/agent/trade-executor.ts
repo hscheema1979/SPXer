@@ -26,6 +26,59 @@ function headers() {
   };
 }
 
+/**
+ * Poll Tradier for an order's fill status.
+ * Returns the actual fill price if filled, or null if rejected/expired/timeout.
+ * Polls every 500ms for up to maxWaitMs (default 5s).
+ */
+async function waitForFill(
+  orderId: number,
+  accountId: string,
+  maxWaitMs = 5000,
+): Promise<{ status: string; fillPrice: number | null; rejectedReason?: string }> {
+  const start = Date.now();
+  const pollMs = 500;
+
+  while (Date.now() - start < maxWaitMs) {
+    try {
+      const { data } = await axios.get(
+        `${TRADIER_BASE}/accounts/${accountId}/orders/${orderId}`,
+        { headers: headers(), timeout: 5000 },
+      );
+      const order = data?.order;
+      if (!order) break;
+
+      if (order.status === 'filled') {
+        const fill = parseFloat(order.avg_fill_price);
+        return { status: 'filled', fillPrice: isNaN(fill) ? null : fill };
+      }
+      if (order.status === 'rejected') {
+        return { status: 'rejected', fillPrice: null, rejectedReason: order.reason_description || 'unknown' };
+      }
+      if (order.status === 'canceled' || order.status === 'expired') {
+        return { status: order.status, fillPrice: null };
+      }
+      // Still pending/open — check legs for OTOCO
+      if (order.leg) {
+        const legs = Array.isArray(order.leg) ? order.leg : [order.leg];
+        const entryLeg = legs[0];
+        if (entryLeg?.status === 'filled') {
+          const fill = parseFloat(entryLeg.avg_fill_price);
+          return { status: 'filled', fillPrice: isNaN(fill) ? null : fill };
+        }
+        if (entryLeg?.status === 'rejected') {
+          return { status: 'rejected', fillPrice: null, rejectedReason: entryLeg.reason_description || order.reason_description || 'unknown' };
+        }
+      }
+    } catch {
+      // network error — retry
+    }
+    await new Promise(r => setTimeout(r, pollMs));
+  }
+
+  return { status: 'timeout', fillPrice: null };
+}
+
 function qs(params: Record<string, string | number>): string {
   return Object.entries(params)
     .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
@@ -205,6 +258,24 @@ export async function openPosition(
     const orderId = data?.order?.id;
     console.log(`[executor] LIVE BUY [${rootSymbol}→${accountId}] ${qty}x ${executedSymbol} @ ${order.type === 'market' ? 'MARKET' : '$' + entryPrice.toFixed(2)} (spread=${spreadStr}) — order #${orderId}`);
     position.tradierOrderId = orderId;
+
+    // Wait for actual fill from broker
+    if (orderId) {
+      const fill = await waitForFill(orderId, accountId);
+      if (fill.status === 'filled' && fill.fillPrice != null) {
+        console.log(`[executor] ✅ Filled @ $${fill.fillPrice.toFixed(2)} (expected $${entryPrice.toFixed(2)})`);
+        position.entryPrice = fill.fillPrice;
+        return { position, execution: { orderId, fillPrice: fill.fillPrice, paper: false, executedSymbol, orderType: order.type, spread: order.spread } };
+      }
+      if (fill.status === 'rejected') {
+        console.error(`[executor] ❌ Order #${orderId} REJECTED: ${fill.rejectedReason}`);
+        return { position, execution: { error: `Rejected: ${fill.rejectedReason}`, paper: false, executedSymbol, orderType: order.type, spread: order.spread } };
+      }
+      if (fill.status === 'timeout') {
+        console.warn(`[executor] ⏳ Order #${orderId} still pending after 5s — using expected price`);
+      }
+    }
+
     return { position, execution: { orderId, fillPrice: entryPrice, paper: false, executedSymbol, orderType: order.type, spread: order.spread } };
   } catch (e: any) {
     const err = e?.response?.data?.errors?.error || e.message;
@@ -344,6 +415,23 @@ export async function closePosition(
     );
     const orderId = data?.order?.id;
     console.log(`[executor] LIVE SELL [${rootSymbol}→${accountId}] ${position.quantity}x ${position.symbol} @ MARKET (${reason}) — order #${orderId}`);
+
+    // Wait for actual fill from broker
+    if (orderId) {
+      const fill = await waitForFill(orderId, accountId);
+      if (fill.status === 'filled' && fill.fillPrice != null) {
+        console.log(`[executor] ✅ Sold @ $${fill.fillPrice.toFixed(2)} (expected ~$${currentPrice.toFixed(2)})`);
+        return { orderId, fillPrice: fill.fillPrice, paper: false, orderType: 'market' };
+      }
+      if (fill.status === 'rejected') {
+        console.error(`[executor] ❌ Sell #${orderId} REJECTED: ${fill.rejectedReason}`);
+        return { error: `Sell rejected: ${fill.rejectedReason}`, paper: false, orderType: 'market' };
+      }
+      if (fill.status === 'timeout') {
+        console.warn(`[executor] ⏳ Sell #${orderId} still pending after 5s — using expected price`);
+      }
+    }
+
     return { orderId, fillPrice: currentPrice, paper: false, orderType: 'market' };
   } catch (e: any) {
     const err = e?.response?.data?.errors?.error || e.message;

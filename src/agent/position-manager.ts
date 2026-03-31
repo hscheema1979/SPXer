@@ -181,18 +181,10 @@ export class PositionManager {
       const exitCheck = checkExit(corePosition, priceForCheck, this.cfg, context);
 
       if (exitCheck.shouldExit && exitCheck.reason) {
-        const closePrice = currentPrice ?? pos.entryPrice; // best-effort P&L; market order will get real fill
-        const pnl = (closePrice - pos.entryPrice) * pos.quantity * 100;
+        const estimatedClose = currentPrice ?? pos.entryPrice;
         if (currentPrice === undefined) {
-          console.log(`[positions] ⚠️ No pipeline price for ${pos.symbol} — closing on ${exitCheck.reason} with estimated P&L`);
+          console.log(`[positions] ⚠️ No pipeline price for ${pos.symbol} — closing on ${exitCheck.reason} with estimated price`);
         }
-        const closeRecord: PositionClose = {
-          position: pos,
-          closePrice,
-          reason: exitCheck.reason,
-          pnl,
-          closedAt: now,
-        };
 
         // Cancel ALL open sell orders for this symbol before closing.
         // Must happen before closePosition() — Tradier rejects sells if
@@ -202,7 +194,23 @@ export class PositionManager {
           await this.cancelOpenSellOrders(pos.symbol);
         }
 
-        await closePosition(pos, exitCheck.reason, closePrice, this.paper, this.cfg.execution);
+        const result = await closePosition(pos, exitCheck.reason, estimatedClose, this.paper, this.cfg.execution);
+
+        // Use actual fill price for P&L if available, otherwise estimate
+        const actualClose = (result.fillPrice && !result.error) ? result.fillPrice : estimatedClose;
+        const pnl = (actualClose - pos.entryPrice) * pos.quantity * 100;
+
+        if (result.error) {
+          console.error(`[positions] ⚠️ Close order failed for ${pos.symbol}: ${result.error} — position may still be open at broker`);
+        }
+
+        const closeRecord: PositionClose = {
+          position: pos,
+          closePrice: actualClose,
+          reason: exitCheck.reason,
+          pnl,
+          closedAt: now,
+        };
         logClose(closeRecord);
         dailyLossCallback(pnl);
         this.positions.delete(id);
@@ -210,7 +218,7 @@ export class PositionManager {
 
         closeEvents.push({
           position: pos,
-          closePrice,
+          closePrice: actualClose,
           reason: exitCheck.reason,
           pnl,
         });
