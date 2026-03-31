@@ -195,20 +195,34 @@ export class PositionManager {
         // Cancel ALL open sell orders for this symbol before closing.
         // Must happen before closePosition() — Tradier rejects sells if
         // pending bracket sell legs already account for the full position qty.
+        let bracketsClear = true;
         if (!this.paper) {
-          await this.cancelBracketLegs(pos);
+          bracketsClear = await this.cancelBracketLegs(pos);
           await this.cancelOpenSellOrders(pos.symbol);
+        }
+
+        // If bracket cancel failed and we couldn't clear sell legs,
+        // skip the close attempt — the broker will reject it anyway.
+        if (!bracketsClear) {
+          pos.closeFailCount = (pos.closeFailCount ?? 0) + 1;
+          console.error(`[positions] 🚨 CRITICAL: Bracket legs still active for ${pos.symbol} — skipping close (attempt #${pos.closeFailCount})`);
+          continue;
         }
 
         const result = await closePosition(pos, exitCheck.reason, estimatedClose, this.paper, this.cfg.execution);
 
-        // Use actual fill price for P&L if available, otherwise estimate
-        const actualClose = (result.fillPrice && !result.error) ? result.fillPrice : estimatedClose;
-        const pnl = (actualClose - pos.entryPrice) * pos.quantity * 100;
-
         if (result.error) {
-          console.error(`[positions] ⚠️ Close order failed for ${pos.symbol}: ${result.error} — position may still be open at broker`);
+          // P0-1 FIX: Do NOT delete position from memory when close fails.
+          // The broker still holds it — deleting it here causes the agent to
+          // lose track, leaving buying power locked and no way to retry.
+          pos.closeFailCount = (pos.closeFailCount ?? 0) + 1;
+          console.error(`[positions] 🚨 CRITICAL: Close failed for ${pos.symbol} — position kept in memory for retry (attempt #${pos.closeFailCount}). Error: ${result.error}`);
+          continue;
         }
+
+        // Close succeeded — compute P&L and clean up
+        const actualClose = result.fillPrice ?? estimatedClose;
+        const pnl = (actualClose - pos.entryPrice) * pos.quantity * 100;
 
         const closeRecord: PositionClose = {
           position: pos,
@@ -413,20 +427,73 @@ export class PositionManager {
 
   /**
    * Cancel server-side bracket/OCO legs before agent-side close.
-   * Tries each known leg ID. Failures are logged but don't block the close.
+   * Retries once on failure, then checks order status to determine if the
+   * legs are actually cleared (filled/expired/canceled = safe to proceed).
+   *
+   * Returns true if all bracket legs are cleared, false if any are still active.
    */
-  private async cancelBracketLegs(pos: OpenPosition): Promise<void> {
+  private async cancelBracketLegs(pos: OpenPosition): Promise<boolean> {
     const legIds = [pos.bracketOrderId, pos.tpLegId, pos.slLegId].filter(Boolean) as number[];
-    if (legIds.length === 0) return;
+    if (legIds.length === 0) return true;
 
     // Deduplicate — bracketOrderId might equal one of the leg IDs
     const unique = [...new Set(legIds)];
+    let allCleared = true;
+
     for (const legId of unique) {
+      let cancelled = false;
+
+      // Attempt 1
       try {
         await cancelOcoLegs(legId, this.cfg.execution);
+        cancelled = true;
       } catch {
-        // cancelOcoLegs already logs errors
+        // Retry after 500ms
+        await new Promise(r => setTimeout(r, 500));
+        try {
+          await cancelOcoLegs(legId, this.cfg.execution);
+          cancelled = true;
+        } catch {
+          // Both attempts failed — check order status
+        }
       }
+
+      if (!cancelled) {
+        // Query order status to determine if cancel was even necessary
+        const status = await this.queryOrderStatus(legId);
+        if (status && ['filled', 'expired', 'canceled', 'rejected'].includes(status)) {
+          console.log(`[positions] Bracket #${legId} already ${status} — cancel unnecessary`);
+        } else {
+          console.error(`[positions] 🚨 CRITICAL: Bracket #${legId} still ${status ?? 'unknown'} after retry — sell may fail`);
+          allCleared = false;
+        }
+      }
+    }
+
+    return allCleared;
+  }
+
+  /**
+   * Query a single order's status from Tradier.
+   * Returns the status string ('pending', 'open', 'filled', 'expired', 'canceled', 'rejected')
+   * or null if the query fails.
+   */
+  private async queryOrderStatus(orderId: number): Promise<string | null> {
+    const accountId = this.cfg.execution?.accountId || appConfig.tradierAccountId;
+    const hdrs = {
+      Authorization: `Bearer ${appConfig.tradierToken}`,
+      Accept: 'application/json',
+    };
+
+    try {
+      const { data } = await axios.get(
+        `${TRADIER_BASE}/accounts/${accountId}/orders/${orderId}`,
+        { headers: hdrs, timeout: 5000 },
+      );
+      return data?.order?.status ?? null;
+    } catch (e: any) {
+      console.warn(`[positions] Failed to query order #${orderId} status: ${e.message}`);
+      return null;
     }
   }
 
