@@ -44,48 +44,6 @@ let winsTotal = 0;
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
-/**
- * Cancel any open/pending OTOCO bracket orders for a given option symbol.
- * Called on flip so the old bracket's TP/SL legs don't linger.
- */
-async function cancelBracketOrdersForSymbol(optionSymbol: string): Promise<void> {
-  const accountId = EXEC.accountId!;
-  const hdrs = {
-    Authorization: `Bearer ${appConfig.tradierToken}`,
-    Accept: 'application/json',
-  };
-
-  try {
-    const { data } = await axios.get(
-      `${TRADIER_BASE}/accounts/${accountId}/orders`,
-      { headers: hdrs, timeout: 10000 },
-    );
-    const raw = data?.orders?.order;
-    const orders = Array.isArray(raw) ? raw : raw ? [raw] : [];
-
-    for (const order of orders) {
-      if (order.status !== 'open' && order.status !== 'pending') continue;
-      if (order.class !== 'otoco' && order.class !== 'oco') continue;
-
-      const legs = Array.isArray(order.leg) ? order.leg : order.leg ? [order.leg] : [];
-      const matchesSymbol = legs.some((l: any) => l.option_symbol === optionSymbol);
-      if (!matchesSymbol) continue;
-
-      try {
-        await axios.delete(
-          `${TRADIER_BASE}/accounts/${accountId}/orders/${order.id}`,
-          { headers: hdrs, timeout: 10000 },
-        );
-        console.log(`[xsp] 🗑️ Cancelled bracket #${order.id} for ${optionSymbol}`);
-      } catch (e: any) {
-        console.warn(`[xsp] ⚠️ Failed to cancel bracket #${order.id}: ${e?.response?.data?.errors?.error || e.message}`);
-      }
-    }
-  } catch (e: any) {
-    console.warn(`[xsp] ⚠️ Failed to fetch orders for bracket cleanup: ${e.message}`);
-  }
-}
-
 function buildCandidates(snap: MarketSnapshot): StrikeCandidate[] {
   return snap.contracts.map(c => ({
     symbol: c.meta.symbol,
@@ -184,10 +142,7 @@ async function executeEntry(
   };
 
   try {
-    // Single market order — agent monitors exits via TP/SL/reversal
-    // (OTOCO brackets disabled — cancel logic broken, causes orphaned TP/SL legs)
-    const plainExec = { ...EXEC, disableBracketOrders: true };
-    const { position: plainPos, execution: plainResult } = await openPosition(signal, decision, guard.isPaper, plainExec);
+    const { position: plainPos, execution: plainResult } = await openPosition(signal, decision, guard.isPaper, EXEC);
     if (!plainResult.error) {
       positions.add(plainPos);
       guard.recordTrade();
@@ -248,16 +203,7 @@ async function runCycle(): Promise<number> {
     console.log(`[xsp] HMA cross: ${arrow} ${hmaCross.toUpperCase()}`);
   }
 
-  // 3. Pre-close: cancel bracket orders for any position that's about to exit
-  //    Must happen BEFORE monitor() sends sell orders, otherwise Tradier rejects
-  //    the sell because pending bracket sell legs count against position quantity.
-  if (positions.count() > 0) {
-    for (const pos of positions.getAll()) {
-      await cancelBracketOrdersForSymbol(pos.symbol);
-    }
-  }
-
-  // 4. Monitor open position (may close + sell)
+  // 3. Monitor open position (may close + sell)
   const closeEvents = await positions.monitor(pnl => {
     guard.recordLoss(pnl);
     dailyPnl += pnl;
