@@ -49,8 +49,10 @@ let tradesTotal = 0;
 let winsTotal = 0;
 let consecutiveRejections = 0;
 const MAX_REJECTIONS_BEFORE_BACKOFF = 3;
+const MAX_REJECTIONS_BEFORE_HALT = 5;
 const REJECTION_BACKOFF_SECS = 300; // 5 minutes
 let rejectionBackoffUntil = 0;
+let sessionHalted = false;
 
 // ── Price Stream TP/SL Callback ─────────────────────────────────────────────
 
@@ -182,6 +184,12 @@ async function executeEntry(
   snap: MarketSnapshot,
   reason: string,
 ): Promise<boolean> {
+  // Session halt check — persistent buying-power failures
+  if (sessionHalted) {
+    console.log('[xsp] ⛔ Session halted due to repeated buying-power rejections');
+    return false;
+  }
+
   // Rejection backoff check
   if (Date.now() < rejectionBackoffUntil) {
     const remaining = Math.round((rejectionBackoffUntil - Date.now()) / 1000);
@@ -199,6 +207,14 @@ async function executeEntry(
     return false;
   }
 
+  // P1-6: Expired contract validation — refuse to trade expired options
+  const contractMeta = snap.contracts.find(c => c.meta.symbol === result.candidate.symbol);
+  const contractExpiry = contractMeta?.meta.expiry;
+  if (contractExpiry && contractExpiry <= todayET()) {
+    console.log(`[xsp] ⚠️ Contract ${result.candidate.symbol} expired (${contractExpiry} <= ${todayET()}) — skipping`);
+    return false;
+  }
+
   const xspSymbol = convertOptionSymbol(result.candidate.symbol, EXEC);
   const xspStrike = result.candidate.strike / EXEC.strikeDivisor;
 
@@ -212,6 +228,13 @@ async function executeEntry(
   const entryPrice = xspQuote.ask;
   const stopLoss = entryPrice * (1 - CFG.position.stopLossPercent / 100);
   const takeProfit = entryPrice * CFG.position.takeProfitMultiplier;
+
+  // P0-3: Price vs budget pre-check — don't submit orders we can't afford
+  const contractCost = entryPrice * 100; // cost per contract in dollars
+  if (contractCost > CFG.sizing.baseDollarsPerTrade) {
+    console.log(`[xsp] 💰 Contract too expensive: $${contractCost.toFixed(0)} > budget $${CFG.sizing.baseDollarsPerTrade} — skipping`);
+    return false;
+  }
 
   console.log(`[xsp] Quote ${xspSymbol}: bid=$${xspQuote.bid.toFixed(2)} ask=$${xspQuote.ask.toFixed(2)} last=$${xspQuote.last.toFixed(2)}`);
 
@@ -267,8 +290,19 @@ async function executeEntry(
       return true;
     } else {
       console.error(`[xsp] ❌ Order failed: ${exec.error}`);
+      const isBuyingPowerError = exec.error.toLowerCase().includes('buying power');
       consecutiveRejections++;
-      if (consecutiveRejections >= MAX_REJECTIONS_BEFORE_BACKOFF) {
+
+      if (isBuyingPowerError) {
+        // Check for ghost positions consuming capital
+        console.log(`[xsp] 🔍 Buying power rejection — checking broker for ghost positions...`);
+        await reconcileBrokerPositions();
+      }
+
+      if (consecutiveRejections >= MAX_REJECTIONS_BEFORE_HALT && isBuyingPowerError) {
+        sessionHalted = true;
+        console.error(`[xsp] 🚨 CRITICAL: ${consecutiveRejections} buying-power rejections — HALTING session. Manual intervention required.`);
+      } else if (consecutiveRejections >= MAX_REJECTIONS_BEFORE_BACKOFF) {
         rejectionBackoffUntil = Date.now() + REJECTION_BACKOFF_SECS * 1000;
         console.log(`[xsp] 🚫 ${consecutiveRejections} consecutive rejections — backing off for ${REJECTION_BACKOFF_SECS}s`);
       }
@@ -313,6 +347,12 @@ async function runCycle(): Promise<number> {
   const spxPrice = snap.spx.price;
   const wr = tradesTotal > 0 ? (winsTotal / tradesTotal * 100).toFixed(0) : '-';
   console.log(`\n[xsp] ═══ #${cycleCount} @ ${ts} | SPX ${spxPrice.toFixed(2)} | ${positions.count()} open | trades: ${tradesTotal} (WR ${wr}%) | P&L: $${dailyPnl.toFixed(0)} ═══`);
+
+  // P1-4: SPX price = 0 guard — skip cycle if data service returns bad price
+  if (!spxPrice || spxPrice <= 0) {
+    console.warn(`[xsp] ⚠️ Bad SPX price (${spxPrice}) from data service — skipping cycle`);
+    return 30;
+  }
 
   // 2. Warmup check
   const { h: etH, m: etM } = nowET();
@@ -570,6 +610,7 @@ async function main(): Promise<void> {
     winsTotal = 0;
     consecutiveRejections = 0;
     rejectionBackoffUntil = 0;
+    sessionHalted = false;
     dailyDate = todayET();
     guard.resetIfNewDay();
 
