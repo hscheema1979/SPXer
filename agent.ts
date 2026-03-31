@@ -189,22 +189,7 @@ async function runCycle(): Promise<number> {
   cycleCount++;
   const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
 
-  // Reset daily stats + refresh account-based sizing
-  const today = new Date().toISOString().split('T')[0];
-  if (dailyDate !== today) {
-    dailyPnl = 0;
-    dailyDate = today;
-
-    // Dynamic sizing: update baseDollarsPerTrade from account balance
-    if (AGENT_CONFIG.sizing.riskPercentOfAccount) {
-      const tradeSize = await computeTradeSize(
-        AGENT_CONFIG.sizing.riskPercentOfAccount,
-        AGENT_CONFIG.execution?.accountId,
-      );
-      AGENT_CONFIG.sizing.baseDollarsPerTrade = tradeSize;
-      console.log(`[agent] Daily sizing: $${tradeSize} per trade (${AGENT_CONFIG.sizing.riskPercentOfAccount}% of account)`);
-    }
-  }
+  // Daily state is reset in the outer loop (main) at market open
 
   // 1. Fetch market state
   let snap: MarketSnapshot;
@@ -325,28 +310,126 @@ async function runCycle(): Promise<number> {
 
 // ── Startup ─────────────────────────────────────────────────────────────────
 
-function waitForMarketOpen(): Promise<void> {
-  return new Promise(resolve => {
-    const check = () => {
-      const now = new Date();
-      const etStr = now.toLocaleString('en-US', { timeZone: 'America/New_York', hour12: false });
-      const timePart = etStr.split(', ')[1];
-      const [h, m] = timePart.split(':').map(Number);
-      const minsNow = h * 60 + m;
-      const marketOpen = 9 * 60 + 30;
+// ── Market Hours ─────────────────────────────────────────────────────────────
 
-      if (minsNow >= marketOpen) {
-        resolve();
-        return;
-      }
+import { nowET, todayET } from './src/utils/et-time';
+import * as fs from 'fs';
+import * as path from 'path';
 
-      const waitMins = marketOpen - minsNow;
-      console.log(`[agent] Market opens in ${waitMins} minutes — waiting...`);
-      setTimeout(check, Math.min(waitMins * 60 * 1000, 60000));
-    };
-    check();
+/** Get current ET minutes-of-day */
+function etMinuteOfDay(): number {
+  const { h, m } = nowET();
+  return h * 60 + m;
+}
+
+const MARKET_OPEN = 9 * 60 + 30;   // 9:30 AM ET
+const MARKET_CLOSE = 16 * 60;       // 4:00 PM ET
+
+/** Returns true if current ET time is within trading hours */
+function isMarketOpen(): boolean {
+  const mins = etMinuteOfDay();
+  return mins >= MARKET_OPEN && mins < MARKET_CLOSE;
+}
+
+/** Sleep until next 9:30 AM ET. Returns ms slept. */
+async function sleepUntilMarketOpen(): Promise<void> {
+  while (true) {
+    const mins = etMinuteOfDay();
+    if (mins >= MARKET_OPEN && mins < MARKET_CLOSE) return;
+
+    // Calculate wait time
+    let waitMins: number;
+    if (mins >= MARKET_CLOSE) {
+      // After close — wait until tomorrow 9:30
+      waitMins = (24 * 60 - mins) + MARKET_OPEN;
+    } else {
+      // Before open
+      waitMins = MARKET_OPEN - mins;
+    }
+
+    const waitMs = Math.min(waitMins * 60 * 1000, 5 * 60 * 1000); // check every 5 min max
+    console.log(`[agent] Market closed — ${waitMins} min until open. Sleeping...`);
+    await new Promise(r => setTimeout(r, waitMs));
+  }
+}
+
+// ── Daily Review ────────────────────────────────────────────────────────────
+
+function dailyReview(): void {
+  const date = todayET();
+  const wr = tradesTotal > 0 ? (winsTotal / tradesTotal * 100).toFixed(1) : '0';
+  const losses = tradesTotal - winsTotal;
+  const avgPnl = tradesTotal > 0 ? (dailyPnl / tradesTotal).toFixed(2) : '0';
+
+  const review = [
+    `\n${'═'.repeat(70)}`,
+    `  DAILY REVIEW — ${date} — SPX Agent (6YA51425)`,
+    `${'═'.repeat(70)}`,
+    ``,
+    `  Trades:     ${tradesTotal} total (${winsTotal} wins, ${losses} losses)`,
+    `  Win Rate:   ${wr}%`,
+    `  Daily P&L:  $${dailyPnl.toFixed(2)}`,
+    `  Avg P&L:    $${avgPnl}/trade`,
+    `  Paper:      ${guard.isPaper ? 'YES' : 'NO — LIVE'}`,
+    ``,
+  ];
+
+  // Lessons learned
+  const lessons: string[] = [];
+
+  if (tradesTotal === 0) {
+    lessons.push('No trades executed. Check if risk guard or contract selection blocked all signals.');
+  }
+  if (tradesTotal > 30) {
+    lessons.push(`High trade count (${tradesTotal}). HMA whipsawing — consider wider HMA periods or cooldown.`);
+  }
+  if (dailyPnl < -1000) {
+    lessons.push(`Significant loss ($${dailyPnl.toFixed(0)}). Review largest losing trades for pattern.`);
+  }
+  if (tradesTotal > 0 && parseFloat(wr) < 40) {
+    lessons.push(`Low win rate (${wr}%). Signal quality may be poor today — choppy market?`);
+  }
+  if (tradesTotal > 0 && parseFloat(wr) > 70) {
+    lessons.push(`Strong win rate (${wr}%). Trending market favored the strategy.`);
+  }
+  if (dailyPnl > 0 && tradesTotal > 0) {
+    lessons.push(`Profitable day. Strategy worked as designed.`);
+  }
+
+  if (lessons.length > 0) {
+    review.push(`  Lessons:`);
+    for (const l of lessons) {
+      review.push(`    • ${l}`);
+    }
+    review.push(``);
+  }
+
+  review.push(`${'═'.repeat(70)}\n`);
+  const text = review.join('\n');
+  console.log(text);
+
+  // Write to daily review log
+  try {
+    const reviewDir = path.join(process.cwd(), 'logs');
+    fs.mkdirSync(reviewDir, { recursive: true });
+    const reviewFile = path.join(reviewDir, 'daily-reviews.log');
+    fs.appendFileSync(reviewFile, text + '\n');
+  } catch (e) {
+    console.error('[agent] Failed to write daily review:', (e as Error).message);
+  }
+
+  // Also log as activity
+  logActivity({
+    ts: Date.now(),
+    timeET: `${nowET().h.toString().padStart(2, '0')}:${nowET().m.toString().padStart(2, '0')} ET`,
+    cycle: cycleCount,
+    event: 'close',
+    summary: `DAILY REVIEW: ${tradesTotal} trades, WR ${wr}%, P&L $${dailyPnl.toFixed(0)}`,
+    details: { tradesTotal, winsTotal, losses, dailyPnl, winRate: parseFloat(wr), lessons },
   });
 }
+
+// ── Main ────────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
   banner();
@@ -360,26 +443,52 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  console.log('[agent] Waiting for market open...');
-  await waitForMarketOpen();
-
-  console.log('[agent] Market open — starting trading loop');
-
-  // Reconcile any open positions from broker (survives restarts)
-  const reconciled = await positions.reconcileFromBroker(AGENT_CONFIG.execution);
-  if (reconciled > 0) console.log(`[agent] Reconciled ${reconciled} position(s) from broker`);
-
-  console.log('[agent] First cycle in 5s (letting bars build)...\n');
-  await new Promise(r => setTimeout(r, 5000));
-
+  // Outer loop: one iteration per trading day
   while (true) {
-    let nextCheckSecs = 30;
-    try {
-      nextCheckSecs = await runCycle();
-    } catch (e) {
-      console.error('[agent] Cycle error:', e);
+    console.log('[agent] Waiting for market open...');
+    await sleepUntilMarketOpen();
+
+    console.log('[agent] Market open — starting trading session');
+
+    // Reset daily state
+    dailyPnl = 0;
+    tradesTotal = 0;
+    winsTotal = 0;
+    dailyDate = todayET();
+    guard.resetIfNewDay();
+
+    // Dynamic sizing: update baseDollarsPerTrade from account balance
+    if (AGENT_CONFIG.sizing.riskPercentOfAccount) {
+      const tradeSize = await computeTradeSize(
+        AGENT_CONFIG.sizing.riskPercentOfAccount,
+        AGENT_CONFIG.execution?.accountId,
+      );
+      AGENT_CONFIG.sizing.baseDollarsPerTrade = tradeSize;
+      console.log(`[agent] Daily sizing: $${tradeSize} per trade (${AGENT_CONFIG.sizing.riskPercentOfAccount}% of account)`);
     }
-    await new Promise(r => setTimeout(r, nextCheckSecs * 1000));
+
+    // Reconcile any open positions from broker (survives restarts)
+    const reconciled = await positions.reconcileFromBroker(AGENT_CONFIG.execution);
+    if (reconciled > 0) console.log(`[agent] Reconciled ${reconciled} position(s) from broker`);
+
+    console.log('[agent] First cycle in 5s (letting bars build)...\n');
+    await new Promise(r => setTimeout(r, 5000));
+
+    // Inner loop: trade until market close
+    while (isMarketOpen()) {
+      let nextCheckSecs = 30;
+      try {
+        nextCheckSecs = await runCycle();
+      } catch (e) {
+        console.error('[agent] Cycle error:', e);
+      }
+      await new Promise(r => setTimeout(r, nextCheckSecs * 1000));
+    }
+
+    // Market closed — run daily review
+    console.log('\n[agent] 🔔 Market closed — ending trading session');
+    dailyReview();
+    console.log('[agent] Sleeping until next market open...\n');
   }
 }
 
