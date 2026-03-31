@@ -208,10 +208,11 @@ async function executeEntry(
   }
 
   // P1-6: Expired contract validation — refuse to trade expired options
+  // Use strict < because 0DTE contracts (expiry == today) are still valid until close
   const contractMeta = snap.contracts.find(c => c.meta.symbol === result.candidate.symbol);
   const contractExpiry = contractMeta?.meta.expiry;
-  if (contractExpiry && contractExpiry <= todayET()) {
-    console.log(`[xsp] ⚠️ Contract ${result.candidate.symbol} expired (${contractExpiry} <= ${todayET()}) — skipping`);
+  if (contractExpiry && contractExpiry < todayET()) {
+    console.log(`[xsp] ⚠️ Contract ${result.candidate.symbol} expired (${contractExpiry} < ${todayET()}) — skipping`);
     return false;
   }
 
