@@ -321,8 +321,51 @@ async function runCycle(): Promise<number> {
 // ── Market Hours ─────────────────────────────────────────────────────────────
 
 import { nowET, todayET } from './src/utils/et-time';
+import { config as appConfig, TRADIER_BASE } from './src/config';
+import axios from 'axios';
 import * as fs from 'fs';
 import * as path from 'path';
+
+/**
+ * Cancel ALL open/pending orders on the account.
+ * Called at market close and before market open to ensure no stale orders linger.
+ */
+async function cancelAllOpenOrders(): Promise<number> {
+  const accountId = AGENT_CONFIG.execution?.accountId || process.env.TRADIER_ACCOUNT_ID || '';
+  const hdrs = {
+    Authorization: `Bearer ${appConfig.tradierToken}`,
+    Accept: 'application/json',
+  };
+
+  let cancelled = 0;
+  try {
+    const { data } = await axios.get(
+      `${TRADIER_BASE}/accounts/${accountId}/orders`,
+      { headers: hdrs, timeout: 10000 },
+    );
+    const raw = data?.orders?.order;
+    const orders = Array.isArray(raw) ? raw : raw ? [raw] : [];
+
+    for (const order of orders) {
+      if (order.status !== 'open' && order.status !== 'pending' && order.status !== 'partially_filled') continue;
+
+      try {
+        await axios.delete(
+          `${TRADIER_BASE}/accounts/${accountId}/orders/${order.id}`,
+          { headers: hdrs, timeout: 10000 },
+        );
+        console.log(`[agent] 🗑️ Cancelled order #${order.id} (${order.class} ${order.status})`);
+        cancelled++;
+      } catch (e: any) {
+        console.warn(`[agent] ⚠️ Failed to cancel #${order.id}: ${e?.response?.data?.errors?.error || e.message}`);
+      }
+    }
+  } catch (e: any) {
+    console.warn(`[agent] ⚠️ Failed to fetch orders for cleanup: ${e.message}`);
+  }
+
+  return cancelled;
+}
 
 /** Get current ET minutes-of-day */
 function etMinuteOfDay(): number {
@@ -458,6 +501,10 @@ async function main(): Promise<void> {
 
     console.log('[agent] Market open — starting trading session');
 
+    // Pre-open: cancel any stale orders from previous session
+    const cancelledPreOpen = await cancelAllOpenOrders();
+    if (cancelledPreOpen > 0) console.log(`[agent] Cancelled ${cancelledPreOpen} stale order(s) pre-open`);
+
     // Reset daily state
     dailyPnl = 0;
     tradesTotal = 0;
@@ -493,8 +540,10 @@ async function main(): Promise<void> {
       await new Promise(r => setTimeout(r, nextCheckSecs * 1000));
     }
 
-    // Market closed — run daily review
+    // Market closed — cancel all orders + daily review
     console.log('\n[agent] 🔔 Market closed — ending trading session');
+    const cancelledAtClose = await cancelAllOpenOrders();
+    if (cancelledAtClose > 0) console.log(`[agent] Cancelled ${cancelledAtClose} open order(s) at market close`);
     dailyReview();
     console.log('[agent] Sleeping until next market open...\n');
   }
