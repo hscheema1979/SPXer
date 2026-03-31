@@ -65,6 +65,7 @@ export interface OpenPosition {
   bracketOrderId?: number;     // OTOCO parent order ID
   tpLegId?: number;            // TP limit leg order ID
   slLegId?: number;            // SL stop leg order ID
+  closeFailCount?: number;     // How many times close order was rejected by broker
 }
 
 export interface PositionClose {
