@@ -230,6 +230,8 @@ export const AGENT_CONFIG: Config = {
   },
 
   // SPX execution on margin account
+  // NOTE: Account requires PDT exemption on file with Tradier — without it,
+  // day trades are blocked even with $25k+ equity (day_trade_buying_power = $0).
   execution: {
     symbol: 'SPX',
     optionPrefix: 'SPXW',
