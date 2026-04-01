@@ -2,6 +2,7 @@ import axios from 'axios';
 import { config, TRADIER_BASE } from '../config';
 import type { ChainContract, OHLCVRaw } from '../types';
 import { CircuitBreaker, withRetry, circuitBreakers } from '../utils/resilience';
+import { getETOffsetMs } from '../utils/et-time';
 
 const cb = new CircuitBreaker('tradier', { failureThreshold: 3, resetTimeoutMs: 30_000 });
 circuitBreakers.set('tradier', cb);
@@ -180,8 +181,24 @@ export async function fetchTimesales(symbol: string, date?: string): Promise<OHL
   const series = resp.data?.series?.data;
   if (!series) return [];
   const list = Array.isArray(series) ? series : [series];
-  return list.map((d: any) => ({
-    ts: Math.floor(new Date(d.time).getTime() / 1000),
-    open: d.open, high: d.high, low: d.low, close: d.close, volume: d.volume ?? 0,
-  }));
+  // Tradier timesales: timestamps without date params are bare ET (e.g. '2026-04-01T13:46:00').
+  // With date params they may include offset. We need to convert ET → UTC timestamps.
+  const etOffsetMs = getETOffsetMs(); // UTC - ET in ms (positive: 14400000 for EDT, 18000000 for EST)
+  return list.map((d: any) => {
+    const timeStr: string = d.time;
+    const hasTimezone = timeStr.endsWith('Z') || /[+-]\d{2}:\d{2}$/.test(timeStr);
+    let tsMs: number;
+    if (hasTimezone) {
+      // Already has timezone info — parse directly
+      tsMs = new Date(timeStr).getTime();
+    } else {
+      // Bare ET timestamp — parse as UTC then add ET offset to get real UTC
+      // e.g. '2026-04-01T13:46:00' is 1:46 PM ET = 5:46 PM UTC (in EDT)
+      tsMs = new Date(timeStr + 'Z').getTime() + etOffsetMs;
+    }
+    return {
+      ts: Math.floor(tsMs / 1000),
+      open: d.open, high: d.high, low: d.low, close: d.close, volume: d.volume ?? 0,
+    };
+  });
 }
