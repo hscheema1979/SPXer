@@ -33,6 +33,8 @@ import { selectStrike, type StrikeCandidate } from './src/core/strike-selector';
 import { computeQty } from './src/core/position-sizer';
 import { frictionEntry } from './src/core/friction';
 import { computeTradeSize } from './src/agent/account-balance';
+import { detectSignals } from './src/core/signal-detector';
+import type { CoreBar, Signal } from './src/core/types';
 
 // ── Initialize ──────────────────────────────────────────────────────────────
 
@@ -126,6 +128,82 @@ async function reconcileBrokerPositions(): Promise<void> {
   } catch (e: any) {
     console.warn(`[agent] Reconciliation check failed: ${e.message}`);
   }
+}
+
+// ── Core Signal Detection ───────────────────────────────────────────────────
+// Uses the SAME detectSignals() from src/core/ that replay uses.
+// Scans option contract HMA crosses, filters by OTM distance and
+// underlying SPX HMA confirmation — identical to the backtested strategy.
+
+let prevContractBarTs = new Map<string, number>(); // dedupe: only process new candle closes
+
+function runCoreSignalDetection(snap: MarketSnapshot): Signal | null {
+  const spxPrice = snap.spx.price;
+  if (spxPrice <= 0) return null;
+
+  // Build CoreBar map from snapshot contract bars
+  const contractBars = new Map<string, CoreBar[]>();
+  for (const c of snap.contracts) {
+    if (c.bars1m.length < 2) continue;
+    const coreBars: CoreBar[] = c.bars1m.map(b => ({
+      ts: b.ts,
+      open: b.open ?? b.close,
+      high: b.high ?? b.close,
+      low: b.low ?? b.close,
+      close: b.close,
+      volume: b.volume ?? 0,
+      indicators: {
+        rsi14: b.rsi14, ema9: b.ema9, ema21: b.ema21,
+        hma3: b.hma3, hma5: b.hma5, hma17: b.hma17, hma19: b.hma19,
+      },
+    }));
+    contractBars.set(c.meta.symbol, coreBars);
+  }
+
+  if (contractBars.size === 0) return null;
+
+  // Check if we have a new candle close (dedupe — don't fire same signal twice)
+  const sampleBars = contractBars.values().next().value;
+  if (sampleBars && sampleBars.length >= 2) {
+    const closedTs = sampleBars[sampleBars.length - 2].ts;
+    const lastProcessed = prevContractBarTs.get('__global__');
+    if (lastProcessed === closedTs) return null; // same candle, already processed
+    prevContractBarTs.set('__global__', closedTs);
+  }
+
+  // Run core signal detection — same as replay
+  let signals = detectSignals(contractBars, spxPrice, cfg);
+
+  // Filter by target OTM distance (same as replay)
+  if (cfg.signals.targetOtmDistance != null && signals.length > 0) {
+    const targetDist = cfg.signals.targetOtmDistance;
+    const spxRounded = Math.round(spxPrice / 5) * 5;
+    const targetCallStrike = spxRounded + targetDist;
+    const targetPutStrike = spxRounded - targetDist;
+    signals = signals.filter(sig => {
+      if (sig.side === 'call') return Math.abs(sig.strike - targetCallStrike) <= 5;
+      if (sig.side === 'put') return Math.abs(sig.strike - targetPutStrike) <= 5;
+      return false;
+    });
+  }
+
+  // Filter by underlying HMA cross confirmation (same as replay)
+  if (cfg.signals.requireUnderlyingHmaCross && signals.length > 0) {
+    const hmaCross = positions.getHmaCrossDirection();
+    if (!hmaCross) {
+      signals = [];
+    } else {
+      const wantSide = hmaCross === 'bullish' ? 'call' : 'put';
+      signals = signals.filter(sig => sig.side === wantSide && sig.direction === 'bullish');
+    }
+  }
+
+  if (signals.length === 0) return null;
+
+  // Pick the best signal (closest to target OTM)
+  const best = signals[0];
+  console.log(`[signal] 📡 Core signal: ${best.direction} ${best.side} ${best.symbol} (strike ${best.strike}) — ${best.signalType}`);
+  return best;
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -388,19 +466,22 @@ async function runCycle(): Promise<number> {
     }
   }
 
-  // 8. If no position open and no flip happened, enter ONLY on a fresh HMA cross signal
-  //    Direction alone (from boot/prior state) is NOT a signal — must witness the actual cross
-  if (positions.count() === 0 && reversals.length === 0 && freshCross && hmaCross) {
-    const direction = hmaCross;
-    const side = direction === 'bullish' ? 'call' : 'put';
-    console.log(`[agent] No position — entering ${side.toUpperCase()} on HMA ${direction} cross`);
+  // 8. If no position open and no flip happened, run core signal detection
+  //    Uses the SAME detectSignals() from src/core/ that replay uses:
+  //    option contract HMA crosses → OTM filter → underlying HMA confirmation
+  if (positions.count() === 0 && reversals.length === 0) {
+    const coreSignal = runCoreSignalDetection(snap);
+    if (coreSignal) {
+      const direction: 'bullish' | 'bearish' = coreSignal.side === 'call' ? 'bullish' : 'bearish';
+      console.log(`[agent] 📡 Core signal → entering ${coreSignal.side.toUpperCase()} ${coreSignal.symbol} (strike ${coreSignal.strike})`);
 
-    const candidates = buildCandidates(snap);
-    const selection = selectTradeStrike(candidates, direction, spxPrice);
-    if (selection) {
-      await executeBuy(selection, snap);
-    } else {
-      console.log(`[agent] No qualifying ${side} contract found`);
+      const candidates = buildCandidates(snap);
+      const selection = selectTradeStrike(candidates, direction, spxPrice);
+      if (selection) {
+        await executeBuy(selection, snap);
+      } else {
+        console.log(`[agent] No qualifying ${coreSignal.side} contract found for strike ~${coreSignal.strike}`);
+      }
     }
   }
 

@@ -326,7 +326,12 @@ export async function fetchMarketSnapshot(): Promise<MarketSnapshot> {
     ).catch(() => []);
 
     const bars1m: BarSummary[] = barsRaw.map(b => ({
-      ts: b.ts, close: b.close,
+      ts: b.ts,
+      open: b.open ?? b.close,
+      high: b.high ?? b.close,
+      low: b.low ?? b.close,
+      close: b.close,
+      volume: b.volume ?? 0,
       rsi14: b.indicators?.rsi14 ?? null,
       ema9: b.indicators?.ema9 ?? null,
       ema21: b.indicators?.ema21 ?? null,

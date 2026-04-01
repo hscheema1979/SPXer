@@ -23,6 +23,88 @@ let prevMode: string | null = null; // tracks mode transitions for VWAP reset
 // Per-symbol 1m candle state for options — built incrementally from quote snapshots
 const optionBarState = new Map<string, { minuteTs: number; open: number; high: number; low: number; volume: number }>();
 
+// ── SPX Tick Stream → 1m Candle Builder ─────────────────────────────────────
+// Streams SPX trades from Tradier for tick-accurate 1m candles.
+// Options stay on REST polling (too many symbols to stream efficiently).
+import { PriceStream } from './agent/price-stream';
+
+const spxStream = new PriceStream();
+let spxCandle: { minuteTs: number; open: number; high: number; low: number; close: number; volume: number; ticks: number } | null = null;
+let spxCandleTimer: ReturnType<typeof setInterval> | null = null;
+
+function initSpxStream(): void {
+  spxStream.onPrice((_symbol, last, bid, ask) => {
+    if (last <= 0) return;
+    const ts = Math.floor(Date.now() / 1000);
+    const minuteTs = ts - (ts % 60);
+
+    if (!spxCandle || spxCandle.minuteTs !== minuteTs) {
+      // New minute — close previous candle if it exists, start new one
+      if (spxCandle && spxCandle.ticks > 0) {
+        closeSpxCandle(spxCandle);
+      }
+      spxCandle = { minuteTs, open: last, high: last, low: last, close: last, volume: 0, ticks: 0 };
+    }
+
+    // Update current candle
+    if (last > spxCandle.high) spxCandle.high = last;
+    if (last < spxCandle.low) spxCandle.low = last;
+    spxCandle.close = last;
+    spxCandle.ticks++;
+
+    // Update last price for contract tracking
+    lastSpxPrice = last;
+    setLastSpxPrice(last);
+  });
+
+  // Safety: close candle on minute boundary even if no new ticks arrive
+  spxCandleTimer = setInterval(() => {
+    if (!spxCandle) return;
+    const now = Math.floor(Date.now() / 1000);
+    const currentMinute = now - (now % 60);
+    if (spxCandle.minuteTs < currentMinute && spxCandle.ticks > 0) {
+      closeSpxCandle(spxCandle);
+      spxCandle = null;
+    }
+  }, 5000); // check every 5s
+
+  spxStream.start(['SPX']);
+  console.log('[stream] SPX tick stream started for candle building');
+}
+
+function closeSpxCandle(candle: NonNullable<typeof spxCandle>): void {
+  const symbol = getMarketMode() === 'rth' ? 'SPX' : 'ES';
+  const bar = rawToBar(symbol, '1m', {
+    ts: candle.minuteTs,
+    open: candle.open,
+    high: candle.high,
+    low: candle.low,
+    close: candle.close,
+    volume: candle.volume,
+  });
+  const enriched = { ...bar, indicators: computeIndicators(bar, 2) };
+  upsertBars([enriched]);
+
+  // Aggregate to higher timeframes
+  const recent1m = getBars(symbol, '1m', 60);
+  if (recent1m.length > 0) aggregateAndStore(recent1m, 2);
+
+  healthTracker.recordBar(symbol, candle.minuteTs * 1000);
+  broadcast({ type: 'spx_bar', data: enriched });
+
+  // Detect HMA cross signal on the closed candle
+  if (symbol === 'SPX') {
+    detectHmaCrossSignal(enriched);
+  }
+
+  console.log(`[stream] SPX 1m candle closed: O=${candle.open.toFixed(2)} H=${candle.high.toFixed(2)} L=${candle.low.toFixed(2)} C=${candle.close.toFixed(2)} (${candle.ticks} ticks)`);
+}
+
+function stopSpxStream(): void {
+  spxStream.stop();
+  if (spxCandleTimer) { clearInterval(spxCandleTimer); spxCandleTimer = null; }
+}
+
 // ── HMA Cross Signal Detection ──────────────────────────────────────────────
 // Detects HMA(3)×HMA(17) crossovers at the data pipeline level.
 // Fires exactly once per candle close — agents subscribe via WebSocket

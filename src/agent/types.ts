@@ -4,7 +4,11 @@ export type TradeAction = 'buy' | 'skip';
 
 export interface BarSummary {
   ts: number;
+  open: number;
+  high: number;
+  low: number;
   close: number;
+  volume: number;
   rsi14: number | null;
   ema9: number | null;
   ema21: number | null;
@@ -12,6 +16,7 @@ export interface BarSummary {
   hma5: number | null;
   hma17: number | null;
   hma19: number | null;
+  [key: string]: number | null | undefined; // allow indicator access by key
 }
 
 export interface SpxContext {
