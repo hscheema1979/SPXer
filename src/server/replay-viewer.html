@@ -1810,10 +1810,21 @@ async function initLiveMode() {
     etOffsetSec = isDST(new Date().toISOString().slice(0, 10)) ? -4 * 3600 : -5 * 3600;
 
     // 1. Fetch SPX bars and render chart
-    // Request more bars to cover both premarket ES and RTH SPX
+    // Request enough bars for a full RTH session, then filter to today only
+    // to avoid overnight gaps that make the chart unreadable
     const rawBars = await fetch(`${API}/live/spx/bars?tf=1m&n=600`).then(r => r.json()).catch(() => []);
-    const bars = normalizeLiveBars(rawBars);
-    renderSpxChart(bars, [], [], []);
+    const allBars = normalizeLiveBars(rawBars);
+    // Filter: keep only today's bars (9:30 ET onward = ts within last 7 hours)
+    const todayOpen = (() => {
+      const now = new Date();
+      const etNow = new Date(now.getTime() + etOffsetSec * 1000);
+      const y = etNow.getUTCFullYear(), m = etNow.getUTCMonth(), d = etNow.getUTCDate();
+      // 9:30 ET in UTC = 9:30 - etOffset
+      const open930 = new Date(Date.UTC(y, m, d, 9, 30, 0));
+      return Math.floor(open930.getTime() / 1000) - etOffsetSec;
+    })();
+    const bars = allBars.filter(b => b.ts >= todayOpen);
+    renderSpxChart(bars.length ? bars : allBars, [], [], []);
 
     // 2. Fetch agent status
     await pollAgentStatus();
