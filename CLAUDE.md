@@ -276,6 +276,9 @@ Other: `POLYGON_API_KEY` (historical data backfill), `LITELLM_BASE_URL` + `LITEL
 - `GET /chain/expirations` — Available tracked expiry dates
 - `GET /underlying/context` — Market context snapshot (ES, NQ, VX, sectors via TradingView screener)
 
+### Signal Endpoints
+- `GET /signal/latest` — Last HMA cross signal (or `{ signal: null }` if none yet)
+
 ### Agent Endpoints (consumed by dashboard)
 - `GET /agent/status` — Current agent status (from status file)
 - `GET /agent/activity?n=50` — Recent agent activity log entries (max 200)
@@ -298,6 +301,37 @@ Other: `POLYGON_API_KEY` (historical data backfill), `LITELLM_BASE_URL` + `LITEL
 - `GET /replay/api/sweep/:configId/daily` — Daily P&L breakdown for sweep
 - `GET /replay/api/live/*` — Proxy to live data service
 - `GET /replay/sweep` — Sweep viewer HTML UI
+
+## WebSocket (port 3600, path `/ws`)
+
+Real-time streaming of bars, signals, and market context. Connect to `ws://host:3600/ws`.
+
+### Subscribe/Unsubscribe
+```json
+{ "action": "subscribe", "channel": "spx" }
+{ "action": "subscribe", "channel": "signals" }
+{ "action": "subscribe", "channel": "contract", "symbol": "SPXW260401C06600000" }
+{ "action": "subscribe", "channel": "chain", "expiry": "2026-04-01" }
+{ "action": "unsubscribe", "channel": "spx" }
+```
+
+### Message Types
+
+| Type | Channel | Description |
+|------|---------|-------------|
+| `spx_bar` | `spx` | New 1m SPX/ES bar with all indicators. Fires each poll cycle (~10s). |
+| `hma_cross_signal` | `signals`, `spx` | **HMA(3)×HMA(17) crossover detected on candle close.** This is the primary trade signal. Fields: `direction` ("bullish"/"bearish"), `ts` (candle timestamp), `price` (close price), `hmaFast`, `hmaSlow`. Fires at most once per 1m candle — only when a cross actually occurs. |
+| `contract_bar` | `contract:{symbol}` | New 1m bar for a tracked options contract. |
+| `chain_update` | `chain:{expiry}` | Options chain refresh for an expiry date. |
+| `market_context` | (all) | ES, NQ, VX, sector snapshot from TradingView screener. |
+| `heartbeat` | (all) | Keepalive every 30s. |
+| `service_shutdown` | (all) | Data service shutting down. |
+
+### Signal-Driven Architecture
+
+The `hma_cross_signal` is the canonical trade trigger. It fires from the data pipeline (`src/index.ts`) when `detectHmaCrossSignal()` sees HMA(3) cross HMA(17) on a newly closed 1m candle. This is event-driven — the signal IS the trigger, computed once at candle close, not something that's polled for.
+
+Agents should subscribe to `signals` (or `spx`) and execute on receipt of `hma_cross_signal`, rather than polling bars and re-deriving the cross.
 
 ## Testing
 
