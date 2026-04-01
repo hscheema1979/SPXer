@@ -217,6 +217,13 @@
   <span class="stat" id="live-hma-dir"></span>
   <span class="stat" id="live-uptime"></span>
 </div>
+<div id="live-config-panel" style="display:none; background:#0d0d15; border:1px solid #222; border-radius:6px; padding:10px 14px; margin:6px 10px; font-size:11px; color:#888; line-height:1.7">
+  <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px">
+    <span style="color:#aaa; font-weight:700; font-size:12px">📋 Live Config</span>
+    <span id="live-config-id" style="color:#3b82f6; font-family:monospace; font-size:11px"></span>
+  </div>
+  <div id="live-config-details" style="display:grid; grid-template-columns:repeat(auto-fill,minmax(200px,1fr)); gap:2px 16px"></div>
+</div>
 
 <!-- Config Modal -->
 <div class="modal-overlay" id="config-modal">
@@ -1826,13 +1833,16 @@ async function initLiveMode() {
     const bars = allBars.filter(b => b.ts >= todayOpen);
     renderSpxChart(bars.length ? bars : allBars, [], [], []);
 
-    // 2. Fetch agent status
+    // 2. Fetch and display live agent config
+    await loadLiveConfig();
+
+    // 3. Fetch agent status
     await pollAgentStatus();
 
-    // 3. Fetch recent activity and render trades
+    // 4. Fetch recent activity and render trades
     await pollActivity();
 
-    // 4. Load active contracts for mini-chart grid (today only)
+    // 5. Load active contracts for mini-chart grid (today only)
     await loadLiveContracts();
 
     // 5. Connect WebSocket for real-time updates
@@ -1866,6 +1876,8 @@ function teardownLiveMode() {
   }
   liveReconnectDelay = 1000;
   liveContractSymbols.clear();
+  const configPanel = document.getElementById('live-config-panel');
+  if (configPanel) configPanel.style.display = 'none';
   lastActivityCount = 0;
   setConnectionStatus(false);
 }
@@ -2015,6 +2027,44 @@ function updateStatusBanner(data) {
     const hours = Math.floor(sec / 3600);
     const mins = Math.floor((sec % 3600) / 60);
     document.getElementById('live-uptime').textContent = `Up ${hours}h${mins}m`;
+  }
+}
+
+async function loadLiveConfig() {
+  try {
+    const cfg = await fetch(`${API}/live/agent/config`).then(r => r.json());
+    if (cfg.error) return;
+
+    const panel = document.getElementById('live-config-panel');
+    const idEl = document.getElementById('live-config-id');
+    const detailsEl = document.getElementById('live-config-details');
+    panel.style.display = 'block';
+    idEl.textContent = cfg.id || '?';
+
+    const items = [
+      ['Signal', `HMA(${cfg.signals?.hmaCrossFast})×HMA(${cfg.signals?.hmaCrossSlow})`],
+      ['Timeframe', cfg.signals?.signalTimeframe || '1m'],
+      ['OTM Target', `$${cfg.signals?.targetOtmDistance}`],
+      ['TP', `${cfg.position?.takeProfitMultiplier}x`],
+      ['SL', `${cfg.position?.stopLossPercent}%`],
+      ['Exit', cfg.exit?.strategy || '?'],
+      ['Max Positions', cfg.position?.maxPositionsOpen],
+      ['Strike Range', `±$${cfg.strikeSelector?.strikeSearchRange}`],
+      ['Price Filter', `$${cfg.strikeSelector?.contractPriceMin}–$${cfg.strikeSelector?.contractPriceMax}`],
+      ['Active Window', `${cfg.timeWindows?.activeStart}–${cfg.timeWindows?.activeEnd} ET`],
+      ['Max Daily Loss', `$${cfg.risk?.maxDailyLoss}`],
+      ['Sizing', `$${cfg.sizing?.baseDollarsPerTrade} base / ${cfg.sizing?.riskPercentOfAccount}% of acct`],
+      ['Max Contracts', cfg.sizing?.maxContracts],
+      ['HMA Crosses', cfg.signals?.enableHmaCrosses ? '✅' : '❌'],
+      ['EMA Crosses', cfg.signals?.enableEmaCrosses ? '✅' : '❌'],
+      ['Und. HMA Req', cfg.signals?.requireUnderlyingHmaCross ? '✅' : '❌'],
+    ];
+
+    detailsEl.innerHTML = items.map(([k, v]) =>
+      `<span><span style="color:#555">${k}:</span> <span style="color:#ccc">${v}</span></span>`
+    ).join('');
+  } catch (e) {
+    console.warn('Failed to load live config:', e);
   }
 }
 

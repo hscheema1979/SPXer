@@ -132,6 +132,35 @@ export function startHttpServer(port: number): { app: Express; httpServer: Serve
     res.json(signal);
   });
 
+  app.get('/agent/config', (_req, res) => {
+    // Serve the live agent config so the viewer can display it
+    try {
+      const { AGENT_CONFIG } = require('../../agent-config');
+      const cfg = AGENT_CONFIG;
+      res.json({
+        id: cfg.id,
+        name: cfg.name,
+        signals: {
+          hmaCrossFast: cfg.signals.hmaCrossFast,
+          hmaCrossSlow: cfg.signals.hmaCrossSlow,
+          targetOtmDistance: cfg.signals.targetOtmDistance,
+          enableHmaCrosses: cfg.signals.enableHmaCrosses,
+          enableEmaCrosses: cfg.signals.enableEmaCrosses,
+          requireUnderlyingHmaCross: cfg.signals.requireUnderlyingHmaCross,
+          signalTimeframe: cfg.signals.signalTimeframe,
+        },
+        position: cfg.position,
+        strikeSelector: cfg.strikeSelector,
+        risk: cfg.risk,
+        exit: cfg.exit,
+        sizing: cfg.sizing,
+        timeWindows: cfg.timeWindows,
+      });
+    } catch {
+      res.json({ error: 'Config not available' });
+    }
+  });
+
   // ── Replay viewer ──
   app.use('/replay', createReplayRoutes());
 
