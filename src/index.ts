@@ -144,7 +144,9 @@ async function pollUnderlying(): Promise<void> {
   try {
     let bars: ReturnType<typeof buildBars> | undefined;
     if (mode === 'rth') {
-      const raw = await fetchSpxTimesales(today);
+      // Fetch without date filter — Tradier returns null for SPX timesales with explicit dates
+      // but returns proper 1m OHLCV bars without date params (defaults to current session)
+      const raw = await fetchTimesales('SPX');
       if (raw.length) {
         bars = buildBars('SPX', '1m', raw.slice(-5));
       } else {
