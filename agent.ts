@@ -320,11 +320,11 @@ async function runCycle(): Promise<number> {
   await reconcileBrokerPositions();
 
   // 4. Update HMA cross state from SPX bars
-  positions.updateHmaCross(snap.spx.bars1m);
+  const freshCross = positions.updateHmaCross(snap.spx.bars1m);
   const hmaCross = positions.getHmaCrossDirection();
   if (hmaCross) {
     const arrow = hmaCross === 'bullish' ? '🔼' : '🔽';
-    console.log(`[agent] HMA cross: ${arrow} ${hmaCross.toUpperCase()}`);
+    console.log(`[agent] HMA cross: ${arrow} ${hmaCross.toUpperCase()}${freshCross ? ' (FRESH SIGNAL)' : ''}`);
   }
 
   // 5. Monitor existing positions — may close and return events
@@ -388,8 +388,9 @@ async function runCycle(): Promise<number> {
     }
   }
 
-  // 8. If no position open and no flip happened, check for new entry
-  if (positions.count() === 0 && reversals.length === 0 && hmaCross) {
+  // 8. If no position open and no flip happened, enter ONLY on a fresh HMA cross signal
+  //    Direction alone (from boot/prior state) is NOT a signal — must witness the actual cross
+  if (positions.count() === 0 && reversals.length === 0 && freshCross && hmaCross) {
     const direction = hmaCross;
     const side = direction === 'bullish' ? 'call' : 'put';
     console.log(`[agent] No position — entering ${side.toUpperCase()} on HMA ${direction} cross`);

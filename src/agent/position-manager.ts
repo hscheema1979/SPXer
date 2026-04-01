@@ -72,11 +72,15 @@ export class PositionManager {
    * Update HMA cross state from SPX bars.
    * Called each cycle by the agent loop with fresh SPX bar data.
    * Uses the configured hmaCrossFast/hmaCrossSlow periods.
+   *
+   * Returns true ONLY when a fresh cross actually happened on this call.
+   * The first call establishes baseline state (no cross signal).
+   * Subsequent calls detect actual crossovers.
    */
-  updateHmaCross(spxBars: BarSummary[]): void {
+  updateHmaCross(spxBars: BarSummary[]): boolean {
     // Need at least 2 bars: use the second-to-last (last closed candle),
     // since the final bar is the currently forming candle with unstable values
-    if (spxBars.length < 2) return;
+    if (spxBars.length < 2) return false;
 
     const latest = spxBars[spxBars.length - 2];
     const fast = this.cfg.signals.hmaCrossFast;
@@ -86,7 +90,9 @@ export class PositionManager {
     const hmaFast = fast === 3 ? latest.hma3 : latest.hma5;
     const hmaSlow = slow === 17 ? latest.hma17 : latest.hma19;
 
-    if (hmaFast == null || hmaSlow == null) return;
+    if (hmaFast == null || hmaSlow == null) return false;
+
+    let freshCross = false;
 
     // Detect crossover: compare prev state to current
     if (this.prevHmaFast != null && this.prevHmaSlow != null) {
@@ -95,19 +101,23 @@ export class PositionManager {
 
       if (!wasFastAbove && isFastAbove) {
         this.hmaCrossDirection = 'bullish';
+        freshCross = true;
         console.log(`[hma] 🔼 Bullish cross: HMA(${fast})=${hmaFast.toFixed(2)} > HMA(${slow})=${hmaSlow.toFixed(2)}`);
       } else if (wasFastAbove && !isFastAbove) {
         this.hmaCrossDirection = 'bearish';
+        freshCross = true;
         console.log(`[hma] 🔽 Bearish cross: HMA(${fast})=${hmaFast.toFixed(2)} < HMA(${slow})=${hmaSlow.toFixed(2)}`);
       }
-      // If no cross, keep existing direction
+      // If no cross, keep existing direction (for exit logic)
     } else {
-      // First update — set initial direction from current state
+      // First update — set initial direction from current state (NOT a signal)
       this.hmaCrossDirection = hmaFast > hmaSlow ? 'bullish' : 'bearish';
+      // freshCross stays false — no entry on initial state
     }
 
     this.prevHmaFast = hmaFast;
     this.prevHmaSlow = hmaSlow;
+    return freshCross;
   }
 
   /**
