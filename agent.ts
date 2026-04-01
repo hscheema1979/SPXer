@@ -172,11 +172,11 @@ function runCoreSignalDetection(snap: MarketSnapshot): Signal | null {
   }
 
   // Run core signal detection — same as replay
-  let signals = detectSignals(contractBars, spxPrice, cfg);
+  let signals = detectSignals(contractBars, spxPrice, AGENT_CONFIG);
 
   // Filter by target OTM distance (same as replay)
-  if (cfg.signals.targetOtmDistance != null && signals.length > 0) {
-    const targetDist = cfg.signals.targetOtmDistance;
+  if (AGENT_CONFIG.signals.targetOtmDistance != null && signals.length > 0) {
+    const targetDist = AGENT_CONFIG.signals.targetOtmDistance;
     const spxRounded = Math.round(spxPrice / 5) * 5;
     const targetCallStrike = spxRounded + targetDist;
     const targetPutStrike = spxRounded - targetDist;
@@ -188,7 +188,7 @@ function runCoreSignalDetection(snap: MarketSnapshot): Signal | null {
   }
 
   // Filter by underlying HMA cross confirmation (same as replay)
-  if (cfg.signals.requireUnderlyingHmaCross && signals.length > 0) {
+  if (AGENT_CONFIG.signals.requireUnderlyingHmaCross && signals.length > 0) {
     const hmaCross = positions.getHmaCrossDirection();
     if (!hmaCross) {
       signals = [];
