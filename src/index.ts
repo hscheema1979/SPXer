@@ -20,6 +20,57 @@ const tracker = new ContractTracker(STRIKE_BAND, STRIKE_INTERVAL);
 let lastSpxPrice: number | null = null;
 let prevMode: string | null = null; // tracks mode transitions for VWAP reset
 
+// ── HMA Cross Signal Detection ──────────────────────────────────────────────
+// Detects HMA(3)×HMA(17) crossovers at the data pipeline level.
+// Fires exactly once per candle close — agents subscribe via WebSocket
+// instead of polling. The signal IS the trigger, not something to check for.
+let prevHma3: number | null = null;
+let prevHma17: number | null = null;
+let lastHmaSignal: { type: string; direction: string; ts: number; price: number; hmaFast: number; hmaSlow: number } | null = null;
+
+/** Get the last HMA cross signal (for REST API) */
+export function getLastHmaSignal() { return lastHmaSignal; }
+
+function detectHmaCrossSignal(bar: Bar): void {
+  const hma3 = bar.indicators?.hma3;
+  const hma17 = bar.indicators?.hma17;
+  if (hma3 == null || hma17 == null) return;
+
+  if (prevHma3 != null && prevHma17 != null) {
+    const wasFastAbove = prevHma3 > prevHma17;
+    const isFastAbove = hma3 > hma17;
+
+    if (!wasFastAbove && isFastAbove) {
+      const signal = {
+        type: 'hma_cross_signal' as const,
+        direction: 'bullish' as const,
+        ts: bar.ts,
+        price: bar.close,
+        hmaFast: hma3,
+        hmaSlow: hma17,
+      };
+      console.log(`[signal] 🔼 BULLISH HMA(3)×HMA(17) cross @ ${bar.close.toFixed(2)} (candle ts=${bar.ts})`);
+      lastHmaSignal = signal;
+      broadcast(signal);
+    } else if (wasFastAbove && !isFastAbove) {
+      const signal = {
+        type: 'hma_cross_signal' as const,
+        direction: 'bearish' as const,
+        ts: bar.ts,
+        price: bar.close,
+        hmaFast: hma3,
+        hmaSlow: hma17,
+      };
+      console.log(`[signal] 🔽 BEARISH HMA(3)×HMA(17) cross @ ${bar.close.toFixed(2)} (candle ts=${bar.ts})`);
+      lastHmaSignal = signal;
+      broadcast(signal);
+    }
+  }
+
+  prevHma3 = hma3;
+  prevHma17 = hma17;
+}
+
 /** Aggregate 1m bars to all higher timeframes (3m, 5m, 15m, 1h) with indicator computation */
 function aggregateAndStore(bars1m: Bar[], tier: 1 | 2 = 1): void {
   for (const [tf, secs] of HIGHER_TIMEFRAMES) {
@@ -125,6 +176,12 @@ async function pollUnderlying(): Promise<void> {
       const lastBar = enriched[enriched.length - 1];
       healthTracker.recordBar(symbol, lastBar.ts * 1000);
       broadcast({ type: 'spx_bar', data: lastBar });
+
+      // Detect HMA cross signal on the newly closed candle
+      // Only check during RTH on SPX bars (not overnight ES)
+      if (symbol === 'SPX') {
+        detectHmaCrossSignal(lastBar);
+      }
     }
   } catch (e) {
     healthTracker.recordFailure(mode === 'rth' ? 'tradier' : 'yahoo');

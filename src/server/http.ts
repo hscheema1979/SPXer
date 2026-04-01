@@ -125,6 +125,13 @@ export function startHttpServer(port: number): { app: Express; httpServer: Serve
     res.json(readRecentActivity(n));
   });
 
+  app.get('/signal/latest', (_req, res) => {
+    const { getLastHmaSignal } = require('../index');
+    const signal = getLastHmaSignal();
+    if (!signal) return res.json({ signal: null });
+    res.json(signal);
+  });
+
   // ── Replay viewer ──
   app.use('/replay', createReplayRoutes());
 

@@ -37,6 +37,7 @@ export class PositionManager {
   // Tracks previous HMA values for cross detection
   private prevHmaFast: number | null = null;
   private prevHmaSlow: number | null = null;
+  private lastProcessedBarTs: number | null = null; // Only process each closed candle once
 
   constructor(config: Config, paper: boolean) {
     this.cfg = config;
@@ -73,22 +74,34 @@ export class PositionManager {
    * Called each cycle by the agent loop with fresh SPX bar data.
    * Uses the configured hmaCrossFast/hmaCrossSlow periods.
    *
-   * Returns true ONLY when a fresh cross actually happened on this call.
+   * ONLY processes a new closed candle — if the last closed bar's timestamp
+   * hasn't changed since the previous call, this is a no-op. This ensures
+   * signals fire exactly once per candle close, not mid-candle on unstable data.
+   *
+   * Returns true ONLY when a fresh cross actually happened on a newly closed candle.
    * The first call establishes baseline state (no cross signal).
-   * Subsequent calls detect actual crossovers.
    */
   updateHmaCross(spxBars: BarSummary[]): boolean {
     // Need at least 2 bars: use the second-to-last (last closed candle),
     // since the final bar is the currently forming candle with unstable values
     if (spxBars.length < 2) return false;
 
-    const latest = spxBars[spxBars.length - 2];
+    const closedBar = spxBars[spxBars.length - 2];
+
+    // Only process each closed candle once — if we've already seen this
+    // bar timestamp, skip. The agent polls every 5-30s but we only act
+    // when a new 1m candle has closed.
+    if (this.lastProcessedBarTs != null && closedBar.ts === this.lastProcessedBarTs) {
+      return false;
+    }
+    this.lastProcessedBarTs = closedBar.ts;
+
     const fast = this.cfg.signals.hmaCrossFast;
     const slow = this.cfg.signals.hmaCrossSlow;
 
     // Pick the right HMA values based on config periods
-    const hmaFast = fast === 3 ? latest.hma3 : latest.hma5;
-    const hmaSlow = slow === 17 ? latest.hma17 : latest.hma19;
+    const hmaFast = fast === 3 ? closedBar.hma3 : closedBar.hma5;
+    const hmaSlow = slow === 17 ? closedBar.hma17 : closedBar.hma19;
 
     if (hmaFast == null || hmaSlow == null) return false;
 
@@ -102,11 +115,11 @@ export class PositionManager {
       if (!wasFastAbove && isFastAbove) {
         this.hmaCrossDirection = 'bullish';
         freshCross = true;
-        console.log(`[hma] 🔼 Bullish cross: HMA(${fast})=${hmaFast.toFixed(2)} > HMA(${slow})=${hmaSlow.toFixed(2)}`);
+        console.log(`[hma] 🔼 Bullish cross on candle close (ts=${closedBar.ts}): HMA(${fast})=${hmaFast.toFixed(2)} > HMA(${slow})=${hmaSlow.toFixed(2)}`);
       } else if (wasFastAbove && !isFastAbove) {
         this.hmaCrossDirection = 'bearish';
         freshCross = true;
-        console.log(`[hma] 🔽 Bearish cross: HMA(${fast})=${hmaFast.toFixed(2)} < HMA(${slow})=${hmaSlow.toFixed(2)}`);
+        console.log(`[hma] 🔽 Bearish cross on candle close (ts=${closedBar.ts}): HMA(${fast})=${hmaFast.toFixed(2)} < HMA(${slow})=${hmaSlow.toFixed(2)}`);
       }
       // If no cross, keep existing direction (for exit logic)
     } else {

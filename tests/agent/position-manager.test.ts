@@ -50,22 +50,31 @@ const mockedLogClose = vi.mocked(logClose);
  * For bullish cross: fast was below slow, now fast above slow.
  * For bearish cross: fast was above slow, now fast below slow.
  */
+let _testBarTs = Math.floor(Date.now() / 1000);
 function setHmaCross(pm: PositionManager, direction: 'bullish' | 'bearish'): void {
-  const bar = (hma3: number, hma17: number) => ({
-    ts: Date.now(), close: 100, rsi14: 50, ema9: 100, ema21: 100,
-    hma3, hma5: hma3, hma17, hma19: hma17,
-  });
+  // Each call uses unique timestamps so updateHmaCross processes each as a new closed candle
+  const bar = (hma3: number, hma17: number) => {
+    _testBarTs += 60; // advance 1 minute
+    return {
+      ts: _testBarTs, close: 100, rsi14: 50, ema9: 100, ema21: 100,
+      hma3, hma5: hma3, hma17, hma19: hma17,
+    };
+  };
 
   if (direction === 'bullish') {
-    // Step 1: fast < slow (bearish state)
-    pm.updateHmaCross([bar(99, 101), bar(99, 101), bar(99, 101)]);
-    // Step 2: fast > slow (bullish cross)
-    pm.updateHmaCross([bar(102, 100), bar(102, 100), bar(102, 100)]);
+    // Step 1: fast < slow (bearish state) — bars: [old, closed, forming]
+    const b1a = bar(99, 101), b1b = bar(99, 101), b1c = bar(99, 101);
+    pm.updateHmaCross([b1a, b1b, b1c]);
+    // Step 2: fast > slow (bullish cross) — new candle close
+    const b2a = bar(102, 100), b2b = bar(102, 100), b2c = bar(102, 100);
+    pm.updateHmaCross([b2a, b2b, b2c]);
   } else {
     // Step 1: fast > slow (bullish state)
-    pm.updateHmaCross([bar(102, 100), bar(102, 100), bar(102, 100)]);
-    // Step 2: fast < slow (bearish cross)
-    pm.updateHmaCross([bar(99, 101), bar(99, 101), bar(99, 101)]);
+    const b1a = bar(102, 100), b1b = bar(102, 100), b1c = bar(102, 100);
+    pm.updateHmaCross([b1a, b1b, b1c]);
+    // Step 2: fast < slow (bearish cross) — new candle close
+    const b2a = bar(99, 101), b2b = bar(99, 101), b2c = bar(99, 101);
+    pm.updateHmaCross([b2a, b2b, b2c]);
   }
 }
 

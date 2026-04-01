@@ -46,6 +46,8 @@ export function broadcast(message: object): void {
       ws.send(data);
     } else if (msg.type === 'chain_update' && subs.has(`chain:${msg.expiry}`)) {
       ws.send(data);
+    } else if (msg.type === 'hma_cross_signal' && (subs.has('signals') || subs.has('spx'))) {
+      ws.send(data);
     } else if (['market_context', 'heartbeat', 'service_shutdown'].includes(msg.type)) {
       ws.send(data); // broadcast to all
     }
