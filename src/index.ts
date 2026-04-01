@@ -20,6 +20,9 @@ const tracker = new ContractTracker(STRIKE_BAND, STRIKE_INTERVAL);
 let lastSpxPrice: number | null = null;
 let prevMode: string | null = null; // tracks mode transitions for VWAP reset
 
+// Per-symbol 1m candle state for options — built incrementally from quote snapshots
+const optionBarState = new Map<string, { minuteTs: number; open: number; high: number; low: number; volume: number }>();
+
 // ── HMA Cross Signal Detection ──────────────────────────────────────────────
 // Detects HMA(3)×HMA(17) crossovers at the data pipeline level.
 // Fires exactly once per candle close — agents subscribe via WebSocket
@@ -210,7 +213,8 @@ async function pollOptions(): Promise<void> {
     }
 
     // Batch-quote update for already-tracked contracts → build bars + persist
-    // Uses real OHLCV from Tradier quotes (open/high/low/close/volume are session values)
+    // We build 1m candles incrementally from quote snapshots (last/bid/ask).
+    // Tradier's q.open/high/low are SESSION-level, not candle-level — don't use them.
     const tracked = tracker.getActive().concat(tracker.getSticky());
     if (tracked.length > 0) {
       const quotes = await fetchBatchQuotes(tracked.map(c => c.symbol));
@@ -220,13 +224,27 @@ async function pollOptions(): Promise<void> {
       quotes.forEach((q, sym) => {
         const price = q.last ?? q.bid ?? q.ask;
         if (price === null || price <= 0) return;
+
+        // Build proper 1m candle from quote snapshot:
+        // Track open/high/low per minute in optionBarState
+        let state = optionBarState.get(sym);
+        if (!state || state.minuteTs !== minuteTs) {
+          // New minute — start fresh candle with current price as open
+          state = { minuteTs, open: price, high: price, low: price, volume: 0 };
+          optionBarState.set(sym, state);
+        }
+        // Update high/low within the minute
+        if (price > state.high) state.high = price;
+        if (price < state.low) state.low = price;
+        state.volume += (q.volume ?? 0) - state.volume; // session volume delta approximation
+
         const bar = rawToBar(sym, '1m', {
           ts: minuteTs,
-          open: q.open ?? price,
-          high: q.high ?? Math.max(price, q.ask ?? price),
-          low: q.low ?? Math.min(price, q.bid ?? price),
+          open: state.open,
+          high: state.high,
+          low: state.low,
           close: price,
-          volume: q.volume ?? 0,
+          volume: state.volume,
         });
         const enriched = { ...bar, indicators: computeIndicators(bar, 2) };
         newBars.push(enriched);
