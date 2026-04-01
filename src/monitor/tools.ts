@@ -180,11 +180,19 @@ const getBalanceTool = {
 
         lines.push(`── ${acct.label} (${acct.accountId}) ──`);
 
+        // Tradier returns equity=0 when no positions are open (it's position equity).
+        // total_equity is the actual account value. total_cash is cash on hand.
+        // Use total_equity as the primary indicator of account health.
+        const totalEquity = b?.total_equity ?? b?.equity ?? '?';
+        const totalCash = b?.total_cash ?? '?';
+
         // Cash accounts have cash.cash_available, margin accounts have margin.buying_power
         const buyingPower =
           b?.cash?.cash_available ?? b?.margin?.buying_power ?? b?.buying_power ?? '?';
-        lines.push(`  Equity: $${b?.equity ?? b?.total_equity ?? '?'}`);
+        lines.push(`  Total Equity: $${totalEquity}`);
+        lines.push(`  Total Cash: $${totalCash}`);
         lines.push(`  Buying Power: $${buyingPower}`);
+        lines.push(`  Position Equity: $${b?.equity ?? 0} (open position value only — $0 when flat)`);
         lines.push(`  Market Value: $${b?.market_value ?? '?'}`);
         lines.push(`  Open P&L: $${b?.open_pl ?? '?'}`);
         lines.push(`  Close P&L: $${b?.close_pl ?? '?'}`);
