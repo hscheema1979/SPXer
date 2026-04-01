@@ -70,6 +70,20 @@ priceStream.onPrice((symbol, last, bid, ask) => {
     // Use bid for sell (what we'd actually get)
     const sellPrice = bid > 0 ? bid : last;
 
+    // Track intra-trade highs/lows from real-time stream
+    const now = Date.now();
+    if (last > (pos.highPrice ?? pos.entryPrice)) {
+      pos.highPrice = last;
+      pos.highTs = now;
+    }
+    if (last < (pos.lowPrice ?? pos.entryPrice)) {
+      pos.lowPrice = last;
+      pos.lowTs = now;
+    }
+    const pnlPct = (last - pos.entryPrice) / pos.entryPrice;
+    if (pnlPct > (pos.maxPnlPct ?? 0)) pos.maxPnlPct = pnlPct;
+    if (pnlPct < (pos.maxDrawdownPct ?? 0)) pos.maxDrawdownPct = pnlPct;
+
     // TP check
     if (pos.takeProfit && sellPrice >= pos.takeProfit) {
       console.log(`[stream] 🎯 TP HIT on ${symbol}: $${sellPrice.toFixed(2)} >= TP $${pos.takeProfit.toFixed(2)} — flagging for exit`);

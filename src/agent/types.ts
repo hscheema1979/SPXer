@@ -66,6 +66,13 @@ export interface OpenPosition {
   tpLegId?: number;            // TP limit leg order ID
   slLegId?: number;            // SL stop leg order ID
   closeFailCount?: number;     // How many times close order was rejected by broker
+  // Intra-trade price tracking — for post-trade "what-if TP" analysis
+  highPrice?: number;          // Highest price seen during trade
+  lowPrice?: number;           // Lowest price seen during trade
+  highTs?: number;             // Timestamp of high
+  lowTs?: number;              // Timestamp of low
+  maxPnlPct?: number;          // Peak unrealized P&L as % of entry (e.g. 0.35 = +35%)
+  maxDrawdownPct?: number;     // Worst unrealized P&L as % of entry (e.g. -0.50 = -50%)
 }
 
 export interface PositionClose {

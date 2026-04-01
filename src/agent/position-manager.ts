@@ -45,6 +45,13 @@ export class PositionManager {
   }
 
   add(position: OpenPosition): void {
+    // Initialize intra-trade price tracking
+    position.highPrice = position.entryPrice;
+    position.lowPrice = position.entryPrice;
+    position.highTs = position.openedAt;
+    position.lowTs = position.openedAt;
+    position.maxPnlPct = 0;
+    position.maxDrawdownPct = 0;
     this.positions.set(position.id, position);
     this.highWaterPrices.set(position.id, position.entryPrice);
     console.log(`[positions] Opened ${position.symbol} x${position.quantity} @ $${position.entryPrice.toFixed(2)} | stop: $${position.stopLoss.toFixed(2)}`);
@@ -175,12 +182,24 @@ export class PositionManager {
     for (const [id, pos] of this.positions) {
       const currentPrice = priceMap.get(pos.symbol);
 
-      // Update high-water mark (only when we have a price)
+      // Update high-water mark and intra-trade price tracking
       if (currentPrice !== undefined) {
         const prevHigh = this.highWaterPrices.get(id) ?? pos.entryPrice;
         if (currentPrice > prevHigh) {
           this.highWaterPrices.set(id, currentPrice);
         }
+        // Track high/low prices and unrealized P&L extremes
+        if (currentPrice > (pos.highPrice ?? pos.entryPrice)) {
+          pos.highPrice = currentPrice;
+          pos.highTs = now;
+        }
+        if (currentPrice < (pos.lowPrice ?? pos.entryPrice)) {
+          pos.lowPrice = currentPrice;
+          pos.lowTs = now;
+        }
+        const pnlPct = (currentPrice - pos.entryPrice) / pos.entryPrice;
+        if (pnlPct > (pos.maxPnlPct ?? 0)) pos.maxPnlPct = pnlPct;
+        if (pnlPct < (pos.maxDrawdownPct ?? 0)) pos.maxDrawdownPct = pnlPct;
       }
 
       // Map OpenPosition → core Position for checkExit
