@@ -1,5 +1,6 @@
 /**
  * Sweep takeProfitMultiplier from 1.3 to 3.0 in 0.1 increments.
+ * RESUMABLE — skips configs/dates that already have results.
  * Uses the live config across Jan 2 → Apr 2, 2026 (63 trading days).
  * Close pricing (current live behavior — no intrabar).
  */
@@ -44,10 +45,36 @@ async function main() {
     tpValues.push(Math.round(tp * 10) / 10);
   }
 
-  console.log(`\n  TP Multiplier Sweep: ${tpValues.length} values × ${dates.length} days = ${tpValues.length * dates.length} replays`);
+  // Check what's already done
+  const existingResults = db.prepare(
+    `SELECT configId, date FROM replay_results WHERE configId LIKE 'sweep-tp-%'`
+  ).all() as { configId: string; date: string }[];
+  
+  const doneSet = new Set(existingResults.map(r => `${r.configId}|${r.date}`));
+
+  // Count remaining work
+  let totalRemaining = 0;
+  const workPlan: { tp: number; dates: string[] }[] = [];
+  for (const tp of tpValues) {
+    const id = `sweep-tp-${tp.toFixed(1).replace('.', '')}`;
+    const remaining = dates.filter(d => !doneSet.has(`${id}|${d}`));
+    if (remaining.length > 0) {
+      workPlan.push({ tp, dates: remaining });
+      totalRemaining += remaining.length;
+    }
+  }
+
+  const alreadyDone = tpValues.length * dates.length - totalRemaining;
+  console.log(`\n  TP Multiplier Sweep: ${tpValues.length} values × ${dates.length} days`);
+  console.log(`  Already completed: ${alreadyDone} replays`);
+  console.log(`  Remaining: ${totalRemaining} replays across ${workPlan.length} TP values`);
   console.log(`  Config: ${CONFIG_ID} | Close pricing\n`);
 
-  // Register all sweep configs
+  if (totalRemaining === 0) {
+    console.log('  All sweep runs already complete! Generating summary...\n');
+  }
+
+  // Register sweep configs (upsert — won't overwrite existing)
   const now = Date.now();
   const upsert = db.prepare(`INSERT INTO replay_configs (id, name, config_json, createdAt, updatedAt)
     VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET config_json=excluded.config_json, updatedAt=excluded.updatedAt`);
@@ -59,46 +86,59 @@ async function main() {
     cfg.id = id;
     cfg.name = `Sweep TP ${tp.toFixed(1)}x`;
     cfg.position.takeProfitMultiplier = tp;
-    // Ensure close pricing (no intrabar)
+    cfg.exit = cfg.exit || {};
     cfg.exit.exitPricing = 'close';
     upsert.run(id, cfg.name, JSON.stringify(cfg), now, now);
     configs.set(tp, cfg);
-    // Clean old results
-    db.prepare(`DELETE FROM replay_results WHERE configId = ?`).run(id);
-    db.prepare(`DELETE FROM replay_runs WHERE configId = ?`).run(id);
   }
   db.close();
 
-  const results: SweepRow[] = [];
-  const totalRuns = tpValues.length * dates.length;
+  // Run remaining replays
   let completed = 0;
   const startTime = Date.now();
 
-  for (const tp of tpValues) {
-    const cfg = configs.get(tp)!;
-    const dayPnls: number[] = [];
-    let trades = 0, wins = 0;
+  for (const work of workPlan) {
+    const cfg = configs.get(work.tp)!;
+    const id = `sweep-tp-${work.tp.toFixed(1).replace('.', '')}`;
 
-    for (const date of dates) {
+    for (const date of work.dates) {
       try {
-        const r = await runReplay(cfg, date, {
+        await runReplay(cfg, date, {
           dataDbPath: DB_PATH, storeDbPath: DB_PATH, verbose: false, noJudge: true,
         });
-        trades += r.trades;
-        wins += r.wins;
-        dayPnls.push(r.totalPnl);
       } catch (e: any) {
-        // skip
+        console.error(`  ✗ ${id} ${date}: ${e.message}`);
       }
       completed++;
-      if (completed % 50 === 0 || completed === totalRuns) {
+      if (completed % 10 === 0 || completed === totalRemaining) {
         const elapsed = (Date.now() - startTime) / 1000;
         const rate = completed / elapsed;
-        const eta = Math.ceil((totalRuns - completed) / rate);
-        process.stdout.write(`  ${completed}/${totalRuns} (${rate.toFixed(1)}/s, ~${eta}s left)     \r`);
+        const eta = Math.ceil((totalRemaining - completed) / rate);
+        const etaMin = Math.floor(eta / 60);
+        const etaSec = eta % 60;
+        process.stdout.write(`  ${completed}/${totalRemaining} (${rate.toFixed(1)}/s, ~${etaMin}m${etaSec}s left)     \r`);
       }
     }
 
+    // Print progress for this TP value
+    console.log(`  ✓ TP ${work.tp.toFixed(1)}x — ${work.dates.length} days completed`);
+  }
+
+  // Now gather all results for summary
+  const db2 = new Database(DB_PATH);
+  const results: SweepRow[] = [];
+
+  for (const tp of tpValues) {
+    const id = `sweep-tp-${tp.toFixed(1).replace('.', '')}`;
+    const rows = db2.prepare(
+      `SELECT trades, wins, totalPnl, winRate FROM replay_results WHERE configId = ?`
+    ).all(id) as { trades: number; wins: number; totalPnl: number; winRate: number }[];
+
+    if (rows.length === 0) continue;
+
+    const trades = rows.reduce((s, r) => s + r.trades, 0);
+    const wins = rows.reduce((s, r) => s + r.wins, 0);
+    const dayPnls = rows.map(r => r.totalPnl);
     const totalPnl = dayPnls.reduce((s, v) => s + v, 0);
     const winDays = dayPnls.filter(p => p > 0).length;
 
@@ -108,36 +148,42 @@ async function main() {
       wins,
       winRate: trades > 0 ? wins / trades : 0,
       totalPnl,
-      avgDaily: dayPnls.length > 0 ? totalPnl / dayPnls.length : 0,
+      avgDaily: rows.length > 0 ? totalPnl / rows.length : 0,
       winDays,
-      totalDays: dayPnls.length,
-      bestDay: dayPnls.length > 0 ? Math.max(...dayPnls) : 0,
-      worstDay: dayPnls.length > 0 ? Math.min(...dayPnls) : 0,
+      totalDays: rows.length,
+      bestDay: Math.max(...dayPnls),
+      worstDay: Math.min(...dayPnls),
       avgTrade: trades > 0 ? totalPnl / trades : 0,
     });
-
-    const r = results[results.length - 1];
-    console.log(`  TP ${tp.toFixed(1)}x | ${r.trades} trades | WR ${(r.winRate * 100).toFixed(1)}% | P&L ${r.totalPnl >= 0 ? '+' : ''}$${r.totalPnl.toFixed(0)} | Avg/day ${r.avgDaily >= 0 ? '+' : ''}$${r.avgDaily.toFixed(0)}`);
   }
+  db2.close();
 
   // Summary table
   const fmt = (n: number) => n >= 0 ? `+$${n.toFixed(0)}` : `-$${Math.abs(n).toFixed(0)}`;
 
-  console.log(`\n${'='.repeat(100)}`);
+  console.log(`\n${'='.repeat(110)}`);
   console.log(`  TP MULTIPLIER SWEEP — ${dates.length} days (${START_DATE} → ${END_DATE})`);
-  console.log(`${'='.repeat(100)}\n`);
+  console.log(`${'='.repeat(110)}\n`);
 
-  console.log(`  ${'TP'.padEnd(6)} ${'Trades'.padStart(7)} ${'WR%'.padStart(7)} ${'Total P&L'.padStart(12)} ${'Avg/Day'.padStart(10)} ${'Avg/Trade'.padStart(11)} ${'WinDays'.padStart(8)} ${'Best Day'.padStart(10)} ${'Worst Day'.padStart(10)}`);
-  console.log(`  ${'-'.repeat(6)} ${'-'.repeat(7)} ${'-'.repeat(7)} ${'-'.repeat(12)} ${'-'.repeat(10)} ${'-'.repeat(11)} ${'-'.repeat(8)} ${'-'.repeat(10)} ${'-'.repeat(10)}`);
+  console.log(`  ${'TP'.padEnd(6)} ${'Days'.padStart(5)} ${'Trades'.padStart(7)} ${'WR%'.padStart(7)} ${'Total P&L'.padStart(12)} ${'Avg/Day'.padStart(10)} ${'Avg/Trade'.padStart(11)} ${'WinDays'.padStart(8)} ${'Best Day'.padStart(10)} ${'Worst Day'.padStart(10)}`);
+  console.log(`  ${'-'.repeat(6)} ${'-'.repeat(5)} ${'-'.repeat(7)} ${'-'.repeat(7)} ${'-'.repeat(12)} ${'-'.repeat(10)} ${'-'.repeat(11)} ${'-'.repeat(8)} ${'-'.repeat(10)} ${'-'.repeat(10)}`);
 
   let bestTp = results[0];
   for (const r of results) {
     if (r.totalPnl > bestTp.totalPnl) bestTp = r;
     const marker = r.tp === 1.4 ? ' ◄ current' : '';
-    console.log(`  ${r.tp.toFixed(1).padEnd(6)} ${String(r.trades).padStart(7)} ${(r.winRate * 100).toFixed(1).padStart(6)}% ${fmt(r.totalPnl).padStart(12)} ${fmt(r.avgDaily).padStart(10)} ${fmt(r.avgTrade).padStart(11)} ${(r.winDays + '/' + r.totalDays).padStart(8)} ${fmt(r.bestDay).padStart(10)} ${fmt(r.worstDay).padStart(10)}${marker}`);
+    console.log(`  ${r.tp.toFixed(1).padEnd(6)} ${String(r.totalDays).padStart(5)} ${String(r.trades).padStart(7)} ${(r.winRate * 100).toFixed(1).padStart(6)}% ${fmt(r.totalPnl).padStart(12)} ${fmt(r.avgDaily).padStart(10)} ${fmt(r.avgTrade).padStart(11)} ${(r.winDays + '/' + r.totalDays).padStart(8)} ${fmt(r.bestDay).padStart(10)} ${fmt(r.worstDay).padStart(10)}${marker}`);
   }
 
-  console.log(`\n  ★ Best: TP ${bestTp.tp.toFixed(1)}x → ${fmt(bestTp.totalPnl)} total (${fmt(bestTp.avgDaily)}/day)\n`);
+  console.log(`\n  ★ Best: TP ${bestTp.tp.toFixed(1)}x → ${fmt(bestTp.totalPnl)} total (${fmt(bestTp.avgDaily)}/day)`);
+  
+  // Compute delta vs current 1.4x
+  const current = results.find(r => r.tp === 1.4);
+  if (current && bestTp.tp !== 1.4) {
+    const delta = bestTp.totalPnl - current.totalPnl;
+    console.log(`  Δ vs 1.4x (current): ${fmt(delta)} over ${dates.length} days`);
+  }
+  console.log();
 }
 
 main().catch(console.error);
