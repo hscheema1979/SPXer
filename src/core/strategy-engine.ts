@@ -12,6 +12,7 @@
 
 import type { Direction, CoreBar, ExitReason, Position } from './types';
 import type { Config } from '../config/types';
+import { getEntryCooldownSec } from '../config/types';
 import type { StrikeCandidate } from './strike-selector';
 import { checkExit, type ExitContext } from './position-manager';
 import { isRiskBlocked, type RiskState } from './risk-guard';
@@ -456,9 +457,10 @@ export function tick(
   }
 
   // ── Step 5: Cooldown gate ─────────────────────────────────────────────
+  const cooldownSec = getEntryCooldownSec(config);
   const elapsed = input.ts - state.lastEntryTs;
-  if (state.lastEntryTs > 0 && elapsed < config.judges.escalationCooldownSec) {
-    const remaining = config.judges.escalationCooldownSec - elapsed;
+  if (state.lastEntryTs > 0 && elapsed < cooldownSec) {
+    const remaining = cooldownSec - elapsed;
     return {
       exits,
       entry: null,

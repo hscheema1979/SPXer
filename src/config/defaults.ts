@@ -29,7 +29,7 @@ export const DEFAULT_CONFIG: Config = {
     activeJudge: 'sonnet',
     consensusRule: 'primary-decides',
     confidenceThreshold: 0.5,
-    escalationCooldownSec: 0,
+    entryCooldownSec: 0,
     promptId: 'judge-regime-advisor-v1',
   },
 
@@ -376,8 +376,9 @@ export function validateConfig(config: Config): { valid: boolean; errors: string
   }
 
   // Cooldown
-  if (config.judges.escalationCooldownSec < 0) {
-    errors.push('escalationCooldownSec must be >= 0');
+  const cooldown = config.judges.entryCooldownSec ?? config.judges.escalationCooldownSec ?? 0;
+  if (cooldown < 0) {
+    errors.push('entryCooldownSec must be >= 0');
   }
 
   // Regime

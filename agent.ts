@@ -19,7 +19,7 @@ dotenv.config();
 
 import { fetchMarketSnapshot, type MarketSnapshot, type ContractState } from './src/agent/market-feed';
 import { openPosition, closePosition, cancelOcoLegs, convertOptionSymbol } from './src/agent/trade-executor';
-import { PositionManager, type PositionCloseEvent } from './src/agent/position-manager';
+import { PositionManager } from './src/agent/position-manager';
 import { createStore } from './src/replay/store';
 import { DEFAULT_CONFIG } from './src/config/defaults';
 import { RiskGuard } from './src/agent/risk-guard';

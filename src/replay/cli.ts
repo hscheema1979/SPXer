@@ -321,7 +321,7 @@ function cmdConfigs() {
     if (c.description) console.log(`  Desc: ${c.description}`);
     console.log(`  Strike: ±$${c.strikeSelector?.strikeSearchRange || '?'} | SL: ${c.position?.stopLossPercent || 0}% | TP: ${c.position?.takeProfitMultiplier || '?'}x`);
     console.log(`  RSI: ${c.signals?.rsiOversold || '?'}/${c.signals?.rsiOverbought || '?'} | HMA: ${c.signals?.enableHmaCrosses ? 'ON' : 'OFF'} | EMA: ${c.signals?.enableEmaCrosses ? 'ON' : 'OFF'}`);
-    console.log(`  Cooldown: ${c.judges?.escalationCooldownSec || '?'}s | Window: ${c.timeWindows?.activeStart || '?'}-${c.timeWindows?.activeEnd || '?'}`);
+    console.log(`  Cooldown: ${c.judges?.entryCooldownSec ?? c.judges?.escalationCooldownSec ?? '?'}s | Window: ${c.timeWindows?.activeStart || '?'}-${c.timeWindows?.activeEnd || '?'}`);
   }
 
   console.log(`\n  ${'─'.repeat(80)}\n`);

@@ -20,7 +20,6 @@ export interface ScheduleResult {
 
 /**
  * Market holidays — US equity markets closed.
- * Sourced from agent-xsp-config.ts calendar.
  */
 const HOLIDAYS = new Set([
   // 2025

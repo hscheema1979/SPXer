@@ -141,7 +141,7 @@ export function buildConfigFromFlags(flags: CliOverrides, base?: Config): Config
     };
   }
   if (flags.cooldownSec !== undefined) {
-    overrides.judges = { ...config.judges, escalationCooldownSec: flags.cooldownSec };
+    overrides.judges = { ...config.judges, entryCooldownSec: flags.cooldownSec };
   }
   if (flags.maxDailyLoss !== undefined) {
     overrides.risk = { ...config.risk, maxDailyLoss: flags.maxDailyLoss };

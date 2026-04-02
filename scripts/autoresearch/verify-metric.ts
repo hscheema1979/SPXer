@@ -116,7 +116,7 @@ async function main() {
     ...(flags.activeStart ? { activeStart: flags.activeStart } : {}),
     ...(flags.activeEnd ? { activeEnd: flags.activeEnd } : {}),
   };
-  if (flags.cooldownSec) overrides.judges = { ...config.judges, escalationCooldownSec: Number(flags.cooldownSec) };
+  if (flags.cooldownSec) overrides.judges = { ...config.judges, entryCooldownSec: Number(flags.cooldownSec) };
   if (flags.maxDailyLoss) overrides.risk = { ...config.risk, maxDailyLoss: Number(flags.maxDailyLoss) };
   if (flags.timeframe) overrides.pipeline = { ...config.pipeline, timeframe: flags.timeframe as any };
 

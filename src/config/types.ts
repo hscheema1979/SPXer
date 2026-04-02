@@ -49,7 +49,11 @@ export interface Config {
     activeJudge: string;
     consensusRule: 'primary-decides' | 'majority' | 'unanimous' | 'first-agree';
     confidenceThreshold: number;
-    escalationCooldownSec: number;
+    /** Entry cooldown in seconds between trades.
+     *  Renamed from escalationCooldownSec. Both names are supported for backward compat. */
+    entryCooldownSec: number;
+    /** @deprecated Use entryCooldownSec instead */
+    escalationCooldownSec?: number;
     /** Prompt ID for judge system prompt */
     promptId: string;
   };
@@ -271,4 +275,10 @@ export interface ResolvedConfig extends Config {
   resolvedJudges: ModelRecord[];
   /** Hydrated prompt records keyed by prompt ID */
   resolvedPrompts: Record<string, PromptRecord>;
+}
+
+/** Resolve the entry cooldown from config, supporting both old and new field names.
+ *  Prefers `entryCooldownSec`, falls back to `escalationCooldownSec` for backward compat. */
+export function getEntryCooldownSec(config: Config): number {
+  return config.judges.entryCooldownSec ?? config.judges.escalationCooldownSec ?? 0;
 }

@@ -4,9 +4,8 @@
  * Runs at 6 AM to:
  * 1. Parse .autoresearch-results.tsv
  * 2. Find best config by composite score
- * 3. Update agent-config.ts (transitional file)
- * 4. Save updated config to DB via ConfigManager
- * 5. Restart spxer-agent PM2 process
+ * 3. Save updated config to DB via ConfigManager
+ * 4. Restart spxer-agent PM2 process
  *
  * Usage:
  *   npx tsx scripts/update-config-from-autoresearch.ts
@@ -60,43 +59,6 @@ function parseResults(): { best: ResultRow; all: ResultRow[] } {
   rows.sort((a, b) => computeScore(b) - computeScore(a));
 
   return { best: rows[0], all: rows };
-}
-
-function updateAgentConfig(best: ResultRow) {
-  const configPath = path.resolve(__dirname, '../agent-config.ts');
-
-  const strikeRange = parseInt(best.strike_range);
-  const rsiOs = parseInt(best.rsi_os);
-  const rsiOb = parseInt(best.rsi_ob);
-  const optRsiOs = parseInt(best.opt_rsi_os);
-  const optRsiOb = parseInt(best.opt_rsi_ob);
-  const stopLoss = parseInt(best.stop_loss);
-  const tpMult = parseFloat(best.tp_mult);
-  const timeStart = best.time_start;
-  const timeEnd = best.time_end;
-  const maxPos = parseInt(best.max_pos);
-
-  let config = fs.readFileSync(configPath, 'utf-8');
-
-  // Update values via regex (field names match unified Config type)
-  config = config.replace(/strikeSearchRange: \d+/, `strikeSearchRange: ${strikeRange}`);
-  config = config.replace(/rsiOversold: \d+/, `rsiOversold: ${rsiOs}`);
-  config = config.replace(/rsiOverbought: \d+/, `rsiOverbought: ${rsiOb}`);
-  config = config.replace(/optionRsiOversold: \d+/, `optionRsiOversold: ${optRsiOs}`);
-  config = config.replace(/optionRsiOverbought: \d+/, `optionRsiOverbought: ${optRsiOb}`);
-  config = config.replace(/stopLossPercent: \d+/, `stopLossPercent: ${stopLoss}`);
-  config = config.replace(/takeProfitMultiplier: [\d.]+/, `takeProfitMultiplier: ${tpMult}`);
-  config = config.replace(/activeStart: '[0-9:]+'/,  `activeStart: '${timeStart}'`);
-  config = config.replace(/activeEnd: '[0-9:]+'/,    `activeEnd: '${timeEnd}'`);
-  config = config.replace(/maxPositionsOpen: \d+/, `maxPositionsOpen: ${maxPos}`);
-
-  // Update the updatedAt timestamp
-  config = config.replace(/updatedAt: Date\.now\(\)|updatedAt: \d+/, `updatedAt: ${Date.now()}`);
-
-  fs.writeFileSync(configPath, config);
-  console.log(`[UPDATED] agent-config.ts with best params`);
-  console.log(`  Strike: ±${strikeRange} | RSI: ${rsiOs}/${rsiOb} | OptRSI: ${optRsiOs}/${optRsiOb}`);
-  console.log(`  Stop: ${stopLoss}% | TP: ${tpMult}x | Time: ${timeStart}-${timeEnd} | MaxPos: ${maxPos}`);
 }
 
 function saveToDb(best: ResultRow) {
@@ -171,7 +133,6 @@ function main() {
     console.log(`  Score: ${computeScore(best).toFixed(1)}`);
     console.log('');
 
-    updateAgentConfig(best);
     saveToDb(best);
     console.log('');
 

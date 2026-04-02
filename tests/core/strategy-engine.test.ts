@@ -54,7 +54,7 @@ function makeConfig(overrides: Record<string, any> = {}): Config {
       activeJudge: '',
       consensusRule: 'primary-decides',
       confidenceThreshold: 0.5,
-      escalationCooldownSec: 180,
+      entryCooldownSec: 180,
       promptId: '',
     },
     regime: {
