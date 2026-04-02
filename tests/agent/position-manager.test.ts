@@ -1,9 +1,11 @@
 /**
  * Tests for src/agent/position-manager.ts
  *
- * Focuses on:
- * - P0-1: Failed close must NOT delete position from memory
- * - P1-5: Bracket cancel retry + order status check
+ * PositionManager now handles broker-side position tracking only.
+ * HMA cross detection and exit monitoring are handled by
+ * src/core/strategy-engine.ts tick().
+ *
+ * Tests cover: add/remove/count/getAll, reconcileFromBroker.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
@@ -23,62 +25,15 @@ vi.mock('../../src/config', () => ({
   },
   TRADIER_BASE: 'https://api.tradier.com/v1',
 }));
-vi.mock('../../src/utils/et-time', () => ({
-  etTimeToUnixTs: vi.fn(() => Math.floor(Date.now() / 1000) + 3600), // 1hr from now
-}));
 
 import axios from 'axios';
 import { PositionManager } from '../../src/agent/position-manager';
-import { closePosition, cancelOcoLegs } from '../../src/agent/trade-executor';
-import { logClose } from '../../src/agent/audit-log';
 import type { OpenPosition } from '../../src/agent/types';
 import type { Config } from '../../src/config/types';
 
 const mockedAxios = vi.mocked(axios);
-const mockedClosePosition = vi.mocked(closePosition);
-const mockedCancelOcoLegs = vi.mocked(cancelOcoLegs);
-const mockedLogClose = vi.mocked(logClose);
 
-/**
- * Helper: Set HMA cross direction on the PositionManager.
- *
- * updateHmaCross reads the SECOND-TO-LAST bar (last closed candle).
- * It needs to be called twice to detect a crossover:
- *   1st call: establishes prev state
- *   2nd call: detects cross from prev → current
- *
- * For bullish cross: fast was below slow, now fast above slow.
- * For bearish cross: fast was above slow, now fast below slow.
- */
-let _testBarTs = Math.floor(Date.now() / 1000);
-function setHmaCross(pm: PositionManager, direction: 'bullish' | 'bearish'): void {
-  // Each call uses unique timestamps so updateHmaCross processes each as a new closed candle
-  const bar = (hma3: number, hma17: number) => {
-    _testBarTs += 60; // advance 1 minute
-    return {
-      ts: _testBarTs, close: 100, rsi14: 50, ema9: 100, ema21: 100,
-      hma3, hma5: hma3, hma17, hma19: hma17,
-    };
-  };
-
-  if (direction === 'bullish') {
-    // Step 1: fast < slow (bearish state) — bars: [old, closed, forming]
-    const b1a = bar(99, 101), b1b = bar(99, 101), b1c = bar(99, 101);
-    pm.updateHmaCross([b1a, b1b, b1c]);
-    // Step 2: fast > slow (bullish cross) — new candle close
-    const b2a = bar(102, 100), b2b = bar(102, 100), b2c = bar(102, 100);
-    pm.updateHmaCross([b2a, b2b, b2c]);
-  } else {
-    // Step 1: fast > slow (bullish state)
-    const b1a = bar(102, 100), b1b = bar(102, 100), b1c = bar(102, 100);
-    pm.updateHmaCross([b1a, b1b, b1c]);
-    // Step 2: fast < slow (bearish cross) — new candle close
-    const b2a = bar(99, 101), b2b = bar(99, 101), b2c = bar(99, 101);
-    pm.updateHmaCross([b2a, b2b, b2c]);
-  }
-}
-
-// Minimal config for PositionManager — only fields used by monitor()
+// Minimal config for PositionManager
 function makeConfig(overrides?: Partial<Config>): Config {
   return {
     id: 'test',
@@ -87,7 +42,7 @@ function makeConfig(overrides?: Partial<Config>): Config {
     createdAt: 0,
     updatedAt: 0,
     scanners: { enabled: false, models: [], cycleIntervalSec: 60, minConfidenceToEscalate: 0.5, promptAssignments: {}, defaultPromptId: '' },
-    judges: { enabled: false, models: [], activeJudge: '', consensusRule: 'primary-decides', confidenceThreshold: 0.5, escalationCooldownSec: 0, promptId: '' },
+    judges: { enabled: false, models: [], activeJudge: '', consensusRule: 'primary-decides', confidenceThreshold: 0.5, entryCooldownSec: 0, promptId: '' },
     regime: { enabled: false, mode: 'disabled', classification: { trendThreshold: 0.15, lookbackBars: 20, openingRangeMinutes: 15 }, timeWindows: { morningEnd: '10:15', middayEnd: '14:00', gammaExpiryStart: '14:00', noTradeStart: '15:55' }, signalGates: {} as any },
     signals: {
       enableRsiCrosses: false, enableHmaCrosses: true, enablePriceCrossHma: false, enableEmaCrosses: false,
@@ -132,256 +87,15 @@ function makePosition(overrides?: Partial<OpenPosition>): OpenPosition {
 describe('PositionManager', () => {
   let pm: PositionManager;
   let cfg: Config;
-  let dailyLossCallback: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     vi.clearAllMocks();
     cfg = makeConfig();
-    pm = new PositionManager(cfg, false); // paper=false for live mode
-    dailyLossCallback = vi.fn();
-
-    // Default: Tradier quote returns a valid price triggering signal_reversal
-    // (by making the price equal to entry — checkExit with scannerReverse will
-    // trigger if HMA cross direction opposes position side)
-    mockedAxios.get = vi.fn().mockResolvedValue({
-      data: { quotes: { quote: { last: 1.50, bid: 1.48, ask: 1.52 } } },
-    });
+    pm = new PositionManager(cfg, false);
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
-  });
-
-  describe('P0-1: Failed close must NOT delete position from memory', () => {
-    it('keeps position in memory when closePosition returns an error', async () => {
-      const pos = makePosition();
-      pm.add(pos);
-
-      // Set up HMA cross direction opposing the position (put) → bullish = reversal
-      setHmaCross(pm, 'bullish');
-
-      // Close fails with an error
-      mockedClosePosition.mockResolvedValue({
-        error: 'Sell order is for more shares than your current long position',
-        paper: false,
-      });
-
-      const events = await pm.monitor(dailyLossCallback);
-
-      // Position should still be tracked
-      expect(pm.count()).toBe(1);
-      expect(pm.getAll()[0].symbol).toBe('XSP260331P00643000');
-
-      // No close events should be emitted — the caller should NOT flip
-      expect(events).toHaveLength(0);
-
-      // dailyLossCallback and logClose should NOT be called
-      expect(dailyLossCallback).not.toHaveBeenCalled();
-      expect(mockedLogClose).not.toHaveBeenCalled();
-    });
-
-    it('increments closeFailCount on each failed close attempt', async () => {
-      const pos = makePosition();
-      pm.add(pos);
-
-      // HMA bullish → put position triggers signal_reversal
-      setHmaCross(pm, 'bullish');
-
-      mockedClosePosition.mockResolvedValue({
-        error: 'You do not have enough buying power for this trade.',
-        paper: false,
-      });
-
-      // First attempt
-      await pm.monitor(dailyLossCallback);
-      expect(pm.getAll()[0].closeFailCount).toBe(1);
-
-      // Second attempt
-      await pm.monitor(dailyLossCallback);
-      expect(pm.getAll()[0].closeFailCount).toBe(2);
-
-      // Third attempt
-      await pm.monitor(dailyLossCallback);
-      expect(pm.getAll()[0].closeFailCount).toBe(3);
-
-      // Position still tracked all 3 times
-      expect(pm.count()).toBe(1);
-    });
-
-    it('deletes position and emits close event when close succeeds', async () => {
-      const pos = makePosition();
-      pm.add(pos);
-
-      // HMA bullish → put position triggers signal_reversal
-      setHmaCross(pm, 'bullish');
-
-      mockedClosePosition.mockResolvedValue({
-        fillPrice: 1.50,
-        paper: false,
-      });
-
-      const events = await pm.monitor(dailyLossCallback);
-
-      // Position should be removed
-      expect(pm.count()).toBe(0);
-
-      // Close event emitted with correct P&L
-      expect(events).toHaveLength(1);
-      expect(events[0].reason).toBe('signal_reversal');
-      expect(events[0].pnl).toBeCloseTo((1.50 - 1.63) * 1 * 100); // -$13
-
-      // P&L callback and audit log called
-      expect(dailyLossCallback).toHaveBeenCalledWith(expect.closeTo(-13, 0));
-      expect(mockedLogClose).toHaveBeenCalledTimes(1);
-    });
-
-    it('handles paper mode — close always succeeds (no broker interaction)', async () => {
-      const paperPm = new PositionManager(cfg, true); // paper=true
-      const pos = makePosition();
-      paperPm.add(pos);
-
-      // HMA bullish → put position triggers signal_reversal
-      setHmaCross(paperPm, 'bullish');
-
-      // Paper closePosition always succeeds
-      mockedClosePosition.mockResolvedValue({
-        fillPrice: 1.50,
-        paper: true,
-      });
-
-      const events = await paperPm.monitor(dailyLossCallback);
-
-      // Paper mode: cancelBracketLegs not called
-      expect(mockedCancelOcoLegs).not.toHaveBeenCalled();
-
-      // Position closed, event emitted
-      expect(paperPm.count()).toBe(0);
-      expect(events).toHaveLength(1);
-    });
-  });
-
-  describe('P1-5: Bracket cancel retry with status check', () => {
-    it('retries cancel once on failure, succeeds on retry', async () => {
-      const pos = makePosition({ bracketOrderId: 12345 });
-      pm.add(pos);
-
-      // HMA bullish → signal_reversal on put
-      setHmaCross(pm, 'bullish');
-
-      // First cancel fails, retry succeeds
-      mockedCancelOcoLegs
-        .mockRejectedValueOnce(new Error('Request failed with status code 400'))
-        .mockResolvedValueOnce(undefined);
-
-      mockedClosePosition.mockResolvedValue({ fillPrice: 1.50, paper: false });
-
-      const events = await pm.monitor(dailyLossCallback);
-
-      // cancelOcoLegs called twice (attempt + retry)
-      expect(mockedCancelOcoLegs).toHaveBeenCalledTimes(2);
-
-      // Close should succeed since retry worked
-      expect(events).toHaveLength(1);
-      expect(pm.count()).toBe(0);
-    });
-
-    it('checks order status when both cancel attempts fail — safe statuses allow close', async () => {
-      const pos = makePosition({ bracketOrderId: 12345 });
-      pm.add(pos);
-
-      // HMA bullish → signal_reversal on put
-      setHmaCross(pm, 'bullish');
-
-      // Both cancel attempts fail
-      mockedCancelOcoLegs.mockRejectedValue(new Error('Request failed with status code 400'));
-
-      // Order status query shows the bracket was already filled
-      mockedAxios.get = vi.fn().mockImplementation((url: string) => {
-        if (url.includes('/orders/12345')) {
-          return Promise.resolve({ data: { order: { status: 'filled' } } });
-        }
-        // Default: Tradier quote
-        return Promise.resolve({ data: { quotes: { quote: { last: 1.50, bid: 1.48, ask: 1.52 } } } });
-      });
-
-      mockedClosePosition.mockResolvedValue({ fillPrice: 1.50, paper: false });
-
-      const events = await pm.monitor(dailyLossCallback);
-
-      // Close should proceed because order was already 'filled'
-      expect(events).toHaveLength(1);
-      expect(pm.count()).toBe(0);
-    });
-
-    it('skips close when bracket is still pending after all cancel attempts', async () => {
-      const pos = makePosition({ bracketOrderId: 12345 });
-      pm.add(pos);
-
-      // HMA bullish → signal_reversal on put
-      setHmaCross(pm, 'bullish');
-
-      // Both cancel attempts fail
-      mockedCancelOcoLegs.mockRejectedValue(new Error('Request failed with status code 400'));
-
-      // Order is still 'pending' — bracket is active
-      mockedAxios.get = vi.fn().mockImplementation((url: string) => {
-        if (url.includes('/orders/12345')) {
-          return Promise.resolve({ data: { order: { status: 'pending' } } });
-        }
-        return Promise.resolve({ data: { quotes: { quote: { last: 1.50, bid: 1.48, ask: 1.52 } } } });
-      });
-
-      const events = await pm.monitor(dailyLossCallback);
-
-      // Close should NOT proceed — bracket legs would cause rejection
-      expect(events).toHaveLength(0);
-      expect(pm.count()).toBe(1);
-
-      // closePosition should not even be called
-      expect(mockedClosePosition).not.toHaveBeenCalled();
-
-      // closeFailCount incremented
-      expect(pm.getAll()[0].closeFailCount).toBe(1);
-    });
-
-    it('returns true when position has no bracket legs', async () => {
-      const pos = makePosition(); // no bracketOrderId, tpLegId, slLegId
-      pm.add(pos);
-
-      // HMA bullish → signal_reversal on put
-      setHmaCross(pm, 'bullish');
-
-      mockedClosePosition.mockResolvedValue({ fillPrice: 1.50, paper: false });
-
-      const events = await pm.monitor(dailyLossCallback);
-
-      // No cancel attempts needed
-      expect(mockedCancelOcoLegs).not.toHaveBeenCalled();
-
-      // Close proceeds normally
-      expect(events).toHaveLength(1);
-      expect(pm.count()).toBe(0);
-    });
-
-    it('deduplicates bracket IDs when bracketOrderId equals a leg ID', async () => {
-      const pos = makePosition({
-        bracketOrderId: 12345,
-        tpLegId: 12345,      // same as bracketOrderId
-        slLegId: 67890,
-      });
-      pm.add(pos);
-
-      // HMA bullish → signal_reversal on put
-      setHmaCross(pm, 'bullish');
-
-      mockedCancelOcoLegs.mockResolvedValue(undefined);
-      mockedClosePosition.mockResolvedValue({ fillPrice: 1.50, paper: false });
-
-      await pm.monitor(dailyLossCallback);
-
-      // Should only cancel 2 unique IDs (12345, 67890), not 3
-      expect(mockedCancelOcoLegs).toHaveBeenCalledTimes(2);
-    });
   });
 
   describe('basic operations', () => {
@@ -398,25 +112,87 @@ describe('PositionManager', () => {
       expect(pm.count()).toBe(0);
     });
 
-    it('monitor returns empty when no positions', async () => {
-      const events = await pm.monitor(dailyLossCallback);
-      expect(events).toHaveLength(0);
+    it('tracks multiple positions', () => {
+      pm.add(makePosition({ id: 'p1', symbol: 'XSP260331C00650000' }));
+      pm.add(makePosition({ id: 'p2', symbol: 'XSP260331P00640000' }));
+      expect(pm.count()).toBe(2);
+      expect(pm.getAll()).toHaveLength(2);
+
+      pm.remove('p1');
+      expect(pm.count()).toBe(1);
+      expect(pm.getAll()[0].symbol).toBe('XSP260331P00640000');
     });
 
-    it('does not exit when no exit condition is met', async () => {
-      const pos = makePosition({
-        entryPrice: 1.00,
-        stopLoss: 0.30,    // SL far away
-        takeProfit: 5.00,   // TP far away
-      });
-      pm.add(pos);
-
-      // No HMA cross set → no signal_reversal trigger
-      // Price is 1.50 → between SL (0.30) and TP (5.00)
-
-      const events = await pm.monitor(dailyLossCallback);
-      expect(events).toHaveLength(0);
+    it('remove is a no-op for unknown IDs', () => {
+      pm.add(makePosition());
+      pm.remove('nonexistent');
       expect(pm.count()).toBe(1);
+    });
+  });
+
+  describe('reconcileFromBroker', () => {
+    it('skips reconciliation in paper mode', async () => {
+      const paperPm = new PositionManager(cfg, true);
+      const count = await paperPm.reconcileFromBroker();
+      expect(count).toBe(0);
+      expect(mockedAxios.get).not.toHaveBeenCalled();
+    });
+
+    it('handles empty positions from broker', async () => {
+      mockedAxios.get = vi.fn().mockResolvedValue({
+        data: { positions: { position: null } },
+      });
+
+      const count = await pm.reconcileFromBroker(cfg.execution);
+      expect(count).toBe(0);
+      expect(pm.count()).toBe(0);
+    });
+
+    it('adopts orphan positions from broker', async () => {
+      // First call: positions, second call: orders
+      mockedAxios.get = vi.fn().mockImplementation((url: string) => {
+        if (url.includes('/positions')) {
+          return Promise.resolve({
+            data: {
+              positions: {
+                position: {
+                  symbol: 'XSP260401C00650000',
+                  quantity: 2,
+                  cost_basis: 326, // $1.63 per contract × 2 × 100
+                  date_acquired: '2026-04-01T10:00:00Z',
+                },
+              },
+            },
+          });
+        }
+        if (url.includes('/orders')) {
+          return Promise.resolve({ data: { orders: { order: null } } });
+        }
+        return Promise.resolve({ data: {} });
+      });
+
+      // Mock the OCO submission
+      mockedAxios.post = vi.fn().mockResolvedValue({
+        data: { order: { id: 99999 } },
+      });
+
+      const count = await pm.reconcileFromBroker(cfg.execution);
+      expect(count).toBe(1);
+      expect(pm.count()).toBe(1);
+
+      const adopted = pm.getAll()[0];
+      expect(adopted.symbol).toBe('XSP260401C00650000');
+      expect(adopted.side).toBe('call');
+      expect(adopted.strike).toBe(650);
+      expect(adopted.quantity).toBe(2);
+    });
+
+    it('handles API errors gracefully', async () => {
+      mockedAxios.get = vi.fn().mockRejectedValue(new Error('Network error'));
+
+      const count = await pm.reconcileFromBroker(cfg.execution);
+      expect(count).toBe(0);
+      expect(pm.count()).toBe(0);
     });
   });
 });

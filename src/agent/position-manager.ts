@@ -1,24 +1,16 @@
 /**
- * PositionManager: tracks open positions and monitors them for exit conditions.
+ * PositionManager: tracks open positions and handles broker interactions.
  *
- * Exit logic delegates to src/core/position-manager.checkExit() so that
- * live agent and replay evaluate the same exit conditions.
- *
- * Supports scannerReverse: when a position exits via signal_reversal,
- * the close reason is surfaced so the agent loop can flip to opposite side.
+ * Trading decisions (HMA cross detection, exit monitoring) are handled by
+ * src/core/strategy-engine.ts tick(). This class manages broker-side state:
+ * position tracking, bracket order management, and reconciliation.
  */
 import axios from 'axios';
-import type { OpenPosition, PositionClose, BarSummary, OptionSide } from './types';
+import type { OpenPosition, OptionSide } from './types';
 import type { Config } from '../config/types';
-import type { Position, Direction } from '../core/types';
-import { checkExit, type ExitContext } from '../core/position-manager';
-import { closePosition, cancelOcoLegs } from './trade-executor';
-import { logClose } from './audit-log';
-import { etTimeToUnixTs } from '../utils/et-time';
+import { cancelOcoLegs } from './trade-executor';
 import { config as appConfig, TRADIER_BASE } from '../config';
 import { randomUUID } from 'crypto';
-
-const SPXER_BASE = process.env.SPXER_URL || 'http://localhost:3600';
 
 export interface PositionCloseEvent {
   position: OpenPosition;
@@ -29,15 +21,8 @@ export interface PositionCloseEvent {
 
 export class PositionManager {
   private positions: Map<string, OpenPosition> = new Map();
-  private highWaterPrices: Map<string, number> = new Map();
   private paper: boolean;
   private cfg: Config;
-  private hmaCrossDirection: Direction | null = null;
-
-  // Tracks previous HMA values for cross detection
-  private prevHmaFast: number | null = null;
-  private prevHmaSlow: number | null = null;
-  private lastProcessedBarTs: number | null = null; // Only process each closed candle once
 
   constructor(config: Config, paper: boolean) {
     this.cfg = config;
@@ -45,15 +30,7 @@ export class PositionManager {
   }
 
   add(position: OpenPosition): void {
-    // Initialize intra-trade price tracking
-    position.highPrice = position.entryPrice;
-    position.lowPrice = position.entryPrice;
-    position.highTs = position.openedAt;
-    position.lowTs = position.openedAt;
-    position.maxPnlPct = 0;
-    position.maxDrawdownPct = 0;
     this.positions.set(position.id, position);
-    this.highWaterPrices.set(position.id, position.entryPrice);
     console.log(`[positions] Opened ${position.symbol} x${position.quantity} @ $${position.entryPrice.toFixed(2)} | stop: $${position.stopLoss.toFixed(2)}`);
   }
 
@@ -68,227 +45,12 @@ export class PositionManager {
   /** Remove a position by ID (e.g., phantom position detected during reconciliation) */
   remove(id: string): void {
     this.positions.delete(id);
-    this.highWaterPrices.delete(id);
   }
 
-  /** Get the current HMA cross direction (for agent.ts to use in entry decisions) */
-  getHmaCrossDirection(): Direction | null {
-    return this.hmaCrossDirection;
-  }
-
-  /**
-   * Update HMA cross state from SPX bars.
-   * Called each cycle by the agent loop with fresh SPX bar data.
-   * Uses the configured hmaCrossFast/hmaCrossSlow periods.
-   *
-   * ONLY processes a new closed candle — if the last closed bar's timestamp
-   * hasn't changed since the previous call, this is a no-op. This ensures
-   * signals fire exactly once per candle close, not mid-candle on unstable data.
-   *
-   * Returns true ONLY when a fresh cross actually happened on a newly closed candle.
-   * The first call establishes baseline state (no cross signal).
-   */
-  updateHmaCross(spxBars: BarSummary[]): boolean {
-    // Need at least 2 bars: use the second-to-last (last closed candle),
-    // since the final bar is the currently forming candle with unstable values
-    if (spxBars.length < 2) return false;
-
-    const closedBar = spxBars[spxBars.length - 2];
-
-    // Only process each closed candle once — if we've already seen this
-    // bar timestamp, skip. The agent polls every 5-30s but we only act
-    // when a new 1m candle has closed.
-    if (this.lastProcessedBarTs != null && closedBar.ts === this.lastProcessedBarTs) {
-      return false;
-    }
-    this.lastProcessedBarTs = closedBar.ts;
-
-    const fast = this.cfg.signals.hmaCrossFast;
-    const slow = this.cfg.signals.hmaCrossSlow;
-
-    // Pick the right HMA values based on config periods
-    const hmaFast = fast === 3 ? closedBar.hma3 : closedBar.hma5;
-    const hmaSlow = slow === 17 ? closedBar.hma17 : closedBar.hma19;
-
-    if (hmaFast == null || hmaSlow == null) return false;
-
-    let freshCross = false;
-
-    // Detect crossover: compare prev state to current
-    if (this.prevHmaFast != null && this.prevHmaSlow != null) {
-      const wasFastAbove = this.prevHmaFast > this.prevHmaSlow;
-      const isFastAbove = hmaFast > hmaSlow;
-
-      if (!wasFastAbove && isFastAbove) {
-        this.hmaCrossDirection = 'bullish';
-        freshCross = true;
-        console.log(`[hma] 🔼 Bullish cross on candle close (ts=${closedBar.ts}): HMA(${fast})=${hmaFast.toFixed(2)} > HMA(${slow})=${hmaSlow.toFixed(2)}`);
-      } else if (wasFastAbove && !isFastAbove) {
-        this.hmaCrossDirection = 'bearish';
-        freshCross = true;
-        console.log(`[hma] 🔽 Bearish cross on candle close (ts=${closedBar.ts}): HMA(${fast})=${hmaFast.toFixed(2)} < HMA(${slow})=${hmaSlow.toFixed(2)}`);
-      }
-      // If no cross, keep existing direction (for exit logic)
-    } else {
-      // First update — set initial direction from current state (NOT a signal)
-      this.hmaCrossDirection = hmaFast > hmaSlow ? 'bullish' : 'bearish';
-      // freshCross stays false — no entry on initial state
-    }
-
-    this.prevHmaFast = hmaFast;
-    this.prevHmaSlow = hmaSlow;
-    return freshCross;
-  }
-
-  /**
-   * Fetch current prices for all open positions and check exit conditions.
-   * Returns array of close events so the agent can handle flip-on-reversal.
-   */
-  async monitor(dailyLossCallback: (loss: number) => void): Promise<PositionCloseEvent[]> {
-    const closeEvents: PositionCloseEvent[] = [];
-    if (this.positions.size === 0) return closeEvents;
-
-    // Fetch latest prices from Tradier API (source of truth for execution),
-    // fall back to pipeline only if API is unavailable
-    const priceMap = new Map<string, number>();
-    await Promise.allSettled(
-      [...this.positions.values()].map(async pos => {
-        // 1. Tradier quotes API — source of truth
-        try {
-          const { data } = await axios.get(
-            `${TRADIER_BASE}/markets/quotes`,
-            {
-              headers: { Authorization: `Bearer ${appConfig.tradierToken}`, Accept: 'application/json' },
-              params: { symbols: pos.symbol, greeks: 'false' },
-              timeout: 5000,
-            },
-          );
-          const quote = data?.quotes?.quote;
-          const price = quote?.last ?? quote?.mid ?? ((quote?.bid ?? 0) + (quote?.ask ?? 0)) / 2;
-          if (price > 0) { priceMap.set(pos.symbol, price); return; }
-        } catch { /* fall through */ }
-
-        // 2. Pipeline fallback (may not have the contract, e.g. XSP)
-        try {
-          const { data } = await axios.get(`${SPXER_BASE}/contracts/${pos.symbol}/latest`, { timeout: 5000 });
-          if (data?.close) priceMap.set(pos.symbol, data.close);
-        } catch { /* no price available */ }
-      })
-    );
-
-    const now = Date.now();
-    const closeCutoffTs = this.computeCloseCutoffTs();
-
-    for (const [id, pos] of this.positions) {
-      const currentPrice = priceMap.get(pos.symbol);
-
-      // Update high-water mark and intra-trade price tracking
-      if (currentPrice !== undefined) {
-        const prevHigh = this.highWaterPrices.get(id) ?? pos.entryPrice;
-        if (currentPrice > prevHigh) {
-          this.highWaterPrices.set(id, currentPrice);
-        }
-        // Track high/low prices and unrealized P&L extremes
-        if (currentPrice > (pos.highPrice ?? pos.entryPrice)) {
-          pos.highPrice = currentPrice;
-          pos.highTs = now;
-        }
-        if (currentPrice < (pos.lowPrice ?? pos.entryPrice)) {
-          pos.lowPrice = currentPrice;
-          pos.lowTs = now;
-        }
-        const pnlPct = (currentPrice - pos.entryPrice) / pos.entryPrice;
-        if (pnlPct > (pos.maxPnlPct ?? 0)) pos.maxPnlPct = pnlPct;
-        if (pnlPct < (pos.maxDrawdownPct ?? 0)) pos.maxDrawdownPct = pnlPct;
-      }
-
-      // Map OpenPosition → core Position for checkExit
-      const corePosition: Position = {
-        id: pos.id,
-        symbol: pos.symbol,
-        side: pos.side,
-        strike: pos.strike,
-        qty: pos.quantity,
-        entryPrice: pos.entryPrice,
-        stopLoss: pos.stopLoss,
-        takeProfit: pos.takeProfit ?? pos.entryPrice * this.cfg.position.takeProfitMultiplier,
-        entryTs: pos.openedAt,
-        entryET: '',
-      };
-
-      const context: ExitContext = {
-        ts: Math.floor(now / 1000),
-        closeCutoffTs,
-        hmaCrossDirection: this.hmaCrossDirection,
-        highWaterPrice: this.highWaterPrices.get(id),
-      };
-
-      // Use current price for price-dependent checks, fall back to entry price
-      // for price-independent exits (signal_reversal, time_exit) so they aren't blocked
-      const priceForCheck = currentPrice ?? pos.entryPrice;
-      const exitCheck = checkExit(corePosition, priceForCheck, this.cfg, context);
-
-      if (exitCheck.shouldExit && exitCheck.reason) {
-        const estimatedClose = currentPrice ?? pos.entryPrice;
-        if (currentPrice === undefined) {
-          console.log(`[positions] ⚠️ No pipeline price for ${pos.symbol} — closing on ${exitCheck.reason} with estimated price`);
-        }
-
-        // Cancel ALL open sell orders for this symbol before closing.
-        // Must happen before closePosition() — Tradier rejects sells if
-        // pending bracket sell legs already account for the full position qty.
-        let bracketsClear = true;
-        if (!this.paper) {
-          bracketsClear = await this.cancelBracketLegs(pos);
-          await this.cancelOpenSellOrders(pos.symbol);
-        }
-
-        // If bracket cancel failed and we couldn't clear sell legs,
-        // skip the close attempt — the broker will reject it anyway.
-        if (!bracketsClear) {
-          pos.closeFailCount = (pos.closeFailCount ?? 0) + 1;
-          console.error(`[positions] 🚨 CRITICAL: Bracket legs still active for ${pos.symbol} — skipping close (attempt #${pos.closeFailCount})`);
-          continue;
-        }
-
-        const result = await closePosition(pos, exitCheck.reason, estimatedClose, this.paper, this.cfg.execution);
-
-        if (result.error) {
-          // P0-1 FIX: Do NOT delete position from memory when close fails.
-          // The broker still holds it — deleting it here causes the agent to
-          // lose track, leaving buying power locked and no way to retry.
-          pos.closeFailCount = (pos.closeFailCount ?? 0) + 1;
-          console.error(`[positions] 🚨 CRITICAL: Close failed for ${pos.symbol} — position kept in memory for retry (attempt #${pos.closeFailCount}). Error: ${result.error}`);
-          continue;
-        }
-
-        // Close succeeded — compute P&L and clean up
-        const actualClose = result.fillPrice ?? estimatedClose;
-        const pnl = (actualClose - pos.entryPrice) * pos.quantity * 100;
-
-        const closeRecord: PositionClose = {
-          position: pos,
-          closePrice: actualClose,
-          reason: exitCheck.reason,
-          pnl,
-          closedAt: now,
-        };
-        logClose(closeRecord);
-        dailyLossCallback(pnl);
-        this.positions.delete(id);
-        this.highWaterPrices.delete(id);
-
-        closeEvents.push({
-          position: pos,
-          closePrice: actualClose,
-          reason: exitCheck.reason,
-          pnl,
-        });
-      }
-    }
-
-    return closeEvents;
-  }
+  // NOTE: updateHmaCross() and monitor() have been removed.
+  // HMA cross detection and exit monitoring are now handled by
+  // src/core/strategy-engine.ts tick() — the single source of truth
+  // for both replay and live agents.
 
   /**
    * Reconcile open positions from broker on startup.
@@ -588,9 +350,5 @@ export class PositionManager {
     } catch (e: any) {
       console.warn(`[positions] ⚠️ Failed to scan open orders for ${optionSymbol}: ${e.message}`);
     }
-  }
-
-  private computeCloseCutoffTs(): number {
-    return etTimeToUnixTs('16:00');
   }
 }

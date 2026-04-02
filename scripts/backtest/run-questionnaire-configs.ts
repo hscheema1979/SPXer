@@ -31,7 +31,7 @@ const baseConfig: Partial<ReplayConfig> = {
     activeJudge: 'sonnet',
     consensusRule: 'primary-decides',
     confidenceThreshold: 0.5,
-    escalationCooldownSec: 600,
+    entryCooldownSec: 600,
     promptId: 'judge-regime-advisor-v1',
   },
 

@@ -152,21 +152,25 @@ export function startHttpServer(port: number): { app: Express; httpServer: Serve
   });
 
   app.get('/agent/config', (_req, res) => {
-    // Serve the live agent config so the viewer can display it
+    // Serve the live agent config from the DB (same source the agents use)
     try {
-      const { AGENT_CONFIG } = require('../../agent-config');
-      const cfg = AGENT_CONFIG;
+      const { createStore } = require('../replay/store');
+      const store = createStore();
+      const configId = process.env.AGENT_CONFIG_ID || 'hma3x17-scannerReverse-live';
+      const cfg = store.getConfig(configId);
+      store.close();
+      if (!cfg) return res.json({ error: `Config '${configId}' not found in DB` });
       res.json({
         id: cfg.id,
         name: cfg.name,
         signals: {
-          hmaCrossFast: cfg.signals.hmaCrossFast,
-          hmaCrossSlow: cfg.signals.hmaCrossSlow,
-          targetOtmDistance: cfg.signals.targetOtmDistance,
-          enableHmaCrosses: cfg.signals.enableHmaCrosses,
-          enableEmaCrosses: cfg.signals.enableEmaCrosses,
-          requireUnderlyingHmaCross: cfg.signals.requireUnderlyingHmaCross,
-          signalTimeframe: cfg.signals.signalTimeframe,
+          hmaCrossFast: cfg.signals?.hmaCrossFast,
+          hmaCrossSlow: cfg.signals?.hmaCrossSlow,
+          targetOtmDistance: cfg.signals?.targetOtmDistance,
+          enableHmaCrosses: cfg.signals?.enableHmaCrosses,
+          enableEmaCrosses: cfg.signals?.enableEmaCrosses,
+          requireUnderlyingHmaCross: cfg.signals?.requireUnderlyingHmaCross,
+          signalTimeframe: cfg.signals?.signalTimeframe,
         },
         position: cfg.position,
         strikeSelector: cfg.strikeSelector,

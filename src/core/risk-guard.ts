@@ -6,6 +6,7 @@
  */
 
 import type { Config } from '../config/types';
+import { getEntryCooldownSec } from '../config/types';
 
 export interface RiskState {
   openPositions: number;
@@ -46,11 +47,12 @@ export function isRiskBlocked(
     return { blocked: true, reason: 'Past close cutoff time' };
   }
 
-  // 5. Escalation cooldown
+  // 5. Entry cooldown
+  const cooldownSec = getEntryCooldownSec(config);
   const elapsed = state.currentTs - state.lastEscalationTs;
-  if (elapsed < config.judges.escalationCooldownSec) {
-    const remaining = config.judges.escalationCooldownSec - elapsed;
-    return { blocked: true, reason: `Escalation cooldown (${remaining}s remaining)` };
+  if (elapsed < cooldownSec) {
+    const remaining = cooldownSec - elapsed;
+    return { blocked: true, reason: `Entry cooldown (${remaining}s remaining)` };
   }
 
   return { blocked: false, reason: '' };

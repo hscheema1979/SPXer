@@ -34,7 +34,16 @@ export interface ContractMeta {
   expiry: string;
 }
 
-/** Aggregate 1m bars into N-minute bars, aligned from the newest bar backward */
+/** Aggregate 1m bars into N-minute bars, aligned from the newest bar backward.
+ *
+ * WARNING: This copies indicator values from the last 1m bar in each window
+ * instead of recomputing them on the aggregated OHLCV. HMA(3) on a 3m bar
+ * should be computed from 3m close prices, not copied from the last 1m bar.
+ * This is acceptable for advisory/monitoring purposes (judgment-engine,
+ * market-narrative) but NOT for trading decisions. The live agents use
+ * tick() from src/core/strategy-engine.ts which fetches properly aggregated
+ * bars with correct indicators from the data service DB.
+ */
 function aggregate(bars1m: BarSummary[], periodMins: number): BarSummary[] {
   const result: BarSummary[] = [];
   // Align from the end so the most recent complete+partial window is always included
