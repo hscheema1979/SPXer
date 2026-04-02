@@ -16,3 +16,12 @@ export { isRiskBlocked, type RiskState } from './risk-guard';
 export { isRegimeBlocked } from './regime-gate';
 export { selectStrike, type StrikeCandidate, type StrikeResult } from './strike-selector';
 export { computeIndicators, seedIndicatorState, resetVWAP } from './indicator-engine';
+export {
+  tick,
+  createInitialState,
+  stripFormingCandle,
+  type CorePosition,
+  type StrategyState,
+  type TickInput,
+  type TickResult,
+} from './strategy-engine';

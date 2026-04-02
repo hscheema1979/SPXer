@@ -28,6 +28,10 @@ import { computeRealisticPnl, frictionEntry } from '../core/friction';
 import type { Signal, CoreBar } from '../core/types';
 import { makeHMAState, hmaStep, makeKCState, kcStep } from '../pipeline/indicators/tier1';
 
+// ── Strategy engine (deterministic tick()-based decision function) ─────────
+import { tick, createInitialState, type StrategyState, type TickInput, type CorePosition } from '../core/strategy-engine';
+import type { StrikeCandidate } from '../core/strike-selector';
+
 const DATA_DB_PATH = path.resolve(process.cwd(), 'data/spxer.db');
 
 // Configurable data source: 'bars' (live) or 'replay_bars' (sanitized Polygon)
@@ -612,6 +616,155 @@ function selectJudges(config: ReplayConfig) {
   return all.filter(j => enabledModels.has(j.id));
 }
 
+// ── Deterministic replay via tick() ────────────────────────────────────────
+
+/**
+ * Run a deterministic replay using the strategy engine's tick() function.
+ * This is the same code path the live agent uses — same inputs → same decisions.
+ *
+ * Only used when scanners and judges are disabled (pure HMA cross execution).
+ */
+function runDeterministicReplay(
+  config: ReplayConfig,
+  tfCacheMap: Map<string, BarCache>,
+  cache1m: BarCache,
+  timestamps: number[],
+  closeCutoffTs: number,
+  symbolFilter: string,
+  verbose: boolean,
+): { trades: Trade[] } {
+  const trades: Trade[] = [];
+  const state: StrategyState = createInitialState();
+  const strikeRange = config.strikeSelector.strikeSearchRange;
+
+  // Resolve timeframes from config
+  const dirTf = config.signals.directionTimeframe || '1m';
+  const exitTf = config.signals.exitTimeframe || dirTf;
+
+  const dirCache = tfCacheMap.get(dirTf) ?? cache1m;
+  const exitCache = (exitTf === dirTf) ? dirCache : (tfCacheMap.get(exitTf) ?? cache1m);
+
+  for (const ts of timestamps) {
+    // ── Resolve bars at each config timeframe ──
+    const spxDirBars = getSpxBarsAt(dirCache, ts);
+    if (spxDirBars.length < 5) continue;
+    const spxExitBars = (exitTf === dirTf) ? spxDirBars : getSpxBarsAt(exitCache, ts);
+
+    // SPX price from 1m cache (finest granularity, for OTM distance + position prices)
+    const spx1m = getSpxBarsAt(cache1m, ts);
+    const spxPrice = spx1m.length > 0 ? spx1m[spx1m.length - 1].close : spxDirBars[spxDirBars.length - 1].close;
+
+    // Position prices from 1m cache (bar close = "tick price" in replay)
+    const positionPrices = new Map<string, number>();
+    for (const [, pos] of state.positions) {
+      const price = getPosPriceAt(cache1m, pos.side, pos.strike, symbolFilter, ts);
+      if (price != null) positionPrices.set(pos.symbol, price);
+    }
+
+    // Strike candidates from 1m cache (finest price resolution)
+    const candidates: StrikeCandidate[] = [];
+    const candidateContracts = getContractBarsAt(cache1m, spxPrice, strikeRange, ts);
+    for (const [sym, bars] of candidateContracts) {
+      if (bars.length === 0) continue;
+      const strike = cache1m.contractStrikes.get(sym);
+      if (strike == null) continue;
+      const parsed = parseOptionSymbol(sym);
+      if (!parsed) continue;
+      candidates.push({
+        symbol: sym,
+        side: parsed.isCall ? 'call' : 'put',
+        strike,
+        price: bars[bars.length - 1].close,
+        volume: bars[bars.length - 1].volume,
+      });
+    }
+
+    // ── Call tick() — same function the live agent calls ──
+    const result = tick(state, {
+      ts,
+      spxDirectionBars: spxDirBars as CoreBar[],
+      spxExitBars: spxExitBars as CoreBar[],
+      contractBars: new Map() as Map<string, CoreBar[]>, // not used for deterministic mode
+      spxPrice,
+      closeCutoffTs,
+      candidates,
+      positionPrices,
+    }, config);
+
+    // ── Apply HMA state (always, even if no trades) ──
+    state.directionCross = result.directionState.directionCross;
+    state.prevDirectionHmaFast = result.directionState.prevHmaFast;
+    state.prevDirectionHmaSlow = result.directionState.prevHmaSlow;
+    state.lastDirectionBarTs = result.directionState.lastBarTs;
+    state.exitCross = result.exitState.exitCross;
+    state.prevExitHmaFast = result.exitState.prevHmaFast;
+    state.prevExitHmaSlow = result.exitState.prevHmaSlow;
+    state.lastExitBarTs = result.exitState.lastBarTs;
+
+    // ── Apply exits (instant fill at decision price) ──
+    for (const exit of result.exits) {
+      const pos = state.positions.get(exit.positionId);
+      if (!pos) continue;
+
+      trades.push({
+        symbol: pos.symbol, side: pos.side, strike: pos.strike, qty: pos.qty,
+        entryTs: pos.entryTs, entryET: etLabel(pos.entryTs), entryPrice: pos.entryPrice,
+        exitTs: ts, exitET: etLabel(ts), exitPrice: exit.decisionPrice,
+        reason: exit.reason, pnlPct: exit.pnl.pnlPct, pnl$: exit.pnl['pnl$'],
+        signalType: '',
+      });
+
+      if (verbose) {
+        const emoji = exit.pnl.pnlPct >= 0 ? '+' : '';
+        console.log(`  CLOSE [${etLabel(ts)}] ${pos.symbol} ${exit.reason}: ${emoji}${exit.pnl.pnlPct.toFixed(0)}%`);
+      }
+
+      state.positions.delete(exit.positionId);
+      state.dailyPnl += exit.pnl['pnl$'];
+      state.tradesCompleted++;
+    }
+
+    // ── Apply entry (instant fill at decision price) ──
+    if (result.entry) {
+      const effEntry = frictionEntry(result.entry.price);
+      const corePos: CorePosition = {
+        id: result.entry.symbol,
+        symbol: result.entry.symbol,
+        side: result.entry.side,
+        strike: result.entry.strike,
+        qty: result.entry.qty,
+        entryPrice: result.entry.price,
+        stopLoss: result.entry.stopLoss,
+        takeProfit: result.entry.takeProfit,
+        entryTs: ts,
+        highWaterPrice: result.entry.price,
+      };
+      state.positions.set(corePos.id, corePos);
+      state.lastEntryTs = ts;
+
+      if (verbose) {
+        console.log(`  ENTER ${result.entry.symbol} x${result.entry.qty} @ $${result.entry.price.toFixed(2)} (eff $${effEntry.toFixed(2)}) | stop=$${result.entry.stopLoss.toFixed(2)} tp=$${result.entry.takeProfit.toFixed(2)} | ${result.entry.reason}`);
+      }
+    }
+  }
+
+  // ── EOD: force-close any remaining positions ──
+  const finalTs = timestamps[timestamps.length - 1];
+  for (const [, pos] of state.positions) {
+    const curPrice = getPosPriceAt(cache1m, pos.side, pos.strike, symbolFilter, finalTs) ?? pos.entryPrice;
+    const { pnlPct, 'pnl$': pnl$ } = computeRealisticPnl(pos.entryPrice, curPrice, pos.qty);
+    trades.push({
+      symbol: pos.symbol, side: pos.side, strike: pos.strike, qty: pos.qty,
+      entryTs: pos.entryTs, entryET: etLabel(pos.entryTs), entryPrice: pos.entryPrice,
+      exitTs: finalTs, exitET: etLabel(finalTs), exitPrice: curPrice,
+      reason: 'time_exit', pnlPct, pnl$, signalType: '',
+    });
+    if (verbose) console.log(`  EOD CLOSE ${pos.symbol} @ $${curPrice.toFixed(2)} -> ${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(0)}%`);
+  }
+
+  return { trades };
+}
+
 // ── Main engine ────────────────────────────────────────────────────────────
 
 export interface ReplayOptions {
@@ -734,6 +887,45 @@ export async function runReplay(
       console.log('');
     }
 
+    // ── Branch point: deterministic configs use tick()-based loop ──────
+    const isDeterministic = !config.scanners.enabled && judges.length === 0;
+
+    if (isDeterministic) {
+      if (verbose) console.log(`  [deterministic mode] Using tick() strategy engine\n`);
+      const { trades: deterministicTrades } = runDeterministicReplay(
+        config, tfCacheMap, cache1m, timestamps, CLOSE_CUTOFF, SYMBOL_FILTER, verbose,
+      );
+
+      // ── Compute and store results ──────────────────────────────────
+      const metrics = computeMetrics(deterministicTrades);
+      const result: ReplayResult = {
+        runId,
+        configId: config.id,
+        date: targetDate,
+        ...metrics,
+        trades_json: JSON.stringify(deterministicTrades),
+      };
+
+      store.saveResult(result);
+      store.completeRun(runId);
+
+      if (verbose) {
+        console.log(`\n${'='.repeat(72)}`);
+        console.log(`  RESULTS: ${targetDate} | ${config.id}`);
+        console.log('='.repeat(72));
+        for (const t of deterministicTrades) {
+          const emoji = t.pnlPct >= 0 ? '+' : '';
+          console.log(`  ${t.side.toUpperCase()} ${t.strike} | ${t.entryET}@$${t.entryPrice.toFixed(2)} -> ${t.exitET}@$${t.exitPrice.toFixed(2)} | ${emoji}${t.pnlPct.toFixed(0)}% ($${t.pnl$.toFixed(0)})`);
+        }
+        console.log(`\n  Trades: ${metrics.trades} | Win rate: ${(metrics.winRate * 100).toFixed(0)}% | P&L: $${metrics.totalPnl.toFixed(0)}`);
+      }
+
+      dataDb.close();
+      store.close();
+      return result;
+    }
+
+    // ── Legacy pipeline (non-deterministic: scanners/judges enabled) ──
     const trades: Trade[] = [];
     const openPositions = new Map<string, SimPosition>();
     let lastEscalationTs = 0;
@@ -768,7 +960,10 @@ export async function runReplay(
       }
 
       // ── Direction cross (for entry gating) — uses directionTimeframe ──
-      spxDirectionCross = detectHmaCross(directionCache);
+      // Update only when a NEW cross fires — persist last known direction otherwise
+      // (matches live agent behavior where getHmaCrossDirection() holds last direction)
+      const newDirectionCross = detectHmaCross(directionCache);
+      if (newDirectionCross !== null) spxDirectionCross = newDirectionCross;
       // Track current direction values for logging/filtering
       const dirSpxBars = getSpxBarsAt(directionCache, ts);
       if (dirSpxBars.length >= 1) {
@@ -1132,12 +1327,16 @@ export async function runReplay(
       let judgeTp: number | null = null;
 
       if (judges.length === 0) {
-        // No judge mode: auto-buy the strongest signal
-        const best = optionSignals[0] ?? (scannerHotSetups.length > 0 ? { symbol: scannerHotSetups[0].symbol } : null);
-        if (best) {
-          judgeAction = 'buy';
-          judgeConf = 0.6;
-          judgeTarget = best.symbol;
+        // No judge mode: auto-buy the strongest signal — but respect maxPositionsOpen
+        if (openPositions.size >= (config.position.maxPositionsOpen ?? 100)) {
+          // Already at max — skip entry
+        } else {
+          const best = optionSignals[0] ?? (scannerHotSetups.length > 0 ? { symbol: scannerHotSetups[0].symbol } : null);
+          if (best) {
+            judgeAction = 'buy';
+            judgeConf = 0.6;
+            judgeTarget = best.symbol;
+          }
         }
       } else {
         const judgeSystem = buildJudgeSystem(config);
@@ -1202,7 +1401,9 @@ export async function runReplay(
       }
 
       // ── Open position ──────────────────────────────────────────────────
-      if (judgeAction === 'buy' && judgeTarget && !openPositions.has(judgeTarget)) {
+      // Use symbol as key (not symbol+ts) so we don't double-enter the same contract
+      const posKey = judgeTarget ?? '';
+      if (judgeAction === 'buy' && judgeTarget && !openPositions.has(posKey) && openPositions.size < (config.position.maxPositionsOpen ?? 100)) {
         const parsed = parseOptionSymbol(judgeTarget);
         if (parsed) {
           const bars = contractBars.get(judgeTarget);
@@ -1218,8 +1419,8 @@ export async function runReplay(
               : effEntry * config.position.takeProfitMultiplier;
             const qty = computeQty(effEntry, config);
 
-            openPositions.set(`${judgeTarget}_${ts}`, {
-              id: `${judgeTarget}_${ts}`,
+            openPositions.set(posKey, {
+              id: posKey,
               symbol: judgeTarget,
               side: parsed.isCall ? 'call' : 'put',
               strike: parsed.strike,
