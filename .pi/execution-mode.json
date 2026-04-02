@@ -3,35 +3,35 @@
   "status": "active",
   "pid": 2043478,
   "plan": {
-    "id": "plan-1775173243083",
-    "text": "\n# Replay Performance Optimization — All 6 Options\n\n## Summary of Changes\n\nThe replay system's #1 bottleneck is the contract bar query using `WHERE symbol LIKE '%260320%'` which forces a full index SCAN (1,500ms). Fixing this alone is a 22× speedup on data loading. Additionally, 5GB of indicator JSON is stored as TEXT blobs and parsed via JSON.parse — replacing these with native REAL columns saves 71% storage and eliminates parse overhead.\n\n### Phase 1: Schema Migration — Add Indicator Columns to replay_bars\n- Add 21 REAL columns (hma3, hma5, hma15, hma17, hma19, hma25, ema9, ema21, rsi14, bbUpper, bbMiddle, bbLower, bbWidth, atr14, atrPct, vwap, kcUpper, kcMiddle, kcLower, kcWidth, kcSlope)\n- Write a migration script that copies JSON indicator values into the new columns\n- Keep the `indicators` TEXT column temporarily for backward compat (nullable, can be dropped later)\n- Add a `replay_contracts` index table (Option 4) at the same time\n\n### Phase 2: Fix the LIKE Query — Indexed Symbol Lookups (Option 1)\n- In `loadBarCache()` in machine.ts: replace LIKE with two-step approach:\n  1. Discover symbols via range prefix (`symbol >= 'SPXW260320' AND symbol < 'SPXW260321'`)\n  2. Load bars per-symbol using prepared statement with exact `symbol = ?`\n- This alone takes contract loading from 1,500ms → 70ms (22× faster)\n\n### Phase 3: Read Indicator Columns Instead of JSON (Option 5)\n- Update `loadBarCache()` to SELECT the 21 indicator columns directly instead of `indicators` TEXT\n- Eliminate all JSON.parse calls for bar loading\n- Update the Bar interface in machine.ts to populate `indicators: Record<string, number|null>` from columns\n- Update `ensureHmaPeriods()` and `ensureKcFields()` to write to columns instead of JSON\n- Update framework.ts and replay-routes.ts to read columns\n\n### Phase 4: Lazy/Skip Contract Indicators in Deterministic Mode (Option 2)\n- In deterministic mode, contract bars don't need ANY indicators (only OHLCV)\n- Skip loading indicator columns for contracts when scanners are disabled\n- SPX bars still get full indicators (needed for HMA cross detection)\n\n### Phase 5: In-Process Parallel Batch via worker_threads (Option 3)\n- Create `src/replay/batch-thread-worker.ts` — a worker_threads entry point\n- Update `cmdBacktest()` in cli.ts to use worker pool instead of sequential\n- Concurrency = min(dates.length, cpus - 1)\n- Each worker gets its own read-only DB connection\n\n### Phase 6: Day-Level Binary Cache Files (Option 6)\n- After loading bars from SQLite, serialize the BarCache to a binary file\n- On subsequent runs, load from cache file (~50ms) instead of SQLite\n- Cache key: `{date}-{tf}-v{schemaVersion}.cache`\n- Invalidation: delete cache files when schema changes\n\n### Files to Modify:\n- `src/replay/machine.ts` — Options 1, 2, 3, 4, 5, 6 (main changes)\n- `src/replay/cli.ts` — Option 3 (parallel batch)\n- `src/replay/framework.ts` — Option 5 (column reads)\n- `src/server/replay-routes.ts` — Option 5 (column reads)\n- `scripts/backfill/build-mtf-bars.ts` — Option 5 (column writes)\n- `scripts/backfill/compute-indicators.ts` — Option 5 (column writes)\n- `scripts/backfill/build-replay-bars.ts` — Option 5 (column writes)\n- `scripts/backfill/backfill-replay-options.ts` — Option 5 (column writes)\n- `scripts/backfill/backfill-year.ts` — Option 5 (column writes)\n- NEW: `scripts/migrations/001-indicator-columns.ts` — Phase 1 migration\n- NEW: `src/replay/bar-cache.ts` — Extracted cache logic (Options 1, 2, 6)\n- NEW: `src/replay/batch-thread-worker.ts` — Option 3 worker\n",
+    "id": "plan-1775173247568",
+    "text": "Replay Performance Optimization - All 6 Options. Phase 1: Schema migration (add 21 indicator columns + replay_contracts table). Phase 2: Fix LIKE query with indexed lookups. Phase 3: Read columns instead of JSON. Phase 4: Skip contract indicators in deterministic mode. Phase 5: worker_threads parallel batch. Phase 6: Binary cache files. Phase 7: Test and benchmark.",
     "phases": [
       {
-        "name": "Schema Migration — Add Indicator Columns + Contracts Table",
+        "name": "Schema Migration",
         "status": "in_progress"
       },
       {
-        "name": "Fix LIKE Query — Indexed Symbol Lookups",
+        "name": "Fix LIKE Query",
         "status": "pending"
       },
       {
-        "name": "Read Indicator Columns Instead of JSON",
+        "name": "Read Columns Instead of JSON",
         "status": "pending"
       },
       {
-        "name": "Skip Contract Indicators in Deterministic Mode",
+        "name": "Skip Contract Indicators",
         "status": "pending"
       },
       {
-        "name": "Parallel Batch via worker_threads",
+        "name": "Parallel Batch",
         "status": "pending"
       },
       {
-        "name": "Day-Level Binary Cache Files",
+        "name": "Binary Cache Files",
         "status": "pending"
       },
       {
-        "name": "Test & Benchmark Verification",
+        "name": "Test and Benchmark",
         "status": "pending"
       }
     ],
@@ -43,7 +43,7 @@
     "lastResponseTokens": 0
   },
   "lastCheckpoint": null,
-  "startedAt": "2026-04-02T23:40:43.083Z",
-  "updatedAt": "2026-04-02T23:40:43.083Z",
+  "startedAt": "2026-04-02T23:40:47.568Z",
+  "updatedAt": "2026-04-02T23:40:47.569Z",
   "interruptedAt": "2026-04-02T22:48:31.512Z"
 }
