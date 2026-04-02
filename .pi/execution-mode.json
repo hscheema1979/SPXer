@@ -8,11 +8,13 @@
     "phases": [
       {
         "name": "Schema Migration",
-        "status": "in_progress"
+        "status": "completed",
+        "completedAt": "2026-04-02T23:46:24.533Z",
+        "notes": "Schema migration already complete. replay_bars table has 21 denormalized indicator columns (hma3, hma5, hma15, hma17, hma19, hma25, ema9, ema21, rsi14, bbUpper, bbMiddle, bbLower, bbWidth, atr14, atrPct, vwap, kcUpper, kcMiddle, kcLower, kcWidth, kcSlope). All populated where data exists. Tier 2 indicators (ema50, ema200, macd, stochK, etc.) remain in JSON only but are NOT used by replay/trading core."
       },
       {
         "name": "Fix LIKE Query",
-        "status": "pending"
+        "status": "in_progress"
       },
       {
         "name": "Read Columns Instead of JSON",
@@ -35,15 +37,15 @@
         "status": "pending"
       }
     ],
-    "currentPhase": 1
+    "currentPhase": 2
   },
   "safetyCounters": {
     "continuations": 0,
     "maxContinuations": 10,
     "lastResponseTokens": 0
   },
-  "lastCheckpoint": null,
+  "lastCheckpoint": "d6a3ec446f2196e25a5db329b338f89c2f890a30",
   "startedAt": "2026-04-02T23:40:50.443Z",
-  "updatedAt": "2026-04-02T23:40:50.443Z",
+  "updatedAt": "2026-04-02T23:46:24.566Z",
   "interruptedAt": "2026-04-02T22:48:31.512Z"
 }
