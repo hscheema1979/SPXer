@@ -1,5 +1,5 @@
 import { initDb, getDb, closeDb } from './storage/db';
-import { getAllActiveContracts, upsertBar, upsertBars, upsertContract, getDbSizeMb, getBars } from './storage/queries';
+import { getAllActiveContracts, upsertBar, upsertBars, upsertContract, getDbSizeMb, getBars, getLatestBar } from './storage/queries';
 import { fetchYahooBars } from './providers/yahoo';
 import { fetchSpxQuote, fetchOptionsChain, fetchExpirations, fetchSpxTimesales, fetchBatchQuotes, fetchTimesales } from './providers/tradier';
 import { fetchScreenerSnapshot } from './providers/tv-screener';
@@ -8,10 +8,13 @@ import { aggregate } from './pipeline/aggregator';
 import { computeIndicators, seedState, resetVWAP } from './pipeline/indicator-engine';
 import { ContractTracker } from './pipeline/contract-tracker';
 import { getMarketMode, getActiveExpirations } from './pipeline/scheduler';
-import { startHttpServer, setLastSpxPrice, setTrackerCountFn } from './server/http';
+import { startHttpServer, setLastSpxPrice, setTrackerCountFn, setOptionStreamStatusFn } from './server/http';
 import { startWsServer, broadcast } from './server/ws';
-import { config, STRIKE_BAND, STRIKE_INTERVAL, POLL_UNDERLYING_MS, POLL_OPTIONS_RTH_MS, POLL_OPTIONS_OVERNIGHT_MS, POLL_SCREENER_MS } from './config';
+import { config, STRIKE_BAND, STRIKE_INTERVAL, POLL_UNDERLYING_MS, POLL_OPTIONS_RTH_MS, POLL_OPTIONS_OVERNIGHT_MS, POLL_SCREENER_MS, OPTION_STREAM_WAKE_ET, OPTION_STREAM_CLOSE_ET } from './config';
 import { healthTracker } from './utils/health';
+import { OptionStream } from './pipeline/option-stream';
+import { OptionCandleBuilder } from './pipeline/option-candle-builder';
+import { todayET, nowET } from './utils/et-time';
 import type { Bar, Timeframe } from './types';
 
 const HIGHER_TIMEFRAMES: [Timeframe, number][] = [['3m', 180], ['5m', 300], ['10m', 600], ['15m', 900], ['1h', 3600]];
@@ -103,6 +106,261 @@ function closeSpxCandle(candle: NonNullable<typeof spxCandle>): void {
 function stopSpxStream(): void {
   spxStream.stop();
   if (spxCandleTimer) { clearInterval(spxCandleTimer); spxCandleTimer = null; }
+}
+
+// ── Option WebSocket Stream → 1m Candle Builder ─────────────────────────────
+// Streams real-time trade/quote events for ~160 option contracts via Tradier
+// WebSocket. Replaces 30s REST polling with tick-level candle building.
+// Falls back to pollOptions() if the stream disconnects.
+
+const optionStream = new OptionStream();
+let optionCandleBuilder: OptionCandleBuilder | null = null;
+let optionCandleTimer: ReturnType<typeof setInterval> | null = null;
+let optionStreamActive = false;       // true when stream is live — suppresses pollOptions()
+let optionStreamScheduleTimer: ReturnType<typeof setInterval> | null = null;
+
+/** ES→SPX fair value offset: ES trades ~46 pts above SPX (simple fixed estimate) */
+const ES_SPX_OFFSET = 46;
+
+/**
+ * Get today's and tomorrow's expiry dates for the contract pool.
+ * Uses todayET() for accurate ET date and adds the next trading day.
+ */
+function getPoolExpiries(): string[] {
+  const today = todayET();
+  // Next calendar day — the pool covers 0DTE (today) + 1DTE (tomorrow)
+  const todayDate = new Date(today + 'T12:00:00Z');
+  const tomorrow = new Date(todayDate.getTime() + 86400_000)
+    .toISOString().split('T')[0];
+  return [today, tomorrow];
+}
+
+/**
+ * Initialize the option WebSocket stream:
+ *   1. Fetch ES price (from lastSpxPrice or DB) to center the pool
+ *   2. Estimate SPX from ES using the fair value offset
+ *   3. Build contract pool: ±100 pts × $5 × calls+puts × 2 expiries ≈ 160 symbols
+ *   4. Create OptionCandleBuilder with onClose → rawToBar → indicators → DB → broadcast
+ *   5. Wire optionStream.onTick → candleBuilder
+ *   6. Start the stream
+ */
+async function initOptionStream(): Promise<void> {
+  // Step 1: Get a price to center the pool on
+  let centerPrice = lastSpxPrice;
+  if (!centerPrice) {
+    // Try ES from DB
+    const esBar = getLatestBar('ES', '1m');
+    if (esBar) {
+      centerPrice = esBar.close - ES_SPX_OFFSET;
+    }
+  }
+  if (!centerPrice) {
+    // Try fetching ES from Yahoo as last resort
+    try {
+      const rawBars = await fetchYahooBars('ES=F', '1m', '1d');
+      if (rawBars.length > 0) {
+        const lastEs = rawBars[rawBars.length - 1];
+        centerPrice = lastEs.close - ES_SPX_OFFSET;
+      }
+    } catch (e) {
+      console.error('[option-stream] Failed to fetch ES for pool centering:', e);
+    }
+  }
+  if (!centerPrice) {
+    console.error('[option-stream] No price available to center contract pool — skipping stream init');
+    return;
+  }
+
+  // Step 2: Build the pool
+  const expiries = getPoolExpiries();
+  const pool = OptionStream.buildContractPool(centerPrice, STRIKE_BAND, STRIKE_INTERVAL, expiries);
+  if (pool.length === 0) {
+    console.error('[option-stream] Empty contract pool — skipping stream init');
+    return;
+  }
+  console.log(`[option-stream] Pool: ${pool.length} symbols centered on SPX≈${centerPrice.toFixed(0)} (±${STRIKE_BAND}), expiries=${expiries.join(',')}`);
+
+  // Step 3: Create candle builder with onClose callback
+  optionCandleBuilder = new OptionCandleBuilder((symbol, candle) => {
+    // Build a proper Bar from the closed candle
+    const bar = rawToBar(symbol, '1m', {
+      ts: candle.minuteTs,
+      open: candle.open,
+      high: candle.high,
+      low: candle.low,
+      close: candle.close,
+      volume: candle.volume,
+    });
+    const enriched = { ...bar, indicators: computeIndicators(bar, 2) };
+    upsertBars([enriched]);
+
+    // Aggregate to higher timeframes
+    const recent1m = getBars(symbol, '1m', 60);
+    if (recent1m.length > 0) aggregateAndStore(recent1m, 2);
+
+    // Track the bar for health monitoring
+    healthTracker.recordBar(symbol, candle.minuteTs * 1000);
+
+    // Broadcast to WebSocket clients
+    broadcast({ type: 'contract_bar', symbol, data: enriched });
+  });
+
+  // Step 4: Wire stream ticks to candle builder
+  optionStream.onTick((tick) => {
+    if (!optionCandleBuilder) return;
+
+    if (tick.type === 'trade' && tick.price && tick.price > 0) {
+      optionCandleBuilder.processTick(tick.symbol, tick.price, tick.size ?? 0, tick.ts);
+    } else if (tick.type === 'quote' && tick.bid && tick.ask) {
+      optionCandleBuilder.processQuote(tick.symbol, tick.bid, tick.ask, tick.ts);
+    }
+
+    // Health tracking on every tick
+    healthTracker.recordSuccess('option-stream');
+  });
+
+  // Step 5: Start the stream
+  try {
+    await optionStream.start(pool);
+    optionStreamActive = true;
+    console.log(`[option-stream] Stream started — ${pool.length} symbols, polling suppressed`);
+  } catch (e) {
+    console.error('[option-stream] Failed to start:', e);
+    optionStreamActive = false;
+    healthTracker.recordFailure('option-stream');
+  }
+
+  // Step 6: Minute-boundary timer to flush forming candles (safety net)
+  if (optionCandleTimer) clearInterval(optionCandleTimer);
+  optionCandleTimer = setInterval(() => {
+    if (!optionCandleBuilder) return;
+    const now = Math.floor(Date.now() / 1000);
+    const currentMinute = now - (now % 60);
+    // Flush candles from previous minutes that haven't been closed by new ticks
+    // The builder's flushAll() closes all forming candles — we only call it
+    // when we're past the minute boundary. Individual symbols auto-close when
+    // a new-minute tick arrives, but illiquid symbols may not get ticks every minute.
+    // We check every 5s; if any candle is from a past minute, flushAll() handles it.
+    optionCandleBuilder.flushAll();
+  }, 5_000);
+
+  // Also register tracked contracts with the contract tracker for the sticky band
+  for (const sym of pool) {
+    // Parse symbol to extract strike and type for tracker
+    // OCC format: SPXW260401C06500000
+    const match = sym.match(/^(SPXW?)(\d{6})([CP])(\d{8})$/);
+    if (match) {
+      const [, prefix, expiryCode, type, strikeCode] = match;
+      const strike = parseInt(strikeCode) / 1000;
+      const expiry = `20${expiryCode.slice(0, 2)}-${expiryCode.slice(2, 4)}-${expiryCode.slice(4, 6)}`;
+      const added = tracker.updateBand(centerPrice, [{
+        symbol: sym,
+        strike,
+        expiry,
+        type: type === 'C' ? 'call' : 'put',
+      }]);
+      for (const c of added) upsertContract(c);
+    }
+  }
+}
+
+/** Stop the option stream and flush remaining candles */
+function stopOptionStream(): void {
+  optionStream.stop();
+  optionStreamActive = false;
+
+  if (optionCandleBuilder) {
+    optionCandleBuilder.flushAll();
+    optionCandleBuilder = null;
+  }
+
+  if (optionCandleTimer) {
+    clearInterval(optionCandleTimer);
+    optionCandleTimer = null;
+  }
+
+  console.log('[option-stream] Stopped and flushed');
+}
+
+/**
+ * Check option stream health — if disconnected, fall back to polling.
+ * If reconnected, suppress polling again.
+ */
+function checkOptionStreamFallback(): void {
+  if (!optionStreamActive) return; // stream was never started or intentionally stopped
+
+  if (!optionStream.isConnected()) {
+    // Stream disconnected — fall back to polling
+    if (optionStreamActive) {
+      console.warn('[option-stream] Disconnected — falling back to REST polling');
+      optionStreamActive = false;
+      healthTracker.recordFailure('option-stream');
+    }
+  } else {
+    // Stream is connected — suppress polling
+    if (!optionStreamActive) {
+      console.log('[option-stream] Reconnected — suppressing REST polling');
+      optionStreamActive = true;
+    }
+    healthTracker.recordSuccess('option-stream');
+  }
+}
+
+/**
+ * Parse ET time string 'HH:MM' into minutes since midnight.
+ */
+function parseETTime(timeStr: string): number {
+  const [h, m] = timeStr.split(':').map(Number);
+  return h * 60 + m;
+}
+
+/**
+ * Schedule option stream lifecycle:
+ *   - At OPTION_STREAM_WAKE_ET (~9:15 ET): init stream
+ *   - At OPTION_STREAM_CLOSE_ET (~16:15 ET): stop stream
+ * Also checks for fallback/reconnection every 30s.
+ */
+function scheduleOptionStream(): void {
+  const wakeMinutes = parseETTime(OPTION_STREAM_WAKE_ET);
+  const closeMinutes = parseETTime(OPTION_STREAM_CLOSE_ET);
+  let streamInitialized = false;
+  let streamStopped = false;
+
+  optionStreamScheduleTimer = setInterval(async () => {
+    const et = nowET();
+    const nowMinutes = et.h * 60 + et.m;
+
+    // Check if we're in the streaming window
+    if (nowMinutes >= wakeMinutes && nowMinutes < closeMinutes) {
+      // Inside window — init stream if not done yet
+      if (!streamInitialized && !optionStreamActive) {
+        streamInitialized = true;
+        streamStopped = false;
+        console.log(`[option-stream] Wake time reached (${OPTION_STREAM_WAKE_ET} ET) — initializing`);
+        try {
+          await initOptionStream();
+        } catch (e) {
+          console.error('[option-stream] Init failed:', e);
+          streamInitialized = false;
+        }
+      }
+
+      // Check fallback status
+      checkOptionStreamFallback();
+    } else if (nowMinutes >= closeMinutes && !streamStopped) {
+      // Past close time — stop stream
+      if (optionStream.isConnected() || optionStreamActive) {
+        console.log(`[option-stream] Close time reached (${OPTION_STREAM_CLOSE_ET} ET) — stopping`);
+        stopOptionStream();
+      }
+      streamStopped = true;
+      streamInitialized = false;
+    } else if (nowMinutes < wakeMinutes) {
+      // Before wake time — reset flags for new day
+      streamInitialized = false;
+      streamStopped = false;
+    }
+  }, 30_000); // check every 30s
 }
 
 // ── HMA Cross Signal Detection ──────────────────────────────────────────────
@@ -278,6 +536,8 @@ async function pollUnderlying(): Promise<void> {
 
 async function pollOptions(): Promise<void> {
   if (!lastSpxPrice) return;
+  // Skip REST polling when option stream is active — stream provides tick-level data
+  if (optionStreamActive && optionStream.isConnected()) return;
   try {
     const expirations = await fetchExpirations('SPX');
     const today = new Date().toISOString().split('T')[0];
@@ -407,8 +667,10 @@ async function shutdown(signal: string): Promise<void> {
     process.exit(1);
   }, 5000).unref();
 
-  // 1. Stop all polling intervals
+  // 1. Stop all polling intervals and option stream
   for (const id of intervals) clearInterval(id);
+  if (optionStreamScheduleTimer) clearInterval(optionStreamScheduleTimer);
+  stopOptionStream();
 
   // 2. Notify WebSocket clients and close WS server
   try {
@@ -528,10 +790,32 @@ async function main(): Promise<void> {
   wsServerRef = startWsServer(httpServer);
   setTrackerCountFn(() => tracker.getActive().length + tracker.getSticky().length);
 
+  // Wire option stream status into /health endpoint
+  setOptionStreamStatusFn(() => ({
+    connected: optionStream.isConnected(),
+    symbolCount: optionStream.symbolCount,
+    lastActivity: optionStream.lastActivity,
+  }));
+
   intervals.push(setInterval(pollUnderlying, POLL_UNDERLYING_MS));
   const optionsInterval = getMarketMode() === 'rth' ? POLL_OPTIONS_RTH_MS : POLL_OPTIONS_OVERNIGHT_MS;
   intervals.push(setInterval(pollOptions, optionsInterval));
   intervals.push(setInterval(pollScreener, POLL_SCREENER_MS));
+
+  // Schedule option stream lifecycle (9:15 ET wake → 16:15 ET close)
+  if (config.tradierToken) {
+    scheduleOptionStream();
+
+    // If we're already in the streaming window at startup, init immediately
+    const et = nowET();
+    const nowMinutes = et.h * 60 + et.m;
+    const wakeMinutes = parseETTime(OPTION_STREAM_WAKE_ET);
+    const closeMinutes = parseETTime(OPTION_STREAM_CLOSE_ET);
+    if (nowMinutes >= wakeMinutes && nowMinutes < closeMinutes) {
+      console.log('[option-stream] Inside streaming window at startup — initializing now');
+      initOptionStream().catch(e => console.error('[option-stream] Startup init failed:', e));
+    }
+  }
 
   // Reset VWAP exactly once on transition into RTH (not every minute during RTH)
   intervals.push(setInterval(() => {

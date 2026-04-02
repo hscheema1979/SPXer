@@ -1,9 +1,11 @@
 /**
- * SPXer Deterministic Trading Agent — HMA3x17 ScannerReverse
+ * SPXer Deterministic Trading Agent — tick()-based
  *
- * Pure deterministic execution — no LLM scanners or judges.
- * Strategy: HMA(3) × HMA(17) cross on SPX underlying → enter OTM contract
- *           → exit on reversal cross (scannerReverse) → immediately flip to opposite side
+ * Uses the same tick() function from src/core/strategy-engine.ts that
+ * replay uses. Config loaded from DB — same config validated in replay.
+ *
+ * Strategy: HMA(fast) × HMA(slow) cross on SPX underlying → enter OTM contract
+ *           → exit on reversal cross (scannerReverse) → immediately flip
  *
  * HTTP streaming for real-time TP/SL monitoring when holding a position.
  * Per-cycle broker reconciliation to prevent phantom/orphan positions.
@@ -15,32 +17,59 @@
 import * as dotenv from 'dotenv';
 dotenv.config();
 
-import { fetchMarketSnapshot, type MarketSnapshot } from './src/agent/market-feed';
-import { openPosition, closePosition } from './src/agent/trade-executor';
+import { fetchMarketSnapshot, type MarketSnapshot, type ContractState } from './src/agent/market-feed';
+import { openPosition, closePosition, cancelOcoLegs, convertOptionSymbol } from './src/agent/trade-executor';
 import { PositionManager, type PositionCloseEvent } from './src/agent/position-manager';
-import { AGENT_CONFIG } from './agent-config';
+import { createStore } from './src/replay/store';
+import { DEFAULT_CONFIG } from './src/config/defaults';
 import { RiskGuard } from './src/agent/risk-guard';
 import { logEntry, logRejected } from './src/agent/audit-log';
 import { writeStatus, logActivity } from './src/agent/reporter';
 import { PriceStream } from './src/agent/price-stream';
-import { nowET, todayET } from './src/utils/et-time';
+import { nowET, todayET, etTimeToUnixTs } from './src/utils/et-time';
 import { config as appConfig, TRADIER_BASE } from './src/config';
 import axios from 'axios';
 import * as fs from 'fs';
 import * as path from 'path';
-import type { AgentSignal, AgentDecision } from './src/agent/types';
-import { selectStrike, type StrikeCandidate } from './src/core/strike-selector';
+import type { AgentSignal, AgentDecision, OpenPosition } from './src/agent/types';
+import type { StrikeCandidate } from './src/core/strike-selector';
 import { computeQty } from './src/core/position-sizer';
-import { frictionEntry } from './src/core/friction';
+import { frictionEntry, computeRealisticPnl } from './src/core/friction';
 import { computeTradeSize } from './src/agent/account-balance';
-import { detectSignals } from './src/core/signal-detector';
-import type { CoreBar, Signal } from './src/core/types';
+import type { CoreBar } from './src/core/types';
+import type { Config } from './src/config/types';
+import {
+  tick,
+  createInitialState,
+  stripFormingCandle,
+  type CorePosition,
+  type StrategyState,
+  type TickInput,
+  type TickResult,
+} from './src/core/strategy-engine';
+
+// ── Load Config from DB ─────────────────────────────────────────────────────
+
+const CONFIG_ID = process.env.AGENT_CONFIG_ID || 'hma3x17-scannerReverse-live';
+const _store = createStore();
+const config: Config = _store.getConfig(CONFIG_ID) ?? DEFAULT_CONFIG;
+_store.close();
+
+console.log(`[agent] Loaded config: ${config.id} — "${config.name}"`);
+
+// ── Resolve Timeframes ──────────────────────────────────────────────────────
+
+const dirTf = config.signals.directionTimeframe || '1m';
+const exitTf = config.signals.exitTimeframe || dirTf;
+const signalTf = config.signals.signalTimeframe || '1m';
 
 // ── Initialize ──────────────────────────────────────────────────────────────
 
-const guard = new RiskGuard(AGENT_CONFIG);
-const positions = new PositionManager(AGENT_CONFIG, guard.isPaper);
+const isPaper = process.env.AGENT_PAPER !== 'false';
+const guard = new RiskGuard(config);
+const positions = new PositionManager(config, isPaper);
 const priceStream = new PriceStream();
+const SPXER_BASE = process.env.SPXER_URL || 'http://localhost:3600';
 
 let cycleCount = 0;
 let tradesTotal = 0;
@@ -52,6 +81,96 @@ const MAX_REJECTIONS_BEFORE_BACKOFF = 3;
 const REJECTION_BACKOFF_SECS = 300;
 let rejectionBackoffUntil = 0;
 
+// ── Strategy State — persisted across cycles, survives restarts ─────────────
+
+let strategyState: StrategyState = createInitialState();
+
+// ── Session state file — survives restarts ───────────────────────────────────
+
+const SESSION_FILE = path.join(process.cwd(), 'logs', 'agent-session.json');
+
+interface SessionState {
+  date: string;
+  dailyPnl: number;
+  tradesTotal: number;
+  winsTotal: number;
+  startedAt: number;
+  strategyState?: {
+    directionCross: string | null;
+    prevDirectionHmaFast: number | null;
+    prevDirectionHmaSlow: number | null;
+    lastDirectionBarTs: number | null;
+    exitCross: string | null;
+    prevExitHmaFast: number | null;
+    prevExitHmaSlow: number | null;
+    lastExitBarTs: number | null;
+    lastEntryTs: number;
+    dailyPnl: number;
+    tradesCompleted: number;
+    positions: Array<CorePosition>;
+  };
+}
+
+function loadSession(): SessionState | null {
+  try {
+    const raw = fs.readFileSync(SESSION_FILE, 'utf8');
+    return JSON.parse(raw) as SessionState;
+  } catch { return null; }
+}
+
+function saveSession(): void {
+  try {
+    fs.mkdirSync(path.join(process.cwd(), 'logs'), { recursive: true });
+    // Serialize strategy state (Map → Array for JSON)
+    const posArr = Array.from(strategyState.positions.values());
+    fs.writeFileSync(SESSION_FILE, JSON.stringify({
+      date: dailyDate,
+      dailyPnl,
+      tradesTotal,
+      winsTotal,
+      startedAt: Date.now(),
+      strategyState: {
+        directionCross: strategyState.directionCross,
+        prevDirectionHmaFast: strategyState.prevDirectionHmaFast,
+        prevDirectionHmaSlow: strategyState.prevDirectionHmaSlow,
+        lastDirectionBarTs: strategyState.lastDirectionBarTs,
+        exitCross: strategyState.exitCross,
+        prevExitHmaFast: strategyState.prevExitHmaFast,
+        prevExitHmaSlow: strategyState.prevExitHmaSlow,
+        lastExitBarTs: strategyState.lastExitBarTs,
+        lastEntryTs: strategyState.lastEntryTs,
+        dailyPnl: strategyState.dailyPnl,
+        tradesCompleted: strategyState.tradesCompleted,
+        positions: posArr,
+      },
+    }));
+  } catch {}
+}
+
+function restoreStrategyState(session: SessionState): void {
+  if (!session.strategyState) return;
+  const ss = session.strategyState;
+  strategyState.directionCross = ss.directionCross as any;
+  strategyState.prevDirectionHmaFast = ss.prevDirectionHmaFast;
+  strategyState.prevDirectionHmaSlow = ss.prevDirectionHmaSlow;
+  strategyState.lastDirectionBarTs = ss.lastDirectionBarTs;
+  strategyState.exitCross = ss.exitCross as any;
+  strategyState.prevExitHmaFast = ss.prevExitHmaFast;
+  strategyState.prevExitHmaSlow = ss.prevExitHmaSlow;
+  strategyState.lastExitBarTs = ss.lastExitBarTs;
+  strategyState.lastEntryTs = ss.lastEntryTs;
+  strategyState.dailyPnl = ss.dailyPnl;
+  strategyState.tradesCompleted = ss.tradesCompleted;
+  strategyState.positions = new Map();
+  for (const p of ss.positions ?? []) {
+    strategyState.positions.set(p.id, p);
+  }
+}
+
+function clearSession(): void {
+  try { fs.unlinkSync(SESSION_FILE); } catch {}
+}
+
 // ── Price Stream TP/SL Callback ─────────────────────────────────────────────
 
 let streamExitPending = false;
@@ -60,7 +179,6 @@ priceStream.onPrice((symbol, last, bid, ask) => {
   for (const pos of positions.getAll()) {
     if (pos.symbol !== symbol) continue;
     const sellPrice = bid > 0 ? bid : last;
-
     if (pos.takeProfit && sellPrice >= pos.takeProfit) {
       console.log(`[stream] 🎯 TP HIT on ${symbol}: $${sellPrice.toFixed(2)} >= TP $${pos.takeProfit.toFixed(2)}`);
       streamExitPending = true;
@@ -75,7 +193,7 @@ priceStream.onPrice((symbol, last, bid, ask) => {
 // ── Broker Reconciliation ───────────────────────────────────────────────────
 
 async function reconcileBrokerPositions(): Promise<void> {
-  const accountId = AGENT_CONFIG.execution?.accountId || process.env.TRADIER_ACCOUNT_ID || '';
+  const accountId = config.execution?.accountId || process.env.TRADIER_ACCOUNT_ID || '';
   const hdrs = {
     Authorization: `Bearer ${appConfig.tradierToken}`,
     Accept: 'application/json',
@@ -96,7 +214,7 @@ async function reconcileBrokerPositions(): Promise<void> {
       if (!agentSymbols.has(bp.symbol)) {
         console.log(`[agent] ⚠️ ORPHAN at broker: ${bp.symbol} x${bp.quantity} — closing immediately`);
         try {
-          const rootSymbol = AGENT_CONFIG.execution?.symbol || 'SPX';
+          const rootSymbol = config.execution?.symbol || 'SPX';
           const body = new URLSearchParams({
             class: 'option',
             symbol: rootSymbol,
@@ -130,84 +248,71 @@ async function reconcileBrokerPositions(): Promise<void> {
   }
 }
 
-// ── Core Signal Detection ───────────────────────────────────────────────────
-// Uses the SAME detectSignals() from src/core/ that replay uses.
-// Scans option contract HMA crosses, filters by OTM distance and
-// underlying SPX HMA confirmation — identical to the backtested strategy.
+// ── Data Conversion Helpers ─────────────────────────────────────────────────
 
-let prevContractBarTs = new Map<string, number>(); // dedupe: only process new candle closes
+/**
+ * Convert a BarSummary (from market-feed) to a CoreBar (for tick()).
+ */
+function toCoreBar(b: any): CoreBar {
+  return {
+    ts: b.ts,
+    open: b.open ?? b.close,
+    high: b.high ?? b.close,
+    low: b.low ?? b.close,
+    close: b.close,
+    volume: b.volume ?? 0,
+    indicators: {
+      rsi14: b.rsi14 ?? null,
+      ema9: b.ema9 ?? null,
+      ema21: b.ema21 ?? null,
+      hma3: b.hma3 ?? null,
+      hma5: b.hma5 ?? null,
+      hma15: b.hma15 ?? null,
+      hma17: b.hma17 ?? null,
+      hma19: b.hma19 ?? null,
+      hma25: b.hma25 ?? null,
+      ...extractIndicators(b),
+    },
+  };
+}
 
-function runCoreSignalDetection(snap: MarketSnapshot): Signal | null {
-  const spxPrice = snap.spx.price;
-  if (spxPrice <= 0) return null;
+/** Extract any additional indicator fields from bar data */
+function extractIndicators(b: any): Record<string, number | null> {
+  if (b.indicators && typeof b.indicators === 'object') {
+    return b.indicators;
+  }
+  return {};
+}
 
-  // Build CoreBar map from snapshot contract bars
-  const contractBars = new Map<string, CoreBar[]>();
-  for (const c of snap.contracts) {
-    if (c.bars1m.length < 2) continue;
-    const coreBars: CoreBar[] = c.bars1m.map(b => ({
+/**
+ * Fetch bars at a specific timeframe from the data service REST API.
+ * The data service stores aggregated bars at all TFs via aggregateAndStore().
+ */
+async function fetchBarsAtTf(tf: string, n: number = 50): Promise<CoreBar[]> {
+  try {
+    const { data } = await axios.get(`${SPXER_BASE}/spx/bars`, {
+      params: { tf, n },
+      timeout: 6000,
+    });
+    const bars: any[] = Array.isArray(data) ? data : [];
+    return bars.map(b => ({
       ts: b.ts,
       open: b.open ?? b.close,
       high: b.high ?? b.close,
       low: b.low ?? b.close,
       close: b.close,
       volume: b.volume ?? 0,
-      indicators: {
-        rsi14: b.rsi14, ema9: b.ema9, ema21: b.ema21,
-        hma3: b.hma3, hma5: b.hma5, hma17: b.hma17, hma19: b.hma19,
-      },
+      indicators: b.indicators ?? {},
     }));
-    contractBars.set(c.meta.symbol, coreBars);
+  } catch (e) {
+    console.warn(`[agent] Failed to fetch bars at ${tf}: ${(e as Error).message}`);
+    return [];
   }
-
-  if (contractBars.size === 0) return null;
-
-  // Check if we have a new candle close (dedupe — don't fire same signal twice)
-  const sampleBars = contractBars.values().next().value;
-  if (sampleBars && sampleBars.length >= 2) {
-    const closedTs = sampleBars[sampleBars.length - 2].ts;
-    const lastProcessed = prevContractBarTs.get('__global__');
-    if (lastProcessed === closedTs) return null; // same candle, already processed
-    prevContractBarTs.set('__global__', closedTs);
-  }
-
-  // Run core signal detection — same as replay
-  let signals = detectSignals(contractBars, spxPrice, AGENT_CONFIG);
-
-  // Filter by target OTM distance (same as replay)
-  if (AGENT_CONFIG.signals.targetOtmDistance != null && signals.length > 0) {
-    const targetDist = AGENT_CONFIG.signals.targetOtmDistance;
-    const spxRounded = Math.round(spxPrice / 5) * 5;
-    const targetCallStrike = spxRounded + targetDist;
-    const targetPutStrike = spxRounded - targetDist;
-    signals = signals.filter(sig => {
-      if (sig.side === 'call') return Math.abs(sig.strike - targetCallStrike) <= 5;
-      if (sig.side === 'put') return Math.abs(sig.strike - targetPutStrike) <= 5;
-      return false;
-    });
-  }
-
-  // Filter by underlying HMA cross confirmation (same as replay)
-  if (AGENT_CONFIG.signals.requireUnderlyingHmaCross && signals.length > 0) {
-    const hmaCross = positions.getHmaCrossDirection();
-    if (!hmaCross) {
-      signals = [];
-    } else {
-      const wantSide = hmaCross === 'bullish' ? 'call' : 'put';
-      signals = signals.filter(sig => sig.side === wantSide && sig.direction === 'bullish');
-    }
-  }
-
-  if (signals.length === 0) return null;
-
-  // Pick the best signal (closest to target OTM)
-  const best = signals[0];
-  console.log(`[signal] 📡 Core signal: ${best.direction} ${best.side} ${best.symbol} (strike ${best.strike}) — ${best.signalType}`);
-  return best;
 }
 
-// ── Helpers ─────────────────────────────────────────────────────────────────
-
+/**
+ * Build StrikeCandidates from the market snapshot contracts.
+ */
 function buildCandidates(snap: MarketSnapshot): StrikeCandidate[] {
   return snap.contracts.map(c => ({
     symbol: c.meta.symbol,
@@ -218,53 +323,103 @@ function buildCandidates(snap: MarketSnapshot): StrikeCandidate[] {
   }));
 }
 
-function computeSlTp(entryPrice: number): { stopLoss: number; takeProfit: number } {
-  const effEntry = frictionEntry(entryPrice);
-  const slPct = AGENT_CONFIG.position.stopLossPercent / 100;
-  return {
-    stopLoss: effEntry * (1 - slPct),
-    takeProfit: effEntry * AGENT_CONFIG.position.takeProfitMultiplier,
+/**
+ * Build contract bars map for tick() from snapshot data.
+ */
+function buildContractBars(snap: MarketSnapshot): Map<string, CoreBar[]> {
+  const map = new Map<string, CoreBar[]>();
+  for (const c of snap.contracts) {
+    if (c.bars1m.length < 2) continue;
+    const coreBars: CoreBar[] = c.bars1m.map(b => toCoreBar(b));
+    map.set(c.meta.symbol, coreBars);
+  }
+  return map;
+}
+
+/**
+ * Build position prices from PriceStream tick cache.
+ */
+function buildPositionPrices(): Map<string, number> {
+  const prices = new Map<string, number>();
+  for (const [, pos] of strategyState.positions) {
+    const cached = priceStream.getPrice(pos.symbol);
+    if (cached) prices.set(pos.symbol, cached.last);
+  }
+  return prices;
+}
+
+/**
+ * Compute the EOD close cutoff timestamp.
+ */
+function computeCloseCutoff(): number {
+  return etTimeToUnixTs(config.risk.cutoffTimeET || '16:00');
+}
+
+/**
+ * Get the period in seconds for a timeframe string.
+ */
+function tfToSeconds(tf: string): number {
+  const match = tf.match(/^(\d+)(m|h|d)$/);
+  if (!match) return 60;
+  const [, num, unit] = match;
+  const n = parseInt(num);
+  if (unit === 'm') return n * 60;
+  if (unit === 'h') return n * 3600;
+  if (unit === 'd') return n * 86400;
+  return 60;
+}
+
+// ── Order Execution Helpers ─────────────────────────────────────────────────
+
+async function executeExit(
+  pos: CorePosition,
+  reason: string,
+  decisionPrice: number,
+): Promise<{ success: boolean; fillPrice: number; pnl: number }> {
+  // Find the OpenPosition in the PositionManager (for broker operations)
+  const openPos = positions.getAll().find(p => p.symbol === pos.symbol);
+
+  // Cancel bracket legs if present
+  if (openPos?.bracketOrderId && !isPaper) {
+    try {
+      await cancelOcoLegs(openPos.bracketOrderId, config.execution);
+    } catch (e: any) {
+      console.warn(`[agent] Failed to cancel bracket: ${e.message}`);
+    }
+  }
+
+  // Submit sell
+  const dummyPos: OpenPosition = openPos ?? {
+    id: pos.id,
+    symbol: pos.symbol,
+    side: pos.side,
+    strike: pos.strike,
+    expiry: '',
+    entryPrice: pos.entryPrice,
+    quantity: pos.qty,
+    stopLoss: pos.stopLoss,
+    takeProfit: pos.takeProfit,
+    openedAt: pos.entryTs * 1000,
   };
+
+  const result = await closePosition(dummyPos, reason, decisionPrice, isPaper, config.execution);
+
+  if (result.error) {
+    console.error(`[agent] ❌ Exit failed for ${pos.symbol}: ${result.error}`);
+    return { success: false, fillPrice: decisionPrice, pnl: 0 };
+  }
+
+  const fillPrice = result.fillPrice ?? decisionPrice;
+  const pnl = (fillPrice - pos.entryPrice) * pos.qty * 100;
+
+  // Clean up
+  if (openPos) positions.remove(openPos.id);
+
+  return { success: true, fillPrice, pnl };
 }
 
-interface TradeSelection {
-  symbol: string;
-  side: 'call' | 'put';
-  strike: number;
-  price: number;
-  qty: number;
-  stopLoss: number;
-  takeProfit: number;
-  reason: string;
-}
-
-function selectTradeStrike(
-  candidates: StrikeCandidate[],
-  direction: 'bullish' | 'bearish',
-  spxPrice: number,
-): TradeSelection | null {
-  const result = selectStrike(candidates, direction, spxPrice, AGENT_CONFIG);
-  if (!result) return null;
-
-  const { candidate, reason } = result;
-  const effEntry = frictionEntry(candidate.price);
-  const qty = computeQty(effEntry, AGENT_CONFIG);
-  const { stopLoss, takeProfit } = computeSlTp(candidate.price);
-
-  return {
-    symbol: candidate.symbol,
-    side: candidate.side,
-    strike: candidate.strike,
-    price: candidate.price,
-    qty,
-    stopLoss,
-    takeProfit,
-    reason,
-  };
-}
-
-async function executeBuy(
-  selection: TradeSelection,
+async function executeEntry(
+  entry: NonNullable<TickResult['entry']>,
   snap: MarketSnapshot,
 ): Promise<boolean> {
   // Rejection backoff
@@ -274,30 +429,28 @@ async function executeBuy(
     return false;
   }
 
-  const contractState = snap.contracts.find(c => c.meta.symbol === selection.symbol);
-  if (!contractState) {
-    console.warn(`[agent] Contract ${selection.symbol} not in snapshot — skipping`);
+  // Hard guard: never exceed max positions
+  if (positions.count() >= (config.position.maxPositionsOpen ?? 1)) {
+    console.log(`[agent] Already have ${positions.count()} open position(s) — skipping entry`);
     return false;
   }
 
-  const recheck = guard.check(positions.getAll(), snap.minutesToClose);
-  if (!recheck.allowed) {
-    logRejected(recheck.reason!, selection.symbol, 'hma_cross');
-    return false;
-  }
+  // Find the contract in the snapshot
+  const contractState = snap.contracts.find(c => c.meta.symbol === entry.symbol);
+  const quote = contractState?.quote;
 
   const signal: AgentSignal = {
     type: 'HMA_CROSS',
-    symbol: contractState.meta.symbol,
-    side: contractState.meta.side,
-    strike: contractState.meta.strike,
-    expiry: contractState.meta.expiry,
-    currentPrice: contractState.quote.last ?? contractState.quote.mid ?? 0,
-    bid: contractState.quote.bid,
-    ask: contractState.quote.ask,
-    indicators: contractState.bars1m[contractState.bars1m.length - 1] ?? {} as any,
-    recentBars: contractState.bars1m,
-    signalBarLow: selection.stopLoss,
+    symbol: entry.symbol,
+    side: entry.side,
+    strike: entry.strike,
+    expiry: contractState?.meta.expiry ?? '',
+    currentPrice: entry.price,
+    bid: quote?.bid ?? null,
+    ask: quote?.ask ?? null,
+    indicators: contractState?.bars1m[contractState.bars1m.length - 1] ?? {} as any,
+    recentBars: contractState?.bars1m ?? [],
+    signalBarLow: entry.stopLoss,
     spxContext: {
       price: snap.spx.price,
       changePercent: snap.spx.changePct,
@@ -312,26 +465,44 @@ async function executeBuy(
   const decision: AgentDecision = {
     action: 'buy',
     confidence: 1.0,
-    positionSize: selection.qty,
-    stopLoss: selection.stopLoss,
-    takeProfit: selection.takeProfit,
-    reasoning: `HMA cross → ${selection.side} ${selection.symbol} x${selection.qty} @ $${selection.price.toFixed(2)} | ${selection.reason}`,
+    positionSize: entry.qty,
+    stopLoss: entry.stopLoss,
+    takeProfit: entry.takeProfit,
+    reasoning: `tick() → ${entry.reason}`,
     concerns: [],
     ts: Date.now(),
   };
 
   try {
-    const { position, execution } = await openPosition(signal, decision, guard.isPaper, AGENT_CONFIG.execution);
+    const { position, execution } = await openPosition(signal, decision, isPaper, config.execution);
     if (!execution.error) {
       positions.add(position);
       guard.recordTrade();
       tradesTotal++;
       consecutiveRejections = 0;
-      console.log(`[agent] ✅ ENTERED ${selection.side.toUpperCase()} ${selection.symbol} x${selection.qty} @ $${(execution.fillPrice ?? selection.price).toFixed(2)} | SL=$${selection.stopLoss.toFixed(2)} TP=$${selection.takeProfit.toFixed(2)}`);
+
+      const fillPrice = execution.fillPrice ?? entry.price;
+      console.log(`[agent] ✅ ENTERED ${entry.side.toUpperCase()} ${entry.symbol} x${entry.qty} @ $${fillPrice.toFixed(2)} | SL=$${entry.stopLoss.toFixed(2)} TP=$${entry.takeProfit.toFixed(2)}`);
       logEntry({ ts: Date.now(), signal, decision, execution });
 
       // Start streaming prices for real-time TP/SL
       await priceStream.updateSymbols([position.symbol]);
+
+      // Add to strategy state
+      const corePos: CorePosition = {
+        id: entry.symbol,
+        symbol: entry.symbol,
+        side: entry.side,
+        strike: entry.strike,
+        qty: entry.qty,
+        entryPrice: fillPrice,
+        stopLoss: entry.stopLoss,
+        takeProfit: entry.takeProfit,
+        entryTs: Math.floor(Date.now() / 1000),
+        highWaterPrice: fillPrice,
+      };
+      strategyState.positions.set(corePos.id, corePos);
+      strategyState.lastEntryTs = corePos.entryTs;
 
       return true;
     } else {
@@ -353,16 +524,15 @@ async function executeBuy(
 // ── Banner ──────────────────────────────────────────────────────────────────
 
 function banner(): void {
-  const cfg = AGENT_CONFIG;
   console.log('\n╔══════════════════════════════════════════════════════════╗');
-  console.log('║       SPXer Deterministic Agent — HMA3x17              ║');
-  console.log(`║  Mode: ${guard.isPaper ? 'PAPER (no real orders)              ' : 'LIVE  ⚠️  REAL MONEY                  '}║`);
+  console.log('║       SPXer Deterministic Agent — tick()-based          ║');
+  console.log(`║  Mode: ${isPaper ? 'PAPER (no real orders)              ' : 'LIVE  ⚠️  REAL MONEY                  '}║`);
   console.log('║                                                          ║');
-  console.log(`║  Signal:  HMA(${cfg.signals.hmaCrossFast})×HMA(${cfg.signals.hmaCrossSlow}) cross on SPX underlying      ║`);
-  console.log(`║  Exit:    scannerReverse (flip on HMA reversal)          ║`);
-  console.log(`║  TP/SL:   ${cfg.position.takeProfitMultiplier}x / ${cfg.position.stopLossPercent}%                                     ║`);
-  console.log(`║  Target:  $${cfg.signals.targetOtmDistance} OTM | $${cfg.sizing.baseDollarsPerTrade} base | max ${cfg.sizing.maxContracts} contracts  ║`);
-  console.log(`║  Risk:    $${cfg.risk.maxRiskPerTrade}/trade | cutoff ${cfg.risk.cutoffTimeET} ET            ║`);
+  console.log(`║  Config: ${config.id.slice(0, 46).padEnd(46)}║`);
+  console.log(`║  Signal:  HMA(${config.signals.hmaCrossFast})×HMA(${config.signals.hmaCrossSlow}) cross on SPX underlying      ║`);
+  console.log(`║  Dir TF:  ${dirTf.padEnd(5)} | Exit TF: ${exitTf.padEnd(5)} | Sig TF: ${signalTf.padEnd(5)}  ║`);
+  console.log(`║  Exit:    ${config.exit.strategy.padEnd(47)}║`);
+  console.log(`║  TP/SL:   ${config.position.takeProfitMultiplier}x / ${config.position.stopLossPercent}%                                     ║`);
   console.log(`║  Stream:  HTTP streaming for real-time TP/SL            ║`);
   console.log('╚══════════════════════════════════════════════════════════╝\n');
 }
@@ -388,54 +558,152 @@ async function runCycle(): Promise<number> {
 
   // 2. Warmup check
   const { h: etH, m: etM } = nowET();
-  const [asH, asM] = AGENT_CONFIG.timeWindows.activeStart.split(':').map(Number);
+  const [asH, asM] = config.timeWindows.activeStart.split(':').map(Number);
   if (etH * 60 + etM < asH * 60 + asM) {
-    console.log(`[agent] Warming up — waiting until ${AGENT_CONFIG.timeWindows.activeStart} ET for indicator stabilization`);
+    console.log(`[agent] Warming up — waiting until ${config.timeWindows.activeStart} ET for indicator stabilization`);
     return 30;
   }
 
-  // 3. CLOSE FIRST — reconcile broker positions every cycle
+  // 3. Reconcile broker positions every cycle
   await reconcileBrokerPositions();
 
-  // 4. Update HMA cross state from SPX bars
-  const freshCross = positions.updateHmaCross(snap.spx.bars1m);
-  const hmaCross = positions.getHmaCrossDirection();
-  if (hmaCross) {
-    const arrow = hmaCross === 'bullish' ? '🔼' : '🔽';
-    console.log(`[agent] HMA cross: ${arrow} ${hmaCross.toUpperCase()}${freshCross ? ' (FRESH SIGNAL)' : ''}`);
-  }
-
-  // 5. Monitor existing positions — may close and return events
-  const closeEvents = await positions.monitor(pnl => {
-    guard.recordLoss(pnl);
-    dailyPnl += pnl;
-  });
-
-  // Handle stream-flagged exits that monitor didn't catch
-  if (streamExitPending && closeEvents.length === 0 && positions.count() > 0) {
+  // 4. Handle stream-flagged exits
+  if (streamExitPending && positions.count() > 0) {
     console.log(`[agent] ⚡ Stream flagged exit — force-closing`);
     for (const pos of positions.getAll()) {
       const streamPrice = priceStream.getPrice(pos.symbol);
       const sellPrice = streamPrice?.bid ?? streamPrice?.last ?? pos.entryPrice;
 
-      const result = await closePosition(pos, 'stream_exit', sellPrice, guard.isPaper, AGENT_CONFIG.execution);
+      const result = await closePosition(pos, 'stream_exit', sellPrice, isPaper, config.execution);
       const pnl = ((result.fillPrice ?? sellPrice) - pos.entryPrice) * pos.quantity * 100;
       dailyPnl += pnl;
+      strategyState.dailyPnl += pnl;
+      strategyState.tradesCompleted++;
       guard.recordLoss(pnl);
       positions.remove(pos.id);
+      strategyState.positions.delete(pos.symbol);
 
       const emoji = pnl >= 0 ? '💰' : '💸';
       if (pnl > 0) winsTotal++;
+      tradesTotal++;
       console.log(`[agent] ${emoji} STREAM-CLOSED ${pos.symbol} @ $${(result.fillPrice ?? sellPrice).toFixed(2)}: P&L $${pnl.toFixed(0)}`);
-      closeEvents.push({ position: pos, closePrice: result.fillPrice ?? sellPrice, reason: 'stream_exit', pnl });
     }
+    streamExitPending = false;
+    saveSession();
   }
   streamExitPending = false;
 
-  for (const evt of closeEvents) {
-    const emoji = evt.pnl >= 0 ? '💰' : '💸';
-    if (evt.pnl > 0) winsTotal++;
-    console.log(`[agent] ${emoji} CLOSED ${evt.position.symbol} (${evt.reason}): P&L $${evt.pnl.toFixed(0)}`);
+  // 5. Build tick input
+
+  // 5a. SPX direction bars — fetch at direction timeframe, strip forming candle
+  let spxDirBars: CoreBar[];
+  if (dirTf === '1m') {
+    spxDirBars = stripFormingCandle(snap.spx.bars1m.map(toCoreBar), 60);
+  } else {
+    const rawBars = await fetchBarsAtTf(dirTf, 50);
+    spxDirBars = stripFormingCandle(rawBars, tfToSeconds(dirTf));
+  }
+
+  // 5b. SPX exit bars — same as direction if same TF
+  let spxExitBars: CoreBar[];
+  if (exitTf === dirTf) {
+    spxExitBars = spxDirBars;
+  } else if (exitTf === '1m') {
+    spxExitBars = stripFormingCandle(snap.spx.bars1m.map(toCoreBar), 60);
+  } else {
+    const rawBars = await fetchBarsAtTf(exitTf, 50);
+    spxExitBars = stripFormingCandle(rawBars, tfToSeconds(exitTf));
+  }
+
+  // 5c. Contract bars at signal timeframe
+  const contractBars = buildContractBars(snap);
+
+  // 5d. Position prices from PriceStream tick cache
+  const positionPrices = buildPositionPrices();
+
+  // Also use Tradier quotes for positions not in the stream
+  for (const [, pos] of strategyState.positions) {
+    if (!positionPrices.has(pos.symbol)) {
+      // Fall back to snapshot quote
+      const contractState = snap.contracts.find(c => c.meta.symbol === pos.symbol);
+      const price = contractState?.quote?.last ?? contractState?.quote?.mid;
+      if (price && price > 0) positionPrices.set(pos.symbol, price);
+    }
+  }
+
+  // 5e. SPX price from stream or snapshot
+  const spxLive = priceStream.getPrice('SPX');
+  const spxCurrentPrice = spxLive?.last ?? spxPrice;
+
+  // 5f. Candidates from contract pool
+  const candidates = buildCandidates(snap);
+
+  // 6. Call tick() — same function replay uses
+  const tickInput: TickInput = {
+    ts: Math.floor(Date.now() / 1000),
+    spxDirectionBars: spxDirBars,
+    spxExitBars,
+    contractBars,
+    spxPrice: spxCurrentPrice,
+    closeCutoffTs: computeCloseCutoff(),
+    candidates,
+    positionPrices,
+  };
+
+  const result = tick(strategyState, tickInput, config);
+
+  // 7. Apply HMA state (always, even if no trades)
+  strategyState.directionCross = result.directionState.directionCross;
+  strategyState.prevDirectionHmaFast = result.directionState.prevHmaFast;
+  strategyState.prevDirectionHmaSlow = result.directionState.prevHmaSlow;
+  strategyState.lastDirectionBarTs = result.directionState.lastBarTs;
+  strategyState.exitCross = result.exitState.exitCross;
+  strategyState.prevExitHmaFast = result.exitState.prevHmaFast;
+  strategyState.prevExitHmaSlow = result.exitState.prevHmaSlow;
+  strategyState.lastExitBarTs = result.exitState.lastBarTs;
+
+  // Log direction state
+  if (result.directionState.directionCross) {
+    const arrow = result.directionState.directionCross === 'bullish' ? '🔼' : '🔽';
+    console.log(`[agent] HMA cross: ${arrow} ${result.directionState.directionCross.toUpperCase()}${result.directionState.freshCross ? ' (FRESH SIGNAL)' : ''}`);
+  }
+
+  // 8. Execute exits FIRST
+  let allExitsSucceeded = true;
+  for (const exit of result.exits) {
+    console.log(`[agent] 📤 Exiting ${exit.symbol} — reason: ${exit.reason} @ $${exit.decisionPrice.toFixed(2)} (est P&L: $${exit.pnl['pnl$'].toFixed(0)})`);
+
+    const pos = strategyState.positions.get(exit.positionId);
+    if (!pos) {
+      console.warn(`[agent] Position ${exit.positionId} not found in strategy state`);
+      continue;
+    }
+
+    const exitResult = await executeExit(pos, exit.reason, exit.decisionPrice);
+
+    if (exitResult.success) {
+      strategyState.positions.delete(exit.positionId);
+      strategyState.dailyPnl += exitResult.pnl;
+      strategyState.tradesCompleted++;
+      dailyPnl += exitResult.pnl;
+      guard.recordLoss(exitResult.pnl);
+      if (exitResult.pnl > 0) winsTotal++;
+      tradesTotal++;
+
+      const emoji = exitResult.pnl >= 0 ? '💰' : '💸';
+      console.log(`[agent] ${emoji} CLOSED ${pos.symbol} (${exit.reason}): P&L $${exitResult.pnl.toFixed(0)}`);
+    } else {
+      allExitsSucceeded = false;
+      console.error(`[agent] Failed to exit ${pos.symbol} — will retry next cycle`);
+    }
+  }
+
+  // 9. Execute entry ONLY if all exits succeeded
+  if (result.entry && allExitsSucceeded) {
+    console.log(`[agent] 📥 Entry signal: ${result.entry.side.toUpperCase()} ${result.entry.symbol} x${result.entry.qty} @ $${result.entry.price.toFixed(2)} | ${result.entry.reason}`);
+    await executeEntry(result.entry, snap);
+  } else if (result.skipReason) {
+    console.log(`[agent] Skip: ${result.skipReason}`);
   }
 
   // Stop streaming if no positions
@@ -443,56 +711,16 @@ async function runCycle(): Promise<number> {
     priceStream.stop();
   }
 
-  // 6. Risk guard check
-  const riskCheck = guard.check(positions.getAll(), snap.minutesToClose);
-  if (!riskCheck.allowed) {
-    console.log(`[agent] Risk guard: ${riskCheck.reason}`);
-    return 60;
-  }
+  // 10. Save session & report status
+  saveSession();
 
-  // 7. Handle flip-on-reversal — CLOSE already happened, now ENTER opposite
-  const reversals = closeEvents.filter(e => e.reason === 'signal_reversal');
-  for (const rev of reversals) {
-    const flipDirection = rev.position.side === 'call' ? 'bearish' : 'bullish';
-    const flipSide = flipDirection === 'bullish' ? 'call' : 'put';
-    console.log(`[agent] 🔄 FLIP → ${flipSide.toUpperCase()} (reversal from ${rev.position.side})`);
-
-    const candidates = buildCandidates(snap);
-    const selection = selectTradeStrike(candidates, flipDirection, spxPrice);
-    if (selection) {
-      await executeBuy(selection, snap);
-    } else {
-      console.log(`[agent] No qualifying ${flipSide} contract found for flip`);
-    }
-  }
-
-  // 8. If no position open and no flip happened, run core signal detection
-  //    Uses the SAME detectSignals() from src/core/ that replay uses:
-  //    option contract HMA crosses → OTM filter → underlying HMA confirmation
-  if (positions.count() === 0 && reversals.length === 0) {
-    const coreSignal = runCoreSignalDetection(snap);
-    if (coreSignal) {
-      const direction: 'bullish' | 'bearish' = coreSignal.side === 'call' ? 'bullish' : 'bearish';
-      console.log(`[agent] 📡 Core signal → entering ${coreSignal.side.toUpperCase()} ${coreSignal.symbol} (strike ${coreSignal.strike})`);
-
-      const candidates = buildCandidates(snap);
-      const selection = selectTradeStrike(candidates, direction, spxPrice);
-      if (selection) {
-        await executeBuy(selection, snap);
-      } else {
-        console.log(`[agent] No qualifying ${coreSignal.side} contract found for strike ~${coreSignal.strike}`);
-      }
-    }
-  }
-
-  // 9. Report status
   const wr = tradesTotal > 0 ? (winsTotal / tradesTotal * 100).toFixed(0) : '-';
   writeStatus({
     ts: Date.now(),
     timeET: snap.timeET,
     cycle: cycleCount,
     mode: snap.mode,
-    paper: guard.isPaper,
+    paper: isPaper,
     spxPrice,
     minutesToClose: snap.minutesToClose,
     contractsTracked: snap.contracts.length,
@@ -501,7 +729,7 @@ async function runCycle(): Promise<number> {
     dailyPnL: dailyPnl,
     judgeCallsToday: 0,
     lastAction: positions.count() > 0 ? 'holding' : 'watching',
-    lastReasoning: `HMA ${hmaCross ?? 'none'} | trades: ${tradesTotal} (WR ${wr}%) | daily P&L: $${dailyPnl.toFixed(0)}`,
+    lastReasoning: `HMA ${result.directionState.directionCross ?? 'none'} | trades: ${tradesTotal} (WR ${wr}%) | daily P&L: $${dailyPnl.toFixed(0)}`,
     scannerReads: [],
     nextCheckSecs: positions.count() > 0 ? 5 : 30,
     upSince: '',
@@ -512,13 +740,16 @@ async function runCycle(): Promise<number> {
     timeET: snap.timeET,
     cycle: cycleCount,
     event: 'cycle' as any,
-    summary: `SPX ${spxPrice.toFixed(2)} | HMA ${hmaCross ?? '-'} | ${positions.count()} open | P&L $${dailyPnl.toFixed(0)}`,
+    summary: `SPX ${spxPrice.toFixed(2)} | HMA ${result.directionState.directionCross ?? '-'} | ${positions.count()} open | P&L $${dailyPnl.toFixed(0)}`,
     details: {
-      hmaCross,
+      hmaCross: result.directionState.directionCross,
+      freshCross: result.directionState.freshCross,
       openPositions: positions.count(),
       dailyPnl,
       tradesTotal,
-      closeEvents: closeEvents.map(e => ({ symbol: e.position.symbol, reason: e.reason, pnl: e.pnl })),
+      exits: result.exits.map(e => ({ symbol: e.symbol, reason: e.reason, pnl: e.pnl['pnl$'] })),
+      entry: result.entry ? { symbol: result.entry.symbol, side: result.entry.side } : null,
+      skipReason: result.skipReason,
     },
   });
 
@@ -529,7 +760,7 @@ async function runCycle(): Promise<number> {
 // ── Order Cleanup ────────────────────────────────────────────────────────────
 
 async function cancelAllOpenOrders(): Promise<number> {
-  const accountId = AGENT_CONFIG.execution?.accountId || process.env.TRADIER_ACCOUNT_ID || '';
+  const accountId = config.execution?.accountId || process.env.TRADIER_ACCOUNT_ID || '';
   const hdrs = {
     Authorization: `Bearer ${appConfig.tradierToken}`,
     Accept: 'application/json',
@@ -605,14 +836,15 @@ function dailyReview(): void {
 
   const review = [
     `\n${'═'.repeat(70)}`,
-    `  DAILY REVIEW — ${date} — SPX Agent (${AGENT_CONFIG.execution?.accountId ?? 'default'})`,
+    `  DAILY REVIEW — ${date} — SPX Agent (${config.execution?.accountId ?? 'default'})`,
     `${'═'.repeat(70)}`,
     ``,
+    `  Config:     ${config.id}`,
     `  Trades:     ${tradesTotal} total (${winsTotal} wins, ${losses} losses)`,
     `  Win Rate:   ${wr}%`,
     `  Daily P&L:  $${dailyPnl.toFixed(2)}`,
     `  Avg P&L:    $${avgPnl}/trade`,
-    `  Paper:      ${guard.isPaper ? 'YES' : 'NO — LIVE'}`,
+    `  Paper:      ${isPaper ? 'YES' : 'NO — LIVE'}`,
     `  Rejections: ${consecutiveRejections} consecutive`,
     ``,
   ];
@@ -662,7 +894,7 @@ async function main(): Promise<void> {
     console.error('[agent] TRADIER_TOKEN not set');
     process.exit(1);
   }
-  if (!guard.isPaper && !process.env.TRADIER_ACCOUNT_ID) {
+  if (!isPaper && !process.env.TRADIER_ACCOUNT_ID) {
     console.error('[agent] TRADIER_ACCOUNT_ID required for live trading');
     process.exit(1);
   }
@@ -674,37 +906,72 @@ async function main(): Promise<void> {
   while (true) {
     console.log('[agent] Waiting for market open...');
     await sleepUntilMarketOpen();
-    console.log('[agent] Market open — starting trading session');
 
-    // Pre-open: cancel stale orders
-    const cancelledPreOpen = await cancelAllOpenOrders();
-    if (cancelledPreOpen > 0) console.log(`[agent] Cancelled ${cancelledPreOpen} stale order(s) pre-open`);
+    const today = todayET();
+    const existingSession = loadSession();
+    const isResume = existingSession?.date === today;
 
-    // Reset daily state
-    dailyPnl = 0;
-    tradesTotal = 0;
-    winsTotal = 0;
-    consecutiveRejections = 0;
-    rejectionBackoffUntil = 0;
-    dailyDate = todayET();
-    guard.resetIfNewDay();
+    if (isResume) {
+      // ── Crash-restart mid-session: restore state ──
+      dailyPnl         = existingSession!.dailyPnl;
+      tradesTotal      = existingSession!.tradesTotal;
+      winsTotal        = existingSession!.winsTotal;
+      dailyDate        = today;
+      restoreStrategyState(existingSession!);
+      console.log(`[agent] ⚡ RESUMING session for ${today} (P&L $${dailyPnl.toFixed(0)}, ${tradesTotal} trades, ${strategyState.positions.size} positions in state)`);
+    } else {
+      // ── Fresh session start ──
+      console.log('[agent] Market open — starting trading session');
 
-    // Dynamic sizing
-    if (AGENT_CONFIG.sizing.riskPercentOfAccount) {
-      const tradeSize = await computeTradeSize(
-        AGENT_CONFIG.sizing.riskPercentOfAccount,
-        AGENT_CONFIG.execution?.accountId,
-      );
-      AGENT_CONFIG.sizing.baseDollarsPerTrade = tradeSize;
-      console.log(`[agent] Daily sizing: $${tradeSize} per trade (${AGENT_CONFIG.sizing.riskPercentOfAccount}% of account)`);
+      // Pre-open: cancel stale orders from previous sessions
+      const cancelledPreOpen = await cancelAllOpenOrders();
+      if (cancelledPreOpen > 0) console.log(`[agent] Cancelled ${cancelledPreOpen} stale order(s) pre-open`);
+
+      dailyPnl             = 0;
+      tradesTotal          = 0;
+      winsTotal            = 0;
+      consecutiveRejections = 0;
+      rejectionBackoffUntil = 0;
+      dailyDate            = today;
+      strategyState        = createInitialState();
+      guard.resetIfNewDay();
+      saveSession();
+
+      // Dynamic sizing (once per day)
+      if (config.sizing.riskPercentOfAccount) {
+        const tradeSize = await computeTradeSize(
+          config.sizing.riskPercentOfAccount,
+          config.execution?.accountId,
+        );
+        config.sizing.baseDollarsPerTrade = tradeSize;
+        console.log(`[agent] Daily sizing: $${tradeSize} per trade (${config.sizing.riskPercentOfAccount}% of account)`);
+      }
     }
 
-    // Reconcile broker positions
-    const reconciled = await positions.reconcileFromBroker(AGENT_CONFIG.execution);
+    // Reconcile broker positions every start/resume
+    const reconciled = await positions.reconcileFromBroker(config.execution);
     if (reconciled > 0) {
       console.log(`[agent] Reconciled ${reconciled} position(s) from broker`);
       const symbols = positions.getAll().map(p => p.symbol);
       if (symbols.length > 0) await priceStream.updateSymbols(symbols);
+
+      // Sync reconciled positions into strategy state
+      for (const pos of positions.getAll()) {
+        if (!strategyState.positions.has(pos.symbol)) {
+          strategyState.positions.set(pos.symbol, {
+            id: pos.symbol,
+            symbol: pos.symbol,
+            side: pos.side,
+            strike: pos.strike,
+            qty: pos.quantity,
+            entryPrice: pos.entryPrice,
+            stopLoss: pos.stopLoss,
+            takeProfit: pos.takeProfit ?? pos.entryPrice * config.position.takeProfitMultiplier,
+            entryTs: Math.floor(pos.openedAt / 1000),
+            highWaterPrice: pos.entryPrice,
+          });
+        }
+      }
     }
 
     console.log('[agent] First cycle in 5s...\n');
@@ -727,6 +994,7 @@ async function main(): Promise<void> {
     const cancelledAtClose = await cancelAllOpenOrders();
     if (cancelledAtClose > 0) console.log(`[agent] Cancelled ${cancelledAtClose} open order(s) at market close`);
     dailyReview();
+    clearSession();
     console.log('[agent] Sleeping until next market open...\n');
   }
 }

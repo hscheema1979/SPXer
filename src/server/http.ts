@@ -9,12 +9,24 @@ import { healthTracker } from '../utils/health';
 import { getWsClientCount } from './ws';
 import { config } from '../config';
 import { createReplayRoutes } from './replay-routes';
+import {
+  buildAuthUrl,
+  exchangeCodeForTokens,
+  getSchwabAuthStatus,
+  startTokenRefresher,
+} from '../providers/schwab';
+import { createSchwaberRoutes } from './schwaber-routes';
 
 let lastSpxPrice: number | null = null;
 export function setLastSpxPrice(p: number) { lastSpxPrice = p; }
 
 let trackerCountFn: () => number = () => 0;
 export function setTrackerCountFn(fn: () => number) { trackerCountFn = fn; }
+
+let optionStreamStatusFn: () => { connected: boolean; symbolCount: number; lastActivity: number } = () => ({
+  connected: false, symbolCount: 0, lastActivity: 0,
+});
+export function setOptionStreamStatusFn(fn: typeof optionStreamStatusFn) { optionStreamStatusFn = fn; }
 
 const startTime = Date.now();
 
@@ -37,6 +49,8 @@ export function startHttpServer(port: number): { app: Express; httpServer: Serve
     const active = getAllActiveContracts();
     const activeCount = active.filter(c => c.state === 'ACTIVE').length;
 
+    const optionStream = optionStreamStatusFn();
+
     res.json({
       // Health report — 'n/a' when no providers tracked, 'healthy'/'degraded'/'critical' otherwise
       status: report.status,
@@ -47,6 +61,11 @@ export function startHttpServer(port: number): { app: Express; httpServer: Serve
       trackedContracts: tracked,
       activeContracts: activeCount,
       wsClients: getWsClientCount(),
+      optionStream: {
+        connected: optionStream.connected,
+        symbolCount: optionStream.symbolCount,
+        lastActivity: optionStream.lastActivity,
+      },
       // Backward-compatible fields
       uptime: Math.floor((Date.now() - startTime) / 1000),
       mode: getMarketMode(),
@@ -160,6 +179,55 @@ export function startHttpServer(port: number): { app: Express; httpServer: Serve
       res.json({ error: 'Config not available' });
     }
   });
+
+  // ── Schwab OAuth ──
+
+  // Step 1: redirect browser to Schwab login
+  // Visit https://bitloom.cloud/schwab/auth to kick off the flow
+  app.get('/schwab/auth', (_req, res) => {
+    try {
+      const url = buildAuthUrl();
+      res.redirect(url);
+    } catch (e: any) {
+      res.status(500).send(`Schwab auth error: ${e.message}`);
+    }
+  });
+
+  // Step 2: Schwab redirects back here with ?code=...
+  // Must match the Callback URL registered in the Schwab Developer Portal exactly:
+  //   https://bitloom.cloud/schwab/callback
+  app.get('/schwab/callback', async (req, res) => {
+    const code = req.query.code as string | undefined;
+    if (!code) {
+      return res.status(400).send('Missing authorization code from Schwab');
+    }
+    try {
+      const tokens = await exchangeCodeForTokens(code);
+      // Start background refresher now that we have valid tokens
+      startTokenRefresher();
+      res.send(`
+        <html><body style="font-family:monospace;padding:2rem">
+          <h2>✅ Schwab authenticated</h2>
+          <p>Access token expires: <strong>${new Date(tokens.expires_at * 1000).toISOString()}</strong></p>
+          <p>Refresh token expires (7-day limit): <strong>${new Date(tokens.refresh_expires_at * 1000).toISOString()}</strong></p>
+          <p>Account hash: <strong>${tokens.account_hash ?? 'fetching...'}</strong></p>
+          <p>Tokens saved to DB. Auto-refresher running every 29 min.</p>
+          <p>⚠️ Bookmark this reminder: re-authenticate before the 7-day refresh token expires.</p>
+        </body></html>
+      `);
+    } catch (e: any) {
+      console.error('[schwab] Callback error:', e.message);
+      res.status(500).send(`Schwab token exchange failed: ${e.message}`);
+    }
+  });
+
+  // Status check — shows auth health without exposing tokens
+  app.get('/schwab/status', (_req, res) => {
+    res.json(getSchwabAuthStatus());
+  });
+
+  // ── Schwaber viewer ──
+  app.use('/schwaber', createSchwaberRoutes());
 
   // ── Replay viewer ──
   app.use('/replay', createReplayRoutes());
