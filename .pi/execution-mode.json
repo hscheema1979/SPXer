@@ -1,25 +1,37 @@
 {
   "version": 1,
   "status": "active",
-  "pid": 2040620,
+  "pid": 2043478,
   "plan": {
-    "id": "plan-1775169735309",
-    "text": "Wire intrabar exit pricing through the full stack so replay uses bar high/low to detect TP/SL breaches within candles, exiting at the exact limit price instead of bar close.\n\nPhase 1: Add positionBars to TickInput, wire barHigh/barLow through tick() into ExitContext, use exitPrice for P&L.\nPhase 2: Build positionBars in replay machine using getPosBarAt(), pass to tick().\nPhase 3: Add intrabar tests to strategy-engine.test.ts.\nPhase 4: Run April 2 validation replay comparing close vs intrabar.",
+    "id": "plan-1775173243083",
+    "text": "\n# Replay Performance Optimization — All 6 Options\n\n## Summary of Changes\n\nThe replay system's #1 bottleneck is the contract bar query using `WHERE symbol LIKE '%260320%'` which forces a full index SCAN (1,500ms). Fixing this alone is a 22× speedup on data loading. Additionally, 5GB of indicator JSON is stored as TEXT blobs and parsed via JSON.parse — replacing these with native REAL columns saves 71% storage and eliminates parse overhead.\n\n### Phase 1: Schema Migration — Add Indicator Columns to replay_bars\n- Add 21 REAL columns (hma3, hma5, hma15, hma17, hma19, hma25, ema9, ema21, rsi14, bbUpper, bbMiddle, bbLower, bbWidth, atr14, atrPct, vwap, kcUpper, kcMiddle, kcLower, kcWidth, kcSlope)\n- Write a migration script that copies JSON indicator values into the new columns\n- Keep the `indicators` TEXT column temporarily for backward compat (nullable, can be dropped later)\n- Add a `replay_contracts` index table (Option 4) at the same time\n\n### Phase 2: Fix the LIKE Query — Indexed Symbol Lookups (Option 1)\n- In `loadBarCache()` in machine.ts: replace LIKE with two-step approach:\n  1. Discover symbols via range prefix (`symbol >= 'SPXW260320' AND symbol < 'SPXW260321'`)\n  2. Load bars per-symbol using prepared statement with exact `symbol = ?`\n- This alone takes contract loading from 1,500ms → 70ms (22× faster)\n\n### Phase 3: Read Indicator Columns Instead of JSON (Option 5)\n- Update `loadBarCache()` to SELECT the 21 indicator columns directly instead of `indicators` TEXT\n- Eliminate all JSON.parse calls for bar loading\n- Update the Bar interface in machine.ts to populate `indicators: Record<string, number|null>` from columns\n- Update `ensureHmaPeriods()` and `ensureKcFields()` to write to columns instead of JSON\n- Update framework.ts and replay-routes.ts to read columns\n\n### Phase 4: Lazy/Skip Contract Indicators in Deterministic Mode (Option 2)\n- In deterministic mode, contract bars don't need ANY indicators (only OHLCV)\n- Skip loading indicator columns for contracts when scanners are disabled\n- SPX bars still get full indicators (needed for HMA cross detection)\n\n### Phase 5: In-Process Parallel Batch via worker_threads (Option 3)\n- Create `src/replay/batch-thread-worker.ts` — a worker_threads entry point\n- Update `cmdBacktest()` in cli.ts to use worker pool instead of sequential\n- Concurrency = min(dates.length, cpus - 1)\n- Each worker gets its own read-only DB connection\n\n### Phase 6: Day-Level Binary Cache Files (Option 6)\n- After loading bars from SQLite, serialize the BarCache to a binary file\n- On subsequent runs, load from cache file (~50ms) instead of SQLite\n- Cache key: `{date}-{tf}-v{schemaVersion}.cache`\n- Invalidation: delete cache files when schema changes\n\n### Files to Modify:\n- `src/replay/machine.ts` — Options 1, 2, 3, 4, 5, 6 (main changes)\n- `src/replay/cli.ts` — Option 3 (parallel batch)\n- `src/replay/framework.ts` — Option 5 (column reads)\n- `src/server/replay-routes.ts` — Option 5 (column reads)\n- `scripts/backfill/build-mtf-bars.ts` — Option 5 (column writes)\n- `scripts/backfill/compute-indicators.ts` — Option 5 (column writes)\n- `scripts/backfill/build-replay-bars.ts` — Option 5 (column writes)\n- `scripts/backfill/backfill-replay-options.ts` — Option 5 (column writes)\n- `scripts/backfill/backfill-year.ts` — Option 5 (column writes)\n- NEW: `scripts/migrations/001-indicator-columns.ts` — Phase 1 migration\n- NEW: `src/replay/bar-cache.ts` — Extracted cache logic (Options 1, 2, 6)\n- NEW: `src/replay/batch-thread-worker.ts` — Option 3 worker\n",
     "phases": [
       {
-        "name": "TickInput + tick() plumbing",
+        "name": "Schema Migration — Add Indicator Columns + Contracts Table",
         "status": "in_progress"
       },
       {
-        "name": "Replay machine integration",
+        "name": "Fix LIKE Query — Indexed Symbol Lookups",
         "status": "pending"
       },
       {
-        "name": "Tests for intrabar exit pricing",
+        "name": "Read Indicator Columns Instead of JSON",
         "status": "pending"
       },
       {
-        "name": "Validation replay on April 2",
+        "name": "Skip Contract Indicators in Deterministic Mode",
+        "status": "pending"
+      },
+      {
+        "name": "Parallel Batch via worker_threads",
+        "status": "pending"
+      },
+      {
+        "name": "Day-Level Binary Cache Files",
+        "status": "pending"
+      },
+      {
+        "name": "Test & Benchmark Verification",
         "status": "pending"
       }
     ],
@@ -31,6 +43,7 @@
     "lastResponseTokens": 0
   },
   "lastCheckpoint": null,
-  "startedAt": "2026-04-02T22:42:15.309Z",
-  "updatedAt": "2026-04-02T22:42:15.309Z"
+  "startedAt": "2026-04-02T23:40:43.083Z",
+  "updatedAt": "2026-04-02T23:40:43.083Z",
+  "interruptedAt": "2026-04-02T22:48:31.512Z"
 }

@@ -1290,3 +1290,160 @@ describe('tick — Multi-step integration', () => {
     expect(r4.entry!.direction).toBe('bearish');
   });
 });
+
+// ── Intrabar Exit Pricing ───────────────────────────────────────────────────
+
+describe('Intrabar exit pricing', () => {
+  // Helper: create state with an open position
+  function stateWithPosition(entryPrice: number, sl: number, tp: number): StrategyState {
+    const state = createInitialState();
+    state.directionCross = 'bullish';
+    state.prevDirectionHmaFast = 5810;
+    state.prevDirectionHmaSlow = 5805;
+    state.positions.set('SPXW260401C05815000', {
+      id: 'SPXW260401C05815000',
+      symbol: 'SPXW260401C05815000',
+      side: 'call',
+      strike: 5815,
+      qty: 1,
+      entryPrice,
+      stopLoss: sl,
+      takeProfit: tp,
+      entryTs: BASE_TS - 60,
+      highWaterPrice: entryPrice,
+    });
+    return state;
+  }
+
+  it('exits at exact TP price when bar high breaches TP (intrabar)', () => {
+    const entryPrice = 2.00;
+    const tp = entryPrice * 1.4; // 2.80
+    const sl = entryPrice * 0.30; // 0.60
+    const config = makeConfig({
+      exit: { strategy: 'takeProfit', exitPricing: 'intrabar', trailingStopEnabled: false, trailingStopPercent: 20, timeBasedExitEnabled: false, timeBasedExitMinutes: 5, reversalSizeMultiplier: 1 },
+      position: { stopLossPercent: 70, takeProfitMultiplier: 1.4, maxPositionsOpen: 1, defaultQuantity: 1, positionSizeMultiplier: 1 },
+    });
+    const state = stateWithPosition(entryPrice, sl, tp);
+
+    // Bar close is 3.50 (way past TP), but bar high is 3.80
+    // With intrabar pricing, exit should fill at TP (2.80), not close (3.50)
+    const bars = [makeBar(BASE_TS - 60, 5810, 5810, 5805), makeBar(BASE_TS, 5815, 5812, 5806)];
+    const result = tick(state, makeInput({
+      ts: BASE_TS,
+      spxDirectionBars: bars,
+      spxExitBars: bars,
+      spxPrice: 5815,
+      positionPrices: new Map([['SPXW260401C05815000', 3.50]]),
+      positionBars: new Map([['SPXW260401C05815000', { high: 3.80, low: 1.90 }]]),
+    }), config);
+
+    expect(result.exits).toHaveLength(1);
+    expect(result.exits[0].reason).toBe('take_profit');
+    expect(result.exits[0].decisionPrice).toBeCloseTo(tp, 2); // 2.80, not 3.50
+  });
+
+  it('exits at exact SL price when bar low breaches SL (intrabar)', () => {
+    const entryPrice = 4.00;
+    const tp = entryPrice * 1.4; // 5.60
+    const sl = entryPrice * 0.30; // 1.20
+    const config = makeConfig({
+      exit: { strategy: 'takeProfit', exitPricing: 'intrabar', trailingStopEnabled: false, trailingStopPercent: 20, timeBasedExitEnabled: false, timeBasedExitMinutes: 5, reversalSizeMultiplier: 1 },
+      position: { stopLossPercent: 70, takeProfitMultiplier: 1.4, maxPositionsOpen: 1, defaultQuantity: 1, positionSizeMultiplier: 1 },
+    });
+    const state = stateWithPosition(entryPrice, sl, tp);
+
+    // Bar close is 1.00 (past SL), but we should fill at SL (1.20)
+    const bars = [makeBar(BASE_TS - 60, 5810, 5810, 5805), makeBar(BASE_TS, 5815, 5812, 5806)];
+    const result = tick(state, makeInput({
+      ts: BASE_TS,
+      spxDirectionBars: bars,
+      spxExitBars: bars,
+      spxPrice: 5815,
+      positionPrices: new Map([['SPXW260401C05815000', 1.00]]),
+      positionBars: new Map([['SPXW260401C05815000', { high: 3.00, low: 0.80 }]]),
+    }), config);
+
+    expect(result.exits).toHaveLength(1);
+    expect(result.exits[0].reason).toBe('stop_loss');
+    expect(result.exits[0].decisionPrice).toBeCloseTo(sl, 2); // 1.20, not 1.00
+  });
+
+  it('SL wins when both TP and SL breached in same bar (conservative)', () => {
+    const entryPrice = 3.00;
+    const tp = entryPrice * 1.4; // 4.20
+    const sl = entryPrice * 0.30; // 0.90
+    const config = makeConfig({
+      exit: { strategy: 'takeProfit', exitPricing: 'intrabar', trailingStopEnabled: false, trailingStopPercent: 20, timeBasedExitEnabled: false, timeBasedExitMinutes: 5, reversalSizeMultiplier: 1 },
+      position: { stopLossPercent: 70, takeProfitMultiplier: 1.4, maxPositionsOpen: 1, defaultQuantity: 1, positionSizeMultiplier: 1 },
+    });
+    const state = stateWithPosition(entryPrice, sl, tp);
+
+    // Both TP and SL breached: high > 4.20, low < 0.90
+    const bars = [makeBar(BASE_TS - 60, 5810, 5810, 5805), makeBar(BASE_TS, 5815, 5812, 5806)];
+    const result = tick(state, makeInput({
+      ts: BASE_TS,
+      spxDirectionBars: bars,
+      spxExitBars: bars,
+      spxPrice: 5815,
+      positionPrices: new Map([['SPXW260401C05815000', 2.00]]),
+      positionBars: new Map([['SPXW260401C05815000', { high: 5.00, low: 0.50 }]]),
+    }), config);
+
+    expect(result.exits).toHaveLength(1);
+    expect(result.exits[0].reason).toBe('stop_loss');
+    expect(result.exits[0].decisionPrice).toBeCloseTo(sl, 2); // SL wins
+  });
+
+  it('falls through to close-based logic when exitPricing is close (default)', () => {
+    const entryPrice = 2.00;
+    const tp = entryPrice * 1.4; // 2.80
+    const sl = entryPrice * 0.30; // 0.60
+    const config = makeConfig({
+      exit: { strategy: 'takeProfit', trailingStopEnabled: false, trailingStopPercent: 20, timeBasedExitEnabled: false, timeBasedExitMinutes: 5, reversalSizeMultiplier: 1 },
+      position: { stopLossPercent: 70, takeProfitMultiplier: 1.4, maxPositionsOpen: 1, defaultQuantity: 1, positionSizeMultiplier: 1 },
+    });
+    // No exitPricing set — defaults to 'close'
+    const state = stateWithPosition(entryPrice, sl, tp);
+
+    // Bar high breaches TP, but close doesn't
+    // With 'close' pricing, NO exit should happen (close 2.50 < TP 2.80)
+    const bars = [makeBar(BASE_TS - 60, 5810, 5810, 5805), makeBar(BASE_TS, 5815, 5812, 5806)];
+    const result = tick(state, makeInput({
+      ts: BASE_TS,
+      spxDirectionBars: bars,
+      spxExitBars: bars,
+      spxPrice: 5815,
+      positionPrices: new Map([['SPXW260401C05815000', 2.50]]),
+      positionBars: new Map([['SPXW260401C05815000', { high: 3.20, low: 1.90 }]]),
+    }), config);
+
+    expect(result.exits).toHaveLength(0);
+  });
+
+  it('uses close price when positionBars not provided (live agent path)', () => {
+    const entryPrice = 2.00;
+    const tp = entryPrice * 1.4; // 2.80
+    const sl = entryPrice * 0.30; // 0.60
+    const config = makeConfig({
+      exit: { strategy: 'takeProfit', exitPricing: 'intrabar', trailingStopEnabled: false, trailingStopPercent: 20, timeBasedExitEnabled: false, timeBasedExitMinutes: 5, reversalSizeMultiplier: 1 },
+      position: { stopLossPercent: 70, takeProfitMultiplier: 1.4, maxPositionsOpen: 1, defaultQuantity: 1, positionSizeMultiplier: 1 },
+    });
+    const state = stateWithPosition(entryPrice, sl, tp);
+
+    // positionBars not provided — should fall through to close-based exit
+    // close (3.50) > TP (2.80), so should exit at close price
+    const bars = [makeBar(BASE_TS - 60, 5810, 5810, 5805), makeBar(BASE_TS, 5815, 5812, 5806)];
+    const result = tick(state, makeInput({
+      ts: BASE_TS,
+      spxDirectionBars: bars,
+      spxExitBars: bars,
+      spxPrice: 5815,
+      positionPrices: new Map([['SPXW260401C05815000', 3.50]]),
+      // No positionBars — simulates live agent which doesn't have bar OHLC
+    }), config);
+
+    expect(result.exits).toHaveLength(1);
+    expect(result.exits[0].reason).toBe('take_profit');
+    expect(result.exits[0].decisionPrice).toBeCloseTo(3.50, 2); // close price, not TP
+  });
+});

@@ -89,6 +89,9 @@ export interface TickInput {
   closeCutoffTs: number;                   // EOD cutoff in unix seconds
   candidates: StrikeCandidate[];           // contracts with live tick prices
   positionPrices: Map<string, number>;     // live tick price per open position
+  /** Bar high/low for open positions — used for intrabar TP/SL detection in replay.
+   *  Key = position symbol. If absent, intrabar pricing is skipped (close-only). */
+  positionBars?: Map<string, { high: number; low: number }>;
 }
 
 /**
@@ -388,11 +391,16 @@ export function tick(
       ? Math.max(pos.highWaterPrice, currentPrice)
       : pos.highWaterPrice;
 
+    // Get bar high/low for intrabar pricing (if available)
+    const posBar = input.positionBars?.get(pos.symbol);
+
     const exitCtx: ExitContext = {
       ts: input.ts,
       closeCutoffTs: input.closeCutoffTs,
       hmaCrossDirection: exitResult.cross,
       highWaterPrice: highWater,
+      barHigh: posBar?.high,
+      barLow: posBar?.low,
     };
 
     // If no price, only check time-based and signal-reversal exits
@@ -417,13 +425,15 @@ export function tick(
 
     const check = checkExit(corePos, currentPrice, config, exitCtx);
     if (check.shouldExit && check.reason !== null) {
-      const pnl = computeRealisticPnl(pos.entryPrice, currentPrice, pos.qty);
+      // Use intrabar exitPrice when available (exact TP/SL fill), otherwise bar close
+      const fillPrice = check.exitPrice ?? currentPrice;
+      const pnl = computeRealisticPnl(pos.entryPrice, fillPrice, pos.qty);
       const flipTo = getFlipDirection(check.reason, pos.side, config);
       exits.push({
         positionId: posId,
         symbol: pos.symbol,
         reason: check.reason,
-        decisionPrice: currentPrice,
+        decisionPrice: fillPrice,
         pnl: { pnlPct: pnl.pnlPct, 'pnl$': pnl['pnl$'] },
         flipTo,
       });

@@ -31,6 +31,7 @@ interface CliOverrides {
   contractPriceMax?: number;
   maxPositionsOpen?: number;
   exitStrategy?: string;
+  exitPricing?: string;
   label?: string;
 }
 
@@ -66,6 +67,7 @@ export function parseCliFlags(args: string[]): CliOverrides {
       case 'contractPriceMax': flags.contractPriceMax = parseFloat(val); break;
       case 'maxPositionsOpen': flags.maxPositionsOpen = parseInt(val); break;
       case 'exitStrategy': flags.exitStrategy = val; break;
+      case 'exitPricing': flags.exitPricing = val; break;
       case 'label': flags.label = val; break;
     }
   }
@@ -146,8 +148,12 @@ export function buildConfigFromFlags(flags: CliOverrides, base?: Config): Config
   if (flags.maxDailyLoss !== undefined) {
     overrides.risk = { ...config.risk, maxDailyLoss: flags.maxDailyLoss };
   }
-  if (flags.exitStrategy !== undefined) {
-    overrides.exit = { ...config.exit, strategy: flags.exitStrategy as any };
+  if (flags.exitStrategy !== undefined || flags.exitPricing !== undefined) {
+    overrides.exit = {
+      ...config.exit,
+      ...(flags.exitStrategy !== undefined && { strategy: flags.exitStrategy as any }),
+      ...(flags.exitPricing !== undefined && { exitPricing: flags.exitPricing as any }),
+    };
   }
   if (flags.label) {
     overrides.id = flags.label;

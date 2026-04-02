@@ -681,9 +681,14 @@ function runDeterministicReplay(
 
     // Position prices from 1m cache (bar close = "tick price" in replay)
     const positionPrices = new Map<string, number>();
+    // Position bar high/low for intrabar TP/SL detection
+    const positionBars = new Map<string, { high: number; low: number }>();
     for (const [, pos] of state.positions) {
-      const price = getPosPriceAt(cache1m, pos.side, pos.strike, symbolFilter, ts);
-      if (price != null) positionPrices.set(pos.symbol, price);
+      const bar = getPosBarAt(cache1m, pos.side, pos.strike, symbolFilter, ts);
+      if (bar != null) {
+        positionPrices.set(pos.symbol, bar.close);
+        positionBars.set(pos.symbol, { high: bar.high, low: bar.low });
+      }
     }
 
     // Strike candidates from 1m cache (finest price resolution)
@@ -714,6 +719,7 @@ function runDeterministicReplay(
       closeCutoffTs,
       candidates,
       positionPrices,
+      positionBars,
     }, config);
 
     // ── Apply HMA state (always, even if no trades) ──
