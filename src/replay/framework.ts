@@ -26,9 +26,14 @@ function aggregateBars(bars: ReplayBar[], periodMins: number): BarSummary[] {
     const slice = arr.slice(Math.max(0, i), i + periodMins);
     const last = slice[slice.length - 1];
     const ind = parseIndicators(last.indicators);
+    const first = slice[0];
     result.unshift({
       ts: last.ts,
+      open: first.open,
+      high: Math.max(...slice.map(b => b.high)),
+      low: Math.min(...slice.map(b => b.low)),
       close: last.close,
+      volume: slice.reduce((s, b) => s + b.volume, 0),
       rsi14: ind.rsi14 ?? null,
       ema9: ind.ema9 ?? null,
       ema21: ind.ema21 ?? null,

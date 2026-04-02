@@ -50,10 +50,17 @@ function aggregate(bars1m: BarSummary[], periodMins: number): BarSummary[] {
   for (let i = bars1m.length - 1; i >= periodMins - 1; i -= periodMins) {
     const slice = bars1m.slice(i - periodMins + 1, i + 1);
     const last = slice[slice.length - 1];
+    const first = slice[0];
     result.unshift({
       ts: last.ts,
+      open: first.open,
+      high: Math.max(...slice.map(b => b.high)),
+      low: Math.min(...slice.map(b => b.low)),
       close: last.close,
+      volume: slice.reduce((s, b) => s + b.volume, 0),
       // Use the last bar's indicators as the aggregated representation
+      // NOTE: This copies 1m indicator values — NOT correct for trading decisions.
+      // The live agents use tick() which fetches properly aggregated bars from DB.
       rsi14: last.rsi14,
       ema9: last.ema9,
       ema21: last.ema21,
@@ -259,7 +266,12 @@ export async function fetchMarketSnapshot(): Promise<MarketSnapshot> {
   // 3. SPX 1m bars from SPXer — fetch early so we have the price for ATM sorting
   const spxBars1mRaw: any[] = await get<any[]>(`${SPXER_BASE}/spx/bars?tf=1m&n=25`).catch(() => []);
   const spxBars1m: BarSummary[] = spxBars1mRaw.map(b => ({
-    ts: b.ts, close: b.close,
+    ts: b.ts,
+    open: b.open ?? b.close,
+    high: b.high ?? b.close,
+    low: b.low ?? b.close,
+    close: b.close,
+    volume: b.volume ?? 0,
     rsi14: b.indicators?.rsi14 ?? null,
     ema9: b.indicators?.ema9 ?? null,
     ema21: b.indicators?.ema21 ?? null,
@@ -272,7 +284,9 @@ export async function fetchMarketSnapshot(): Promise<MarketSnapshot> {
 
   const contracts: ContractMeta[] = activeRaw
     .filter(c => c.state === 'ACTIVE' || c.state === 'STICKY')
-    // During RTH, show ONLY today's 0DTE contracts — tomorrow's have no gamma and pollute the view
+    // ALWAYS exclude expired contracts (expiry date has passed)
+    .filter(c => c.expiry >= todayET)
+    // During RTH, further narrow to today's 0DTE contracts only
     .filter(c => !isRth || c.expiry === todayET)
     .map(c => ({ symbol: c.symbol, side: c.type, strike: c.strike, expiry: c.expiry }))
     // Sort by distance from ATM so the most relevant contracts are always selected first
