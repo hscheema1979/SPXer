@@ -3,49 +3,47 @@
   "status": "active",
   "pid": 2043478,
   "plan": {
-    "id": "plan-1775173250443",
-    "text": "Replay perf optimization",
+    "id": "plan-1775173619604",
+    "text": "\n# Replay System Performance Optimization\n\n## Problem\nThe replay system has two major bottlenecks:\n1. Contract bar query uses `WHERE symbol LIKE '%260320%'` → forces full index SCAN (1,500ms vs 68ms with indexed lookups = 22x slower)\n2. Indicators stored as JSON TEXT blobs → 5GB of JSON.parse overhead (~140ms/day), 71% larger than needed\n\n## Current Performance (per day, deterministic mode)\n- Contract bar query (LIKE scan): ~1,500ms (69%)\n- JSON.parse (indicators): ~140ms (6%)  \n- DB overhead (open/close/ensureHMA): ~200ms (9%)\n- Tick loop (binary search + logic): ~30ms (1%)\n- TSX startup overhead: ~300ms (14%)\n- TOTAL: ~2,200ms/day → 3-day backtest = 6.5s, 22-day = ~48s\n\n## What's Already Done\n- Phase 1 (Schema Migration) is COMPLETE: 21 REAL indicator columns added to replay_bars, 9.2M rows populated from JSON, replay_contracts index table created\n\n## Remaining Work\n\n### Phase 1: Extract bar-cache.ts module\nExtract loadBarCache() and all cache helpers from machine.ts into a dedicated src/replay/bar-cache.ts module. This is the foundation all other optimizations build on. Keeps machine.ts focused on replay logic.\n\nFiles: NEW src/replay/bar-cache.ts, EDIT src/replay/machine.ts\n\n### Phase 2: Fix LIKE Query — Indexed Symbol Lookups  \nReplace LIKE '%260320%' with two-step approach in bar-cache.ts:\n1. Discover symbols from replay_contracts table (instant)\n2. Load bars per-symbol with prepared statement (symbol = ?, 68ms vs 1,500ms)\n\nAlso fix same pattern in framework.ts and replay-routes.ts.\n\nFiles: src/replay/bar-cache.ts, src/replay/framework.ts, src/server/replay-routes.ts\n\n### Phase 3: Read Indicator Columns Instead of JSON\nUpdate bar loading to SELECT the 21 indicator REAL columns directly instead of the indicators TEXT blob. Build the indicators Record from columns, no JSON.parse needed. Update ensureHmaPeriods() and ensureKcFields() to write individual columns instead of full JSON blob. Update replay-routes.ts bars endpoint.\n\nFiles: src/replay/bar-cache.ts, src/replay/machine.ts, src/replay/framework.ts, src/server/replay-routes.ts\n\n### Phase 4: Skip Contract Indicators in Deterministic Mode\nIn deterministic mode, strategy-engine.ts only reads indicators from SPX bars (for HMA cross). Contract bars only need OHLCV (price data). Add a flag to skip indicator columns when loading contracts, saving both query time and memory.\n\nFiles: src/replay/bar-cache.ts, src/replay/machine.ts\n\n### Phase 5: In-Process Parallel Batch via worker_threads\nCreate a worker_threads entry point. Update cmdBacktest() in cli.ts to run days in parallel using a worker pool (concurrency = min(dates, cpus-1)). Each worker gets its own read-only DB connection. Avoids per-process TSX startup overhead (300ms × N days).\n\nFiles: NEW src/replay/replay-worker.ts, src/replay/cli.ts\n\n### Phase 6: Day-Level Binary Cache Files\nAfter loading from SQLite, serialize BarCache to a binary file. On next run, deserialize directly (~50ms vs ~200ms from SQLite). Cache key: {date}-{tf}-v2.cache. Auto-invalidate when schema changes.\n\nFiles: src/replay/bar-cache.ts\n\n### Phase 7: Test & Benchmark Verification\nRun the 3-day backtest benchmark before/after. Verify all existing tests pass. Run a single-day replay and confirm identical trade results.\n\n## Target Performance\n- Per-day: 2,200ms → ~200ms (11x faster)\n- 3-day backtest: 6.5s → ~1s  \n- 22-day backtest: ~48s → ~3-4s (with parallelism)\n\n## Files Modified (total)\n- NEW: src/replay/bar-cache.ts (extracted cache logic)\n- NEW: src/replay/replay-worker.ts (worker_threads entry)\n- EDIT: src/replay/machine.ts (use bar-cache, skip indicators)\n- EDIT: src/replay/cli.ts (parallel batch)\n- EDIT: src/replay/framework.ts (indexed queries, column reads)\n- EDIT: src/server/replay-routes.ts (indexed queries, column reads)\n- DONE: scripts/migrations/001-indicator-columns.ts (already executed)\n",
     "phases": [
       {
-        "name": "Schema Migration",
-        "status": "completed",
-        "completedAt": "2026-04-02T23:46:24.533Z",
-        "notes": "Schema migration already complete. replay_bars table has 21 denormalized indicator columns (hma3, hma5, hma15, hma17, hma19, hma25, ema9, ema21, rsi14, bbUpper, bbMiddle, bbLower, bbWidth, atr14, atrPct, vwap, kcUpper, kcMiddle, kcLower, kcWidth, kcSlope). All populated where data exists. Tier 2 indicators (ema50, ema200, macd, stochK, etc.) remain in JSON only but are NOT used by replay/trading core."
-      },
-      {
-        "name": "Fix LIKE Query",
+        "name": "Extract bar-cache.ts module",
         "status": "in_progress"
       },
       {
-        "name": "Read Columns Instead of JSON",
+        "name": "Fix LIKE Query with Indexed Lookups",
         "status": "pending"
       },
       {
-        "name": "Skip Contract Indicators",
+        "name": "Read Indicator Columns Instead of JSON",
         "status": "pending"
       },
       {
-        "name": "Parallel Batch",
+        "name": "Skip Contract Indicators in Deterministic Mode",
         "status": "pending"
       },
       {
-        "name": "Binary Cache Files",
+        "name": "Parallel Batch via worker_threads",
         "status": "pending"
       },
       {
-        "name": "Test and Benchmark",
+        "name": "Day-Level Binary Cache Files",
+        "status": "pending"
+      },
+      {
+        "name": "Test and Benchmark Verification",
         "status": "pending"
       }
     ],
-    "currentPhase": 2
+    "currentPhase": 1
   },
   "safetyCounters": {
     "continuations": 0,
     "maxContinuations": 10,
     "lastResponseTokens": 0
   },
-  "lastCheckpoint": "d6a3ec446f2196e25a5db329b338f89c2f890a30",
-  "startedAt": "2026-04-02T23:40:50.443Z",
-  "updatedAt": "2026-04-02T23:46:24.566Z",
+  "lastCheckpoint": null,
+  "startedAt": "2026-04-02T23:46:59.604Z",
+  "updatedAt": "2026-04-02T23:46:59.604Z",
   "interruptedAt": "2026-04-02T22:48:31.512Z"
 }
