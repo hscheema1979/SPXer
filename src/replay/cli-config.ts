@@ -24,6 +24,13 @@ interface CliOverrides {
   maxDailyLoss?: number;
   enableHmaCrosses?: boolean;
   enableEmaCrosses?: boolean;
+  hmaCrossFast?: number;
+  hmaCrossSlow?: number;
+  requireUnderlyingHmaCross?: boolean;
+  targetOtmDistance?: number;
+  contractPriceMax?: number;
+  maxPositionsOpen?: number;
+  exitStrategy?: string;
   label?: string;
 }
 
@@ -52,6 +59,13 @@ export function parseCliFlags(args: string[]): CliOverrides {
       case 'maxDailyLoss': flags.maxDailyLoss = parseInt(val); break;
       case 'enableHmaCrosses': flags.enableHmaCrosses = val === 'true'; break;
       case 'enableEmaCrosses': flags.enableEmaCrosses = val === 'true'; break;
+      case 'hmaCrossFast': flags.hmaCrossFast = parseInt(val); break;
+      case 'hmaCrossSlow': flags.hmaCrossSlow = parseInt(val); break;
+      case 'requireUnderlyingHmaCross': flags.requireUnderlyingHmaCross = val === 'true'; break;
+      case 'targetOtmDistance': flags.targetOtmDistance = parseInt(val); break;
+      case 'contractPriceMax': flags.contractPriceMax = parseFloat(val); break;
+      case 'maxPositionsOpen': flags.maxPositionsOpen = parseInt(val); break;
+      case 'exitStrategy': flags.exitStrategy = val; break;
       case 'label': flags.label = val; break;
     }
   }
@@ -85,11 +99,31 @@ export function buildConfigFromFlags(flags: CliOverrides, base?: Config): Config
       ...(flags.optionRsiOverbought !== undefined && { optionRsiOverbought: flags.optionRsiOverbought }),
     };
   }
-  if (flags.enableHmaCrosses !== undefined || flags.enableEmaCrosses !== undefined) {
+  if (
+    flags.enableHmaCrosses !== undefined || flags.enableEmaCrosses !== undefined ||
+    flags.hmaCrossFast !== undefined || flags.hmaCrossSlow !== undefined ||
+    flags.requireUnderlyingHmaCross !== undefined || flags.targetOtmDistance !== undefined
+  ) {
     overrides.signals = {
       ...(overrides.signals || config.signals),
       ...(flags.enableHmaCrosses !== undefined && { enableHmaCrosses: flags.enableHmaCrosses }),
       ...(flags.enableEmaCrosses !== undefined && { enableEmaCrosses: flags.enableEmaCrosses }),
+      ...(flags.hmaCrossFast !== undefined && { hmaCrossFast: flags.hmaCrossFast }),
+      ...(flags.hmaCrossSlow !== undefined && { hmaCrossSlow: flags.hmaCrossSlow }),
+      ...(flags.requireUnderlyingHmaCross !== undefined && { requireUnderlyingHmaCross: flags.requireUnderlyingHmaCross }),
+      ...(flags.targetOtmDistance !== undefined && { targetOtmDistance: flags.targetOtmDistance }),
+    };
+  }
+  if (flags.contractPriceMax !== undefined) {
+    overrides.strikeSelector = {
+      ...(overrides.strikeSelector || config.strikeSelector),
+      contractPriceMax: flags.contractPriceMax,
+    };
+  }
+  if (flags.maxPositionsOpen !== undefined) {
+    overrides.position = {
+      ...(overrides.position || config.position),
+      maxPositionsOpen: flags.maxPositionsOpen,
     };
   }
   if (flags.stopLossPercent !== undefined || flags.takeProfitMultiplier !== undefined) {
@@ -111,6 +145,9 @@ export function buildConfigFromFlags(flags: CliOverrides, base?: Config): Config
   }
   if (flags.maxDailyLoss !== undefined) {
     overrides.risk = { ...config.risk, maxDailyLoss: flags.maxDailyLoss };
+  }
+  if (flags.exitStrategy !== undefined) {
+    overrides.exit = { ...config.exit, strategy: flags.exitStrategy as any };
   }
   if (flags.label) {
     overrides.id = flags.label;
