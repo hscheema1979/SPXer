@@ -19,7 +19,7 @@ dotenv.config();
 import Database = require('better-sqlite3');
 import * as path from 'path';
 
-const DB_PATH = path.resolve(__dirname, 'data/spxer.db');
+const DB_PATH = path.resolve(__dirname, '../../data/spxer.db');
 const POLYGON_KEY = process.env.POLYGON_API_KEY;
 const POLYGON_BASE = 'https://api.polygon.io';
 

@@ -9,6 +9,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import http from 'http';
 import { randomUUID } from 'crypto';
+import { spawn } from 'child_process';
 import { runReplay } from '../replay/machine';
 import { DEFAULT_CONFIG, mergeConfig } from '../config/defaults';
 import type { Config } from '../config/types';
@@ -16,21 +17,44 @@ import type { Config } from '../config/types';
 const REPLAY_DATA_SOURCE = process.env.REPLAY_DATA_SOURCE || 'replay_bars';
 const DB_PATH = path.resolve(process.cwd(), process.env.DB_PATH || 'data/spxer.db');
 
-// ── Background job store (in-memory, survives page navigation) ─────────────
-interface ReplayJob {
-  id: string;
-  configId: string;
-  configName: string;
-  dates: string[];
-  status: 'running' | 'completed' | 'failed';
-  progress: { completed: number; total: number; currentDate: string };
-  results: { date: string; trades: number; wins: number; totalPnl: number }[];
-  error?: string;
-  startedAt: number;
-  completedAt?: number;
-}
+// ── Job tracking in SQLite (survives process restarts) ─────────────────────
 const MAX_CONCURRENT_JOBS = 3;
-const jobs = new Map<string, ReplayJob>();
+
+function ensureJobsTable(db: Database.Database) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS replay_jobs (
+      id TEXT PRIMARY KEY,
+      configId TEXT NOT NULL,
+      configName TEXT NOT NULL,
+      dates_json TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      completed INTEGER NOT NULL DEFAULT 0,
+      total INTEGER NOT NULL,
+      currentDate TEXT,
+      results_json TEXT DEFAULT '[]',
+      error TEXT,
+      pid INTEGER,
+      startedAt INTEGER NOT NULL,
+      completedAt INTEGER
+    )
+  `);
+}
+
+/** Mark any jobs whose worker process has died as failed */
+function reapDeadJobs(db: Database.Database) {
+  const running = db.prepare("SELECT id, pid FROM replay_jobs WHERE status = 'running'").all() as { id: string; pid: number }[];
+  for (const job of running) {
+    if (!job.pid) continue;
+    try {
+      // Signal 0 checks if process exists without killing it
+      process.kill(job.pid, 0);
+    } catch {
+      // Process is dead — mark job as failed
+      db.prepare("UPDATE replay_jobs SET status = 'failed', error = 'Worker process died (PID ' || pid || ')', completedAt = ? WHERE id = ?")
+        .run(Date.now(), job.id);
+    }
+  }
+}
 
 function getDb(): Database.Database {
   return new Database(DB_PATH, { readonly: true });
@@ -313,6 +337,8 @@ export function createReplayRoutes(): Router {
   });
 
   // ── POST /replay/api/run-batch — background multi-day replay ─────────────
+  // Spawns a detached child process so replays survive viewer restarts.
+  // Job state is persisted in SQLite (replay_jobs table).
   router.post('/api/run-batch', (req, res) => {
     const { dates, config, configId, configName } = req.body as {
       dates?: string[];
@@ -325,30 +351,30 @@ export function createReplayRoutes(): Router {
       return res.status(400).json({ error: 'dates[] required' });
     }
 
-    // Enforce max concurrent jobs
-    const runningJobs = Array.from(jobs.values()).filter(j => j.status === 'running');
-    if (runningJobs.length >= MAX_CONCURRENT_JOBS) {
-      return res.status(429).json({
-        error: `Max ${MAX_CONCURRENT_JOBS} concurrent jobs. ${runningJobs.length} running.`,
-        runningJobs: runningJobs.map(j => ({ id: j.id, configName: j.configName, progress: j.progress })),
-      });
-    }
-
+    const db = getWriteDb();
     try {
+      ensureJobsTable(db);
+      reapDeadJobs(db);
+
+      // Enforce max concurrent jobs
+      const runningJobs = db.prepare("SELECT id, configName, completed, total, currentDate FROM replay_jobs WHERE status = 'running'")
+        .all() as { id: string; configName: string; completed: number; total: number; currentDate: string }[];
+      if (runningJobs.length >= MAX_CONCURRENT_JOBS) {
+        return res.status(429).json({
+          error: `Max ${MAX_CONCURRENT_JOBS} concurrent jobs. ${runningJobs.length} running.`,
+          runningJobs: runningJobs.map(j => ({ id: j.id, configName: j.configName, progress: { completed: j.completed, total: j.total, currentDate: j.currentDate } })),
+        });
+      }
+
       // Build the full config (same logic as /api/run)
       let fullConfig: Config;
       if (config) {
         fullConfig = mergeConfig(DEFAULT_CONFIG, config as Partial<Config>);
       } else if (configId) {
-        const db = getDb();
-        try {
-          const row = db.prepare('SELECT config_json FROM replay_configs WHERE id = ?')
-            .get(configId) as { config_json: string } | undefined;
-          if (!row) return res.status(404).json({ error: `Config '${configId}' not found` });
-          fullConfig = JSON.parse(row.config_json) as Config;
-        } finally {
-          db.close();
-        }
+        const row = db.prepare('SELECT config_json FROM replay_configs WHERE id = ?')
+          .get(configId) as { config_json: string } | undefined;
+        if (!row) return res.status(404).json({ error: `Config '${configId}' not found` });
+        fullConfig = JSON.parse(row.config_json) as Config;
       } else {
         fullConfig = { ...DEFAULT_CONFIG };
       }
@@ -358,88 +384,108 @@ export function createReplayRoutes(): Router {
       fullConfig.id = id;
       fullConfig.name = name;
 
-      // Save config to DB before returning
-      const wdb = getWriteDb();
-      try {
-        wdb.prepare(`
-          INSERT INTO replay_configs (id, name, description, config_json, createdAt, updatedAt)
-          VALUES (?, ?, ?, ?, ?, ?)
-          ON CONFLICT(id) DO UPDATE SET
-            name=excluded.name, config_json=excluded.config_json, updatedAt=excluded.updatedAt
-        `).run(id, name, fullConfig.description || '', JSON.stringify(fullConfig), Date.now(), Date.now());
-      } finally {
-        wdb.close();
-      }
+      // Save config to DB
+      db.prepare(`
+        INSERT INTO replay_configs (id, name, description, config_json, createdAt, updatedAt)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          name=excluded.name, config_json=excluded.config_json, updatedAt=excluded.updatedAt
+      `).run(id, name, fullConfig.description || '', JSON.stringify(fullConfig), Date.now(), Date.now());
 
-      // Create the job
+      // Create the job record in SQLite
       const jobId = randomUUID();
-      const job: ReplayJob = {
-        id: jobId,
-        configId: id,
-        configName: name,
-        dates,
-        status: 'running',
-        progress: { completed: 0, total: dates.length, currentDate: dates[0] },
-        results: [],
-        startedAt: Date.now(),
-      };
-      jobs.set(jobId, job);
+      db.prepare(`
+        INSERT INTO replay_jobs (id, configId, configName, dates_json, status, total, currentDate, startedAt)
+        VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)
+      `).run(jobId, id, name, JSON.stringify(dates), dates.length, dates[0], Date.now());
 
-      // Run in background (NOT awaited)
-      (async () => {
-        for (let i = 0; i < dates.length; i++) {
-          job.progress.currentDate = dates[i];
-          try {
-            const result = await runReplay(fullConfig, dates[i], {
-              dataDbPath: DB_PATH,
-              storeDbPath: DB_PATH,
-              verbose: false,
-              noJudge: true,
-            });
-            job.results.push({
-              date: dates[i],
-              trades: result.trades,
-              wins: result.wins,
-              totalPnl: result.totalPnl,
-            });
-          } catch (err: any) {
-            // Log but continue — don't fail the whole batch for one bad day
-            console.error(`[replay-batch] ${dates[i]} error: ${err.message}`);
-            job.results.push({ date: dates[i], trades: 0, wins: 0, totalPnl: 0 });
-          }
-          job.progress.completed = i + 1;
-        }
-        job.status = 'completed';
-        job.completedAt = Date.now();
-        console.log(`[replay-batch] Job ${jobId} completed: ${dates.length} days, ${job.results.reduce((s, r) => s + r.trades, 0)} trades, $${job.results.reduce((s, r) => s + r.totalPnl, 0).toFixed(0)} P&L`);
-      })().catch(err => {
-        job.status = 'failed';
-        job.error = err.message;
-        job.completedAt = Date.now();
-        console.error(`[replay-batch] Job ${jobId} failed: ${err.message}`);
+      // Write job spec to temp file for the worker
+      const jobDir = path.resolve(process.cwd(), 'data', 'jobs');
+      if (!fs.existsSync(jobDir)) fs.mkdirSync(jobDir, { recursive: true });
+      const jobFile = path.join(jobDir, `${jobId}.json`);
+      fs.writeFileSync(jobFile, JSON.stringify({
+        jobId, configId: id, configName: name, dates, config: fullConfig,
+        dbPath: DB_PATH, noJudge: true,
+      }));
+
+      // Spawn detached worker process
+      const workerScript = path.resolve(__dirname, '..', 'replay', 'batch-worker.ts');
+      const logFile = fs.openSync(path.join(jobDir, `${jobId}.log`), 'a');
+
+      const child = spawn('npx', ['tsx', workerScript, jobFile], {
+        cwd: process.cwd(),
+        detached: true,
+        stdio: ['ignore', logFile, logFile],
+        env: { ...process.env },
       });
 
-      // Return immediately with jobId
+      // Record PID and let the child run independently
+      child.unref();
+      db.prepare("UPDATE replay_jobs SET pid = ? WHERE id = ?").run(child.pid, jobId);
+
+      console.log(`[replay-batch] Spawned worker PID ${child.pid} for job ${jobId}: ${dates.length} dates, config ${name}`);
+
       res.json({ jobId, configId: id, configName: name, totalDates: dates.length });
     } catch (err: any) {
       console.error('[replay-batch] Setup error:', err.message);
       res.status(500).json({ error: err.message });
+    } finally {
+      db.close();
     }
   });
 
   // ── GET /replay/api/job/:jobId — poll job status ─────────────────────────
   router.get('/api/job/:jobId', (req, res) => {
-    const job = jobs.get(req.params.jobId);
-    if (!job) return res.status(404).json({ error: 'Job not found' });
-    res.json(job);
+    const db = getDb();
+    try {
+      ensureJobsTable(db);
+      reapDeadJobs(db);
+      const row = db.prepare('SELECT * FROM replay_jobs WHERE id = ?').get(req.params.jobId) as any;
+      if (!row) return res.status(404).json({ error: 'Job not found' });
+
+      // Return in the same shape the frontend expects
+      res.json({
+        id: row.id,
+        configId: row.configId,
+        configName: row.configName,
+        dates: JSON.parse(row.dates_json || '[]'),
+        status: row.status,
+        progress: { completed: row.completed, total: row.total, currentDate: row.currentDate },
+        results: JSON.parse(row.results_json || '[]'),
+        error: row.error,
+        startedAt: row.startedAt,
+        completedAt: row.completedAt,
+        pid: row.pid,
+      });
+    } finally {
+      db.close();
+    }
   });
 
   // ── GET /replay/api/jobs — list recent jobs ──────────────────────────────
   router.get('/api/jobs', (_req, res) => {
-    const all = Array.from(jobs.values())
-      .sort((a, b) => b.startedAt - a.startedAt)
-      .slice(0, 50);
-    res.json(all);
+    const db = getDb();
+    try {
+      ensureJobsTable(db);
+      reapDeadJobs(db);
+      const rows = db.prepare('SELECT * FROM replay_jobs ORDER BY startedAt DESC LIMIT 50').all() as any[];
+      const all = rows.map(row => ({
+        id: row.id,
+        configId: row.configId,
+        configName: row.configName,
+        dates: JSON.parse(row.dates_json || '[]'),
+        status: row.status,
+        progress: { completed: row.completed, total: row.total, currentDate: row.currentDate },
+        results: JSON.parse(row.results_json || '[]'),
+        error: row.error,
+        startedAt: row.startedAt,
+        completedAt: row.completedAt,
+        pid: row.pid,
+      }));
+      res.json(all);
+    } finally {
+      db.close();
+    }
   });
 
   // ── GET /replay/api/sweep — leaderboard aggregated from replay_results ───

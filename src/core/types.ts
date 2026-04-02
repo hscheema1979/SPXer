@@ -36,6 +36,8 @@ export interface Position {
 export interface ExitCheck {
   shouldExit: boolean;
   reason: ExitReason | null;
+  /** When intrabar pricing is active, this is the exact TP/SL price (not bar close). */
+  exitPrice?: number;
 }
 
 /** Result of a completed trade */

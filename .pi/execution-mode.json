@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "status": "active",
+  "pid": 2040620,
+  "plan": {
+    "id": "plan-1775169730130",
+    "text": "Wire intrabar exit pricing through the full stack so replay uses bar high/low to detect TP/SL breaches within candles, exiting at the exact limit price instead of bar close.\n\n**Context**: `checkExit()` already supports intrabar logic (barHigh/barLow in ExitContext → returns exitPrice). `getPosBarAt()` exists in replay machine to get full OHLC. But `tick()` in strategy-engine.ts doesn't pass barHigh/barLow and doesn't use the returned exitPrice.\n\n**Phase 1 — TickInput + tick() plumbing**:\n- Add `positionBars: Map<string, {high: number, low: number}>` to TickInput\n- In tick(), pass barHigh/barLow from positionBars into ExitContext\n- Use check.exitPrice (when present) as decisionPrice and for P&L calculation\n\n**Phase 2 — Replay machine integration**:\n- In replay machine's tick loop, build positionBars map using getPosBarAt()\n- Pass positionBars into TickInput alongside positionPrices\n- Add exitPricing: 'intrabar' to default config for replay\n\n**Phase 3 — Tests**:\n- Add intrabar exit pricing tests to strategy-engine.test.ts\n- Test: TP breached intrabar → exits at TP price, not close\n- Test: SL breached intrabar → exits at SL price, not close\n- Test: Both breached → SL wins (conservative)\n- Test: Neither breached → falls through to close-based logic\n- Run full test suite to ensure no regressions\n\n**Phase 4 — Validation replay**:\n- Run April 2 replay with exitPricing: 'intrabar' and compare against the previous 'close' results\n- Verify the CALL 6535 trade now exits at TP price (~$28.84) instead of +90% ($39.36)\n",
+    "phases": [
+      {
+        "name": "TickInput + tick() plumbing in strategy-engine.ts",
+        "status": "in_progress"
+      },
+      {
+        "name": "Replay machine integration",
+        "status": "pending"
+      },
+      {
+        "name": "Tests for intrabar exit pricing",
+        "status": "pending"
+      },
+      {
+        "name": "Validation replay on April 2 data",
+        "status": "pending"
+      }
+    ],
+    "currentPhase": 1
+  },
+  "safetyCounters": {
+    "continuations": 0,
+    "maxContinuations": 10,
+    "lastResponseTokens": 0
+  },
+  "lastCheckpoint": null,
+  "startedAt": "2026-04-02T22:42:10.130Z",
+  "updatedAt": "2026-04-02T22:42:10.130Z"
+}

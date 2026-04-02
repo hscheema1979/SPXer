@@ -20,7 +20,9 @@
     "replay": "tsx src/replay/cli.ts run",
     "replay:22day": "bash scripts/backtest/run-22day-replay-parallel.sh",
     "backtest": "tsx src/replay/cli.ts backtest --no-scanners --no-judge",
-    "viewer": "tsx src/server/replay-server.ts"
+    "viewer": "tsx src/server/replay-server.ts",
+    "schwaber": "AGENT_PAPER=true tsx schwaber.ts",
+    "schwaber:live": "AGENT_PAPER=false tsx schwaber.ts"
   },
   "keywords": [],
   "author": "",

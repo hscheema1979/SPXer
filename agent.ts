@@ -50,10 +50,20 @@ import {
 
 // ── Load Config from DB ─────────────────────────────────────────────────────
 
-const CONFIG_ID = process.env.AGENT_CONFIG_ID || 'hma3x17-scannerReverse-live';
+const CONFIG_ID = process.env.AGENT_CONFIG_ID || 'hma3x15-undhma-itm5-tp14x-sl70-10k';
 const _store = createStore();
 const config: Config = _store.getConfig(CONFIG_ID) ?? DEFAULT_CONFIG;
 _store.close();
+
+// Execution target is a property of the AGENT, not the config.
+// The config defines trading strategy (signals, exits, risk). The agent defines where orders go.
+const EXECUTION: Config['execution'] = {
+  symbol: 'SPX',
+  optionPrefix: 'SPXW',
+  strikeDivisor: 1,
+  strikeInterval: 5,
+  accountId: process.env.TRADIER_ACCOUNT_ID || '6YA51425',
+};
 
 console.log(`[agent] Loaded config: ${config.id} — "${config.name}"`);
 
@@ -193,7 +203,7 @@ priceStream.onPrice((symbol, last, bid, ask) => {
 // ── Broker Reconciliation ───────────────────────────────────────────────────
 
 async function reconcileBrokerPositions(): Promise<void> {
-  const accountId = config.execution?.accountId || process.env.TRADIER_ACCOUNT_ID || '';
+  const accountId = EXECUTION.accountId!;
   const hdrs = {
     Authorization: `Bearer ${appConfig.tradierToken}`,
     Accept: 'application/json',
@@ -214,7 +224,7 @@ async function reconcileBrokerPositions(): Promise<void> {
       if (!agentSymbols.has(bp.symbol)) {
         console.log(`[agent] ⚠️ ORPHAN at broker: ${bp.symbol} x${bp.quantity} — closing immediately`);
         try {
-          const rootSymbol = config.execution?.symbol || 'SPX';
+          const rootSymbol = EXECUTION.symbol;
           const body = new URLSearchParams({
             class: 'option',
             symbol: rootSymbol,
@@ -382,7 +392,7 @@ async function executeExit(
   // Cancel bracket legs if present
   if (openPos?.bracketOrderId && !isPaper) {
     try {
-      await cancelOcoLegs(openPos.bracketOrderId, config.execution);
+      await cancelOcoLegs(openPos.bracketOrderId, EXECUTION);
     } catch (e: any) {
       console.warn(`[agent] Failed to cancel bracket: ${e.message}`);
     }
@@ -402,7 +412,7 @@ async function executeExit(
     openedAt: pos.entryTs * 1000,
   };
 
-  const result = await closePosition(dummyPos, reason, decisionPrice, isPaper, config.execution);
+  const result = await closePosition(dummyPos, reason, decisionPrice, isPaper, EXECUTION);
 
   if (result.error) {
     console.error(`[agent] ❌ Exit failed for ${pos.symbol}: ${result.error}`);
@@ -474,7 +484,7 @@ async function executeEntry(
   };
 
   try {
-    const { position, execution } = await openPosition(signal, decision, isPaper, config.execution);
+    const { position, execution } = await openPosition(signal, decision, isPaper, EXECUTION);
     if (!execution.error) {
       positions.add(position);
       guard.recordTrade();
@@ -574,7 +584,7 @@ async function runCycle(): Promise<number> {
       const streamPrice = priceStream.getPrice(pos.symbol);
       const sellPrice = streamPrice?.bid ?? streamPrice?.last ?? pos.entryPrice;
 
-      const result = await closePosition(pos, 'stream_exit', sellPrice, isPaper, config.execution);
+      const result = await closePosition(pos, 'stream_exit', sellPrice, isPaper, EXECUTION);
       const pnl = ((result.fillPrice ?? sellPrice) - pos.entryPrice) * pos.quantity * 100;
       dailyPnl += pnl;
       strategyState.dailyPnl += pnl;
@@ -760,7 +770,7 @@ async function runCycle(): Promise<number> {
 // ── Order Cleanup ────────────────────────────────────────────────────────────
 
 async function cancelAllOpenOrders(): Promise<number> {
-  const accountId = config.execution?.accountId || process.env.TRADIER_ACCOUNT_ID || '';
+  const accountId = EXECUTION.accountId!;
   const hdrs = {
     Authorization: `Bearer ${appConfig.tradierToken}`,
     Accept: 'application/json',
@@ -836,7 +846,7 @@ function dailyReview(): void {
 
   const review = [
     `\n${'═'.repeat(70)}`,
-    `  DAILY REVIEW — ${date} — SPX Agent (${config.execution?.accountId ?? 'default'})`,
+    `  DAILY REVIEW — ${date} — SPX Agent (${EXECUTION.accountId!})`,
     `${'═'.repeat(70)}`,
     ``,
     `  Config:     ${config.id}`,
@@ -941,7 +951,7 @@ async function main(): Promise<void> {
       if (config.sizing.riskPercentOfAccount) {
         const tradeSize = await computeTradeSize(
           config.sizing.riskPercentOfAccount,
-          config.execution?.accountId,
+          EXECUTION.accountId,
         );
         config.sizing.baseDollarsPerTrade = tradeSize;
         console.log(`[agent] Daily sizing: $${tradeSize} per trade (${config.sizing.riskPercentOfAccount}% of account)`);
@@ -949,7 +959,7 @@ async function main(): Promise<void> {
     }
 
     // Reconcile broker positions every start/resume
-    const reconciled = await positions.reconcileFromBroker(config.execution);
+    const reconciled = await positions.reconcileFromBroker(EXECUTION);
     if (reconciled > 0) {
       console.log(`[agent] Reconciled ${reconciled} position(s) from broker`);
       const symbols = positions.getAll().map(p => p.symbol);

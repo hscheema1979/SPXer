@@ -1788,3 +1788,125 @@ Expected divergences (not bugs):
 14. Fix divergences
 15. Go live with 1 contract
 16. Scale up
+
+---
+
+## Addendum: Execution Routing Separation (2026-04-02)
+
+### Problem
+
+The original plan said "config loaded from DB by ID" and "agent-config.ts is deleted." Both were implemented. But the plan left `Config.execution` (symbol, accountId, optionPrefix, strikeDivisor, strikeInterval) as part of the Config stored in the DB. This created a downstream problem:
+
+Every time a new config was validated in replay and selected for live deployment, it required **cloning into "live variant" configs** — one per agent:
+
+```
+hma3x15-undhma-itm5-tp1375x-sl50-3m           ← replay config (no execution)
+hma3x15-itm5-tp1375x-sl50-3m-spx-live         ← clone + SPX execution section
+hma3x15-itm5-tp1375x-sl50-3m-xsp-live         ← clone + XSP execution section
+```
+
+This violates the core principle: **test in replay → deploy to live with confidence.** The cloning step is manual, error-prone, and creates config sprawl. Worse, it reintroduces the exact problem the parity plan was supposed to eliminate — config divergence between replay and live. If someone updates the base config and forgets to update the clones, the agents silently run stale parameters.
+
+### Root Cause
+
+`Config.execution` conflates two fundamentally different concerns:
+
+1. **Trading strategy** — What signals to trade, how to size, when to exit, what strikes to target. This is what replay tests and what the Config should contain.
+
+2. **Order routing** — Where to send orders: which Tradier account, which product symbol, which option prefix, what strike math to use. This is an identity property of the agent, not a parameter of the strategy.
+
+The original plan focused on making tick() the shared decision function and loading configs from the DB. It succeeded at both. But it didn't question whether `Config.execution` belonged on the Config in the first place.
+
+### The Fix
+
+Execution routing is now hardcoded per agent. The Config defines the strategy. The agent defines where orders go.
+
+**SPX Agent (`agent.ts`):**
+```typescript
+const CONFIG_ID = process.env.AGENT_CONFIG_ID || 'hma3x15-undhma-itm5-tp1375x-sl50-3m';
+const config: Config = store.getConfig(CONFIG_ID) ?? DEFAULT_CONFIG;
+
+// Execution target is a property of the AGENT, not the config.
+const EXECUTION: Config['execution'] = {
+  symbol: 'SPX',
+  optionPrefix: 'SPXW',
+  strikeDivisor: 1,
+  strikeInterval: 5,
+  accountId: process.env.TRADIER_ACCOUNT_ID || '6YA51425',
+};
+```
+
+**XSP Agent (`agent-xsp.ts`):**
+```typescript
+const CONFIG_ID = process.env.AGENT_CONFIG_ID || 'hma3x15-undhma-itm5-tp1375x-sl50-3m';
+const config: Config = store.getConfig(CONFIG_ID) ?? DEFAULT_CONFIG;
+
+// Execution target is a property of the AGENT, not the config.
+const EXEC: NonNullable<Config['execution']> = {
+  symbol: 'XSP',
+  optionPrefix: 'XSP',
+  strikeDivisor: 10,
+  strikeInterval: 1,
+  accountId: process.env.XSP_ACCOUNT_ID || '6YA58635',
+};
+```
+
+**Both agents load the same config ID.** The config contains the trading strategy (HMA periods, SL/TP, exit strategy, timeframes, risk limits). The agent adds its own routing. No clones, no variants, no translation step.
+
+**Deployment workflow (before):**
+```
+1. Test config in replay
+2. Clone config with -spx-live suffix, add SPX execution section
+3. Clone config with -xsp-live suffix, add XSP execution section
+4. Update ecosystem.config.js to point at the -spx-live and -xsp-live IDs
+5. Restart agents
+```
+
+**Deployment workflow (after):**
+```
+1. Test config in replay
+2. Update AGENT_CONFIG_ID (in ecosystem.config.js or env)
+3. Restart agents
+```
+
+### What Moved Where
+
+| Field | Before (on Config) | After | Rationale |
+|-------|-------------------|-------|-----------|
+| `execution.symbol` | Config | Agent constant | SPX agent always trades SPX. XSP agent always trades XSP. Doesn't change with strategy. |
+| `execution.optionPrefix` | Config | Agent constant | Derived from symbol — SPXW for SPX, XSP for XSP. |
+| `execution.strikeDivisor` | Config | Agent constant | Product math — SPX=1, XSP=10. Inherent to the product, not the strategy. |
+| `execution.strikeInterval` | Config | Agent constant | Product math — SPX=$5, XSP=$1. Inherent to the product. |
+| `execution.accountId` | Config | Agent constant / env var | Which brokerage account. Agent identity, not strategy. |
+| `execution.use1dte` | Config | Removed | Not currently used. If re-enabled, would be an agent-level choice (XSP-specific). |
+| `execution.halfSpread` | Config (unused) | Stays on Config | Friction model parameter — affects P&L in both replay and live. Strategy parameter. |
+| `execution.disableBracketOrders` | Config | Stays on Config | Execution behavior that could be tested in replay (paper mode simulation). |
+| `exit.strategy` | Config | Config (unchanged) | Core strategy behavior — scannerReverse vs takeProfit. tick() uses this. |
+| `position.stopLossPercent` | Config | Config (unchanged) | Core strategy behavior — tick() computes SL from this. |
+| `position.takeProfitMultiplier` | Config | Config (unchanged) | Core strategy behavior — tick() computes TP from this. |
+
+### Config.execution Type — Retained but Optional
+
+The `execution` section remains on the `Config` type as `execution?: { ... }`. It is:
+- **Ignored by replay** — replay doesn't place orders
+- **Ignored by tick()** — tick() makes decisions, doesn't route orders
+- **Ignored by the live agents** — agents use their own hardcoded constants
+- **Retained for backward compatibility** — existing configs in the DB may have it; doesn't break anything
+
+Future cleanup: `execution` could be removed from the `Config` type entirely and the agent constants could use a standalone `ExecutionTarget` interface. This is a low-priority refactor since the current approach works and the type is already optional.
+
+### Files Changed
+
+| File | Change |
+|------|--------|
+| `agent.ts` | CONFIG_ID points at base config. EXECUTION constant defined. All `config.execution` references replaced with `EXECUTION`. |
+| `agent-xsp.ts` | CONFIG_ID points at base config. EXEC constant defined (was `CFG.execution!`). `use1dte` removed. |
+| `ecosystem.config.js` | AGENT_CONFIG_ID env var updated to base config ID (same for both agents). |
+| `CLAUDE.md` | Design decisions updated to document execution-routing-is-agent-owned principle. |
+
+### Invariants
+
+1. **One config, two agents.** Both agents load the same config by ID. Different execution targets are agent-level constants.
+2. **No "live variant" configs.** The `-spx-live` / `-xsp-live` config pattern is deprecated. Existing clones in the DB are harmless but should not be created for new configs.
+3. **Config changes are tested in replay first.** The agent loads whatever CONFIG_ID points at. Replay validated the strategy; the agent executes it.
+4. **tick() never sees execution routing.** It takes strategy parameters from Config and market data from TickInput. It returns decisions. The agent translates decisions into broker orders using its own routing.

@@ -1,0 +1,4 @@
+[dotenv@17.3.1] injecting env (0) from .env -- tip: ⚙️  write to custom object with { processEnv: myObject }
+[dotenv@17.3.1] injecting env (0) from .env -- tip: ⚙️  write to custom object with { processEnv: myObject }
+[batch-worker] Starting job 77a7a223-5b4e-442b-89f7-f5780538e7d5: 7 dates for config HMA3x15 | ITM5 | TP1.4x | SL70%
+[batch-worker] Job 77a7a223-5b4e-442b-89f7-f5780538e7d5 completed: 7 days, 157 trades, $127008 P&L

@@ -1360,10 +1360,12 @@ function startJobPoll(jobId, statusEl, runBtn) {
       indicator.style.display = 'inline';
       indicator.textContent = `⏳ ${job.progress.completed}/${job.progress.total}`;
 
-      if (job.status === 'running') {
+      if (job.status === 'pending' || job.status === 'running') {
         statusEl.className = 'run-status running';
-        statusEl.textContent = `Running ${job.progress.completed}/${job.progress.total} (${job.progress.currentDate})... ${totalTrades} trades | $${totalPnl.toFixed(0)}`;
-        jobPollTimer = setTimeout(poll, 3000);
+        statusEl.textContent = job.status === 'pending'
+          ? `Starting batch (${job.progress.total} days)...`
+          : `Running ${job.progress.completed}/${job.progress.total} (${job.progress.currentDate})... ${totalTrades} trades | $${totalPnl.toFixed(0)}`;
+        jobPollTimer = setTimeout(poll, 2000);
       } else if (job.status === 'completed') {
         statusEl.className = 'run-status done';
         statusEl.textContent = `✅ ${job.dates.length} days | ${totalTrades} trades | $${totalPnl.toFixed(0)}`;
@@ -1704,7 +1706,7 @@ async function boot() {
 boot().then(() => {
   // On page load, check if there's an active background job to resume polling
   fetch(`${API}/jobs`).then(r => r.json()).then(jobList => {
-    const running = jobList.find(j => j.status === 'running');
+    const running = jobList.find(j => j.status === 'running' || j.status === 'pending');
     if (running) {
       const statusEl = document.getElementById('run-status');
       const runBtn = document.getElementById('run-btn');

@@ -1,0 +1,4 @@
+[dotenv@17.3.1] injecting env (0) from .env -- tip: 🛠️  run anywhere with `dotenvx run -- yourcommand`
+[dotenv@17.3.1] injecting env (0) from .env -- tip: 🤖 agentic secret storage: https://dotenvx.com/as2
+[batch-worker] Starting job dd89d07b-2a0c-4835-ae40-5192b7b3e238: 2 dates for config Default Configuration
+[batch-worker] Job dd89d07b-2a0c-4835-ae40-5192b7b3e238 completed: 2 days, 5 trades, $-1291 P&L

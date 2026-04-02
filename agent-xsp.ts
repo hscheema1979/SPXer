@@ -51,11 +51,20 @@ import {
 
 // ── Load Config from DB ─────────────────────────────────────────────────────
 
-const CONFIG_ID = process.env.AGENT_CONFIG_ID || 'hma3x17-xsp-cash';
+const CONFIG_ID = process.env.AGENT_CONFIG_ID || 'hma3x15-undhma-itm5-tp14x-sl70-10k';
 const _xspStore = createStore();
 const CFG: Config = _xspStore.getConfig(CONFIG_ID) ?? DEFAULT_CONFIG;
 _xspStore.close();
-const EXEC = CFG.execution!;
+
+// Execution target is a property of the AGENT, not the config.
+// The config defines trading strategy (signals, exits, risk). The agent defines where orders go.
+const EXEC: NonNullable<Config['execution']> = {
+  symbol: 'XSP',
+  optionPrefix: 'XSP',
+  strikeDivisor: 10,
+  strikeInterval: 1,
+  accountId: process.env.XSP_ACCOUNT_ID || '6YA58635',
+};
 
 console.log(`[xsp] Loaded config: ${CFG.id} — "${CFG.name}"`);
 
@@ -308,7 +317,7 @@ async function executeExit(
 
   if (openPos?.bracketOrderId && !isPaper) {
     try {
-      await cancelOcoLegs(openPos.bracketOrderId, CFG.execution);
+      await cancelOcoLegs(openPos.bracketOrderId, EXEC);
     } catch (e: any) {
       console.warn(`[xsp] Failed to cancel bracket: ${e.message}`);
     }
@@ -327,7 +336,7 @@ async function executeExit(
     openedAt: pos.entryTs * 1000,
   };
 
-  const result = await closePosition(dummyPos, reason, decisionPrice, isPaper, CFG.execution);
+  const result = await closePosition(dummyPos, reason, decisionPrice, isPaper, EXEC);
 
   if (result.error) {
     console.error(`[xsp] ❌ Exit failed for ${pos.symbol}: ${result.error}`);
@@ -548,7 +557,7 @@ async function runCycle(): Promise<number> {
       const streamPrice = priceStream.getPrice(pos.symbol);
       const sellPrice = streamPrice?.bid ?? streamPrice?.last ?? pos.entryPrice;
 
-      const result = await closePosition(pos, 'stream_exit', sellPrice, isPaper, CFG.execution);
+      const result = await closePosition(pos, 'stream_exit', sellPrice, isPaper, EXEC);
       const pnl = ((result.fillPrice ?? sellPrice) - pos.entryPrice) * pos.quantity * 100;
       dailyPnl += pnl;
       strategyState.dailyPnl += pnl;

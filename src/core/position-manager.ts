@@ -17,6 +17,10 @@ export interface ExitContext {
   hmaCrossDirection: Direction | null;
   /** High-water mark price (for trailing stop). Caller must track this. */
   highWaterPrice?: number;
+  /** Bar high — used for intrabar TP detection. */
+  barHigh?: number;
+  /** Bar low — used for intrabar SL detection. */
+  barLow?: number;
 }
 
 /**
@@ -38,6 +42,28 @@ export function checkExit(
   context: ExitContext,
 ): ExitCheck {
   const exitCfg = config.exit;
+  const intrabar = exitCfg?.exitPricing === 'intrabar';
+
+  // For intrabar pricing, use bar high/low to detect TP/SL breach within the candle.
+  // When both TP and SL are breached in the same bar, SL takes priority (conservative).
+  // Exit price is clamped to the exact TP/SL level, not the bar close.
+  if (intrabar && context.barHigh != null && context.barLow != null) {
+    const slHit = config.position.stopLossPercent > 0 && context.barLow <= position.stopLoss;
+    const tpHit = context.barHigh >= position.takeProfit;
+
+    if (slHit && tpHit) {
+      // Both breached in same bar — assume SL hit first (conservative)
+      return { shouldExit: true, reason: 'stop_loss', exitPrice: position.stopLoss };
+    }
+    if (slHit) {
+      return { shouldExit: true, reason: 'stop_loss', exitPrice: position.stopLoss };
+    }
+    if (tpHit) {
+      return { shouldExit: true, reason: 'take_profit', exitPrice: position.takeProfit };
+    }
+  }
+
+  // Fallback: close-based checks (legacy behavior, also used for non-TP/SL exits)
 
   // 1. Stop loss (disabled when stopLossPercent is 0)
   if (config.position.stopLossPercent > 0 && currentPrice <= position.stopLoss) {

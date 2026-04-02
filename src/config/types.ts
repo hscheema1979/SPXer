@@ -165,6 +165,12 @@ export interface Config {
     timeBasedExitEnabled: boolean;
     timeBasedExitMinutes: number;
     reversalSizeMultiplier: number;
+    /** How to price exits in replay/backtest.
+     *  'close' = use bar close price (legacy, can overshoot TP/SL).
+     *  'intrabar' = use bar high/low to detect TP/SL breach, exit at the limit price.
+     *  Live agents with bracket orders always fill at exact TP/SL regardless.
+     *  Default: 'close' for backward compat. */
+    exitPricing?: 'close' | 'intrabar';
   };
 
   narrative: {

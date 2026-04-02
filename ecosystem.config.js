@@ -41,15 +41,16 @@ module.exports = {
       args: 'tsx agent.ts',
       cwd: '/home/ubuntu/SPXer',
       watch: false,
-      autorestart: false,
-      max_restarts: 10,
+      autorestart: false,   // never auto-restart — crash mid-session risks double-entry
+      max_restarts: 0,      // 0 = PM2 will not restart on crash
       min_uptime: '10s',
-      restart_delay: 10000,
+      restart_delay: 30000,
       kill_timeout: 5000,
       max_memory_restart: '512M',
       env: {
         NODE_ENV: 'production',
         AGENT_PAPER: 'false',
+        AGENT_CONFIG_ID: 'hma3x15-undhma-itm5-tp14x-sl70-10k',
       },
       log_date_format: 'YYYY-MM-DD HH:mm:ss',
       error_file: '/home/ubuntu/.pm2/logs/spxer-agent-error.log',
@@ -64,15 +65,16 @@ module.exports = {
       args: 'tsx agent-xsp.ts',
       cwd: '/home/ubuntu/SPXer',
       watch: false,
-      autorestart: false,
-      max_restarts: 10,
+      autorestart: false,   // never auto-restart
+      max_restarts: 0,
       min_uptime: '10s',
-      restart_delay: 10000,
+      restart_delay: 30000,
       kill_timeout: 5000,
       max_memory_restart: '512M',
       env: {
         NODE_ENV: 'production',
         AGENT_PAPER: 'false',
+        AGENT_CONFIG_ID: 'hma3x15-undhma-itm5-tp14x-sl70-10k',
       },
       log_date_format: 'YYYY-MM-DD HH:mm:ss',
       error_file: '/home/ubuntu/.pm2/logs/spxer-xsp-error.log',
@@ -99,6 +101,29 @@ module.exports = {
       log_date_format: 'YYYY-MM-DD HH:mm:ss',
       error_file: '/home/ubuntu/.pm2/logs/xsp-monitor-error.log',
       out_file: '/home/ubuntu/.pm2/logs/xsp-monitor-out.log',
+      merge_logs: true,
+    },
+
+    // ── Schwaber — Schwab ETF Trading Agent ───────────────────────
+    {
+      name: 'schwaber',
+      script: 'npx',
+      args: 'tsx schwaber.ts',
+      cwd: '/home/ubuntu/SPXer',
+      watch: false,
+      autorestart: false,
+      max_restarts: 10,
+      min_uptime: '10s',
+      restart_delay: 10000,
+      kill_timeout: 5000,
+      max_memory_restart: '512M',
+      env: {
+        NODE_ENV: 'production',
+        AGENT_PAPER: 'false',          // paper=true is set in schwaber-config.ts until you're ready
+      },
+      log_date_format: 'YYYY-MM-DD HH:mm:ss',
+      error_file: '/home/ubuntu/.pm2/logs/schwaber-error.log',
+      out_file: '/home/ubuntu/.pm2/logs/schwaber-out.log',
       merge_logs: true,
     },
 

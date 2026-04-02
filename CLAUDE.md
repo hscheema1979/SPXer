@@ -121,36 +121,34 @@ Note: `src/pipeline/indicator-engine.ts` is a re-export shim — actual indicato
 
 The live agents are **pure deterministic** — no LLM scanners or judges in the loop. The signal flow is: HMA(3)×HMA(17) cross → strike selection → OTOCO bracket order → scannerReverse exit (flip on HMA reversal). Both agents share `src/core/` logic.
 
-#### SPX Agent (`agent.ts` → `agent-config.ts`)
+#### SPX Agent (`agent.ts`)
 
 ```
 agent.ts (main loop — margin account 6YA51425)
-├── Uses src/core/ for:          signal detection, strike selection,
-│                                 position exit (via PositionManager),
-│                                 risk guard (via RiskGuard wrapper)
+├── Uses tick() from src/core/strategy-engine.ts — SAME function replay uses
+├── Config loaded from DB by AGENT_CONFIG_ID — same config tested in replay
+├── Execution routing hardcoded: SPX/SPXW/account 6YA51425
 ├── agent/market-feed.ts          — fetches full snapshot from data service
 ├── agent/trade-executor.ts       — Tradier order execution (paper or live, OTOCO brackets)
-├── agent/position-manager.ts     — PositionManager class: state + HTTP price fetch,
-│                                   delegates exit logic to core.checkExit()
-├── agent/risk-guard.ts           — RiskGuard class: daily loss state,
-│                                   delegates risk checks to core.isRiskBlocked()
+├── agent/position-manager.ts     — broker interaction layer (reconcile, cancel OCO)
+├── agent/risk-guard.ts           — RiskGuard class: daily loss state wrapper
 ├── agent/account-balance.ts      — Fetches buying power from Tradier (cached 5 min)
+├── agent/price-stream.ts         — HTTP streaming for live tick prices
 ├── agent/audit-log.ts            — JSON audit trail of all decisions
 └── agent/reporter.ts             — status file + activity log for monitoring
 ```
 
-**Config**: $15 OTM, TP 1.4x, SL 70%, max 10 contracts, 15% of margin buying power per trade. Scanners/judges disabled. Regime disabled. Trades all day 9:30-15:45 ET.
+**Config**: Loaded from DB by `AGENT_CONFIG_ID` env var (same config tested in replay). Execution routing hardcoded in agent.
 
-#### XSP Agent (`agent-xsp.ts` → `agent-xsp-config.ts`)
+#### XSP Agent (`agent-xsp.ts`)
 
-Same HMA3×17 strategy, signals from SPX data pipeline, but executes on XSP (Mini-SPX):
+Same tick()-based strategy, signals from SPX data pipeline, but executes on XSP (Mini-SPX):
 - **XSP options**: 1/10th size of SPX, European/cash-settled
-- **1DTE options**: Next-day expiry for better premium (`use1dte: true`)
+- **0DTE options**: Same-day expiry
 - **Strike conversion**: SPX strikes ÷ 10 (SPX 5700 → XSP 570, `strikeDivisor: 10`)
 - **Cash account**: 6YA58635 (~$1,200), 1 contract at a time
 - **15% of cash buying power** per trade (fetched from Tradier, cached 5 min)
-- **Two orders per signal**: 1 OTOCO bracket (server-side TP/SL) + 1 plain market (agent-managed exits)
-- **Config**: `agent-xsp-config.ts` — $10 OTM, TP 1.4x, SL 70%, max 1 contract
+- **Config**: Same config as SPX agent (loaded from DB by ID). Execution routing hardcoded in agent.
 
 #### Account Monitor (`account-monitor.ts`)
 
@@ -366,7 +364,7 @@ tests/
 - **Dynamic position sizing** — 15% of account buying power per trade (fetched from Tradier via `src/agent/account-balance.ts`, cached 5 minutes). Refreshed daily. Falls back to `baseDollarsPerTrade` config value if API fetch fails.
 - **Smart order types** — Market order if bid-ask spread ≤ $0.75 (configurable via `maxSpreadForMarket`). Limit order at ask price if spread is wider. Exits always use market orders (speed > price on exit). Logic in `src/agent/trade-executor.ts`.
 - **Position reconciliation on startup** — Agents query Tradier for open positions on boot and adopt orphaned ones, submitting missing OCO protection. Survives PM2 restarts and crashes without leaving unmanaged positions.
-- **Multi-account support** — `Config.execution` section routes orders to different Tradier accounts and symbols. SPX agent → margin account 6YA51425, XSP agent → cash account 6YA58635. Each config specifies `symbol`, `optionPrefix`, `strikeDivisor`, `strikeInterval`, and `accountId`.
+- **Execution routing is agent-owned, not config-owned** — The `Config` defines trading strategy (signals, exits, risk). The agent defines where orders go. SPX agent hardcodes `{ symbol: 'SPX', optionPrefix: 'SPXW', strikeDivisor: 1, strikeInterval: 5, accountId: '6YA51425' }`. XSP agent hardcodes `{ symbol: 'XSP', optionPrefix: 'XSP', strikeDivisor: 10, strikeInterval: 1, accountId: '6YA58635' }`. Both agents load the same config by ID — no "live variant" configs needed. Test in replay → set CONFIG_ID → deploy.
 - **Trade friction model** — Always-on $0.05 half-spread + $0.35 commission per side (`src/core/friction.ts`). Applied to all P&L calculations (backtest and live). `frictionEntry()` adds half-spread to buy price, `frictionExit()` subtracts from sell price, `computeRealisticPnl()` wraps both + commission.
 
 ## Scanning & Judgment Agents
@@ -447,6 +445,6 @@ All processes managed via `ecosystem.config.js`. Start with `pm2 start ecosystem
 - **Immutable data**: Use object spreads, never mutate in-place
 - **Indicator computation**: Incremental state-based (see `src/core/indicator-engine.ts`), never from scratch
 - **Error handling**: Explicit at boundaries (API calls, file I/O); let internal guarantees work
-- **Configuration**: Use `src/config.ts` for environment-dependent values, `Config` type for agent settings
+- **Configuration**: Use `src/config.ts` for environment-dependent values, `Config` type for trading strategy. Execution routing (symbol, account, option prefix) is hardcoded per-agent, NOT in Config.
 - **Logging**: Use `console.log` with timestamps for simple logging
 - **Timezone handling**: Server runs in UTC. All ET conversions use `src/utils/et-time.ts` helpers (`getETOffsetMs`, `todayET`, `nowET`, `etTimeToUnixTs`). **Never** use `new Date(date.toLocaleString('en-US', { timeZone: 'America/New_York' }))` — it silently misinterprets ET as UTC.

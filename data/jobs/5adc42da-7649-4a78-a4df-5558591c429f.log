@@ -1,0 +1,4 @@
+[dotenv@17.3.1] injecting env (0) from .env -- tip: 🛠️  run anywhere with `dotenvx run -- yourcommand`
+[dotenv@17.3.1] injecting env (0) from .env -- tip: 🔐 encrypt with Dotenvx: https://dotenvx.com
+[batch-worker] Starting job 5adc42da-7649-4a78-a4df-5558591c429f: 7 dates for config HMA3x19 | RSI | PxHMA | UndHMA | OTM10 | TP1x | SL25%
+[batch-worker] Job 5adc42da-7649-4a78-a4df-5558591c429f completed: 7 days, 188 trades, $12591 P&L

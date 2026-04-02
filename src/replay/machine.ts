@@ -399,6 +399,31 @@ function getPosPriceAt(
   return null;
 }
 
+/** Get full bar (OHLC) for a position's contract at a given timestamp. */
+function getPosBarAt(
+  cache: BarCache, side: string, strike: number, symbolFilter: string, atTs: number,
+): { close: number; high: number; low: number } | null {
+  const cpPattern = side === 'call' ? /C\d/ : /P\d/;
+  for (const [symbol, bars] of cache.contractBars) {
+    const s = cache.contractStrikes.get(symbol)!;
+    if (s !== strike) continue;
+    if (!cpPattern.test(symbol)) continue;
+
+    let right = bars.length - 1;
+    let left = 0;
+    while (left <= right) {
+      const mid = (left + right) >>> 1;
+      if (bars[mid].ts <= atTs) left = mid + 1;
+      else right = mid - 1;
+    }
+    if (right >= 0) {
+      const b = bars[right];
+      return { close: b.close, high: b.high, low: b.low };
+    }
+  }
+  return null;
+}
+
 // Legacy DB function kept for position price fallback
 function getPosPrice(
   db: Database.Database, side: string, strike: number, symbolFilter: string, atTs: number,
