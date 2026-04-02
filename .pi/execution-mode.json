@@ -3,8 +3,8 @@
   "status": "active",
   "pid": 2043478,
   "plan": {
-    "id": "plan-1775173247568",
-    "text": "Replay Performance Optimization - All 6 Options. Phase 1: Schema migration (add 21 indicator columns + replay_contracts table). Phase 2: Fix LIKE query with indexed lookups. Phase 3: Read columns instead of JSON. Phase 4: Skip contract indicators in deterministic mode. Phase 5: worker_threads parallel batch. Phase 6: Binary cache files. Phase 7: Test and benchmark.",
+    "id": "plan-1775173250443",
+    "text": "Replay perf optimization",
     "phases": [
       {
         "name": "Schema Migration",
@@ -43,7 +43,7 @@
     "lastResponseTokens": 0
   },
   "lastCheckpoint": null,
-  "startedAt": "2026-04-02T23:40:47.568Z",
-  "updatedAt": "2026-04-02T23:40:47.569Z",
+  "startedAt": "2026-04-02T23:40:50.443Z",
+  "updatedAt": "2026-04-02T23:40:50.443Z",
   "interruptedAt": "2026-04-02T22:48:31.512Z"
 }
