@@ -16,7 +16,7 @@ import { initSession as initRegimeSession, classify, getSignalGate, formatRegime
 import { getScannerPrompt as getPromptFromLibrary } from './prompt-library';
 import type { ReplayConfig, Trade, ReplayResult } from './types';
 import { ReplayStore } from './store';
-import { etLabel, buildSymbolFilter, buildSessionTimestamps, computeMetrics } from './metrics';
+import { etLabel, buildSymbolFilter, buildSymbolRange, buildSessionTimestamps, computeMetrics } from './metrics';
 
 // ── Core modules (shared with live agent) ─────────────────────────────────
 import { detectSignals } from '../core/signal-detector';
@@ -27,6 +27,7 @@ import { isRegimeBlocked } from '../core/regime-gate';
 import { computeRealisticPnl, frictionEntry } from '../core/friction';
 import type { Signal, CoreBar } from '../core/types';
 import { makeHMAState, hmaStep, makeKCState, kcStep } from '../pipeline/indicators/tier1';
+import { readBarCacheFile, writeBarCacheFile, hasCacheFile } from './bar-cache-file';
 
 // ── Strategy engine (deterministic tick()-based decision function) ─────────
 import { tick, createInitialState, type StrategyState, type TickInput, type CorePosition } from '../core/strategy-engine';
@@ -62,14 +63,48 @@ interface BarCache {
   timestamps: number[];                 // SPX timestamps for the session
 }
 
+// All denormalized indicator columns in replay_bars (order matters for SELECT)
+const INDICATOR_COLUMNS = [
+  'hma3', 'hma5', 'hma15', 'hma17', 'hma19', 'hma25',
+  'ema9', 'ema21', 'rsi14',
+  'bbUpper', 'bbMiddle', 'bbLower', 'bbWidth',
+  'atr14', 'atrPct', 'vwap',
+  'kcUpper', 'kcMiddle', 'kcLower', 'kcWidth', 'kcSlope',
+] as const;
+
+const INDICATOR_SELECT = INDICATOR_COLUMNS.join(', ');
+
+/** Build indicators object from denormalized columns (avoids JSON.parse) */
+function rowToIndicators(r: any): Record<string, number | null> {
+  const ind: Record<string, number | null> = {};
+  for (const col of INDICATOR_COLUMNS) {
+    if (r[col] != null) ind[col] = r[col];
+  }
+  return ind;
+}
+
+/** Empty indicators singleton — shared by all contract bars in price-only mode */
+const EMPTY_INDICATORS: Record<string, number | null> = Object.freeze({});
+
 function loadBarCache(
-  db: Database.Database, start: number, end: number, symbolFilter: string, timeframe: string = '1m',
+  db: Database.Database, start: number, end: number,
+  symbolRange: { lo: string; hi: string },
+  timeframe: string = '1m',
+  opts?: { skipContractIndicators?: boolean; date?: string },
 ): BarCache {
   // Load bars at the requested timeframe directly from DB (pre-computed by build-mtf-bars.ts)
   const tf = timeframe || '1m';
+  const skipContractInd = opts?.skipContractIndicators ?? false;
+  const date = opts?.date;
+
+  // ── Try binary cache first (avoids SQL entirely) ──
+  if (date && hasCacheFile(date, tf, skipContractInd)) {
+    const cached = readBarCacheFile(date, tf, skipContractInd);
+    if (cached) return cached;
+  }
 
   const spxRows = db.prepare(`
-    SELECT ts, open, high, low, close, volume, indicators
+    SELECT ts, open, high, low, close, volume, ${INDICATOR_SELECT}
     FROM ${REPLAY_DATA_SOURCE} WHERE symbol='SPX' AND timeframe=?
     AND ts >= ? AND ts <= ? ORDER BY ts
   `).all(tf, start, end) as any[];
@@ -77,20 +112,25 @@ function loadBarCache(
   const spxBars = spxRows.map((r: any) => ({
     ts: r.ts, open: r.open, high: r.high, low: r.low,
     close: r.close, volume: r.volume,
-    indicators: JSON.parse(r.indicators || '{}'),
+    indicators: rowToIndicators(r),
   }));
 
   const timestamps = spxBars.map(b => b.ts);
 
-  // Load contract bars at the requested timeframe
+  // Load contract bars using index-friendly range query (100x faster than LIKE)
+  // In price-only mode, skip indicator columns entirely (deterministic replay only needs OHLCV)
+  const contractSelect = skipContractInd
+    ? 'symbol, ts, open, high, low, close, volume'
+    : `symbol, ts, open, high, low, close, volume, ${INDICATOR_SELECT}`;
+
   const contractRows = db.prepare(`
-    SELECT b.symbol, b.ts, b.open, b.high, b.low, b.close, b.volume, b.indicators,
-           CAST(substr(b.symbol, -8) AS INTEGER) / 1000.0 as strike
-    FROM ${REPLAY_DATA_SOURCE} b
-    WHERE b.symbol LIKE ? AND b.timeframe = ?
-      AND b.ts >= ? AND b.ts <= ?
-    ORDER BY b.symbol, b.ts
-  `).all(symbolFilter, tf, start, end) as any[];
+    SELECT ${contractSelect},
+           CAST(substr(symbol, -8) AS INTEGER) / 1000.0 as strike
+    FROM ${REPLAY_DATA_SOURCE}
+    WHERE symbol >= ? AND symbol < ? AND timeframe = ?
+      AND ts >= ? AND ts <= ?
+    ORDER BY symbol, ts
+  `).all(symbolRange.lo, symbolRange.hi, tf, start, end) as any[];
 
   const contractBars = new Map<string, Bar[]>();
   const contractStrikes = new Map<string, number>();
@@ -99,12 +139,23 @@ function loadBarCache(
     contractBars.get(r.symbol)!.push({
       ts: r.ts, open: r.open, high: r.high, low: r.low,
       close: r.close, volume: r.volume,
-      indicators: JSON.parse(r.indicators || '{}'),
+      indicators: skipContractInd ? EMPTY_INDICATORS : rowToIndicators(r),
     });
     if (!contractStrikes.has(r.symbol)) contractStrikes.set(r.symbol, r.strike);
   }
 
-  return { spxBars, contractBars, contractStrikes, timestamps };
+  const cache: BarCache = { spxBars, contractBars, contractStrikes, timestamps };
+
+  // ── Write binary cache for next run ──
+  if (date) {
+    try {
+      writeBarCacheFile(cache, date, tf, skipContractInd);
+    } catch {
+      // Non-fatal — just skip caching
+    }
+  }
+
+  return cache;
 }
 
 
@@ -206,14 +257,25 @@ function ensureHmaPeriods(cache: BarCache, periods: number[], tf: string, verbos
     const writeDb = new Database(DATA_DB_PATH);
     writeDb.pragma('journal_mode = WAL');
     writeDb.pragma('busy_timeout = 5000');
+
+    // Build dynamic UPDATE for both JSON indicators column and denormalized HMA columns
+    const hmaCols = missing.filter(p => INDICATOR_COLUMNS.includes(`hma${p}` as any));
+    const colSetClauses = hmaCols.map(p => `hma${p} = json_extract(?, '$.hma${p}')`);
+    const setClauses = ['indicators = ?', ...colSetClauses.map(c => c.replace("json_extract(?, ", "").replace(")", ""))];
+
+    // Simpler: update both indicators JSON and individual hma columns
+    const hmaColNames = missing.map(p => `hma${p}`);
+    const hmaColSets = hmaColNames.map(col => `${col} = ?`).join(', ');
     const updateStmt = writeDb.prepare(`
-      UPDATE ${REPLAY_DATA_SOURCE} SET indicators = ? WHERE symbol = ? AND timeframe = ? AND ts = ?
+      UPDATE ${REPLAY_DATA_SOURCE} SET indicators = ?${hmaColSets ? ', ' + hmaColSets : ''}
+      WHERE symbol = ? AND timeframe = ? AND ts = ?
     `);
 
     const writeTxn = writeDb.transaction((allBars: { symbol: string; bars: Bar[] }[]) => {
       for (const { symbol, bars } of allBars) {
         for (const bar of bars) {
-          updateStmt.run(JSON.stringify(bar.indicators), symbol, tf, bar.ts);
+          const hmaVals = missing.map(p => bar.indicators[`hma${p}`] ?? null);
+          updateStmt.run(JSON.stringify(bar.indicators), ...hmaVals, symbol, tf, bar.ts);
         }
       }
     });
@@ -305,18 +367,28 @@ function ensureKcFields(cache: BarCache, tf: string, config: ReplayConfig, verbo
     prevClose = bar.close;
   }
 
-  // Cache to DB
+  // Cache to DB (update both JSON and denormalized KC columns)
   try {
     const writeDb = new Database(DATA_DB_PATH);
     writeDb.pragma('journal_mode = WAL');
     writeDb.pragma('busy_timeout = 5000');
     const updateStmt = writeDb.prepare(`
-      UPDATE ${REPLAY_DATA_SOURCE} SET indicators = ? WHERE symbol = ? AND timeframe = ? AND ts = ?
+      UPDATE ${REPLAY_DATA_SOURCE}
+      SET indicators = ?, kcUpper = ?, kcMiddle = ?, kcLower = ?, kcWidth = ?, kcSlope = ?
+      WHERE symbol = ? AND timeframe = ? AND ts = ?
     `);
 
     const writeTxn = writeDb.transaction((bars: Bar[]) => {
       for (const bar of bars) {
-        updateStmt.run(JSON.stringify(bar.indicators), 'SPX', tf, bar.ts);
+        updateStmt.run(
+          JSON.stringify(bar.indicators),
+          bar.indicators.kcUpper ?? null,
+          bar.indicators.kcMiddle ?? null,
+          bar.indicators.kcLower ?? null,
+          bar.indicators.kcWidth ?? null,
+          bar.indicators.kcSlope ?? null,
+          'SPX', tf, bar.ts,
+        );
       }
     });
 
@@ -823,11 +895,20 @@ export async function runReplay(
 
   try {
     const { start: SESSION_START, end: SESSION_END, closeCutoff: CLOSE_CUTOFF } = buildSessionTimestamps(targetDate);
+    const SYMBOL_RANGE = buildSymbolRange(targetDate);
+    // Legacy LIKE filter still needed for getPosPrice fallback
     const SYMBOL_FILTER = buildSymbolFilter(targetDate);
 
+    // Determine mode early so we can optimize loading
+    const judges = opts.noJudge ? [] : selectJudges(config);
+    const isDeterministic = !config.scanners.enabled && judges.length === 0;
+
     // Pre-load bars into memory — multiple timeframes from DB
-    // 1m cache: always loaded for price lookups and position management
-    const cache1m = loadBarCache(dataDb, SESSION_START, SESSION_END, SYMBOL_FILTER, '1m');
+    // In deterministic mode, skip contract indicator columns (only need OHLCV for price lookups)
+    const cacheOpts = isDeterministic
+      ? { skipContractIndicators: true, date: targetDate }
+      : { date: targetDate };
+    const cache1m = loadBarCache(dataDb, SESSION_START, SESSION_END, SYMBOL_RANGE, '1m', cacheOpts);
 
     // ── MTF cache loader — deduplicates so each TF is loaded at most once ──
     const tfCacheMap = new Map<string, BarCache>();
@@ -836,7 +917,7 @@ export async function runReplay(
     function getTfCache(tf: string): BarCache {
       if (!tf || tf === '1m') return cache1m;
       if (tfCacheMap.has(tf)) return tfCacheMap.get(tf)!;
-      const c = loadBarCache(dataDb, SESSION_START, SESSION_END, SYMBOL_FILTER, tf);
+      const c = loadBarCache(dataDb, SESSION_START, SESSION_END, SYMBOL_RANGE, tf, cacheOpts);
       tfCacheMap.set(tf, c);
       return c;
     }
@@ -908,7 +989,6 @@ export async function runReplay(
     const priorClose = opts.priorClose || firstBars[0]?.close || 6606.49;
     initRegimeSession(priorClose);
 
-    const judges = opts.noJudge ? [] : selectJudges(config);
     if (verbose) {
       if (judges.length > 0) console.log(`  Judges: ${judges.map(j => j.label).join(', ')}`);
       if (config.scanners.enabled) {
@@ -919,8 +999,6 @@ export async function runReplay(
     }
 
     // ── Branch point: deterministic configs use tick()-based loop ──────
-    const isDeterministic = !config.scanners.enabled && judges.length === 0;
-
     if (isDeterministic) {
       if (verbose) console.log(`  [deterministic mode] Using tick() strategy engine\n`);
       const { trades: deterministicTrades } = runDeterministicReplay(

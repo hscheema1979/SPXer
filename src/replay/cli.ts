@@ -153,11 +153,12 @@ async function cmdBacktest() {
 
   const verbose = flagMap['quiet'] !== 'true';
   const noJudge = flagMap['no-judge'] === 'true';
+  const parallel = parseInt(flagMap['parallel'] || '0', 10);
 
   if (verbose) {
     console.log(`\n${'='.repeat(60)}`);
     console.log(`  BACKTEST: ${dates.length} days | config: ${config.id}`);
-    console.log(`  Scanners: ${config.scanners.enabled ? 'ON' : 'OFF'} | Judge: ${noJudge ? 'OFF' : 'ON'}`);
+    console.log(`  Scanners: ${config.scanners.enabled ? 'ON' : 'OFF'} | Judge: ${noJudge ? 'OFF' : 'ON'}${parallel > 1 ? ` | Parallel: ${parallel}` : ''}`);
     console.log(`${'='.repeat(60)}\n`);
   }
 
@@ -168,22 +169,66 @@ async function cmdBacktest() {
   const dailyPnls: number[] = [];
   let worstDay = 0;
 
-  for (const date of dates) {
-    try {
-      const result = await runReplay(config, date, { verbose: false, noJudge });
-      totalTrades += result.trades;
-      totalWins += result.wins;
-      totalPnl += result.totalPnl;
-      dailyPnls.push(result.totalPnl);
-      if (result.totalPnl < worstDay) worstDay = result.totalPnl;
-      completedDates++;
+  // Collect results for sorted display in parallel mode
+  const dateResults: { date: string; result?: { trades: number; wins: number; totalPnl: number }; error?: string }[] = [];
 
-      if (verbose) {
-        const wr = result.trades > 0 ? ((result.wins / result.trades) * 100).toFixed(0) : '-';
-        console.log(`  ${date}  ${String(result.trades).padEnd(3)} trades  ${wr.padEnd(3)}% WR  $${result.totalPnl.toFixed(0)}`);
+  if (parallel > 1 && dates.length > 1) {
+    // ── Parallel execution: run N dates concurrently ──
+    // Process in batches to limit memory usage
+    const batchSize = parallel;
+    for (let i = 0; i < dates.length; i += batchSize) {
+      const batch = dates.slice(i, i + batchSize);
+      const results = await Promise.allSettled(
+        batch.map(date => runReplay(config, date, { verbose: false, noJudge }))
+      );
+
+      for (let j = 0; j < results.length; j++) {
+        const date = batch[j];
+        const r = results[j];
+        if (r.status === 'fulfilled') {
+          totalTrades += r.value.trades;
+          totalWins += r.value.wins;
+          totalPnl += r.value.totalPnl;
+          dailyPnls.push(r.value.totalPnl);
+          if (r.value.totalPnl < worstDay) worstDay = r.value.totalPnl;
+          completedDates++;
+          dateResults.push({ date, result: r.value });
+        } else {
+          dateResults.push({ date, error: r.reason?.message || String(r.reason) });
+        }
       }
-    } catch (err: any) {
-      if (verbose) console.log(`  ${date}  SKIPPED — ${err.message}`);
+    }
+
+    // Print results in date order
+    if (verbose) {
+      for (const dr of dateResults) {
+        if (dr.result) {
+          const wr = dr.result.trades > 0 ? ((dr.result.wins / dr.result.trades) * 100).toFixed(0) : '-';
+          console.log(`  ${dr.date}  ${String(dr.result.trades).padEnd(3)} trades  ${wr.padEnd(3)}% WR  $${dr.result.totalPnl.toFixed(0)}`);
+        } else {
+          console.log(`  ${dr.date}  SKIPPED — ${dr.error}`);
+        }
+      }
+    }
+  } else {
+    // ── Sequential execution (original path) ──
+    for (const date of dates) {
+      try {
+        const result = await runReplay(config, date, { verbose: false, noJudge });
+        totalTrades += result.trades;
+        totalWins += result.wins;
+        totalPnl += result.totalPnl;
+        dailyPnls.push(result.totalPnl);
+        if (result.totalPnl < worstDay) worstDay = result.totalPnl;
+        completedDates++;
+
+        if (verbose) {
+          const wr = result.trades > 0 ? ((result.wins / result.trades) * 100).toFixed(0) : '-';
+          console.log(`  ${date}  ${String(result.trades).padEnd(3)} trades  ${wr.padEnd(3)}% WR  $${result.totalPnl.toFixed(0)}`);
+        }
+      } catch (err: any) {
+        if (verbose) console.log(`  ${date}  SKIPPED — ${err.message}`);
+      }
     }
   }
 
@@ -356,6 +401,7 @@ function printUsage() {
     --no-scanners              Disable AI scanners
     --no-judge                 Skip judge calls
     --quiet                    Minimal output
+    --parallel=N               Run N days concurrently (backtest only)
     --strikeSearchRange=N      Strike range
     --cooldownSec=N            Escalation cooldown
     --stopLossPercent=N        Stop loss %

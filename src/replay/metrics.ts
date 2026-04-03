@@ -78,6 +78,20 @@ export function buildSymbolFilter(date: string): string {
 }
 
 /**
+ * Build a symbol range for efficient index-based contract queries.
+ * e.g. '2026-03-20' → { prefix: 'SPXW260320', lo: 'SPXW260320', hi: 'SPXW260321' }
+ * Use: WHERE symbol >= lo AND symbol < hi (uses index, ~100x faster than LIKE)
+ */
+export function buildSymbolRange(date: string): { prefix: string; lo: string; hi: string } {
+  const dateCode = date.slice(2, 4) + date.slice(5, 7) + date.slice(8, 10);
+  const prefix = `SPXW${dateCode}`;
+  // Increment the last digit of dateCode for upper bound
+  const dayNum = parseInt(date.slice(8, 10), 10);
+  const hiDateCode = date.slice(2, 4) + date.slice(5, 7) + String(dayNum + 1).padStart(2, '0');
+  return { prefix, lo: prefix, hi: `SPXW${hiDateCode}` };
+}
+
+/**
  * Convert an ET time string to a real UTC Unix timestamp.
  * Uses Intl to determine whether a given date falls in EDT or EST.
  */
