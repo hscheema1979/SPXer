@@ -1,0 +1,5 @@
+[dotenv@17.3.1] injecting env (0) from .env -- tip: ⚙️  enable debug logging with { debug: true }
+[dotenv@17.3.1] injecting env (0) from .env -- tip: ⚙️  load multiple .env files with { path: ['.env.local', '.env'] }
+[batch-worker] Starting job ff877784-417b-40ed-b23e-dca231ce1a1a: 256 dates for config HMA3x19 | OTM5 | TP2.5x | SL70%
+[batch-worker] 2025-03-27 error: Cannot add property hma3, object is not extensible
+[batch-worker] Job ff877784-417b-40ed-b23e-dca231ce1a1a completed: 256 days, 6576 trades, $8746242 P&L

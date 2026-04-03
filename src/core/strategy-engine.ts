@@ -519,6 +519,15 @@ export function tick(
   // Determine side
   const side: 'call' | 'put' = entryDirection === 'bullish' ? 'call' : 'put';
 
+  // allowedSides gate: skip if this side isn't allowed
+  const allowedSides = config.signals.allowedSides ?? 'both';
+  if (allowedSides === 'calls' && side !== 'call') {
+    return { exits, entry: null, directionState, exitState, skipReason: 'allowedSides=calls — bearish signal blocked' };
+  }
+  if (allowedSides === 'puts' && side !== 'put') {
+    return { exits, entry: null, directionState, exitState, skipReason: 'allowedSides=puts — bullish signal blocked' };
+  }
+
   // Select strike from candidates
   const strikeResult = selectStrike(input.candidates, entryDirection, input.spxPrice, config);
   if (strikeResult === null) {

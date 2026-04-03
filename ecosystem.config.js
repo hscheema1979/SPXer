@@ -50,7 +50,7 @@ module.exports = {
       env: {
         NODE_ENV: 'production',
         AGENT_PAPER: 'false',
-        AGENT_CONFIG_ID: 'hma3x15-undhma-itm5-tp14x-sl70-10k',
+        AGENT_CONFIG_ID: 'sweep-tpsl-tp25-sl90',
       },
       log_date_format: 'YYYY-MM-DD HH:mm:ss',
       error_file: '/home/ubuntu/.pm2/logs/spxer-agent-error.log',
@@ -74,7 +74,7 @@ module.exports = {
       env: {
         NODE_ENV: 'production',
         AGENT_PAPER: 'false',
-        AGENT_CONFIG_ID: 'hma3x15-undhma-itm5-tp14x-sl70-10k',
+        AGENT_CONFIG_ID: 'sweep-tpsl-tp25-sl90',
       },
       log_date_format: 'YYYY-MM-DD HH:mm:ss',
       error_file: '/home/ubuntu/.pm2/logs/spxer-xsp-error.log',

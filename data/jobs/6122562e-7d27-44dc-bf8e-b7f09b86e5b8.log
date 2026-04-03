@@ -1,0 +1,4 @@
+[dotenv@17.3.1] injecting env (0) from .env -- tip: ⚙️  enable debug logging with { debug: true }
+[dotenv@17.3.1] injecting env (0) from .env -- tip: ⚙️  override existing env vars with { override: true }
+[batch-worker] Starting job 6122562e-7d27-44dc-bf8e-b7f09b86e5b8: 254 dates for config HMA3x19 | OTM5 | TP2.5x | SL70% | 3m
+[batch-worker] Job 6122562e-7d27-44dc-bf8e-b7f09b86e5b8 completed: 254 days, 6554 trades, $8711400 P&L

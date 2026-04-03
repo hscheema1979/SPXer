@@ -116,6 +116,7 @@ export const DEFAULT_CONFIG: Config = {
     rsiCrossTimeframe: null,
     emaCrossTimeframe: null,
     priceCrossHmaTimeframe: null,
+    allowedSides: 'both' as const,
     targetOtmDistance: null,
     targetContractPrice: null,
     maxEntryPrice: null,           // Filter: skip trades above this price

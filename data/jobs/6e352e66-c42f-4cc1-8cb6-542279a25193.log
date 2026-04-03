@@ -1,0 +1,4 @@
+[dotenv@17.3.1] injecting env (0) from .env -- tip: ⚙️  load multiple .env files with { path: ['.env.local', '.env'] }
+[dotenv@17.3.1] injecting env (0) from .env -- tip: ⚙️  suppress all logs with { quiet: true }
+[batch-worker] Starting job 6e352e66-c42f-4cc1-8cb6-542279a25193: 256 dates for config HMA3x19 | UndHMA | OTM0 | TP1.25x | SL70%
+[batch-worker] Job 6e352e66-c42f-4cc1-8cb6-542279a25193 completed: 256 days, 12737 trades, $-1383660 P&L

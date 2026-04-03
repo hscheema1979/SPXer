@@ -1,0 +1,4 @@
+[dotenv@17.3.1] injecting env (0) from .env -- tip: ⚡️ secrets for agents: https://dotenvx.com/as2
+[dotenv@17.3.1] injecting env (0) from .env -- tip: ⚙️  suppress all logs with { quiet: true }
+[batch-worker] Starting job 5425e981-ca2c-4a5b-bd8e-6099c5938cba: 256 dates for config HMA3x19 | UndHMA | OTM0 | TP2.5x | SL70%
+[batch-worker] Job 5425e981-ca2c-4a5b-bd8e-6099c5938cba completed: 256 days, 12066 trades, $-1256403 P&L

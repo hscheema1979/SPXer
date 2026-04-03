@@ -1,0 +1,5 @@
+[dotenv@17.3.1] injecting env (0) from .env -- tip: 🔐 prevent building .env in docker: https://dotenvx.com/prebuild
+[dotenv@17.3.1] injecting env (0) from .env -- tip: ⚙️  enable debug logging with { debug: true }
+[batch-worker] Starting job 43fe6010-bc03-41a5-884a-dddfe8ad5a89: 256 dates for config HMA3x19 | UndHMA | ITM5 | TP2.5x | SL70%
+[batch-worker] 2025-03-27 error: Cannot add property hma3, object is not extensible
+[batch-worker] Job 43fe6010-bc03-41a5-884a-dddfe8ad5a89 completed: 256 days, 6576 trades, $8743622 P&L

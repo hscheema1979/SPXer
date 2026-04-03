@@ -1,0 +1,5 @@
+[dotenv@17.3.1] injecting env (0) from .env -- tip: 🔐 prevent committing .env to code: https://dotenvx.com/precommit
+[dotenv@17.3.1] injecting env (0) from .env -- tip: ⚙️  suppress all logs with { quiet: true }
+[batch-worker] Starting job 706abd79-905a-40ca-b833-b962590037bf: 256 dates for config HMA3x15 | UndHMA | ITM5 | NoSL
+[batch-worker] 2025-03-27 error: Cannot add property hma3, object is not extensible
+[batch-worker] Job 706abd79-905a-40ca-b833-b962590037bf completed: 256 days, 7239 trades, $1301803 P&L

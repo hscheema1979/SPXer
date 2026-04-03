@@ -102,6 +102,11 @@ export interface Config {
     emaCrossTimeframe: string | null;     // TF for EMA cross signals (null = signalTimeframe)
     priceCrossHmaTimeframe: string | null; // TF for price-cross-HMA signals (null = signalTimeframe)
 
+    /** Filter which sides are allowed for entry.
+     *  'both' (default) = calls + puts. 'calls' = long only (bullish signals only).
+     *  'puts' = short only (bearish signals only). */
+    allowedSides: 'both' | 'calls' | 'puts';
+
     targetOtmDistance: number | null;
     targetContractPrice: number | null;
     maxEntryPrice: number | null;        // Filter: skip trades above this price

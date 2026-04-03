@@ -39,9 +39,9 @@ async function main() {
   const allDates = getAvailableDays(db);
   const dates = allDates.filter(d => d >= START_DATE && d <= END_DATE);
 
-  // Build TP values: 1.3, 1.4, 1.5, ... 3.0
+  // Build TP values: 1.3, 1.4, 1.5, ... 10.0
   const tpValues: number[] = [];
-  for (let tp = 1.3; tp <= 3.01; tp += 0.1) {
+  for (let tp = 1.3; tp <= 10.01; tp += 0.1) {
     tpValues.push(Math.round(tp * 10) / 10);
   }
 

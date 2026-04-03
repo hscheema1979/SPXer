@@ -178,6 +178,7 @@
   .cfg-name-row { display: grid; grid-template-columns: 80px 1fr; align-items: center; gap: 8px; }
   .cfg-name-row .cfg-input { font-size: 13px; }
   .cfg-name-hint { font-size: 10px; color: #555; margin-top: 4px; }
+  .cfg-hint { font-size: 10px; color: #555; grid-column: 1 / -1; padding: 0 0 2px 0; line-height: 1.4; }
 
   /* ── Run Status ── */
   .run-status { font-size: 11px; color: #888; }
@@ -1072,6 +1073,7 @@ const CONFIG_SECTIONS = [
     { path: 'signals.rsiOverbought', label: 'RSI Overbought', type: 'num', min: 50, max: 99 },
     { path: 'signals.optionRsiOversold', label: 'Option RSI Oversold', type: 'num', min: 1, max: 50 },
     { path: 'signals.optionRsiOverbought', label: 'Option RSI Overbought', type: 'num', min: 50, max: 99 },
+    { path: 'signals.allowedSides', label: 'Allowed Sides', type: 'select', options: ['both', 'calls', 'puts'], hint: 'both = calls + puts. calls = long only (bullish). puts = short only (bearish).' },
     { path: 'signals.targetOtmDistance', label: 'Target OTM/ITM Distance ($)', type: 'num-null', min: -100, max: 200 },
     { path: 'signals.targetContractPrice', label: 'Target Contract Price ($)', type: 'num-null', min: 0, max: 50 },
     { path: 'signals.maxEntryPrice', label: 'Max Entry Price ($)', type: 'num-null', min: 0, max: 50, hint: 'Filter: skip trades above this price' },
@@ -1103,6 +1105,7 @@ const CONFIG_SECTIONS = [
   ]},
   { key: 'exit', title: 'Exit Strategy', fields: [
     { path: 'exit.strategy', label: 'Strategy', type: 'select', options: ['takeProfit', 'scannerReverse'] },
+    { path: 'exit.exitPricing', label: 'Exit Pricing', type: 'select', options: ['close', 'intrabar'], hint: 'close = exit at bar close (lets winners overshoot TP). intrabar = exit at exact TP/SL price (matches live bracket orders).' },
     { path: 'exit.trailingStopEnabled', label: 'Trailing Stop', type: 'bool' },
     { path: 'exit.trailingStopPercent', label: 'Trailing Stop %', type: 'num', min: 1, max: 50 },
     { path: 'exit.timeBasedExitEnabled', label: 'Time-Based Exit', type: 'bool' },
@@ -1225,6 +1228,7 @@ function renderConfigForm() {
           <select id="${inputId}" class="cfg-input" onchange="${changeHandler}">
             ${f.options.map(o => `<option value="${o}" ${valStr === o ? 'selected' : ''}>${o || '(default)'}</option>`).join('')}
           </select>
+          ${f.hint ? `<div class="cfg-hint">${f.hint}</div>` : ''}
         </div>`;
       } else if (f.type === 'num') {
         html += `<div class="cfg-row">
@@ -1574,7 +1578,7 @@ function renderAnalysis(a) {
   // Setup line
   const sigStr = s.signals.length ? s.signals.join('+') : 'none';
   const setupHtml = `<div class="analysis-setup">
-    <b>HMA ${s.hma}</b> · ${s.timeframes} · ${sigStr} · ${s.otm} · SL${s.stopLoss}% TP${s.tpMult}x · MaxPos=${s.maxPositions} · ${s.exitStrategy} · $${s.contractPriceMax} cap · $${s.baseDollarsPerTrade}/trade
+    <b>HMA ${s.hma}</b> · ${s.timeframes} · ${sigStr} · ${s.otm} · SL${s.stopLoss}% TP${s.tpMult}x · MaxPos=${s.maxPositions} · ${s.exitStrategy} · ${s.exitPricing || 'close'} pricing · $${s.contractPriceMax} cap · $${s.baseDollarsPerTrade}/trade
   </div>`;
 
   // Helper

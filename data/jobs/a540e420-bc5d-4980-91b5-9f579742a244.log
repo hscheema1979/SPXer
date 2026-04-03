@@ -1,0 +1,5 @@
+[dotenv@17.3.1] injecting env (0) from .env -- tip: 🛠️  run anywhere with `dotenvx run -- yourcommand`
+[dotenv@17.3.1] injecting env (0) from .env -- tip: ⚡️ secrets for agents: https://dotenvx.com/as2
+[batch-worker] Starting job a540e420-bc5d-4980-91b5-9f579742a244: 256 dates for config HMA3x19 | OTM0 | TP2.5x | SL70% | 3m
+[batch-worker] 2025-03-27 error: Cannot add property hma3, object is not extensible
+[batch-worker] Job a540e420-bc5d-4980-91b5-9f579742a244 completed: 256 days, 4740 trades, $7952459 P&L

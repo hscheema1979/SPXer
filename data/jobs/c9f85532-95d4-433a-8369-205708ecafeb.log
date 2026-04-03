@@ -1,0 +1,4 @@
+[dotenv@17.3.1] injecting env (0) from .env -- tip: 🛡️ auth for agents: https://vestauth.com
+[dotenv@17.3.1] injecting env (0) from .env -- tip: ⚙️  specify custom .env file path with { path: '/custom/path/.env' }
+[batch-worker] Starting job c9f85532-95d4-433a-8369-205708ecafeb: 256 dates for config HMA3x19 | UndHMA | OTM0 | TP2.5x | SL70%
+[batch-worker] Job c9f85532-95d4-433a-8369-205708ecafeb completed: 256 days, 12066 trades, $-1256403 P&L

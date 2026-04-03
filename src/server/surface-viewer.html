@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SPXer Option Surface Viewer</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #0a0a0f; color: #e0e0e0; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 13px; overflow: hidden; }
+
+  .header { display: flex; align-items: center; gap: 16px; padding: 10px 16px; background: #111118; border-bottom: 1px solid #222; z-index: 10; position: relative; }
+  .header h1 { font-size: 15px; color: #8b8bff; font-weight: 600; white-space: nowrap; }
+  .header a { color: #666; text-decoration: none; font-size: 12px; }
+  .header a:hover { color: #8b8bff; }
+  .header select, .header button { background: #1a1a24; color: #e0e0e0; border: 1px solid #333; padding: 5px 10px; border-radius: 4px; font-family: inherit; font-size: 12px; cursor: pointer; }
+  .header select:hover, .header button:hover { border-color: #555; }
+  .header button.active { border-color: #8b8bff; color: #8b8bff; }
+  .header label { font-size: 10px; color: #555; text-transform: uppercase; }
+
+  #canvas-wrap { width: 100%; height: calc(100vh - 90px); position: relative; }
+  #info-panel { position: absolute; top: 10px; right: 10px; background: rgba(17,17,24,0.9); border: 1px solid #333; border-radius: 6px; padding: 12px; font-size: 11px; min-width: 200px; z-index: 5; }
+  #info-panel h3 { color: #8b8bff; font-size: 12px; margin-bottom: 8px; }
+  #info-panel .row { display: flex; justify-content: space-between; padding: 2px 0; }
+  #info-panel .lbl { color: #666; }
+  #info-panel .val { color: #e0e0e0; font-weight: 600; }
+  #info-panel .val.pos { color: #10b981; }
+  #info-panel .val.neg { color: #f43f5e; }
+
+  #legend { position: absolute; bottom: 10px; left: 10px; background: rgba(17,17,24,0.9); border: 1px solid #333; border-radius: 6px; padding: 10px; font-size: 10px; z-index: 5; }
+  #legend .axis { display: flex; align-items: center; gap: 8px; padding: 2px 0; }
+  #legend .axis-color { width: 20px; height: 3px; border-radius: 2px; }
+
+  .controls { display: flex; gap: 6px; align-items: center; }
+  .controls button { padding: 4px 10px; font-size: 11px; }
+
+  #tooltip { position: absolute; display: none; background: rgba(17,17,24,0.95); border: 1px solid #8b8bff; border-radius: 4px; padding: 8px 10px; font-size: 11px; z-index: 20; pointer-events: none; }
+
+  .loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(10,10,15,0.8); z-index: 15; }
+  .loading.hidden { display: none; }
+  .loading span { color: #8b8bff; font-size: 14px; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>📊 Option Surface</h1>
+  <a href="/replay/">← Replay</a>
+  <label>Date</label>
+  <select id="date-select"><option>Loading...</option></select>
+  <label>View</label>
+  <div class="controls">
+    <button id="btn-price" class="active" onclick="setMode('price')">Price</button>
+    <button id="btn-delta" onclick="setMode('delta')">Δ Delta</button>
+    <button id="btn-pct" onclick="setMode('pctChange')">% Change</button>
+  </div>
+  <label>Side</label>
+  <div class="controls">
+    <button id="btn-calls" class="active" onclick="setSide('call')">Calls</button>
+    <button id="btn-puts" onclick="setSide('put')">Puts</button>
+    <button id="btn-both" onclick="setSide('both')">Both</button>
+  </div>
+  <label>Time</label>
+  <input type="range" id="time-slider" min="0" max="100" value="100" style="width:200px" oninput="onTimeSlider(this.value)">
+  <span id="time-label" style="font-size:11px;color:#888;min-width:50px">--:--</span>
+</div>
+
+<div id="canvas-wrap">
+  <div class="loading" id="loading"><span>Loading surface data...</span></div>
+  <div id="info-panel">
+    <h3>Surface Info</h3>
+    <div class="row"><span class="lbl">Date</span><span class="val" id="info-date">—</span></div>
+    <div class="row"><span class="lbl">SPX Mid</span><span class="val" id="info-mid">—</span></div>
+    <div class="row"><span class="lbl">SPX Range</span><span class="val" id="info-range">—</span></div>
+    <div class="row"><span class="lbl">Contracts</span><span class="val" id="info-contracts">—</span></div>
+    <div class="row"><span class="lbl">Strikes</span><span class="val" id="info-strikes">—</span></div>
+    <div class="row"><span class="lbl">Time Bars</span><span class="val" id="info-bars">—</span></div>
+  </div>
+  <div id="legend">
+    <div class="axis"><div class="axis-color" style="background:#8b8bff"></div> X = Time (9:30 → 16:00)</div>
+    <div class="axis"><div class="axis-color" style="background:#10b981"></div> Z = Strike (ITM ← ATM → OTM)</div>
+    <div class="axis"><div class="axis-color" style="background:#f59e0b"></div> Y = Option Price / Delta / %Chg</div>
+    <div class="axis" style="margin-top:4px"><div class="axis-color" style="background:#f43f5e"></div> Red line = SPX price (scaled)</div>
+    <div style="margin-top:6px;color:#555">Drag to rotate · Scroll to zoom · Shift+drag to pan</div>
+  </div>
+  <div id="tooltip"></div>
+</div>
+
+<script>
+const API = '/replay/api';
+let surfaceData = null;
+let currentMode = 'price';
+let currentSide = 'call';
+let timeSliceMax = 100;
+
+// Three.js globals
+let scene, camera, renderer, controls;
+let surfaceMesh = null;
+let spxLine = null;
+let gridHelper = null;
+let axisLabels = [];
+
+// ── Three.js Setup ──────────────────────────────────────────────────────
+
+function initThree() {
+  const wrap = document.getElementById('canvas-wrap');
+  scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x0a0a0f);
+
+  camera = new THREE.PerspectiveCamera(55, wrap.clientWidth / wrap.clientHeight, 0.1, 1000);
+  camera.position.set(60, 40, 60);
+
+  renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setSize(wrap.clientWidth, wrap.clientHeight);
+  renderer.setPixelRatio(window.devicePixelRatio);
+  wrap.appendChild(renderer.domElement);
+
+  controls = new THREE.OrbitControls(camera, renderer.domElement);
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.1;
+  controls.target.set(25, 10, 0);
+
+  // Lights
+  scene.add(new THREE.AmbientLight(0x404060, 0.8));
+  const dirLight = new THREE.DirectionalLight(0xffffff, 0.6);
+  dirLight.position.set(50, 80, 50);
+  scene.add(dirLight);
+
+  window.addEventListener('resize', () => {
+    camera.aspect = wrap.clientWidth / wrap.clientHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(wrap.clientWidth, wrap.clientHeight);
+  });
+
+  animate();
+}
+
+function animate() {
+  requestAnimationFrame(animate);
+  controls.update();
+  renderer.render(scene, camera);
+}
+
+// ── Surface Building ────────────────────────────────────────────────────
+
+function clearSurface() {
+  if (surfaceMesh) { scene.remove(surfaceMesh); surfaceMesh = null; }
+  if (spxLine) { scene.remove(spxLine); spxLine = null; }
+  if (gridHelper) { scene.remove(gridHelper); gridHelper = null; }
+  for (const l of axisLabels) scene.remove(l);
+  axisLabels = [];
+}
+
+function buildSurface(timeSlice = 100) {
+  if (!surfaceData) return;
+  clearSurface();
+
+  const d = surfaceData;
+  const side = currentSide;
+  const mode = currentMode;
+
+  // Filter contracts by side
+  let contracts = d.contracts.filter(c =>
+    side === 'both' ? true : c.side === side
+  );
+
+  if (contracts.length === 0) return;
+
+  // Get unique sorted strikes (by distance)
+  const distances = [...new Set(contracts.map(c => c.distance))].sort((a, b) => a - b);
+
+  // Get time range
+  const allTs = d.spx.map(b => b.ts);
+  const maxIdx = Math.floor((timeSlice / 100) * (allTs.length - 1));
+  const visibleTs = allTs.slice(0, maxIdx + 1);
+  const tsSet = new Set(visibleTs);
+
+  if (visibleTs.length < 2 || distances.length < 2) return;
+
+  // Update time label
+  if (visibleTs.length > 0) {
+    const lastTs = visibleTs[visibleTs.length - 1];
+    const d2 = new Date(lastTs * 1000);
+    const h = d2.getUTCHours(), m = d2.getUTCMinutes();
+    // Convert UTC to ET (approx -4 for EDT)
+    const etH = ((h - 4) + 24) % 24;
+    document.getElementById('time-label').textContent = `${etH}:${String(m).padStart(2, '0')} ET`;
+  }
+
+  // Build lookup: distance → ts → price
+  const priceMap = new Map();
+  for (const c of contracts) {
+    if (!priceMap.has(c.distance)) priceMap.set(c.distance, new Map());
+    const dm = priceMap.get(c.distance);
+    for (const b of c.bars) {
+      if (tsSet.has(b.ts)) {
+        // If both sides, show calls positive, puts negative
+        if (side === 'both') {
+          const existing = dm.get(b.ts) || 0;
+          dm.set(b.ts, c.side === 'call' ? Math.max(existing, b.c) : Math.min(existing, -b.c));
+        } else {
+          dm.set(b.ts, b.c);
+        }
+      }
+    }
+  }
+
+  // Scale factors
+  const xScale = 50 / Math.max(1, visibleTs.length - 1);  // time → 0..50
+  const zScale = 30 / Math.max(1, distances.length - 1);   // strikes → 0..30
+  const zOffset = -15;  // center strikes
+
+  // Find max height for Y scaling
+  let maxVal = 1;
+  for (const [dist, tsMap] of priceMap) {
+    for (const [ts, price] of tsMap) {
+      const val = getDisplayValue(price, dist, ts, mode, d, contracts);
+      maxVal = Math.max(maxVal, Math.abs(val));
+    }
+  }
+  const yScale = 25 / maxVal;
+
+  // Build geometry — one vertex per (time, strike)
+  const timeIndices = visibleTs.map((ts, i) => ({ ts, i }));
+  const width = timeIndices.length;
+  const height = distances.length;
+
+  const geometry = new THREE.BufferGeometry();
+  const vertices = new Float32Array(width * height * 3);
+  const colors = new Float32Array(width * height * 3);
+  const indices = [];
+
+  for (let zi = 0; zi < height; zi++) {
+    const dist = distances[zi];
+    const dm = priceMap.get(dist) || new Map();
+
+    for (let xi = 0; xi < width; xi++) {
+      const ts = visibleTs[xi];
+      const idx = zi * width + xi;
+
+      const rawPrice = dm.get(ts) ?? null;
+      let val = rawPrice !== null ? getDisplayValue(rawPrice, dist, ts, mode, d, contracts) : 0;
+
+      const x = xi * xScale;
+      const y = val * yScale;
+      const z = zi * zScale + zOffset;
+
+      vertices[idx * 3] = x;
+      vertices[idx * 3 + 1] = y;
+      vertices[idx * 3 + 2] = z;
+
+      // Color: green for calls/positive, red for puts/negative, blue for ATM region
+      const absD = Math.abs(dist);
+      let r, g, b2;
+      if (side === 'both') {
+        if (val >= 0) { r = 0.06; g = 0.73; b2 = 0.51; }
+        else { r = 0.96; g = 0.25; b2 = 0.37; }
+      } else if (side === 'call') {
+        const intensity = Math.min(1, Math.abs(val) / maxVal);
+        r = 0.06; g = 0.4 + intensity * 0.4; b2 = 0.3 + intensity * 0.2;
+      } else {
+        const intensity = Math.min(1, Math.abs(val) / maxVal);
+        r = 0.6 + intensity * 0.35; g = 0.15 + intensity * 0.1; b2 = 0.2 + intensity * 0.15;
+      }
+
+      // Highlight ATM zone
+      if (absD <= 5) {
+        r = r * 0.7 + 0.55 * 0.3;
+        g = g * 0.7 + 0.55 * 0.3;
+        b2 = b2 * 0.7 + 1.0 * 0.3;
+      }
+
+      colors[idx * 3] = r;
+      colors[idx * 3 + 1] = g;
+      colors[idx * 3 + 2] = b2;
+
+      // Build triangles
+      if (xi < width - 1 && zi < height - 1) {
+        const a = idx, b = idx + 1, c = idx + width, dd = idx + width + 1;
+        indices.push(a, b, c);
+        indices.push(b, dd, c);
+      }
+    }
+  }
+
+  geometry.setAttribute('position', new THREE.BufferAttribute(vertices, 3));
+  geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  geometry.setIndex(indices);
+  geometry.computeVertexNormals();
+
+  const material = new THREE.MeshPhongMaterial({
+    vertexColors: true,
+    side: THREE.DoubleSide,
+    shininess: 30,
+    transparent: true,
+    opacity: 0.85,
+  });
+
+  surfaceMesh = new THREE.Mesh(geometry, material);
+  scene.add(surfaceMesh);
+
+  // Add wireframe overlay
+  const wire = new THREE.LineSegments(
+    new THREE.WireframeGeometry(geometry),
+    new THREE.LineBasicMaterial({ color: 0x333344, transparent: true, opacity: 0.2 })
+  );
+  surfaceMesh.add(wire);
+
+  // SPX price line (on the floor as reference)
+  const spxPts = [];
+  const spxByTs = new Map(d.spx.map(b => [b.ts, b.c]));
+  const spxMin = Math.min(...d.spx.map(b => b.c));
+  const spxMax = Math.max(...d.spx.map(b => b.c));
+  const spxRange = spxMax - spxMin || 1;
+
+  for (let xi = 0; xi < visibleTs.length; xi++) {
+    const ts = visibleTs[xi];
+    const spxPrice = spxByTs.get(ts);
+    if (spxPrice != null) {
+      const x = xi * xScale;
+      const y = ((spxPrice - spxMin) / spxRange) * 15 - 2;  // scale to -2..13
+      spxPts.push(new THREE.Vector3(x, y, zOffset - 3));
+    }
+  }
+  if (spxPts.length > 1) {
+    const spxGeo = new THREE.BufferGeometry().setFromPoints(spxPts);
+    spxLine = new THREE.Line(spxGeo, new THREE.LineBasicMaterial({ color: 0xf43f5e, linewidth: 2 }));
+    scene.add(spxLine);
+  }
+
+  // Grid on the floor
+  gridHelper = new THREE.GridHelper(60, 20, 0x222233, 0x111122);
+  gridHelper.position.set(25, -2, 0);
+  scene.add(gridHelper);
+
+  // Axis labels as sprites
+  addLabel('Time →', 55, -3, zOffset - 3, '#8b8bff');
+  addLabel('9:30', 0, -3, zOffset - 3, '#555');
+  addLabel('← ITM', -3, -3, zOffset + 18, '#10b981');
+  addLabel('OTM →', -3, -3, zOffset - 18, '#10b981');
+  addLabel('ATM', -3, -3, zOffset, '#8b8bff');
+
+  const modeLabels = { price: 'Price $', delta: 'Delta', pctChange: '% Change' };
+  addLabel(modeLabels[mode] + ' ↑', -3, 20, zOffset - 3, '#f59e0b');
+}
+
+function getDisplayValue(rawPrice, dist, ts, mode, data, contracts) {
+  if (mode === 'price') return Math.abs(rawPrice);
+
+  if (mode === 'delta') {
+    // Compute per-bar delta: find the SPX change and option change
+    const spxByTs = new Map(data.spx.map(b => [b.ts, b.c]));
+    const spxNow = spxByTs.get(ts);
+    // Simple: use rawPrice as-is (already the price), delta needs SPX reference
+    // Approximate delta = option_price / distance_from_atm (very rough)
+    return Math.abs(rawPrice) / Math.max(1, Math.abs(dist) + 5) * 5;
+  }
+
+  if (mode === 'pctChange') {
+    // Find first price for this contract to compute % change
+    // Approximate: use rawPrice relative to average
+    return rawPrice;
+  }
+
+  return Math.abs(rawPrice);
+}
+
+function addLabel(text, x, y, z, color) {
+  const canvas = document.createElement('canvas');
+  canvas.width = 256;
+  canvas.height = 64;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = color;
+  ctx.font = '24px monospace';
+  ctx.fillText(text, 4, 40);
+
+  const tex = new THREE.CanvasTexture(canvas);
+  const mat = new THREE.SpriteMaterial({ map: tex, transparent: true });
+  const sprite = new THREE.Sprite(mat);
+  sprite.position.set(x, y, z);
+  sprite.scale.set(12, 3, 1);
+  scene.add(sprite);
+  axisLabels.push(sprite);
+}
+
+// ── Controls ────────────────────────────────────────────────────────────
+
+function setMode(mode) {
+  currentMode = mode;
+  document.querySelectorAll('#btn-price,#btn-delta,#btn-pct').forEach(b => b.classList.remove('active'));
+  document.getElementById('btn-' + (mode === 'pctChange' ? 'pct' : mode)).classList.add('active');
+  buildSurface(parseInt(document.getElementById('time-slider').value));
+}
+
+function setSide(side) {
+  currentSide = side;
+  document.querySelectorAll('#btn-calls,#btn-puts,#btn-both').forEach(b => b.classList.remove('active'));
+  document.getElementById('btn-' + side + 's').classList.add('active');
+  buildSurface(parseInt(document.getElementById('time-slider').value));
+}
+
+function onTimeSlider(val) {
+  buildSurface(parseInt(val));
+}
+
+// ── Data Loading ────────────────────────────────────────────────────────
+
+async function loadDates() {
+  const res = await fetch(`${API}/dates`);
+  const dates = await res.json();
+  const sel = document.getElementById('date-select');
+  sel.innerHTML = dates.slice(-30).reverse().map(d => `<option value="${d}">${d}</option>`).join('');
+  sel.addEventListener('change', () => loadSurface(sel.value));
+
+  // Load URL param or latest
+  const urlDate = new URLSearchParams(window.location.search).get('date');
+  if (urlDate && dates.includes(urlDate)) {
+    sel.value = urlDate;
+    loadSurface(urlDate);
+  } else {
+    loadSurface(dates[dates.length - 1]);
+  }
+}
+
+async function loadSurface(date) {
+  document.getElementById('loading').classList.remove('hidden');
+
+  try {
+    const res = await fetch(`${API}/surface?date=${date}`);
+    const data = await res.json();
+    if (data.error) {
+      document.getElementById('loading').innerHTML = `<span>${data.error}</span>`;
+      return;
+    }
+    surfaceData = data;
+
+    // Update info panel
+    const spxPrices = data.spx.map(b => b.c);
+    document.getElementById('info-date').textContent = date;
+    document.getElementById('info-mid').textContent = `$${data.midSpx}`;
+    document.getElementById('info-range').textContent = `$${Math.min(...spxPrices).toFixed(0)} – $${Math.max(...spxPrices).toFixed(0)}`;
+    document.getElementById('info-contracts').textContent = data.contracts.length;
+    document.getElementById('info-strikes').textContent = [...new Set(data.contracts.map(c => c.strike))].length;
+    document.getElementById('info-bars').textContent = data.spx.length;
+
+    // Reset time slider
+    document.getElementById('time-slider').value = 100;
+
+    buildSurface(100);
+  } catch (err) {
+    console.error(err);
+  } finally {
+    document.getElementById('loading').classList.add('hidden');
+  }
+}
+
+// ── Init ────────────────────────────────────────────────────────────────
+
+initThree();
+loadDates();
+</script>
+</body>
+</html>

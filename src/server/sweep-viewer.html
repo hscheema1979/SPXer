@@ -86,6 +86,26 @@
   .hl td { background: #1a1a2f !important; }
 
   .footer { padding: 8px 16px; text-align: center; color: #333; font-size: 10px; border-top: 1px solid #1a1a24; }
+
+  /* ── Delete button ── */
+  .del-btn { background: none; border: none; color: #333; cursor: pointer; font-size: 12px; padding: 2px 4px; border-radius: 3px; opacity: 0; transition: opacity 0.1s; }
+  tr:hover .del-btn { opacity: 0.6; }
+  .del-btn:hover { opacity: 1 !important; color: #f43f5e; background: #f43f5e18; }
+
+  /* ── Delete confirmation modal ── */
+  .del-modal-overlay { display: none; position: fixed; inset: 0; z-index: 100; background: rgba(0,0,0,0.6); justify-content: center; align-items: center; }
+  .del-modal-overlay.active { display: flex; }
+  .del-modal { background: #111118; border: 1px solid #333; border-radius: 8px; padding: 20px 24px; min-width: 360px; max-width: 480px; }
+  .del-modal h3 { font-size: 14px; color: #f43f5e; margin-bottom: 12px; }
+  .del-modal p { font-size: 12px; color: #aaa; margin-bottom: 8px; line-height: 1.5; }
+  .del-modal .cfg-name { color: #e0e0e0; font-weight: 600; }
+  .del-modal .del-stats { color: #888; font-size: 11px; margin-bottom: 16px; }
+  .del-modal-actions { display: flex; gap: 10px; justify-content: flex-end; }
+  .del-modal-actions button { padding: 6px 16px; border-radius: 4px; font-family: inherit; font-size: 12px; cursor: pointer; }
+  .del-cancel { background: #1a1a24; color: #888; border: 1px solid #333; }
+  .del-cancel:hover { color: #e0e0e0; border-color: #555; }
+  .del-confirm { background: #f43f5e20; color: #f43f5e; border: 1px solid #f43f5e55; }
+  .del-confirm:hover { background: #f43f5e33; }
 </style>
 </head>
 <body>
@@ -184,11 +204,25 @@
     <th data-col="avgEntryPrice">Avg Entry$</th>
     <th data-col="days">Days</th>
     <th>P&L</th>
+    <th style="width:30px"></th>
   </tr></thead>
-  <tbody id="tbody"><tr><td colspan="14" style="text-align:center;padding:40px;color:#444">Loading...</td></tr></tbody>
+  <tbody id="tbody"><tr><td colspan="15" style="text-align:center;padding:40px;color:#444">Loading...</td></tr></tbody>
 </table>
 </div>
 <div class="footer" id="footer"></div>
+
+<!-- Delete confirmation modal -->
+<div class="del-modal-overlay" id="del-overlay">
+  <div class="del-modal">
+    <h3>🗑 Delete Config</h3>
+    <p>Permanently delete <span class="cfg-name" id="del-name"></span>?</p>
+    <p class="del-stats" id="del-stats"></p>
+    <div class="del-modal-actions">
+      <button class="del-cancel" onclick="closeDeleteModal()">Cancel</button>
+      <button class="del-confirm" id="del-confirm-btn">Delete</button>
+    </div>
+  </div>
+</div>
 
 <script>
 const API = '/replay/api';
@@ -312,7 +346,7 @@ function renderTable() {
   const tbody = document.getElementById('tbody');
 
   if (rows.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="14" style="text-align:center;padding:40px;color:#444">No results match filters</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="15" style="text-align:center;padding:40px;color:#444">No results match filters</td></tr>';
     return;
   }
 
@@ -351,6 +385,7 @@ function renderTable() {
       <td>${r.avgEntryPrice ? '$' + r.avgEntryPrice.toFixed(1) : '-'}</td>
       <td>${r.days}</td>
       <td><span class="bar ${bc}" style="width:${bw}px"></span></td>
+      <td><button class="del-btn" onclick="event.stopPropagation();openDeleteModal('${r.configId}','${(r.name||r.configId).replace(/'/g,"\\'")}',${r.days},${r.trades})" title="Delete config">🗑</button></td>
     </tr>`;
   }).join('');
 
@@ -385,7 +420,7 @@ async function toggleDaily(configId, rowEl) {
   tr.className = 'daily-row';
   tr.dataset.config = configId;
   const td = document.createElement('td');
-  td.colSpan = 14;
+  td.colSpan = 15;
 
   // Build analysis summary if available
   let analysisHtml = '';
@@ -536,6 +571,52 @@ function replayUrl(configId, date) {
   return url;
 }
 
+// ── Delete config ──
+
+let pendingDeleteId = null;
+
+function openDeleteModal(configId, name, days, trades) {
+  pendingDeleteId = configId;
+  document.getElementById('del-name').textContent = `${name} (${configId})`;
+  document.getElementById('del-stats').textContent = `This will permanently remove ${days} day(s) of results and ${trades} trade records.`;
+  document.getElementById('del-overlay').classList.add('active');
+  document.getElementById('del-confirm-btn').onclick = confirmDelete;
+}
+
+function closeDeleteModal() {
+  pendingDeleteId = null;
+  document.getElementById('del-overlay').classList.remove('active');
+}
+
+async function confirmDelete() {
+  if (!pendingDeleteId) return;
+  const configId = pendingDeleteId;
+  closeDeleteModal();
+
+  try {
+    const res = await fetch(`${API}/config/${encodeURIComponent(configId)}`, { method: 'DELETE' });
+    const data = await res.json();
+    if (res.ok) {
+      // Remove from in-memory data and re-render
+      allRows = allRows.filter(r => r.configId !== configId);
+      applyFilters();
+      document.getElementById('total-count').textContent = allRows.length;
+    } else {
+      alert(`Delete failed: ${data.error || 'Unknown error'}`);
+    }
+  } catch (err) {
+    alert(`Delete failed: ${err.message}`);
+  }
+}
+
+// Close modal on Escape or overlay click
+document.getElementById('del-overlay').addEventListener('click', (e) => {
+  if (e.target.id === 'del-overlay') closeDeleteModal();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closeDeleteModal();
+});
+
 // ── Load ──
 
 async function loadData() {
@@ -546,7 +627,7 @@ async function loadData() {
   const maxEntry = document.getElementById('max-entry-price').value;
   const maxConcurrent = document.getElementById('max-concurrent').value;
   const maxTradesDay = document.getElementById('max-trades-day').value;
-  let url = `${API}/sweep?limit=2000&minDays=${minDays}`;
+  let url = `${API}/sweep?limit=5000&minDays=${minDays}`;
   if (maxEntry && maxEntry !== '0') url += `&maxEntryPrice=${maxEntry}`;
   if (maxConcurrent && maxConcurrent !== '0') url += `&maxConcurrent=${maxConcurrent}`;
   if (maxTradesDay && maxTradesDay !== '0') url += `&maxTradesPerDay=${maxTradesDay}`;
