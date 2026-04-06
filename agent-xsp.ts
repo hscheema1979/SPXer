@@ -94,9 +94,90 @@ const REJECTION_BACKOFF_SECS = 300;
 let rejectionBackoffUntil = 0;
 let sessionHalted = false;
 
-// ── Strategy State ──────────────────────────────────────────────────────────
+// ── Strategy State — persisted across cycles, survives restarts ─────────────
 
 let strategyState: StrategyState = createInitialState();
+
+// ── Session state file — survives restarts ───────────────────────────────────
+
+const XSP_SESSION_FILE = path.join(process.cwd(), 'logs', 'xsp-session.json');
+
+interface XspSessionState {
+  date: string;
+  dailyPnl: number;
+  tradesTotal: number;
+  winsTotal: number;
+  startedAt: number;
+  strategyState?: {
+    directionCross: string | null;
+    prevDirectionHmaFast: number | null;
+    prevDirectionHmaSlow: number | null;
+    lastDirectionBarTs: number | null;
+    exitCross: string | null;
+    prevExitHmaFast: number | null;
+    prevExitHmaSlow: number | null;
+    lastExitBarTs: number | null;
+    lastEntryTs: number;
+    dailyPnl: number;
+    tradesCompleted: number;
+    positions: Array<CorePosition>;
+  };
+}
+
+function loadXspSession(): XspSessionState | null {
+  try {
+    const raw = fs.readFileSync(XSP_SESSION_FILE, 'utf8');
+    return JSON.parse(raw) as XspSessionState;
+  } catch { return null; }
+}
+
+function saveXspSession(): void {
+  try {
+    fs.mkdirSync(path.join(process.cwd(), 'logs'), { recursive: true });
+    const posArr = Array.from(strategyState.positions.values());
+    fs.writeFileSync(XSP_SESSION_FILE, JSON.stringify({
+      date: dailyDate,
+      dailyPnl,
+      tradesTotal,
+      winsTotal,
+      startedAt: Date.now(),
+      strategyState: {
+        directionCross: strategyState.directionCross,
+        prevDirectionHmaFast: strategyState.prevDirectionHmaFast,
+        prevDirectionHmaSlow: strategyState.prevDirectionHmaSlow,
+        lastDirectionBarTs: strategyState.lastDirectionBarTs,
+        exitCross: strategyState.exitCross,
+        prevExitHmaFast: strategyState.prevExitHmaFast,
+        prevExitHmaSlow: strategyState.prevExitHmaSlow,
+        lastExitBarTs: strategyState.lastExitBarTs,
+        lastEntryTs: strategyState.lastEntryTs,
+        dailyPnl: strategyState.dailyPnl,
+        tradesCompleted: strategyState.tradesCompleted,
+        positions: posArr,
+      },
+    }));
+  } catch {}
+}
+
+function restoreXspStrategyState(session: XspSessionState): void {
+  if (!session.strategyState) return;
+  const ss = session.strategyState;
+  strategyState.directionCross = ss.directionCross as any;
+  strategyState.prevDirectionHmaFast = ss.prevDirectionHmaFast;
+  strategyState.prevDirectionHmaSlow = ss.prevDirectionHmaSlow;
+  strategyState.lastDirectionBarTs = ss.lastDirectionBarTs;
+  strategyState.exitCross = ss.exitCross as any;
+  strategyState.prevExitHmaFast = ss.prevExitHmaFast;
+  strategyState.prevExitHmaSlow = ss.prevExitHmaSlow;
+  strategyState.lastExitBarTs = ss.lastExitBarTs;
+  strategyState.lastEntryTs = ss.lastEntryTs;
+  strategyState.dailyPnl = ss.dailyPnl;
+  strategyState.tradesCompleted = ss.tradesCompleted;
+  strategyState.positions = new Map();
+  for (const p of ss.positions ?? []) {
+    strategyState.positions.set(p.id, p);
+  }
+}
 
 // ── Price Stream TP/SL Callback ─────────────────────────────────────────────
 
@@ -691,7 +772,8 @@ async function runCycle(): Promise<number> {
     priceStream.stop();
   }
 
-  // 10. Report
+  // 10. Save session & report
+  saveXspSession();
   writeStatus({
     ts: Date.now(),
     timeET: snap.timeET,
@@ -849,21 +931,38 @@ async function main(): Promise<void> {
   while (true) {
     console.log('[xsp] Waiting for market open...');
     await sleepUntilMarketOpen();
-    console.log('[xsp] Market open — starting trading session');
 
-    const cancelledPreOpen = await cancelAllOpenOrders();
-    if (cancelledPreOpen > 0) console.log(`[xsp] Cancelled ${cancelledPreOpen} stale order(s) pre-open`);
+    const today = todayET();
+    const existingSession = loadXspSession();
+    const isResume = existingSession?.date === today;
 
-    // Reset daily state
-    dailyPnl = 0;
-    tradesTotal = 0;
-    winsTotal = 0;
-    consecutiveRejections = 0;
-    rejectionBackoffUntil = 0;
-    sessionHalted = false;
-    dailyDate = todayET();
-    strategyState = createInitialState();
-    guard.resetIfNewDay();
+    if (isResume) {
+      dailyPnl         = existingSession!.dailyPnl;
+      tradesTotal      = existingSession!.tradesTotal;
+      winsTotal        = existingSession!.winsTotal;
+      dailyDate        = today;
+      consecutiveRejections = 0;
+      rejectionBackoffUntil = 0;
+      sessionHalted    = false;
+      restoreXspStrategyState(existingSession!);
+      console.log(`[xsp] ⚡ RESUMING session for ${today} (P&L $${dailyPnl.toFixed(0)}, ${tradesTotal} trades, ${strategyState.positions.size} positions in state)`);
+    } else {
+      console.log('[xsp] Market open — starting trading session');
+
+      const cancelledPreOpen = await cancelAllOpenOrders();
+      if (cancelledPreOpen > 0) console.log(`[xsp] Cancelled ${cancelledPreOpen} stale order(s) pre-open`);
+
+      dailyPnl = 0;
+      tradesTotal = 0;
+      winsTotal = 0;
+      consecutiveRejections = 0;
+      rejectionBackoffUntil = 0;
+      sessionHalted = false;
+      dailyDate = today;
+      strategyState = createInitialState();
+      guard.resetIfNewDay();
+      saveXspSession();
+    }
 
     // Dynamic sizing
     if (CFG.sizing.riskPercentOfAccount) {
