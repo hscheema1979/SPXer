@@ -7,6 +7,7 @@
 #   20 16 * * 1-5  /home/ubuntu/SPXer/scripts/agent-scheduler.sh stop
 
 set -euo pipefail
+export PATH="/home/ubuntu/.npm-global/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
 cd /home/ubuntu/SPXer
 
 ACTION="${1:-}"

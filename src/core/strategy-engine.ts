@@ -169,12 +169,19 @@ function detectHmaCross(
     return { cross: null, prevFast, prevSlow, lastBarTs, freshCross: false };
   }
 
-  const lastBar = bars[bars.length - 1];
+  const hmaFastKey = `hma${fastPeriod}`;
+  const hmaSlowKey = `hma${slowPeriod}`;
 
-  // Dedup: already processed this candle
-  if (lastBarTs !== null && lastBar.ts <= lastBarTs) {
-    // Return the current cross direction (unchanged) and no fresh cross
-    // We need to derive the current cross from prevFast/prevSlow
+  // Find all bars newer than the last processed bar.
+  // This ensures we don't miss crosses that happened in intermediate bars
+  // between polling cycles (critical for live agents with multi-minute TFs).
+  // On first call (lastBarTs=null), process ALL bars to catch historical crosses.
+  const newBars = lastBarTs !== null
+    ? bars.filter(b => b.ts > lastBarTs)
+    : bars;
+
+  // No new bars since last check
+  if (newBars.length === 0) {
     let currentCross: Direction | null = null;
     if (prevFast !== null && prevSlow !== null) {
       currentCross = prevFast > prevSlow ? 'bullish' : prevFast < prevSlow ? 'bearish' : null;
@@ -182,61 +189,66 @@ function detectHmaCross(
     return { cross: currentCross, prevFast, prevSlow, lastBarTs, freshCross: false };
   }
 
-  // Read HMA values from the bar's indicators
-  const hmaFastKey = `hma${fastPeriod}`;
-  const hmaSlowKey = `hma${slowPeriod}`;
-  const currentFast = lastBar.indicators[hmaFastKey] ?? null;
-  const currentSlow = lastBar.indicators[hmaSlowKey] ?? null;
-
-  // Can't detect cross without both values
-  if (currentFast === null || currentSlow === null) {
-    return {
-      cross: null,
-      prevFast: currentFast,
-      prevSlow: currentSlow,
-      lastBarTs: lastBar.ts,
-      freshCross: false,
-    };
-  }
-
-  // Can't detect cross without previous values (first bar)
-  if (prevFast === null || prevSlow === null) {
-    // Determine current relationship (no cross yet, just set state)
-    const cross = currentFast > currentSlow ? 'bullish' : currentFast < currentSlow ? 'bearish' : null;
-    return {
-      cross,
-      prevFast: currentFast,
-      prevSlow: currentSlow,
-      lastBarTs: lastBar.ts,
-      freshCross: false,
-    };
-  }
-
-  // Detect crossover: previous fast was below/at slow, now fast is above (bullish)
-  //                    previous fast was above/at slow, now fast is below (bearish)
-  const prevDiff = prevFast - prevSlow;
-  const currDiff = currentFast - currentSlow;
+  // Walk through all new bars sequentially to catch every cross
+  let curFast = prevFast;
+  let curSlow = prevSlow;
   let freshCross = false;
   let cross: Direction | null = null;
+  let processedTs = lastBarTs;
 
-  if (prevDiff <= 0 && currDiff > 0) {
-    // Bullish cross: fast crossed above slow
-    cross = 'bullish';
-    freshCross = true;
-  } else if (prevDiff >= 0 && currDiff < 0) {
-    // Bearish cross: fast crossed below slow
-    cross = 'bearish';
-    freshCross = true;
-  } else {
-    // No cross — maintain the current relationship as the cross direction
-    cross = currDiff > 0 ? 'bullish' : currDiff < 0 ? 'bearish' : null;
+  // Derive current cross direction from initial state
+  if (curFast !== null && curSlow !== null) {
+    cross = curFast > curSlow ? 'bullish' : curFast < curSlow ? 'bearish' : null;
+  }
+
+  for (const bar of newBars) {
+    const barFast = bar.indicators[hmaFastKey] ?? null;
+    const barSlow = bar.indicators[hmaSlowKey] ?? null;
+
+    if (barFast === null || barSlow === null) {
+      // Can't evaluate this bar — skip but update ts
+      curFast = barFast;
+      curSlow = barSlow;
+      processedTs = bar.ts;
+      continue;
+    }
+
+    if (curFast === null || curSlow === null) {
+      // First bar with values — seed state, no cross yet
+      cross = barFast > barSlow ? 'bullish' : barFast < barSlow ? 'bearish' : null;
+      curFast = barFast;
+      curSlow = barSlow;
+      processedTs = bar.ts;
+      continue;
+    }
+
+    // Check for crossover
+    const prevDiff = curFast - curSlow;
+    const currDiff = barFast - barSlow;
+
+    if (prevDiff <= 0 && currDiff > 0) {
+      cross = 'bullish';
+      freshCross = true;
+    } else if (prevDiff >= 0 && currDiff < 0) {
+      cross = 'bearish';
+      freshCross = true;
+    } else {
+      // No cross on this bar — update direction but don't set freshCross
+      cross = currDiff > 0 ? 'bullish' : currDiff < 0 ? 'bearish' : null;
+      // Note: freshCross stays true if a cross was detected on an earlier bar
+      // in this batch. The LAST cross in the batch wins (most recent signal).
+    }
+
+    curFast = barFast;
+    curSlow = barSlow;
+    processedTs = bar.ts;
   }
 
   return {
     cross,
-    prevFast: currentFast,
-    prevSlow: currentSlow,
-    lastBarTs: lastBar.ts,
+    prevFast: curFast,
+    prevSlow: curSlow,
+    lastBarTs: processedTs,
     freshCross,
   };
 }

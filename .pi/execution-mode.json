@@ -3,19 +3,23 @@
   "status": "active",
   "pid": 2069905,
   "plan": {
-    "id": "plan-1775256918224",
-    "text": "Build a 3-panel option surface analysis tool using Plotly.js:\n\n1. **API endpoint** — Already done (`/replay/api/surface`), but needs delta computation added server-side\n2. **Surface viewer HTML** — Replace Three.js with Plotly.js, 3-panel layout:\n   - Panel 1: 3D Price Surface (calls green, puts red, SPX reference)\n   - Panel 2: 2D Delta Heatmap (time × strike, color = realized delta)  \n   - Panel 3: Synced 2D charts (SPX + selected contract + rolling delta)\n3. **Wire up interactivity** — Click heatmap to select contract, time crosshair sync, date picker\n4. **Test & restart** — Verify data loads, restart replay-viewer",
+    "id": "plan-1775491489243",
+    "text": "Fix live-replay parity issues (Priority 2 from code review):\n\n1. **XSP session persistence** — Copy session save/load from agent.ts into agent-xsp.ts so it survives restarts with HMA state intact\n\n2. **Pass positionBars in live agents** — Both agents need to pass bar high/low data to tick() so intrabar exit pricing works if enabled. Currently missing from TickInput construction.\n\n3. **Use bar timestamp not wall clock** — Change tick input `ts` from `Date.now()` to the latest bar's timestamp in both agents, so time-based checks (cutoff, cooldown) match replay behavior.\n\n4. **Restart agents** — Restart both agents with the fixes applied.\n\n5. **Verify** — Check logs confirm agents are cycling, session files exist for both, and trades execute on next cross.",
     "phases": [
       {
-        "name": "Enhance API endpoint with delta computation",
+        "name": "XSP session persistence",
         "status": "in_progress"
       },
       {
-        "name": "Build Plotly.js 3-panel surface viewer",
+        "name": "Pass positionBars in both agents",
         "status": "pending"
       },
       {
-        "name": "Test and deploy",
+        "name": "Use bar timestamp in both agents",
+        "status": "pending"
+      },
+      {
+        "name": "Restart and verify",
         "status": "pending"
       }
     ],
@@ -27,7 +31,7 @@
     "lastResponseTokens": 0
   },
   "lastCheckpoint": null,
-  "startedAt": "2026-04-03T22:55:18.224Z",
-  "updatedAt": "2026-04-03T22:55:18.224Z",
+  "startedAt": "2026-04-06T16:04:49.244Z",
+  "updatedAt": "2026-04-06T16:04:49.244Z",
   "interruptedAt": "2026-04-03T06:48:12.379Z"
 }
