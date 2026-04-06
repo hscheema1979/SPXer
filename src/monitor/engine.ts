@@ -7,6 +7,8 @@
 
 import { nowET, todayET } from '../utils/et-time';
 import type { Severity } from './types';
+import { isMaintenanceActive } from './types';
+import { loadMonitorState, buildStateContext } from './state';
 
 // ── Market Hours Scheduler ──────────────────────────────────────────────────
 
@@ -237,7 +239,7 @@ export class AlertDedup {
 
 // ── Session Cycle Manager ───────────────────────────────────────────────────
 
-const DEFAULT_RESET_INTERVAL = 20;
+const DEFAULT_RESET_INTERVAL = 120; // 120 cycles × 30s = 1 hour
 
 /**
  * Tracks cycle count and manages LLM session resets to prevent
@@ -279,8 +281,38 @@ export class SessionCycleManager {
   }
 
   /**
-   * Build a carryover summary to inject into a fresh session.
-   * Takes the last LLM assessment and condenses it into a context preamble.
+   * Build a compaction prompt — asks the LLM to summarize the session
+   * before we reset it. The summary is stored in persistent state.
+   */
+  buildCompactionPrompt(): string {
+    return [
+      'SESSION COMPACTION: Your conversation history is about to be reset for memory management.',
+      'Please produce a structured summary of everything important from this monitoring session.',
+      '',
+      'Include in your summary:',
+      '- Current positions and their P&L status',
+      '- Any actions you took and their outcomes',
+      '- Any ongoing issues or concerns',
+      '- Trade entries/exits you observed',
+      '- Current market direction and agent alignment',
+      '- Rejection counts and whether they are resolved',
+      '',
+      'Format as a JSON object:',
+      '```json',
+      '{',
+      '  "severity": "info",',
+      '  "assessment": "COMPACTION SUMMARY: [your full summary here]",',
+      '  "positions_summary": "description of current positions",',
+      '  "issues_active": ["list of unresolved issues"],',
+      '  "issues_resolved": ["list of issues that were resolved this session"],',
+      '  "actions_taken": ["list of actions taken this session"]',
+      '}',
+      '```',
+    ].join('\n');
+  }
+
+  /**
+   * Build carryover context from persistent state + last compaction summary.
    */
   buildCarryoverSummary(lastAssessment?: string): string {
     const text = lastAssessment ?? this.lastAssessment;
@@ -288,14 +320,13 @@ export class SessionCycleManager {
       return 'This is a fresh monitoring session. No prior context.';
     }
 
-    // Truncate to ~500 chars to keep context tight
-    const truncated = text.length > 500 ? text.slice(0, 497) + '...' : text;
-
     return [
-      'CONTEXT FROM PREVIOUS SESSION (session was reset to save memory):',
-      `Last assessment (cycle #${this.cycle - 1}): ${truncated}`,
+      'CONTEXT FROM PREVIOUS SESSION (compacted to save memory):',
       '',
-      'Continue monitoring from this state. Do not repeat issues already noted unless they have changed.',
+      text,
+      '',
+      'Continue monitoring from this state. You have FULL HISTORY above.',
+      'Do not repeat actions already taken — check the persistent state for cooldowns.',
     ].join('\n');
   }
 }
@@ -333,6 +364,24 @@ export async function collectPreLLMData(
   const header = `═══ MONITOR CYCLE #${cycle} | ${timeStr} | Mode: ${mode.toUpperCase()} ═══`;
 
   const sections: string[] = [header, ''];
+
+  // Inject persistent state — actions taken, cooldowns, day summary
+  const persistentState = loadMonitorState();
+  persistentState.cycle = cycle;
+  sections.push(buildStateContext(persistentState), '');
+
+  // Check maintenance mode
+  const maint = isMaintenanceActive();
+  if (maint.active) {
+    sections.push(
+      '## ⚠️ MAINTENANCE MODE ACTIVE',
+      `Reason: ${maint.reason}`,
+      'All remediation tools (close_position, cancel_order, cancel_all_orders, stop_agent) are BLOCKED.',
+      'Do NOT attempt to close positions or cancel orders. The agent is being restarted.',
+      'Positions with OTOCO bracket orders are protected server-side at Tradier.',
+      '',
+    );
+  }
 
   try {
     if (mode === 'overnight') {

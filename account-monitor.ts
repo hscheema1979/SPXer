@@ -226,7 +226,7 @@ async function main(): Promise<void> {
 
   // Core components
   const dedup = new AlertDedup();
-  const cycleMgr = new SessionCycleManager(20); // Reset every 20 cycles
+  const cycleMgr = new SessionCycleManager(120); // 120 cycles × 30s = 1 hour
   const tools = buildToolAdapter();
 
   // Create initial session
@@ -246,13 +246,29 @@ async function main(): Promise<void> {
 
     const cycle = cycleMgr.tick();
 
-    // Session reset check — prevent context window bloat
+    // Session compaction — compact context every ~1 hour instead of nuking it
     if (cycleMgr.shouldReset()) {
       logEntry(
-        `Session reset at cycle #${cycle} (every 20 cycles to prevent OOM)`,
+        `Session compaction at cycle #${cycle} (every ${120} cycles / ~1 hour)`,
         'info',
       );
       try {
+        // Ask LLM to summarize before we reset
+        const compactionPrompt = cycleMgr.buildCompactionPrompt();
+        responseAccumulator = '';
+        await session.prompt(compactionPrompt);
+        const compactionText = responseAccumulator;
+        
+        // Store compaction summary in persistent state
+        const { loadMonitorState, saveMonitorState } = await import('./src/monitor/state');
+        const state = loadMonitorState();
+        state.daySummary = compactionText.slice(0, 2000); // cap at 2k chars
+        saveMonitorState(state);
+        
+        cycleMgr.setLastAssessment(compactionText);
+        logEntry(`Compaction complete — summary saved to persistent state`, 'info');
+
+        // Now recreate session with compacted context
         await createSession(
           authStorage,
           modelRegistry,
@@ -260,8 +276,17 @@ async function main(): Promise<void> {
           settingsManager,
         );
       } catch (e: any) {
-        logEntry(`Session recreation failed: ${e.message}`, 'alert');
-        // Continue with old session — better than crashing
+        logEntry(`Session compaction failed: ${e.message} — recreating fresh`, 'alert');
+        try {
+          await createSession(
+            authStorage,
+            modelRegistry,
+            model,
+            settingsManager,
+          );
+        } catch {
+          // Will retry next cycle
+        }
       }
     }
 

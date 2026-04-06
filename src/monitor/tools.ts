@@ -18,9 +18,61 @@ import {
   textResult,
   MONITOR_LOG_FILE,
   STALE_THRESHOLD_MS,
+  isMaintenanceActive,
   type AccountKey,
   type ToolResult,
 } from './types';
+import {
+  loadMonitorState,
+  saveMonitorState,
+  recordAction,
+  checkCooldown,
+} from './state';
+
+/** Cooldown periods for remediation actions */
+const ACTION_COOLDOWNS: Record<string, number> = {
+  stop_agent: 30 * 60 * 1000,          // 30 min — don't stop the same agent repeatedly
+  close_position: 30 * 60 * 1000,      // 30 min — don't panic-sell repeatedly  
+  cancel_order: 5 * 60 * 1000,         // 5 min — order cancels are less dangerous
+  cancel_all_orders: 15 * 60 * 1000,   // 15 min — bulk cancel needs breathing room
+};
+
+/**
+ * Guard for remediation tools — blocks action during maintenance OR cooldown.
+ * Returns a ToolResult if blocked, or null if action is allowed.
+ */
+function maintenanceGuard(toolName: string): ToolResult | null {
+  // Check maintenance mode first
+  const maint = isMaintenanceActive();
+  if (maint.active) {
+    const msg = `🚫 BLOCKED: ${toolName} not allowed during agent maintenance. Reason: ${maint.reason}.`;
+    console.log(`[monitor] ${msg}`);
+    return textResult(msg);
+  }
+  
+  // Check cooldown
+  const cooldownMs = ACTION_COOLDOWNS[toolName];
+  if (cooldownMs) {
+    const state = loadMonitorState();
+    const check = checkCooldown(state, toolName, cooldownMs);
+    if (!check.allowed) {
+      const msg = `🚫 COOLDOWN: ${check.reason}. Wait before retrying.`;
+      console.log(`[monitor] ${msg}`);
+      return textResult(msg);
+    }
+  }
+  
+  return null;
+}
+
+/**
+ * Record that a remediation action was taken (for cooldown tracking).
+ */
+function recordRemediationAction(action: string, target: string, reason: string): void {
+  const state = loadMonitorState();
+  recordAction(state, action, target, reason);
+  saveMonitorState(state);
+}
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -513,6 +565,9 @@ const cancelOrderTool = {
     order_id: Type.String({ description: 'The Tradier order ID to cancel' }),
   }),
   execute: async (_id: string, params: any): Promise<ToolResult> => {
+    const blocked = maintenanceGuard('cancel_order');
+    if (blocked) return blocked;
+
     try {
       const key = params.account as AccountKey;
       const acct = ACCOUNTS[key];
@@ -545,6 +600,9 @@ const cancelAllOrdersTool = {
     account: Type.String({ description: 'Which account: "spx", "xsp", or "both"' }),
   }),
   execute: async (_id: string, params: any): Promise<ToolResult> => {
+    const blocked = maintenanceGuard('cancel_all_orders');
+    if (blocked) return blocked;
+
     try {
       const keys = params.account === 'both' ? ['spx', 'xsp'] as AccountKey[]
         : [params.account as AccountKey];
@@ -601,6 +659,9 @@ const closePositionTool = {
     quantity: Type.Number({ description: 'Number of contracts to sell' }),
   }),
   execute: async (_id: string, params: any): Promise<ToolResult> => {
+    const blocked = maintenanceGuard('close_position');
+    if (blocked) return blocked;
+
     try {
       const key = params.account as AccountKey;
       const acct = ACCOUNTS[key];
@@ -625,6 +686,7 @@ const closePositionTool = {
       const orderId = data?.order?.id;
       const msg = `EMERGENCY CLOSE: sold ${params.quantity}x ${params.option_symbol} on ${acct.label} — order #${orderId}`;
       console.log(`[monitor] 🚨 ${msg}`);
+      recordRemediationAction('close_position', `${params.account}:${params.option_symbol}`, msg);
       return textResult(msg);
     } catch (e: any) {
       const err = e?.response?.data?.errors?.error || e.message;
@@ -647,6 +709,9 @@ const stopAgentTool = {
     reason: Type.String({ description: 'Why the agent is being stopped — logged for audit' }),
   }),
   execute: async (_id: string, params: any): Promise<ToolResult> => {
+    const blocked = maintenanceGuard('stop_agent');
+    if (blocked) return blocked;
+
     try {
       const key = params.agent as AccountKey;
       const acct = ACCOUNTS[key];
@@ -659,6 +724,7 @@ const stopAgentTool = {
 
       const msg = `STOPPED ${acct.agentProcess}: ${params.reason}`;
       console.log(`[monitor] 🛑 ${msg}`);
+      recordRemediationAction('stop_agent', params.agent, params.reason);
 
       // Log to monitor file
       fs.mkdirSync('logs', { recursive: true });

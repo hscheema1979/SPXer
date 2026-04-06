@@ -2,6 +2,8 @@
  * Unified Account Monitor — Shared Types & Config
  */
 
+import * as fs from 'fs';
+
 /** Account identifier used across all monitor tools */
 export type AccountKey = 'spx' | 'xsp';
 
@@ -62,5 +64,32 @@ export function textResult(text: string): ToolResult {
 /** Monitor log file path */
 export const MONITOR_LOG_FILE = 'logs/account-monitor.log';
 
+/** Maintenance signal file — written by agent-ctl.sh before agent restarts */
+export const MAINTENANCE_FILE = 'logs/agent-maintenance.json';
+
 /** Staleness threshold in ms — status file older than this triggers a warning */
 export const STALE_THRESHOLD_MS = 2 * 60 * 1000; // 2 minutes
+
+/**
+ * Check if agent maintenance mode is active.
+ * Returns { active: true, reason } if paused, { active: false } otherwise.
+ * Auto-expires after 30 minutes to prevent stuck pauses.
+ */
+export function isMaintenanceActive(): { active: boolean; reason?: string } {
+  try {
+    const raw = fs.readFileSync(MAINTENANCE_FILE, 'utf-8');
+    const data = JSON.parse(raw);
+    if (!data.active) return { active: false };
+
+    // Auto-expire after 30 minutes
+    const elapsed = Date.now() / 1000 - (data.startedAt || 0);
+    if (elapsed > 30 * 60) {
+      return { active: false, reason: 'Maintenance expired (>30 min)' };
+    }
+
+    return { active: true, reason: data.reason || 'Maintenance in progress' };
+  } catch {
+    return { active: false };
+  }
+}
+

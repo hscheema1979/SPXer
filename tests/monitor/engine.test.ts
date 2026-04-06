@@ -294,13 +294,13 @@ describe('SessionCycleManager', () => {
     expect(summary).toContain('Do not repeat');
   });
 
-  it('buildCarryoverSummary truncates long assessments', () => {
+  it('buildCarryoverSummary includes long assessments with context wrapper', () => {
     mgr.tick();
     const longText = 'A'.repeat(1000);
     mgr.setLastAssessment(longText);
     const summary = mgr.buildCarryoverSummary();
-    expect(summary.length).toBeLessThan(1000);
-    expect(summary).toContain('...');
+    expect(summary).toContain('CONTEXT FROM PREVIOUS SESSION');
+    expect(summary).toContain(longText);
   });
 
   it('buildCarryoverSummary accepts explicit text override', () => {

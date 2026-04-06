@@ -3,23 +3,19 @@
   "status": "active",
   "pid": 2069905,
   "plan": {
-    "id": "plan-1775496504456",
-    "text": "Fix the aggressive position closing that killed profitable trades today.\n\nTwo systems are independently closing positions they shouldn't:\n\n1. **agent.ts `reconcileBrokerPositions()`** — per-cycle function that sells any broker position not in the agent's internal state as an \"ORPHAN\". Should NOT auto-close — should adopt instead (like the startup `reconcileFromBroker` does).\n\n2. **account-monitor `close_position` tool + prompts** — LLM monitor sees stale agent status + live broker positions → force-closes them. Should be much more conservative — only close in true emergencies (near expiry with no agent response after extended period), not just because status file is stale for a couple minutes.\n\n3. **OTOCO fill confirmation** — the OTOCO path doesn't call `waitForFill()`, so the agent assumes a fill without confirmation. Should confirm entry fill like single orders do.\n\nPhases:\n1. Fix agent.ts reconcileBrokerPositions — adopt orphans instead of closing them\n2. Fix account-monitor prompts — make it much more conservative about closing positions  \n3. Fix OTOCO fill confirmation — add waitForFill to OTOCO path\n4. Run tests to verify nothing breaks",
+    "id": "plan-1775505471102",
+    "text": "Add 2m timeframe support for signals, exits, and reversals.\n\nPhase 1: Build 2m bars for all dates (backfill from 1m data)\n- Run build-mtf-bars.ts with --tf=2m for all dates\n- This will aggregate 1m→2m bars with indicator continuity for SPX + all SPXW contracts\n\nPhase 2: Add 2m to config type and autosweep\n- Add '2m' to pipeline.timeframe union type in src/config/types.ts\n- Add 2m combos to autosweep.ts dirExit parameter space\n- Verify cli-config.ts supports timeframe overrides\n\nPhase 3: Validate\n- Run a single-day replay with 2m signal/direction/exit timeframes\n- Verify bars load correctly and signals fire on 2m candle closes\n",
     "phases": [
       {
-        "name": "Fix agent reconcileBrokerPositions — adopt not close",
+        "name": "Build 2m bars for all dates",
         "status": "in_progress"
       },
       {
-        "name": "Fix account-monitor conservatism",
+        "name": "Add 2m to config type and sweep params",
         "status": "pending"
       },
       {
-        "name": "Fix OTOCO fill confirmation",
-        "status": "pending"
-      },
-      {
-        "name": "Run tests",
+        "name": "Validate with test replay",
         "status": "pending"
       }
     ],
@@ -31,7 +27,7 @@
     "lastResponseTokens": 0
   },
   "lastCheckpoint": null,
-  "startedAt": "2026-04-06T17:28:24.456Z",
-  "updatedAt": "2026-04-06T17:28:24.456Z",
+  "startedAt": "2026-04-06T19:57:51.102Z",
+  "updatedAt": "2026-04-06T19:57:51.102Z",
   "interruptedAt": "2026-04-03T06:48:12.379Z"
 }

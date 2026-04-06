@@ -232,28 +232,56 @@ async function reconcileBrokerPositions(): Promise<void> {
     const brokerSymbols = new Set(brokerPositions.map((p: any) => p.symbol));
     const agentSymbols = new Set(positions.getAll().map(p => p.symbol));
 
+    // Orphaned at broker — ADOPT into agent state (don't close!)
     for (const bp of brokerPositions) {
       if (!agentSymbols.has(bp.symbol)) {
-        console.log(`[xsp] ⚠️ ORPHAN at broker: ${bp.symbol} x${bp.quantity} — closing immediately`);
-        try {
-          const body = new URLSearchParams({
-            class: 'option',
-            symbol: EXEC.symbol || 'XSP',
-            option_symbol: bp.symbol,
-            side: 'sell_to_close',
-            quantity: String(Math.abs(bp.quantity)),
-            type: 'market',
-            duration: 'day',
-          }).toString();
-          const { data: orderData } = await axios.post(
-            `${TRADIER_BASE}/accounts/${accountId}/orders`,
-            body,
-            { headers: { ...hdrs, 'Content-Type': 'application/x-www-form-urlencoded' }, timeout: 10000 },
-          );
-          console.log(`[xsp] 🗑️ Closed orphan ${bp.symbol} — order #${orderData?.order?.id}`);
-        } catch (e: any) {
-          console.error(`[xsp] Failed to close orphan ${bp.symbol}: ${e?.response?.data?.errors?.error || e.message}`);
+        const quantity = Math.abs(bp.quantity);
+        const costBasis = Math.abs(bp.cost_basis);
+        const entryPrice = costBasis / (quantity * 100);
+
+        const match = (bp.symbol as string).match(/^([A-Z]+)(\d{6})([CP])(\d{8})$/);
+        if (!match) {
+          console.warn(`[xsp] ⚠️ ORPHAN at broker: ${bp.symbol} x${quantity} — unrecognized symbol, skipping`);
+          continue;
         }
+        const [, , dateStr, callPut, strikeStr] = match;
+        const side = callPut === 'C' ? 'call' : 'put';
+        const strike = parseInt(strikeStr) / 1000;
+        const expiry = `20${dateStr.slice(0, 2)}-${dateStr.slice(2, 4)}-${dateStr.slice(4, 6)}`;
+        const stopLoss = entryPrice * (1 - config.position.stopLossPercent / 100);
+        const takeProfit = entryPrice * config.position.takeProfitMultiplier;
+
+        console.log(`[xsp] 📥 ADOPTING orphan from broker: ${bp.symbol} x${quantity} @ $${entryPrice.toFixed(2)} (${side} ${strike})`);
+
+        const { randomUUID } = await import('crypto');
+        const openPos: import('./src/agent/types').OpenPosition = {
+          id: randomUUID(),
+          symbol: bp.symbol,
+          side: side as any,
+          strike,
+          expiry,
+          entryPrice,
+          quantity,
+          stopLoss,
+          takeProfit,
+          openedAt: bp.date_acquired ? new Date(bp.date_acquired).getTime() : Date.now(),
+        };
+        positions.add(openPos);
+
+        const corePos: CorePosition = {
+          id: bp.symbol,
+          symbol: bp.symbol,
+          side: side as any,
+          strike,
+          qty: quantity,
+          entryPrice,
+          stopLoss,
+          takeProfit,
+          entryTs: Math.floor((openPos.openedAt) / 1000),
+          highWaterPrice: entryPrice,
+        };
+        strategyState.positions.set(corePos.id, corePos);
+        priceStream.updateSymbols([bp.symbol]).catch(() => {});
       }
     }
 
@@ -988,7 +1016,8 @@ async function main(): Promise<void> {
     if (reconciled > 0) {
       console.log(`[xsp] Reconciled ${reconciled} position(s) from broker`);
       const symbols = positions.getAll().map(p => p.symbol);
-      if (symbols.length > 0) await priceStream.updateSymbols(symbols);
+      // Fire-and-forget: don't await — connect() blocks forever reading the stream.
+      if (symbols.length > 0) priceStream.updateSymbols(symbols).catch(() => {});
 
       // Sync reconciled positions into strategy state
       for (const pos of positions.getAll()) {

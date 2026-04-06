@@ -397,6 +397,67 @@ export async function closePosition(
     return { fillPrice: currentPrice, paper: true, orderType: 'market' };
   }
 
+  // Pre-flight: verify position exists at broker, cancel blocking OCO legs, then sell
+  try {
+    const hdrs = headers();
+
+    // 1. Check position exists
+    const { data: posData } = await axios.get(
+      `${TRADIER_BASE}/accounts/${accountId}/positions`,
+      { headers: hdrs, timeout: 5000 },
+    );
+    const rawPos = posData?.positions?.position;
+    const brokerPositions = Array.isArray(rawPos) ? rawPos : rawPos ? [rawPos] : [];
+    const found = brokerPositions.find((p: any) => p.symbol === position.symbol);
+    if (!found) {
+      console.warn(`[executor] ⚠️ Position ${position.symbol} not found at broker — skipping sell (already closed?)`);
+      return { error: 'Position not at broker', paper: false, orderType: 'market' };
+    }
+    const brokerQty = Math.abs(found.quantity);
+    if (brokerQty < position.quantity) {
+      console.warn(`[executor] ⚠️ Broker has ${brokerQty}x ${position.symbol} but agent wants to sell ${position.quantity} — adjusting to ${brokerQty}`);
+      position.quantity = brokerQty;
+    }
+
+    // 2. Cancel any open sell_to_close orders blocking the position (OCO/OTOCO legs)
+    const { data: ordData } = await axios.get(
+      `${TRADIER_BASE}/accounts/${accountId}/orders`,
+      { headers: hdrs, timeout: 5000 },
+    );
+    const rawOrders = ordData?.orders?.order;
+    const allOrders = Array.isArray(rawOrders) ? rawOrders : rawOrders ? [rawOrders] : [];
+
+    for (const order of allOrders) {
+      if (order.status !== 'open' && order.status !== 'pending') continue;
+
+      // Check top-level sell orders for this symbol
+      if (order.option_symbol === position.symbol && order.side === 'sell_to_close') {
+        try {
+          await axios.delete(`${TRADIER_BASE}/accounts/${accountId}/orders/${order.id}`, { headers: hdrs, timeout: 5000 });
+          console.log(`[executor] 🗑️ Cancelled blocking sell order #${order.id} for ${position.symbol}`);
+        } catch { /* best effort */ }
+        continue;
+      }
+
+      // Check OCO/OTOCO legs
+      const legs = Array.isArray(order.leg) ? order.leg : order.leg ? [order.leg] : [];
+      const hasBlockingSell = legs.some((l: any) =>
+        (l.status === 'open' || l.status === 'pending') &&
+        l.side === 'sell_to_close' &&
+        l.option_symbol === position.symbol
+      );
+      if (hasBlockingSell) {
+        try {
+          await axios.delete(`${TRADIER_BASE}/accounts/${accountId}/orders/${order.id}`, { headers: hdrs, timeout: 5000 });
+          console.log(`[executor] 🗑️ Cancelled blocking bracket #${order.id} with sell legs for ${position.symbol}`);
+        } catch { /* best effort */ }
+      }
+    }
+  } catch (e: any) {
+    console.warn(`[executor] ⚠️ Pre-flight check failed: ${e.message} — proceeding with sell`);
+    // Don't block the sell on a failed check — better to try and get rejected than not exit
+  }
+
   const body = qs({
     class: 'option',
     symbol: rootSymbol,
