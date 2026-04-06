@@ -193,7 +193,7 @@ export interface Config {
     strikeInterval: number;
     gapInterpolateMaxMins: number;
     maxBarsMemory: number;
-    timeframe: '1m' | '3m' | '5m' | '10m' | '15m' | '1h';
+    timeframe: '1m' | '2m' | '3m' | '5m' | '10m' | '15m' | '1h';
   };
 
   contracts: {

@@ -128,16 +128,31 @@ function main() {
     dates = allDates.slice(Math.max(0, start), end + 1);
   }
 
+  // Denormalized indicator columns that get written alongside the JSON blob
+  const DENORM_COLS = [
+    'hma3', 'hma5', 'hma15', 'hma17', 'hma19', 'hma25',
+    'ema9', 'ema21', 'rsi14',
+    'bbUpper', 'bbMiddle', 'bbLower', 'bbWidth',
+    'atr14', 'atrPct', 'vwap',
+    'kcUpper', 'kcMiddle', 'kcLower', 'kcWidth', 'kcSlope',
+  ] as const;
+
+  const upsertCols = DENORM_COLS.map(c => c).join(', ');
+  const upsertPlaceholders = DENORM_COLS.map(() => '?').join(', ');
+  const upsertUpdate = DENORM_COLS.map(c => `${c}=excluded.${c}`).join(', ');
+
   const upsert = db.prepare(`
-    INSERT INTO replay_bars (symbol, timeframe, ts, open, high, low, close, volume, synthetic, gap_type, indicators, source)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, 'aggregated')
+    INSERT INTO replay_bars (symbol, timeframe, ts, open, high, low, close, volume, synthetic, gap_type, indicators, source, ${upsertCols})
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, 'aggregated', ${upsertPlaceholders})
     ON CONFLICT(symbol, timeframe, ts) DO UPDATE SET
       open=excluded.open, high=excluded.high, low=excluded.low,
-      close=excluded.close, volume=excluded.volume, indicators=excluded.indicators, source='aggregated'
+      close=excluded.close, volume=excluded.volume, indicators=excluded.indicators, source='aggregated',
+      ${upsertUpdate}
   `);
 
+  const update1mCols = DENORM_COLS.map(c => `${c}=?`).join(', ');
   const update1mInd = db.prepare(`
-    UPDATE replay_bars SET indicators=? WHERE symbol=? AND timeframe='1m' AND ts=?
+    UPDATE replay_bars SET indicators=?, ${update1mCols} WHERE symbol=? AND timeframe='1m' AND ts=?
   `);
 
   const tfsToProcess = recompute1m ? ['1m' as Timeframe, ...selectedTfs] : selectedTfs;
@@ -215,13 +230,14 @@ function main() {
             } as any, tier as 1 | 2);
 
             const indJson = JSON.stringify(ind);
+            const denormVals = DENORM_COLS.map(c => (ind as any)[c] ?? null);
 
             if (tf === '1m') {
-              // Update existing 1m bar indicators
-              update1mInd.run(indJson, symbol, b.ts);
+              // Update existing 1m bar indicators + denormalized columns
+              update1mInd.run(indJson, ...denormVals, symbol, b.ts);
             } else {
-              // Insert aggregated bar
-              upsert.run(symbol, tf, b.ts, b.open, b.high, b.low, b.close, b.volume, indJson);
+              // Insert aggregated bar with denormalized indicator columns
+              upsert.run(symbol, tf, b.ts, b.open, b.high, b.low, b.close, b.volume, indJson, ...denormVals);
             }
             dateBars++;
           }

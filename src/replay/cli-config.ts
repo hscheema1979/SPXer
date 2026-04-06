@@ -32,6 +32,9 @@ interface CliOverrides {
   maxPositionsOpen?: number;
   exitStrategy?: string;
   exitPricing?: string;
+  signalTimeframe?: string;
+  directionTimeframe?: string;
+  exitTimeframe?: string;
   label?: string;
 }
 
@@ -68,6 +71,14 @@ export function parseCliFlags(args: string[]): CliOverrides {
       case 'maxPositionsOpen': flags.maxPositionsOpen = parseInt(val); break;
       case 'exitStrategy': flags.exitStrategy = val; break;
       case 'exitPricing': flags.exitPricing = val; break;
+      case 'signalTimeframe': flags.signalTimeframe = val; break;
+      case 'directionTimeframe': flags.directionTimeframe = val; break;
+      case 'exitTimeframe': flags.exitTimeframe = val; break;
+      case 'timeframe': // shorthand: sets all three at once
+        flags.signalTimeframe = val;
+        flags.directionTimeframe = val;
+        flags.exitTimeframe = val;
+        break;
       case 'label': flags.label = val; break;
     }
   }
@@ -104,7 +115,9 @@ export function buildConfigFromFlags(flags: CliOverrides, base?: Config): Config
   if (
     flags.enableHmaCrosses !== undefined || flags.enableEmaCrosses !== undefined ||
     flags.hmaCrossFast !== undefined || flags.hmaCrossSlow !== undefined ||
-    flags.requireUnderlyingHmaCross !== undefined || flags.targetOtmDistance !== undefined
+    flags.requireUnderlyingHmaCross !== undefined || flags.targetOtmDistance !== undefined ||
+    flags.signalTimeframe !== undefined || flags.directionTimeframe !== undefined ||
+    flags.exitTimeframe !== undefined
   ) {
     overrides.signals = {
       ...(overrides.signals || config.signals),
@@ -114,6 +127,9 @@ export function buildConfigFromFlags(flags: CliOverrides, base?: Config): Config
       ...(flags.hmaCrossSlow !== undefined && { hmaCrossSlow: flags.hmaCrossSlow }),
       ...(flags.requireUnderlyingHmaCross !== undefined && { requireUnderlyingHmaCross: flags.requireUnderlyingHmaCross }),
       ...(flags.targetOtmDistance !== undefined && { targetOtmDistance: flags.targetOtmDistance }),
+      ...(flags.signalTimeframe !== undefined && { signalTimeframe: flags.signalTimeframe }),
+      ...(flags.directionTimeframe !== undefined && { directionTimeframe: flags.directionTimeframe }),
+      ...(flags.exitTimeframe !== undefined && { exitTimeframe: flags.exitTimeframe }),
     };
   }
   if (flags.contractPriceMax !== undefined) {

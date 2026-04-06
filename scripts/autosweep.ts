@@ -57,7 +57,9 @@ function generateConfigs(): SweepParam[] {
   const hmaFast = [5, 7];
   const hmaSlow = [19, 21, 23, 25, 27, 29];
   const dirExit: [string, string][] = [
-    ['3m', '5m'], ['5m', '3m'], ['3m', '3m'], ['5m', '5m'],
+    ['2m', '2m'], ['2m', '3m'], ['2m', '5m'],
+    ['3m', '2m'], ['3m', '3m'], ['3m', '5m'],
+    ['5m', '2m'], ['5m', '3m'], ['5m', '5m'],
   ];
   const stopLoss = [0, 40, 80];
   const tpMult = [3, 5, 8];
