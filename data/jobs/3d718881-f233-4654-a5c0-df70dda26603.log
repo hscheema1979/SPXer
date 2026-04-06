@@ -1,0 +1,5 @@
+[dotenv@17.3.1] injecting env (0) from .env -- tip: ⚙️  load multiple .env files with { path: ['.env.local', '.env'] }
+[dotenv@17.3.1] injecting env (0) from .env -- tip: 🔐 prevent building .env in docker: https://dotenvx.com/prebuild
+[batch-worker] Starting job 3d718881-f233-4654-a5c0-df70dda26603: 256 dates for config HMA3x15 | OTM5 | TP1.5x | SL90% | 3m
+[batch-worker] 2025-03-27 error: Cannot add property hma3, object is not extensible
+[batch-worker] Job 3d718881-f233-4654-a5c0-df70dda26603 completed: 256 days, 7391 trades, $10477849 P&L

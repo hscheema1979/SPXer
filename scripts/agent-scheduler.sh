@@ -51,10 +51,17 @@ fi
 
 case "$ACTION" in
   start)
-    log "START: Starting agents ($TODAY)"
-    pm2 start ecosystem.config.js --only spxer-agent --update-env >> "$LOG" 2>&1
-    pm2 start ecosystem.config.js --only spxer-xsp --update-env >> "$LOG" 2>&1
-    log "START: Both agents started"
+    # Only start if not already running (avoid killing mid-trade)
+    SPX_STATUS=$(pm2 show spxer-agent 2>/dev/null | grep "status" | head -1 | grep -c "online")
+    XSP_STATUS=$(pm2 show spxer-xsp 2>/dev/null | grep "status" | head -1 | grep -c "online")
+    if [ "$SPX_STATUS" = "1" ] && [ "$XSP_STATUS" = "1" ]; then
+      log "START: Both agents already online — skipping ($TODAY)"
+    else
+      log "START: Starting agents ($TODAY)"
+      pm2 start ecosystem.config.js --only spxer-agent --update-env >> "$LOG" 2>&1
+      pm2 start ecosystem.config.js --only spxer-xsp --update-env >> "$LOG" 2>&1
+      log "START: Both agents started"
+    fi
     ;;
   stop)
     log "STOP: Stopping agents ($TODAY)"

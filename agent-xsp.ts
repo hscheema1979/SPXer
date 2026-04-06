@@ -701,9 +701,20 @@ async function runCycle(): Promise<number> {
   // 5f. Candidates (SPX contracts — tick() does strike selection on SPX, we convert to XSP at execution)
   const candidates = buildCandidates(snap);
 
+  // 5g. Position bar high/low for intrabar TP/SL detection
+  const positionBars = new Map<string, { high: number; low: number }>();
+  for (const [, pos] of strategyState.positions) {
+    const contractState = snap.contracts.find(c => c.meta.symbol === pos.symbol);
+    if (contractState && contractState.bars1m.length > 0) {
+      const lastBar = contractState.bars1m[contractState.bars1m.length - 1];
+      positionBars.set(pos.symbol, { high: lastBar.high ?? lastBar.close, low: lastBar.low ?? lastBar.close });
+    }
+  }
+
   // 6. Call tick()
+  const lastDirBar = spxDirBars.length > 0 ? spxDirBars[spxDirBars.length - 1] : null;
   const tickInput: TickInput = {
-    ts: Math.floor(Date.now() / 1000),
+    ts: lastDirBar?.ts ?? Math.floor(Date.now() / 1000),
     spxDirectionBars: spxDirBars,
     spxExitBars,
     contractBars,
@@ -711,6 +722,7 @@ async function runCycle(): Promise<number> {
     closeCutoffTs: computeCloseCutoff(),
     candidates,
     positionPrices,
+    positionBars,
   };
 
   const result = tick(strategyState, tickInput, CFG);

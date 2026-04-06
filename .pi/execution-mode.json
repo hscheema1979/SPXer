@@ -3,23 +3,23 @@
   "status": "active",
   "pid": 2069905,
   "plan": {
-    "id": "plan-1775491489243",
-    "text": "Fix live-replay parity issues (Priority 2 from code review):\n\n1. **XSP session persistence** — Copy session save/load from agent.ts into agent-xsp.ts so it survives restarts with HMA state intact\n\n2. **Pass positionBars in live agents** — Both agents need to pass bar high/low data to tick() so intrabar exit pricing works if enabled. Currently missing from TickInput construction.\n\n3. **Use bar timestamp not wall clock** — Change tick input `ts` from `Date.now()` to the latest bar's timestamp in both agents, so time-based checks (cutoff, cooldown) match replay behavior.\n\n4. **Restart agents** — Restart both agents with the fixes applied.\n\n5. **Verify** — Check logs confirm agents are cycling, session files exist for both, and trades execute on next cross.",
+    "id": "plan-1775496504456",
+    "text": "Fix the aggressive position closing that killed profitable trades today.\n\nTwo systems are independently closing positions they shouldn't:\n\n1. **agent.ts `reconcileBrokerPositions()`** — per-cycle function that sells any broker position not in the agent's internal state as an \"ORPHAN\". Should NOT auto-close — should adopt instead (like the startup `reconcileFromBroker` does).\n\n2. **account-monitor `close_position` tool + prompts** — LLM monitor sees stale agent status + live broker positions → force-closes them. Should be much more conservative — only close in true emergencies (near expiry with no agent response after extended period), not just because status file is stale for a couple minutes.\n\n3. **OTOCO fill confirmation** — the OTOCO path doesn't call `waitForFill()`, so the agent assumes a fill without confirmation. Should confirm entry fill like single orders do.\n\nPhases:\n1. Fix agent.ts reconcileBrokerPositions — adopt orphans instead of closing them\n2. Fix account-monitor prompts — make it much more conservative about closing positions  \n3. Fix OTOCO fill confirmation — add waitForFill to OTOCO path\n4. Run tests to verify nothing breaks",
     "phases": [
       {
-        "name": "XSP session persistence",
+        "name": "Fix agent reconcileBrokerPositions — adopt not close",
         "status": "in_progress"
       },
       {
-        "name": "Pass positionBars in both agents",
+        "name": "Fix account-monitor conservatism",
         "status": "pending"
       },
       {
-        "name": "Use bar timestamp in both agents",
+        "name": "Fix OTOCO fill confirmation",
         "status": "pending"
       },
       {
-        "name": "Restart and verify",
+        "name": "Run tests",
         "status": "pending"
       }
     ],
@@ -31,7 +31,7 @@
     "lastResponseTokens": 0
   },
   "lastCheckpoint": null,
-  "startedAt": "2026-04-06T16:04:49.244Z",
-  "updatedAt": "2026-04-06T16:04:49.244Z",
+  "startedAt": "2026-04-06T17:28:24.456Z",
+  "updatedAt": "2026-04-06T17:28:24.456Z",
   "interruptedAt": "2026-04-03T06:48:12.379Z"
 }
