@@ -6,17 +6,8 @@ build/
 # Environment & secrets
 .env
 
-# Database files (112GB+ of market data)
-data/*.db
-data/*.db-shm
-data/*.db-wal
-data/spxer.db.backup
-data/spxer.db.pre-utc-fix
-data/spxer.db.backup-shm
-data/spxer.db.backup-wal
-data/archive/
-data/cache/
-data/jobs/
+# Database & market data (112GB+ — never track)
+data/
 *.parquet
 
 # Logs (runtime output)
