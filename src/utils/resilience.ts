@@ -75,6 +75,11 @@ export class CircuitBreaker {
     };
   }
 
+  /** Returns the current circuit state as a lowercase string for health endpoints */
+  getState(): string {
+    return this.state.toLowerCase().replace('_', '-');
+  }
+
   /**
    * Execute fn through the circuit breaker.
    * Returns null when circuit is OPEN (without calling fn) or on failure.

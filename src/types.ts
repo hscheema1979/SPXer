@@ -78,6 +78,7 @@ export interface IndicatorState {
   adxState: { plusDM: number | null; minusDM: number | null; tr: number | null; adx: number | null };
   hmaState: Record<number, HMAState>; // keyed by HMA period
   kcState: KCState | null; // Keltner Channel state for trend filtering
+  lastIndicators?: Record<string, number | null>; // last known-good indicator snapshot for NaN fallback
 }
 
 export interface ChainContract {

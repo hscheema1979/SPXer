@@ -16,6 +16,8 @@ import { OptionStream } from './pipeline/option-stream';
 import { OptionCandleBuilder } from './pipeline/option-candle-builder';
 import { todayET, nowET } from './utils/et-time';
 import type { Bar, Timeframe } from './types';
+import { pipelineHealth, recordModeTransition } from './ops/pipeline-health';
+import { startAlertMonitor } from './ops/alerter';
 
 const HIGHER_TIMEFRAMES: [Timeframe, number][] = [['3m', 180], ['5m', 300], ['10m', 600], ['15m', 900], ['1h', 3600]];
 
@@ -839,6 +841,9 @@ async function main(): Promise<void> {
   // Reset VWAP exactly once on transition into RTH (not every minute during RTH)
   intervals.push(setInterval(() => {
     const mode = getMarketMode();
+    if (mode !== prevMode) {
+      recordModeTransition(prevMode ?? 'startup', mode);
+    }
     if (mode === 'rth' && prevMode !== 'rth') {
       for (const sym of ['SPX', 'ES']) {
         resetVWAP(sym, '1m');
@@ -846,6 +851,7 @@ async function main(): Promise<void> {
       }
     }
     prevMode = mode;
+    pipelineHealth.currentMode = mode;
   }, 60_000));
 
   // Periodic health check — log warnings when providers are degraded or data is stale
@@ -866,6 +872,7 @@ async function main(): Promise<void> {
   }, 60_000));
 
   console.log(`[SPXer] Running on port ${config.port}`);
+  startAlertMonitor();
 
   if (config.tradierToken) {
     // Delay first polls by 2 seconds so the HTTP server can process requests

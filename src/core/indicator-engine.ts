@@ -34,10 +34,20 @@ export function resetVWAP(symbol: string, tf: Timeframe): void {
 
 export function seedIndicatorState(symbol: string, tf: Timeframe, bars: Bar[]): void {
   const s = getState(symbol, tf);
-  s.closes = bars.map(b => b.close).slice(-MAX_BARS_MEMORY);
-  s.highs = bars.map(b => b.high).slice(-MAX_BARS_MEMORY);
-  s.lows = bars.map(b => b.low).slice(-MAX_BARS_MEMORY);
-  s.volumes = bars.map(b => b.volume).slice(-MAX_BARS_MEMORY);
+  // Filter out bars with non-finite OHLC before seeding — a single NaN in the
+  // seed history would poison all HMA/EMA state for the entire session.
+  const cleanBars = bars.filter(b =>
+    Number.isFinite(b.close) && Number.isFinite(b.high) &&
+    Number.isFinite(b.low)   && Number.isFinite(b.open) &&
+    b.close > 0
+  );
+  if (cleanBars.length < bars.length) {
+    console.warn(`[indicator-engine] seedIndicatorState ${symbol}@${tf}: filtered ${bars.length - cleanBars.length} invalid bars`);
+  }
+  s.closes = cleanBars.map(b => b.close).slice(-MAX_BARS_MEMORY);
+  s.highs  = cleanBars.map(b => b.high).slice(-MAX_BARS_MEMORY);
+  s.lows   = cleanBars.map(b => b.low).slice(-MAX_BARS_MEMORY);
+  s.volumes = cleanBars.map(b => b.volume).slice(-MAX_BARS_MEMORY);
   // Re-seed incremental HMA state by replaying closes through hmaStep
   for (const period of [3, 5, 15, 17, 19, 25]) {
     const hma = makeHMAState(period);
@@ -48,6 +58,18 @@ export function seedIndicatorState(symbol: string, tf: Timeframe, bars: Bar[]): 
 
 export function computeIndicators(bar: Bar, tier: 1 | 2 = 1): Record<string, number | null> {
   const s = getState(bar.symbol, bar.timeframe as Timeframe);
+
+  // Guard: reject bars with non-finite price values before they touch indicator state.
+  // A single NaN close would poison HMA/EMA buffers for the entire session — all
+  // subsequent indicator values would return NaN and signals would silently stop firing.
+  if (!Number.isFinite(bar.close) || !Number.isFinite(bar.high) ||
+      !Number.isFinite(bar.low)   || !Number.isFinite(bar.open) ||
+      bar.close <= 0) {
+    console.error(`[indicator-engine] NaN/invalid bar rejected: ${bar.symbol}@${bar.timeframe} ts=${bar.ts} close=${bar.close}`);
+    // Return last known indicator values rather than empty object — callers get
+    // stale-but-valid indicators rather than undefined, preventing false signal misfires.
+    return s.lastIndicators ?? {};
+  }
 
   s.closes.push(bar.close);
   s.highs.push(bar.high);
@@ -125,6 +147,9 @@ export function computeIndicators(bar: Bar, tier: 1 | 2 = 1): Record<string, num
     ind['momentum10'] = computeMomentum(s.closes, 10);
     ind['adx14'] = computeADX(s.highs, s.lows, s.closes, 14);
   }
+
+  // Cache last known-good indicators for NaN fallback
+  s.lastIndicators = ind;
 
   return ind;
 }

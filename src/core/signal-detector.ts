@@ -20,6 +20,48 @@
 import type { CoreBar, Signal, SignalType, Direction } from './types';
 import type { Config } from '../config/types';
 
+/** HMA periods pre-computed by the indicator engine. Any config requesting a period
+ *  outside this set will never produce a signal — fail fast at startup instead. */
+export const VALID_HMA_PERIODS = [3, 5, 15, 17, 19, 25] as const;
+export const VALID_EMA_PERIODS = [9, 21, 50, 200] as const;
+
+/**
+ * Validate that config signal periods are computable by the indicator engine.
+ * Call this at agent/replay startup — throws if misconfigured so the issue is
+ * caught immediately rather than silently never firing signals.
+ */
+export function validateSignalConfig(config: Config): void {
+  const sig = config.signals;
+  const hmaFast = sig.hmaCrossFast ?? 5;
+  const hmaSlow = sig.hmaCrossSlow ?? 19;
+  const emaFast = sig.emaCrossFast ?? 9;
+  const emaSlow = sig.emaCrossSlow ?? 21;
+
+  if (sig.enableHmaCrosses) {
+    if (!(VALID_HMA_PERIODS as readonly number[]).includes(hmaFast)) {
+      throw new Error(`[signal-detector] hmaCrossFast=${hmaFast} is not computed by the indicator engine. Valid periods: ${VALID_HMA_PERIODS.join(', ')}`);
+    }
+    if (!(VALID_HMA_PERIODS as readonly number[]).includes(hmaSlow)) {
+      throw new Error(`[signal-detector] hmaCrossSlow=${hmaSlow} is not computed by the indicator engine. Valid periods: ${VALID_HMA_PERIODS.join(', ')}`);
+    }
+    if (hmaFast >= hmaSlow) {
+      throw new Error(`[signal-detector] hmaCrossFast(${hmaFast}) must be < hmaCrossSlow(${hmaSlow})`);
+    }
+  }
+
+  if (sig.enableEmaCrosses) {
+    if (!(VALID_EMA_PERIODS as readonly number[]).includes(emaFast)) {
+      throw new Error(`[signal-detector] emaCrossFast=${emaFast} is not computed by the indicator engine. Valid periods: ${VALID_EMA_PERIODS.join(', ')}`);
+    }
+    if (!(VALID_EMA_PERIODS as readonly number[]).includes(emaSlow)) {
+      throw new Error(`[signal-detector] emaCrossSlow=${emaSlow} is not computed by the indicator engine. Valid periods: ${VALID_EMA_PERIODS.join(', ')}`);
+    }
+    if (emaFast >= emaSlow) {
+      throw new Error(`[signal-detector] emaCrossFast(${emaFast}) must be < emaCrossSlow(${emaSlow})`);
+    }
+  }
+}
+
 /**
  * Parse an option symbol to extract call/put side and strike price.
  * Matches trailing C or P followed by 4-5 digit strike, with optional trailing 000.
@@ -135,28 +177,45 @@ export function detectSignals(
       }
     }
 
+    // ── Synthetic bar filter ─────────────────────────────────────────────
+    // Skip signal detection if the PREVIOUS bar was stale-filled (flat price for 60+ min).
+    // Stale-filled bars pre-warm HMA state with artificial flat values, so crosses on
+    // the bar immediately after a stale gap are unreliable. Interpolated gaps are allowed
+    // since they represent gradual movement and are less likely to cause false crosses.
+    if (prev.synthetic && prev.gapType === 'stale') continue;
+
     // ── HMA crosses ──────────────────────────────────────────────────────
+    // Hysteresis: require a minimum price separation to confirm a cross — prevents
+    // floating-point jitter (where HMA values oscillate around equality) from firing
+    // phantom back-to-back signals. Threshold scales with contract price to stay
+    // meaningful across both cheap (~$0.50) and expensive (~$8.00) contracts.
+    const hmaCrossThreshold = Math.max(0.01, curr.close * 0.001); // 0.1% of price, min $0.01
+
     if (
       sig.enableHmaCrosses &&
       prevInd[hmaFastKey] != null && prevInd[hmaSlowKey] != null &&
       ind[hmaFastKey] != null && ind[hmaSlowKey] != null
     ) {
-      // Fast crossed above slow → bullish
-      if (prevInd[hmaFastKey]! < prevInd[hmaSlowKey]! && ind[hmaFastKey]! >= ind[hmaSlowKey]!) {
+      // Fast crossed above slow → bullish (require curr fast > slow by threshold)
+      if (prevInd[hmaFastKey]! < prevInd[hmaSlowKey]! &&
+          ind[hmaFastKey]! > ind[hmaSlowKey]! + hmaCrossThreshold) {
         signals.push(makeSignal(symbol, isCall, strike, 'HMA_CROSS', 'bullish', {
           [hmaFastKey]: ind[hmaFastKey],
           [hmaSlowKey]: ind[hmaSlowKey],
         }));
       }
 
-      // Fast crossed below slow → bearish
-      if (prevInd[hmaFastKey]! >= prevInd[hmaSlowKey]! && ind[hmaFastKey]! < ind[hmaSlowKey]!) {
+      // Fast crossed below slow → bearish (require curr slow > fast by threshold)
+      if (prevInd[hmaFastKey]! > prevInd[hmaSlowKey]! &&
+          ind[hmaSlowKey]! > ind[hmaFastKey]! + hmaCrossThreshold) {
         signals.push(makeSignal(symbol, isCall, strike, 'HMA_CROSS', 'bearish', {
           [hmaFastKey]: ind[hmaFastKey],
           [hmaSlowKey]: ind[hmaSlowKey],
         }));
       }
     }
+
+    const emaCrossThreshold = Math.max(0.01, curr.close * 0.001);
 
     // ── EMA crosses ──────────────────────────────────────────────────────
     if (
@@ -165,7 +224,8 @@ export function detectSignals(
       ind[emaFastKey] != null && ind[emaSlowKey] != null
     ) {
       // Fast crossed above slow → bullish
-      if (prevInd[emaFastKey]! < prevInd[emaSlowKey]! && ind[emaFastKey]! >= ind[emaSlowKey]!) {
+      if (prevInd[emaFastKey]! < prevInd[emaSlowKey]! &&
+          ind[emaFastKey]! > ind[emaSlowKey]! + emaCrossThreshold) {
         signals.push(makeSignal(symbol, isCall, strike, 'EMA_CROSS', 'bullish', {
           [emaFastKey]: ind[emaFastKey],
           [emaSlowKey]: ind[emaSlowKey],
@@ -173,7 +233,8 @@ export function detectSignals(
       }
 
       // Fast crossed below slow → bearish
-      if (prevInd[emaFastKey]! >= prevInd[emaSlowKey]! && ind[emaFastKey]! < ind[emaSlowKey]!) {
+      if (prevInd[emaFastKey]! > prevInd[emaSlowKey]! &&
+          ind[emaSlowKey]! > ind[emaFastKey]! + emaCrossThreshold) {
         signals.push(makeSignal(symbol, isCall, strike, 'EMA_CROSS', 'bearish', {
           [emaFastKey]: ind[emaFastKey],
           [emaSlowKey]: ind[emaSlowKey],

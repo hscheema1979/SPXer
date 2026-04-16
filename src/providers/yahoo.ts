@@ -1,6 +1,7 @@
 import axios from 'axios';
 import type { OHLCVRaw } from '../types';
 import { CircuitBreaker, withRetry, circuitBreakers } from '../utils/resilience';
+import { filterValidRaws } from '../core/bar-validator';
 
 const cb = new CircuitBreaker('yahoo', { failureThreshold: 3, resetTimeoutMs: 30_000 });
 circuitBreakers.set('yahoo', cb);
@@ -46,5 +47,5 @@ export async function fetchYahooBars(
       volume: volumes[i] ?? 0,
     });
   }
-  return bars;
+  return filterValidRaws(bars, `yahoo:${symbol}`);
 }

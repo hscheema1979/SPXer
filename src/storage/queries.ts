@@ -1,6 +1,8 @@
 import { getDb } from './db';
 import type { Bar, Contract, ContractState } from '../types';
 import type { Statement } from 'better-sqlite3';
+import { validateBar } from '../core/bar-validator';
+import { recordDbWrite } from '../ops/pipeline-health';
 
 // Lazy-initialised prepared statement — created once per DB connection, reused on every call.
 // This avoids the overhead of db.prepare() on every row in tight loops.
@@ -27,6 +29,9 @@ function getUpsertBarStmt(): Statement {
 }
 
 export function upsertBar(bar: Bar): boolean {
+  // Last-line-of-defence validation — providers should have already filtered,
+  // but this catches anything that slipped through (e.g. synthetic bars with bad prices)
+  if (!validateBar(bar).valid) return false;
   try {
     getUpsertBarStmt().run({
       ...bar,
@@ -60,6 +65,7 @@ export function upsertBars(bars: Bar[]): { written: number; failed: number } {
   if (failed > 0) {
     console.error(`[db] upsertBars: ${failed} bars lost for symbols: ${[...new Set(bars.map(b => b.symbol))].join(', ')}`);
   }
+  recordDbWrite(bars.length, written);
   return { written, failed };
 }
 

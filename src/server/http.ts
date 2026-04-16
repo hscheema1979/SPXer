@@ -6,9 +6,11 @@ import { getMarketMode } from '../pipeline/scheduler';
 import { fetchOptionsChain, fetchExpirations } from '../providers/tradier';
 import { readStatus, readRecentActivity } from '../agent/reporter';
 import { healthTracker } from '../utils/health';
+import { circuitBreakers } from '../utils/resilience';
 import { getWsClientCount } from './ws';
 import { config } from '../config';
 import { createReplayRoutes } from './replay-routes';
+import { refreshPipelineHealth } from '../ops/pipeline-health';
 import {
   buildAuthUrl,
   exchangeCodeForTokens,
@@ -84,6 +86,15 @@ export function startHttpServer(port: number): { app: Express; httpServer: Serve
     const n = Math.min(parseInt(req.query.n as string) || 100, 2000);
     const symbol = getMarketMode() === 'rth' ? 'SPX' : 'ES';
     res.json(getBars(symbol, tf, n));
+  });
+
+  // Pipeline telemetry — per-stage counters updated by the pipeline as it runs
+  app.get('/pipeline/health', (_, res) => {
+    const snap = refreshPipelineHealth();
+    // Enrich with live circuit breaker states
+    const cbStates: Record<string, string> = {};
+    circuitBreakers.forEach((cb, name) => { cbStates[name] = cb.getState(); });
+    res.json({ ...snap, circuitBreakers: cbStates });
   });
 
   app.get('/contracts/active', (_, res) => res.json(getAllActiveContracts()));

@@ -3,6 +3,7 @@ import { config, TRADIER_BASE } from '../config';
 import type { ChainContract, OHLCVRaw } from '../types';
 import { CircuitBreaker, withRetry, circuitBreakers } from '../utils/resilience';
 import { getETOffsetMs } from '../utils/et-time';
+import { filterValidRaws } from '../core/bar-validator';
 
 const cb = new CircuitBreaker('tradier', { failureThreshold: 3, resetTimeoutMs: 30_000 });
 circuitBreakers.set('tradier', cb);
@@ -184,7 +185,7 @@ export async function fetchTimesales(symbol: string, date?: string): Promise<OHL
   // Tradier timesales: timestamps without date params are bare ET (e.g. '2026-04-01T13:46:00').
   // With date params they may include offset. We need to convert ET → UTC timestamps.
   const etOffsetMs = getETOffsetMs(); // UTC - ET in ms (positive: 14400000 for EDT, 18000000 for EST)
-  return list.map((d: any) => {
+  const raws = list.map((d: any) => {
     const timeStr: string = d.time;
     const hasTimezone = timeStr.endsWith('Z') || /[+-]\d{2}:\d{2}$/.test(timeStr);
     let tsMs: number;
@@ -201,4 +202,5 @@ export async function fetchTimesales(symbol: string, date?: string): Promise<OHL
       open: d.open, high: d.high, low: d.low, close: d.close, volume: d.volume ?? 0,
     };
   });
+  return filterValidRaws(raws, `tradier:${symbol}`);
 }
