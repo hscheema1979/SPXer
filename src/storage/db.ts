@@ -16,12 +16,30 @@ export function initDb(path: string): void {
   runMigrations();
   runConfigMigrations();
 
-  // Checkpoint WAL every 5 minutes to prevent unbounded growth
+  // Checkpoint WAL every 5 minutes to prevent unbounded growth.
+  // PASSIVE: writes dirty WAL pages to the main DB file without blocking readers.
+  // TRUNCATE: additionally resets WAL to zero size — only possible when no readers hold WAL.
+  // We always run PASSIVE first (guaranteed progress), then attempt TRUNCATE.
+  // Log results so failures are visible in PM2 logs.
   setInterval(() => {
     try {
       const d = getDb();
-      d.pragma('wal_checkpoint(TRUNCATE)');
-      console.log('[db] WAL checkpoint complete');
+      // PASSIVE checkpoint: safe to run any time, never blocks
+      const passive = d.pragma('wal_checkpoint(PASSIVE)') as Array<{busy: number; log: number; checkpointed: number}>;
+      const { busy, log, checkpointed } = passive[0] ?? { busy: 0, log: 0, checkpointed: 0 };
+      const walStats = getDbStats();
+      console.log(`[db] WAL checkpoint(PASSIVE): log=${log} checkpointed=${checkpointed} busy=${busy} walMb=${walStats.walSizeMb}`);
+
+      // If WAL is large and no readers are busy, attempt TRUNCATE to reclaim disk
+      if (walStats.walSizeMb > 50) {
+        if (busy === 0) {
+          d.pragma('wal_checkpoint(TRUNCATE)');
+          const after = getDbStats();
+          console.log(`[db] WAL checkpoint(TRUNCATE): walMb ${walStats.walSizeMb} → ${after.walSizeMb}`);
+        } else {
+          console.warn(`[db] WAL is ${walStats.walSizeMb}MB but ${busy} readers are blocking TRUNCATE`);
+        }
+      }
     } catch (err) {
       console.error('[db] WAL checkpoint failed:', err);
     }

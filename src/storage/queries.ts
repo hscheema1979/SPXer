@@ -26,7 +26,7 @@ function getUpsertBarStmt(): Statement {
   return _upsertBarStmt;
 }
 
-export function upsertBar(bar: Bar): void {
+export function upsertBar(bar: Bar): boolean {
   try {
     getUpsertBarStmt().run({
       ...bar,
@@ -34,19 +34,33 @@ export function upsertBar(bar: Bar): void {
       gapType: bar.gapType,
       indicators: JSON.stringify(bar.indicators),
     });
+    return true;
   } catch (err) {
-    console.error(`[db] upsertBar failed for ${bar.symbol}:`, err);
+    console.error(`[db] upsertBar failed for ${bar.symbol} ts=${bar.ts}:`, err);
+    return false;
   }
 }
 
-export function upsertBars(bars: Bar[]): void {
+export function upsertBars(bars: Bar[]): { written: number; failed: number } {
+  let written = 0;
+  let failed = 0;
   try {
     const db = getDb();
-    const insert = db.transaction((rows: Bar[]) => rows.forEach(upsertBar));
+    const insert = db.transaction((rows: Bar[]) => {
+      for (const row of rows) {
+        if (upsertBar(row)) written++; else failed++;
+      }
+    });
     insert(bars);
   } catch (err) {
-    console.error(`[db] upsertBars failed for ${bars.length} bars:`, err);
+    // Transaction itself failed (e.g. DB locked beyond busy_timeout)
+    failed += bars.length - written;
+    console.error(`[db] upsertBars transaction failed after ${written}/${bars.length} writes:`, err);
   }
+  if (failed > 0) {
+    console.error(`[db] upsertBars: ${failed} bars lost for symbols: ${[...new Set(bars.map(b => b.symbol))].join(', ')}`);
+  }
+  return { written, failed };
 }
 
 export function getBars(symbol: string, timeframe: string, n: number): Bar[] {
@@ -141,11 +155,17 @@ export function getDbSizeMb(): number {
 }
 
 function rowToBar(row: any): Bar {
+  let indicators: Record<string, number> = {};
+  try {
+    indicators = JSON.parse(row.indicators || '{}');
+  } catch {
+    console.warn(`[db] rowToBar: corrupt indicators JSON for ${row.symbol} ts=${row.ts} — using empty`);
+  }
   return {
     symbol: row.symbol, timeframe: row.timeframe, ts: row.ts,
     open: row.open, high: row.high, low: row.low, close: row.close,
     volume: row.volume, synthetic: row.synthetic === 1,
-    gapType: row.gap_type, indicators: JSON.parse(row.indicators || '{}'),
+    gapType: row.gap_type, indicators,
   };
 }
 
