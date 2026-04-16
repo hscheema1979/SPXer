@@ -8,7 +8,11 @@ export function initDb(path: string): void {
   db = new Database(path);
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
-  db.pragma('wal_autocheckpoint = 0'); // disable auto-checkpoint; checkpoint manually to avoid blocking event loop
+  // Auto-checkpoint every 1000 pages (~4MB): SQLite automatically runs a PASSIVE checkpoint
+  // inline with writes once the WAL reaches this size. PASSIVE never blocks readers or writers.
+  // better-sqlite3 is fully synchronous so there is no "event loop blocking" concern —
+  // every DB call already blocks. This keeps WAL bounded without a manual interval.
+  db.pragma('wal_autocheckpoint = 1000');
   db.pragma('synchronous = NORMAL');   // Faster writes, still durable with WAL
   db.pragma('busy_timeout = 5000');     // Wait 5s on lock instead of failing immediately
   db.pragma('cache_size = -64000');     // 64MB cache (negative = KB)
@@ -16,34 +20,28 @@ export function initDb(path: string): void {
   runMigrations();
   runConfigMigrations();
 
-  // Checkpoint WAL every 5 minutes to prevent unbounded growth.
-  // PASSIVE: writes dirty WAL pages to the main DB file without blocking readers.
-  // TRUNCATE: additionally resets WAL to zero size — only possible when no readers hold WAL.
-  // We always run PASSIVE first (guaranteed progress), then attempt TRUNCATE.
-  // Log results so failures are visible in PM2 logs.
+  // Hourly TRUNCATE to reclaim the WAL file's disk allocation.
+  // Auto-checkpoint (above) keeps WAL pages flushed to the main DB, but the WAL *file*
+  // on disk retains its allocated size until explicitly truncated. This runs less often
+  // since WAL content is always current — we're just reclaiming the file size.
   setInterval(() => {
     try {
       const d = getDb();
-      // PASSIVE checkpoint: safe to run any time, never blocks
+      const before = getDbStats();
       const passive = d.pragma('wal_checkpoint(PASSIVE)') as Array<{busy: number; log: number; checkpointed: number}>;
       const { busy, log, checkpointed } = passive[0] ?? { busy: 0, log: 0, checkpointed: 0 };
-      const walStats = getDbStats();
-      console.log(`[db] WAL checkpoint(PASSIVE): log=${log} checkpointed=${checkpointed} busy=${busy} walMb=${walStats.walSizeMb}`);
 
-      // If WAL is large and no readers are busy, attempt TRUNCATE to reclaim disk
-      if (walStats.walSizeMb > 50) {
-        if (busy === 0) {
-          d.pragma('wal_checkpoint(TRUNCATE)');
-          const after = getDbStats();
-          console.log(`[db] WAL checkpoint(TRUNCATE): walMb ${walStats.walSizeMb} → ${after.walSizeMb}`);
-        } else {
-          console.warn(`[db] WAL is ${walStats.walSizeMb}MB but ${busy} readers are blocking TRUNCATE`);
-        }
+      if (busy === 0) {
+        d.pragma('wal_checkpoint(TRUNCATE)');
+        const after = getDbStats();
+        console.log(`[db] WAL truncated: ${before.walSizeMb}MB → ${after.walSizeMb}MB (log=${log} checkpointed=${checkpointed})`);
+      } else {
+        console.warn(`[db] WAL truncate skipped: ${busy} active readers (log=${log} checkpointed=${checkpointed} walMb=${before.walSizeMb})`);
       }
     } catch (err) {
-      console.error('[db] WAL checkpoint failed:', err);
+      console.error('[db] WAL truncate failed:', err);
     }
-  }, 5 * 60 * 1000);
+  }, 60 * 60 * 1000); // hourly — auto-checkpoint handles the actual page flushing
 
   // Daily backup
   setInterval(() => backupDb(), 24 * 60 * 60 * 1000);
