@@ -1,0 +1,2347 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SPXer Replay Viewer</title>
+<script src="https://unpkg.com/lightweight-charts@5.0.5/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #0a0a0f; color: #e0e0e0; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 13px; }
+
+  /* ── Header ── */
+  .header { display: flex; align-items: center; gap: 16px; padding: 10px 16px; background: #111118; border-bottom: 1px solid #222; }
+  .header h1 { font-size: 15px; color: #8b8bff; font-weight: 600; white-space: nowrap; }
+  .header select { background: #1a1a24; color: #e0e0e0; border: 1px solid #333; padding: 5px 10px; border-radius: 4px; font-family: inherit; font-size: 12px; cursor: pointer; }
+  .header select:hover { border-color: #555; }
+  .summary { margin-left: auto; display: flex; gap: 16px; font-size: 12px; color: #888; }
+  .summary .win { color: #10b981; }
+  .summary .loss { color: #f43f5e; }
+  .summary .neutral { color: #a78bfa; }
+
+  /* ── SPX Chart ── */
+  #spx-chart { width: 100%; height: 380px; border-bottom: 1px solid #222; }
+
+  /* ── Trades Table ── */
+  .trades-section { border-bottom: 1px solid #222; }
+  .trades-section h2 { font-size: 12px; color: #666; padding: 8px 16px 4px; text-transform: uppercase; letter-spacing: 1px; }
+  .trades-table { width: 100%; border-collapse: collapse; }
+  .trades-table th { text-align: left; padding: 4px 12px; color: #555; font-size: 11px; text-transform: uppercase; border-bottom: 1px solid #1a1a24; }
+  .trades-table td { padding: 5px 12px; border-bottom: 1px solid #111118; cursor: pointer; font-size: 12px; }
+  .trades-table tr:hover td { background: #1a1a28; }
+  .trades-table tr.selected td { background: #1a1a38; border-left: 2px solid #8b8bff; }
+  .trades-table .call { color: #10b981; }
+  .trades-table .put { color: #f43f5e; }
+  .trades-table .pnl-pos { color: #10b981; }
+  .trades-table .pnl-neg { color: #f43f5e; }
+  .trades-table .pnl-zero { color: #666; }
+  .reason { font-size: 10px; padding: 2px 6px; border-radius: 3px; }
+  .reason-take_profit { background: #10b98120; color: #10b981; }
+  .reason-stop_loss { background: #f43f5e20; color: #f43f5e; }
+  .reason-signal_reversal { background: #f59e0b20; color: #f59e0b; }
+  .reason-time_exit { background: #64748b20; color: #64748b; }
+
+  /* ── Expanded Contract Chart ── */
+  #expanded-chart-wrap { display: none; border-bottom: 1px solid #222; position: relative; }
+  #expanded-chart-wrap .close-btn { position: absolute; top: 8px; right: 12px; color: #666; cursor: pointer; z-index: 10; font-size: 16px; }
+  #expanded-chart-wrap .close-btn:hover { color: #fff; }
+  #expanded-chart-label { padding: 8px 16px 0; font-size: 12px; color: #a78bfa; }
+  #expanded-chart { width: 100%; height: 300px; }
+
+  /* ── Mini Charts Grid ── */
+  .mini-section { padding: 8px 12px; }
+  .mini-section h2 { font-size: 12px; color: #666; padding: 0 4px 8px; text-transform: uppercase; letter-spacing: 1px; }
+  .mini-tabs { display: flex; gap: 8px; margin-bottom: 10px; padding: 0 4px; }
+  .mini-tabs button { background: #1a1a24; color: #888; border: 1px solid #333; padding: 4px 14px; border-radius: 4px; cursor: pointer; font-size: 11px; font-family: inherit; }
+  .mini-tabs button.active { background: #2a2a3a; color: #e0e0e0; border-color: #8b8bff; }
+  .mini-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px; }
+  .mini-card { background: #111118; border: 1px solid #222; border-radius: 6px; cursor: pointer; overflow: hidden; transition: border-color 0.15s; }
+  .mini-card:hover { border-color: #444; }
+  .mini-card.traded { border-color: #8b8bff55; }
+  .mini-card-header { display: flex; justify-content: space-between; padding: 4px 8px; font-size: 11px; }
+  .mini-card-header .strike { color: #ccc; font-weight: 600; }
+  .mini-card-header .price { color: #888; }
+  .mini-card-header .traded-badge { color: #8b8bff; font-size: 10px; }
+  .mini-card-chart { height: 100px; }
+
+  /* ── Strategy Analysis Panel ── */
+  .analysis-panel { background: #0d0d14; border-bottom: 1px solid #1a1a24; padding: 0; overflow: hidden; transition: max-height 0.25s ease; }
+  .analysis-panel.collapsed { max-height: 0 !important; padding: 0; border: none; }
+  .analysis-toggle { display: flex; align-items: center; gap: 8px; padding: 6px 16px; cursor: pointer; user-select: none; border-bottom: 1px solid #1a1a24; background: #0d0d14; }
+  .analysis-toggle:hover { background: #111118; }
+  .analysis-toggle .label { font-size: 11px; color: #8b8bff; text-transform: uppercase; letter-spacing: 0.5px; }
+  .analysis-toggle .chevron { font-size: 10px; color: #555; transition: transform 0.2s; }
+  .analysis-toggle.open .chevron { transform: rotate(90deg); }
+  .analysis-content { padding: 10px 16px 12px; }
+  .analysis-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+  @media (max-width: 900px) { .analysis-grid { grid-template-columns: 1fr 1fr; } }
+  .analysis-card { background: #111118; border: 1px solid #1a1a24; border-radius: 4px; padding: 8px 10px; }
+  .analysis-card h4 { font-size: 10px; color: #555; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
+  .analysis-card .stat-row { display: flex; justify-content: space-between; padding: 2px 0; font-size: 11px; }
+  .analysis-card .stat-label { color: #888; }
+  .analysis-card .stat-value { color: #e0e0e0; font-weight: 600; }
+  .analysis-card .stat-value.pos { color: #10b981; }
+  .analysis-card .stat-value.neg { color: #f43f5e; }
+  .analysis-card .stat-value.hl { color: #8b8bff; }
+  .analysis-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
+  .analysis-tag { font-size: 10px; padding: 2px 8px; border-radius: 3px; }
+  .analysis-tag.strength { background: #10b98118; color: #10b981; border: 1px solid #10b98133; }
+  .analysis-tag.explore { background: #f59e0b18; color: #f59e0b; border: 1px solid #f59e0b33; }
+  .analysis-setup { font-size: 11px; color: #aaa; padding: 4px 0 8px; }
+  .analysis-setup b { color: #e0e0e0; }
+  .analysis-loading { text-align: center; padding: 20px; color: #444; font-size: 12px; }
+  .equity-sparkline { width: 100%; height: 40px; margin-top: 4px; }
+
+  /* ── Trade Filters Bar ── */
+  .trade-filters { display: flex; gap: 10px; padding: 6px 16px; background: #0d0d14; border-bottom: 1px solid #1a1a24; align-items: center; font-size: 11px; }
+  .trade-filters label { color: #555; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; white-space: nowrap; }
+  .trade-filters select { background: #1a1a24; color: #e0e0e0; border: 1px solid #333; padding: 3px 6px; border-radius: 3px; font-family: inherit; font-size: 11px; cursor: pointer; }
+  .trade-filters select:focus { border-color: #8b8bff; outline: none; }
+  .trade-filters .filter-active { border-color: #8b8bff; color: #8b8bff; }
+  .trade-filters .filter-summary { color: #666; margin-left: auto; font-size: 10px; }
+  .trade-filters .filter-summary .num { color: #a78bfa; }
+
+  /* ── Mode Toggle (Replay / Live) ── */
+  .mode-toggle { display: flex; gap: 0; border: 1px solid #333; border-radius: 4px; overflow: hidden; }
+  .mode-toggle button { background: #1a1a24; color: #888; border: none; padding: 5px 14px; cursor: pointer; font-family: inherit; font-size: 12px; transition: background 0.15s, color 0.15s; }
+  .mode-toggle button:hover { background: #2a2a3a; color: #ccc; }
+  .mode-toggle button.active { background: #8b8bff22; color: #8b8bff; border-bottom: 2px solid #8b8bff; }
+
+  /* ── Status Banner (Live Mode) ── */
+  .status-banner { display: flex; align-items: center; gap: 16px; padding: 6px 16px; background: #0d0d14; border-bottom: 1px solid #1a1a24; font-size: 12px; flex-wrap: wrap; }
+  .status-banner .stat { display: flex; align-items: center; gap: 4px; color: #aaa; }
+  .status-banner .badge-live { background: #f43f5e22; color: #f43f5e; padding: 2px 8px; border-radius: 3px; font-size: 10px; font-weight: 700; text-transform: uppercase; border: 1px solid #f43f5e44; }
+  .status-banner .badge-paper { background: #f59e0b22; color: #f59e0b; padding: 2px 8px; border-radius: 3px; font-size: 10px; font-weight: 700; text-transform: uppercase; border: 1px solid #f59e0b44; }
+  .status-banner .pnl-pos { color: #10b981; font-weight: 600; }
+  .status-banner .pnl-neg { color: #f43f5e; font-weight: 600; }
+
+  /* ── Connection Status Indicator ── */
+  .connection-status { display: none; align-items: center; gap: 4px; font-size: 10px; color: #666; }
+  .connection-status::before { content: ''; display: inline-block; width: 8px; height: 8px; border-radius: 50%; }
+  .connection-status.connected { color: #10b981; }
+  .connection-status.connected::before { background: #10b981; box-shadow: 0 0 4px #10b98166; }
+  .connection-status.disconnected { color: #f43f5e; }
+  .connection-status.disconnected::before { background: #f43f5e; box-shadow: 0 0 4px #f43f5e66; }
+
+  /* ── Live Mode Utilities ── */
+  .live-hidden { display: none !important; }
+  .trade-new { animation: flash-new 1.2s ease-out; }
+  @keyframes flash-new {
+    0% { background: #10b98133; }
+    100% { background: transparent; }
+  }
+  .auto-scroll-toggle { position: absolute; top: 8px; right: 12px; z-index: 5; background: #1a1a24; color: #888; border: 1px solid #333; padding: 3px 8px; border-radius: 3px; cursor: pointer; font-family: inherit; font-size: 10px; }
+  .auto-scroll-toggle:hover { border-color: #8b8bff; color: #ccc; }
+  .auto-scroll-toggle.active { border-color: #8b8bff; color: #8b8bff; background: #8b8bff11; }
+
+  /* ── Loading ── */
+  .loading { display: flex; align-items: center; justify-content: center; height: 200px; color: #444; font-size: 14px; }
+  .no-data { text-align: center; padding: 40px; color: #444; }
+
+  /* ── Config Button ── */
+  .config-btn { background: #1a1a24; color: #8b8bff; border: 1px solid #8b8bff44; padding: 5px 14px; border-radius: 4px; cursor: pointer; font-family: inherit; font-size: 12px; white-space: nowrap; }
+  .config-btn:hover { background: #2a2a3a; border-color: #8b8bff; }
+  .run-btn { background: #10b98122; color: #10b981; border: 1px solid #10b98144; padding: 5px 14px; border-radius: 4px; cursor: pointer; font-family: inherit; font-size: 12px; white-space: nowrap; }
+  .run-btn:hover { background: #10b98133; border-color: #10b981; }
+  .run-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  /* ── Config Modal ── */
+  .modal-overlay { display: none; position: fixed; inset: 0; background: #000a; z-index: 100; justify-content: center; align-items: flex-start; padding: 40px 20px; overflow-y: auto; }
+  .modal-overlay.open { display: flex; }
+  .modal { background: #111118; border: 1px solid #333; border-radius: 8px; width: 680px; max-width: 100%; max-height: calc(100vh - 80px); overflow-y: auto; }
+  .modal-header { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid #222; position: sticky; top: 0; background: #111118; z-index: 1; }
+  .modal-header h2 { font-size: 14px; color: #8b8bff; font-weight: 600; }
+  .modal-close { color: #666; cursor: pointer; font-size: 18px; background: none; border: none; padding: 4px 8px; }
+  .modal-close:hover { color: #fff; }
+  .modal-body { padding: 12px 16px; }
+  .modal-footer { display: flex; gap: 12px; justify-content: flex-end; align-items: center; padding: 12px 16px; border-top: 1px solid #222; position: sticky; bottom: 0; background: #111118; }
+
+  /* ── Config Sections ── */
+  .cfg-section { margin-bottom: 16px; }
+  .cfg-section-title { font-size: 11px; color: #8b8bff; text-transform: uppercase; letter-spacing: 1px; padding: 6px 0 8px; border-bottom: 1px solid #1a1a24; margin-bottom: 8px; cursor: pointer; display: flex; justify-content: space-between; }
+  .cfg-section-title:hover { color: #a8a8ff; }
+  .cfg-section-title .chevron { transition: transform 0.15s; }
+  .cfg-section.collapsed .cfg-fields { display: none; }
+  .cfg-section.collapsed .chevron { transform: rotate(-90deg); }
+  .cfg-row { display: grid; grid-template-columns: 180px 1fr; align-items: center; gap: 8px; padding: 3px 0; }
+  .cfg-label { font-size: 11px; color: #888; }
+  .cfg-input { background: #0a0a0f; color: #e0e0e0; border: 1px solid #333; padding: 4px 8px; border-radius: 3px; font-family: inherit; font-size: 12px; width: 100%; }
+  .cfg-input:focus { border-color: #8b8bff; outline: none; }
+  .cfg-input[type="number"] { width: 100px; }
+  .cfg-input[type="checkbox"] { width: auto; margin: 0; }
+  .cfg-check-row { display: flex; align-items: center; gap: 8px; padding: 3px 0; }
+  .cfg-check-row label { font-size: 11px; color: #888; cursor: pointer; }
+  select.cfg-input { cursor: pointer; }
+
+  /* ── Name input at bottom ── */
+  .cfg-name-section { border-top: 1px solid #333; padding-top: 12px; margin-top: 8px; }
+  .cfg-name-row { display: grid; grid-template-columns: 80px 1fr; align-items: center; gap: 8px; }
+  .cfg-name-row .cfg-input { font-size: 13px; }
+  .cfg-name-hint { font-size: 10px; color: #555; margin-top: 4px; }
+  .cfg-hint { font-size: 10px; color: #555; grid-column: 1 / -1; padding: 0 0 2px 0; line-height: 1.4; }
+
+  /* ── Run Status ── */
+  .run-status { font-size: 11px; color: #888; }
+  .run-status.running { color: #f59e0b; }
+  .run-status.done { color: #10b981; }
+  .run-status.error { color: #f43f5e; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="mode-toggle" id="mode-toggle">
+    <button class="active" onclick="setMode('replay')">Replay</button>
+    <button onclick="setMode('live')">Live</button>
+  </div>
+  <h1>SPXer Replay</h1>
+  <a href="/replay/sweep" id="sweep-link" style="color:#666;text-decoration:none;font-size:12px;margin-left:-8px">🏆 Leaderboard</a>
+  <a href="/replay/surface" style="color:#666;text-decoration:none;font-size:12px;margin-left:-8px">📊 Surface</a>
+  <select id="date-select"><option>Loading...</option></select>
+  <span style="color:#444">to</span>
+  <select id="date-end-select"><option value="">same</option></select>
+  <select id="config-select"><option>Loading...</option></select>
+  <button class="config-btn" onclick="openConfigModal()">Settings</button>
+  <button class="run-btn" id="run-btn" onclick="runReplay()">Run</button>
+  <span class="run-status" id="run-status"></span>
+  <span id="job-indicator" style="display:none;margin-left:8px;padding:2px 8px;background:#1a1a2e;border:1px solid #444;border-radius:4px;font-size:11px;color:#ffa500;cursor:pointer" onclick="showJobStatus()" title="Click for details"></span>
+  <div class="summary" id="summary"></div>
+  <span class="connection-status disconnected" id="conn-status">WS</span>
+</div>
+
+<div class="status-banner" id="status-banner" style="display:none">
+  <span class="stat" id="live-mode-badge"></span>
+  <span class="stat" id="live-spx-price"></span>
+  <span class="stat" id="live-daily-pnl"></span>
+  <span class="stat" id="live-open-positions"></span>
+  <span class="stat" id="live-cycle"></span>
+  <span class="stat" id="live-minutes-close"></span>
+  <span class="stat" id="live-hma-dir"></span>
+  <span class="stat" id="live-uptime"></span>
+</div>
+<div id="live-config-panel" style="display:none; background:#0d0d15; border:1px solid #222; border-radius:6px; padding:10px 14px; margin:6px 10px; font-size:11px; color:#888; line-height:1.7">
+  <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px">
+    <span style="color:#aaa; font-weight:700; font-size:12px">📋 Live Config</span>
+    <span id="live-config-id" style="color:#3b82f6; font-family:monospace; font-size:11px"></span>
+  </div>
+  <div id="live-config-details" style="display:grid; grid-template-columns:repeat(auto-fill,minmax(200px,1fr)); gap:2px 16px"></div>
+</div>
+
+<!-- Config Modal -->
+<div class="modal-overlay" id="config-modal">
+  <div class="modal">
+    <div class="modal-header">
+      <h2>Replay Configuration</h2>
+      <button class="modal-close" onclick="closeConfigModal()">&times;</button>
+    </div>
+    <div class="modal-body" id="config-body">Loading...</div>
+    <div class="modal-footer">
+      <div class="cfg-name-section" style="flex:1; border:none; padding:0; margin:0;">
+        <div class="cfg-name-row">
+          <span class="cfg-label" style="color:#ccc">Config ID</span>
+          <input type="text" class="cfg-input" id="cfg-id" placeholder="my-config-name">
+        </div>
+        <div class="cfg-name-row" style="margin-top:6px">
+          <span class="cfg-label" style="color:#ccc">Name</span>
+          <input type="text" class="cfg-input" id="cfg-name" placeholder="My Custom Config">
+        </div>
+        <div class="cfg-name-hint">Leave blank to auto-generate from settings</div>
+      </div>
+      <button class="config-btn" onclick="closeConfigModal()">Cancel</button>
+      <button class="run-btn" onclick="saveAndRun()">Save &amp; Run</button>
+    </div>
+  </div>
+</div>
+
+<div class="analysis-toggle" id="analysis-toggle" onclick="toggleAnalysis()">
+  <span class="chevron">▶</span>
+  <span class="label">📊 Strategy Analysis</span>
+  <span id="analysis-summary-inline" style="font-size:11px;color:#666;margin-left:auto"></span>
+</div>
+<div class="analysis-panel collapsed" id="analysis-panel">
+  <div class="analysis-content" id="analysis-content">
+    <div class="analysis-loading">Select a config to see analysis...</div>
+  </div>
+</div>
+
+<div class="trade-filters">
+  <span id="filter-sync-indicator" style="color:#8b8bff;font-size:10px;margin-right:8px;display:none">↳ synced</span>
+  <label>Max Entry $</label>
+  <select id="tf-max-entry" onchange="applyTradeFilters()">
+    <option value="0" selected>No limit</option>
+    <option value="5">≤ $5</option>
+    <option value="8">≤ $8</option>
+    <option value="10">≤ $10</option>
+    <option value="15">≤ $15</option>
+    <option value="20">≤ $20</option>
+    <option value="25">≤ $25</option>
+    <option value="50">≤ $50</option>
+  </select>
+  <label>Max Concurrent</label>
+  <select id="tf-max-concurrent" onchange="applyTradeFilters()">
+    <option value="0" selected>No limit</option>
+    <option value="1">1</option>
+    <option value="2">2</option>
+    <option value="3">3</option>
+    <option value="5">5</option>
+    <option value="10">10</option>
+  </select>
+  <label>Max Trades/Day</label>
+  <select id="tf-max-trades" onchange="applyTradeFilters()">
+    <option value="0" selected>No limit</option>
+    <option value="3">3</option>
+    <option value="5">5</option>
+    <option value="10">10</option>
+    <option value="15">15</option>
+    <option value="20">20</option>
+    <option value="30">30</option>
+  </select>
+  <span class="filter-summary" id="filter-summary"></span>
+</div>
+
+<div id="spx-chart"><div class="loading">Select a date and config...</div></div>
+
+<div class="trades-section">
+  <h2>Trades</h2>
+  <table class="trades-table">
+    <thead><tr>
+      <th>#</th><th>Side</th><th>Strike</th><th>Entry</th><th>Exit</th><th>P&L</th><th>%</th><th>Reason</th>
+    </tr></thead>
+    <tbody id="trades-body"></tbody>
+  </table>
+</div>
+
+<div id="expanded-chart-wrap">
+  <span class="close-btn" onclick="closeExpanded()">&times;</span>
+  <div id="expanded-chart-label"></div>
+  <div id="expanded-chart"></div>
+</div>
+
+<div class="mini-section">
+  <h2>Option Chain Charts</h2>
+  <div class="mini-tabs">
+    <button class="active" onclick="setTab('calls', this)">Calls</button>
+    <button onclick="setTab('puts', this)">Puts</button>
+    <button onclick="setTab('traded', this)">Traded Only</button>
+  </div>
+  <div class="mini-grid" id="mini-grid"></div>
+</div>
+
+<script>
+// Path prefix for reverse proxy (e.g. '/spxer/replay' behind bitloom.cloud)
+const BASE = (document.querySelector('meta[name="base-path"]')?.content || '') || '';
+const API = BASE + '/replay/api';
+let allContracts = [];
+let allTrades = [];      // filtered trades (displayed)
+let rawTrades = [];      // unfiltered trades from DB
+let lastSpxBars = [];
+let lastSpx3m = [];
+let lastSpx5m = [];
+let spxChart = null;
+let spxCandleSeries = null;
+let spxMarkers = [];
+let expandedChart = null;
+let expandedSeries = null;
+let miniCharts = new Map(); // symbol -> { chart, series }
+let currentTab = 'calls';
+
+// ── Timezone: UTC → ET display ──────────────────────────────────────────────
+// replay_bars stores timestamps in real UTC. lightweight-charts displays Unix
+// timestamps as UTC. To show Eastern Time on the chart, we subtract the ET
+// offset so the chart renders ET labels (it thinks it's UTC but shows ET).
+let etOffsetSec = -5 * 3600; // default EST; updated per selected date
+
+function isDST(dateStr) {
+  // US DST 2026: starts March 8 (2nd Sunday of March), ends Nov 1
+  const d = new Date(dateStr + 'T12:00:00Z');
+  const year = d.getUTCFullYear();
+  const mar1 = new Date(Date.UTC(year, 2, 1));
+  const dstStart = new Date(Date.UTC(year, 2, 14 - mar1.getUTCDay()));
+  const nov1 = new Date(Date.UTC(year, 10, 1));
+  const dstEnd = new Date(Date.UTC(year, 10, 7 - nov1.getUTCDay()));
+  return d >= dstStart && d < dstEnd;
+}
+
+function toEtDisplay(utcTs) {
+  return utcTs + etOffsetSec;
+}
+
+// ── Init ───────────────────────────────────────────────────────────────────
+
+async function init() {
+  const [dates, configs] = await Promise.all([
+    fetch(`${API}/dates`).then(r => r.json()),
+    fetch(`${API}/configs`).then(r => r.json()),
+  ]);
+
+  const dateSel = document.getElementById('date-select');
+  dateSel.innerHTML = dates.map(d => `<option value="${d}">${d}</option>`).join('');
+
+  const dateEndSel = document.getElementById('date-end-select');
+  dateEndSel.innerHTML = '<option value="">same</option>' + dates.map(d => `<option value="${d}">${d}</option>`).join('');
+
+  const configSel = document.getElementById('config-select');
+  // Sort: put named/important configs first
+  const important = configs.filter(c => c.name !== 'Default Configuration');
+  const defaults = configs.filter(c => c.name === 'Default Configuration');
+  const sorted = [...important, ...defaults];
+  configSel.innerHTML = sorted.map(c =>
+    `<option value="${c.id}">${c.id} — ${c.name}</option>`
+  ).join('');
+
+  dateSel.addEventListener('change', loadDay);
+  configSel.addEventListener('change', loadDay);
+
+  // Auto-load latest date (skip if we're about to enter live mode)
+  if (dates.length) {
+    dateSel.value = dates[dates.length - 1];
+    if (location.hash !== '#live') {
+      loadDay();
+    }
+  }
+}
+
+// ── Load a day ─────────────────────────────────────────────────────────────
+
+async function loadDay() {
+  if (typeof currentMode !== 'undefined' && currentMode === 'live') return; // don't load replay data in live mode
+  const date = document.getElementById('date-select').value;
+  const configId = document.getElementById('config-select').value;
+  if (!date || !configId) return;
+
+  // Set ET offset for this date (EST=-5h or EDT=-4h)
+  etOffsetSec = isDST(date) ? -4 * 3600 : -5 * 3600;
+
+  // Fetch config to sync trade filters with config settings
+  const config = await fetch(`${API}/config/${configId}`).then(r => r.json()).catch(() => null);
+  if (config) {
+    syncTradeFiltersFromConfig(config);
+  }
+
+  // Fetch everything in parallel — 1m bars + 3m/5m bars from DB (pre-computed with continuity)
+  const [spxBars, spx3m, spx5m, results, contracts] = await Promise.all([
+    fetch(`${API}/bars?date=${date}&symbol=SPX`).then(r => r.json()),
+    fetch(`${API}/bars?date=${date}&symbol=SPX&tf=3m`).then(r => r.json()),
+    fetch(`${API}/bars?date=${date}&symbol=SPX&tf=5m`).then(r => r.json()),
+    fetch(`${API}/results?date=${date}&configId=${configId}`).then(r => r.json()),
+    fetch(`${API}/contracts?date=${date}`).then(r => r.json()),
+  ]);
+
+  allContracts = contracts;
+  rawTrades = results.trades || [];
+  lastSpxBars = spxBars;
+  lastSpx3m = spx3m;
+  lastSpx5m = spx5m;
+
+  applyTradeFilters();
+}
+
+// ── Sync trade filters from config ─────────────────────────────────────────
+
+function syncTradeFiltersFromConfig(config) {
+  // Map config values to trade filter dropdowns
+  const maxConcurrent = config?.position?.maxPositionsOpen || 0;
+  const maxTradesDay = config?.risk?.maxTradesPerDay || 0;
+  const maxEntry = config?.signals?.maxEntryPrice || config?.strikeSelector?.contractPriceMax || 0;
+
+  // Set dropdowns to match config (find closest match in options)
+  setClosestOption('tf-max-concurrent', maxConcurrent);
+  setClosestOption('tf-max-trades', maxTradesDay);
+  setClosestOption('tf-max-entry', maxEntry);
+
+  // Show indicator that filters are synced from config
+  const indicator = document.getElementById('filter-sync-indicator');
+  if (indicator && (maxConcurrent || maxTradesDay || maxEntry)) {
+    indicator.style.display = 'inline';
+    indicator.title = `Synced: max ${maxConcurrent || '∞'} concurrent, ${maxTradesDay || '∞'} trades/day, $${maxEntry || '∞'} entry`;
+  }
+}
+
+function setClosestOption(selectId, value) {
+  const select = document.getElementById(selectId);
+  if (!select || !value) return;
+
+  const options = Array.from(select.options).map(o => parseFloat(o.value) || 0);
+  if (options.includes(value)) {
+    select.value = value;
+  } else if (value > 0) {
+    // Find closest option (round up to available values)
+    const sorted = options.filter(v => v > 0).sort((a, b) => a - b);
+    const closest = sorted.find(v => v >= value) || sorted[sorted.length - 1];
+    if (closest) select.value = closest;
+  }
+}
+
+// ── Trade Filters ──────────────────────────────────────────────────────────
+
+function applyTradeFilters() {
+  const maxEntry = parseFloat(document.getElementById('tf-max-entry').value) || 0;
+  const maxConcurrent = parseInt(document.getElementById('tf-max-concurrent').value) || 0;
+  const maxTradesDay = parseInt(document.getElementById('tf-max-trades').value) || 0;
+
+  // Highlight active filters
+  for (const id of ['tf-max-entry', 'tf-max-concurrent', 'tf-max-trades']) {
+    const el = document.getElementById(id);
+    el.classList.toggle('filter-active', el.value !== '0');
+  }
+
+  let filtered = [...rawTrades];
+
+  // Step 1: entry price filter
+  if (maxEntry > 0) {
+    filtered = filtered.filter(t => t.entryPrice <= maxEntry);
+  }
+
+  // Step 2: sort by entry time
+  filtered.sort((a, b) => (a.entryTs || 0) - (b.entryTs || 0));
+
+  // Step 3: max concurrent positions — skip trades that would exceed the cap
+  if (maxConcurrent > 0) {
+    const accepted = [];
+    for (const t of filtered) {
+      const openAtEntry = accepted.filter(a => a.exitTs > t.entryTs).length;
+      if (openAtEntry < maxConcurrent) {
+        accepted.push(t);
+      }
+    }
+    filtered = accepted;
+  }
+
+  // Step 4: max trades per day
+  if (maxTradesDay > 0 && filtered.length > maxTradesDay) {
+    filtered = filtered.slice(0, maxTradesDay);
+  }
+
+  allTrades = filtered;
+
+  // Build summary from filtered trades
+  const totalPnl = filtered.reduce((s, t) => s + (t['pnl$'] || 0), 0);
+  const wins = filtered.filter(t => (t['pnl$'] || 0) > 0).length;
+  const summary = filtered.length > 0 ? {
+    trades: filtered.length,
+    wins,
+    winRate: wins / filtered.length,
+    totalPnl,
+  } : null;
+
+  // Update filter summary
+  const summaryEl = document.getElementById('filter-summary');
+  if (rawTrades.length !== filtered.length) {
+    summaryEl.innerHTML = `Showing <span class="num">${filtered.length}</span> of <span class="num">${rawTrades.length}</span> trades`;
+  } else {
+    summaryEl.innerHTML = '';
+  }
+
+  renderSummary(summary);
+  renderSpxChart(lastSpxBars, allTrades, lastSpx3m, lastSpx5m);
+  renderTradesTable(allTrades);
+  closeExpanded();
+  renderMiniCharts(document.getElementById('date-select').value);
+}
+
+// ── Summary ────────────────────────────────────────────────────────────────
+
+function renderSummary(s) {
+  const el = document.getElementById('summary');
+  if (!s || s.trades === 0) {
+    el.innerHTML = '<span>No trades</span>';
+    return;
+  }
+  const pnlClass = s.totalPnl > 0 ? 'win' : s.totalPnl < 0 ? 'loss' : 'neutral';
+  el.innerHTML = `
+    <span class="neutral">${s.trades} trades</span>
+    <span class="${s.winRate >= 0.5 ? 'win' : 'loss'}">${(s.winRate * 100).toFixed(0)}% WR</span>
+    <span class="${pnlClass}">$${s.totalPnl.toFixed(0)}</span>
+  `;
+}
+
+// ── Multi-Timeframe HMA Computation ───────────────────────────────────────
+
+function computeWMA(values, period) {
+  if (values.length < period) return null;
+  const slice = values.slice(-period);
+  let num = 0, den = 0;
+  for (let i = 0; i < period; i++) {
+    const w = i + 1;
+    num += slice[i] * w;
+    den += w;
+  }
+  return num / den;
+}
+
+function computeHMASeries(closes, period) {
+  const halfPeriod = Math.floor(period / 2);
+  const sqrtPeriod = Math.round(Math.sqrt(period));
+  const results = [];
+  const diffSeries = [];
+
+  for (let i = 0; i < closes.length; i++) {
+    const slice = closes.slice(0, i + 1);
+    const wmaHalf = computeWMA(slice, halfPeriod);
+    const wmaFull = computeWMA(slice, period);
+    if (wmaHalf != null && wmaFull != null) {
+      diffSeries.push(2 * wmaHalf - wmaFull);
+    } else {
+      diffSeries.push(null);
+    }
+  }
+
+  for (let i = 0; i < diffSeries.length; i++) {
+    const validDiffs = diffSeries.slice(0, i + 1).filter(v => v != null);
+    const hma = computeWMA(validDiffs, sqrtPeriod);
+    results.push(hma);
+  }
+  return results;
+}
+
+function aggregateBarsClient(bars1m, tfMinutes) {
+  if (tfMinutes <= 1) return bars1m;
+  const result = [];
+  let bucket = [];
+  let bucketStart = 0;
+
+  for (const bar of bars1m) {
+    const barMinute = Math.floor(bar.ts / (tfMinutes * 60)) * (tfMinutes * 60);
+    if (bucket.length === 0) bucketStart = barMinute;
+    if (barMinute !== bucketStart && bucket.length > 0) {
+      result.push({
+        ts: bucketStart,
+        o: bucket[0].o,
+        h: Math.max(...bucket.map(b => b.h)),
+        l: Math.min(...bucket.map(b => b.l)),
+        c: bucket[bucket.length - 1].c,
+      });
+      bucket = [];
+      bucketStart = barMinute;
+    }
+    bucket.push(bar);
+  }
+  if (bucket.length > 0) {
+    result.push({
+      ts: bucketStart,
+      o: bucket[0].o,
+      h: Math.max(...bucket.map(b => b.h)),
+      l: Math.min(...bucket.map(b => b.l)),
+      c: bucket[bucket.length - 1].c,
+    });
+  }
+  return result;
+}
+
+function computeMultiTfHma(bars1m, period, tfMinutes) {
+  const aggBars = aggregateBarsClient(bars1m, tfMinutes);
+  const closes = aggBars.map(b => b.c);
+  const hmaValues = computeHMASeries(closes, period);
+  return aggBars.map((b, i) => hmaValues[i] != null ? { time: toEtDisplay(b.ts), value: hmaValues[i] } : null).filter(Boolean);
+}
+
+// ── SPX Chart ──────────────────────────────────────────────────────────────
+
+function renderSpxChart(bars, trades, bars3m, bars5m) {
+  const container = document.getElementById('spx-chart');
+  container.innerHTML = '';
+
+  if (!bars.length) {
+    container.innerHTML = '<div class="no-data">No SPX data for this date</div>';
+    return;
+  }
+
+  spxChart = LightweightCharts.createChart(container, {
+    width: container.clientWidth,
+    height: 380,
+    layout: { background: { color: '#0a0a0f' }, textColor: '#666' },
+    grid: { vertLines: { color: '#151520' }, horzLines: { color: '#151520' } },
+    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+    timeScale: { timeVisible: true, secondsVisible: false, borderColor: '#222' },
+    rightPriceScale: { borderColor: '#222', autoScale: true },
+    handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: true },
+    handleScale: { mouseWheel: true, pinch: true, axisPressedMouseMove: true },
+  });
+
+  spxCandleSeries = spxChart.addSeries(LightweightCharts.CandlestickSeries, {
+    upColor: '#10b981', downColor: '#f43f5e',
+    borderUpColor: '#10b981', borderDownColor: '#f43f5e',
+    wickUpColor: '#10b98188', wickDownColor: '#f43f5e88',
+  });
+
+  const candleData = bars.map(b => ({ time: toEtDisplay(b.ts), open: b.o, high: b.h, low: b.l, close: b.c }));
+  spxCandleSeries.setData(candleData);
+
+  // HMA overlays — 1m (from pre-computed indicators)
+  const hma5Data = bars.filter(b => b.ind.hma5).map(b => ({ time: toEtDisplay(b.ts), value: b.ind.hma5 }));
+  const hma19Data = bars.filter(b => b.ind.hma19).map(b => ({ time: toEtDisplay(b.ts), value: b.ind.hma19 }));
+
+  if (hma5Data.length) {
+    spxChart.addSeries(LightweightCharts.LineSeries, {
+      color: '#10b98155', lineWidth: 1, lineStyle: 0, priceLineVisible: false,
+      lastValueVisible: false, crosshairMarkerVisible: false,
+      title: 'HMA5 1m',
+    }).setData(hma5Data);
+  }
+  if (hma19Data.length) {
+    spxChart.addSeries(LightweightCharts.LineSeries, {
+      color: '#3b82f655', lineWidth: 1, lineStyle: 0, priceLineVisible: false,
+      lastValueVisible: false, crosshairMarkerVisible: false,
+      title: 'HMA19 1m',
+    }).setData(hma19Data);
+  }
+
+  // Multi-timeframe HMA overlays — from pre-computed DB bars (with cross-day continuity)
+  if (bars3m && bars3m.length) {
+    const hma5_3m = bars3m.filter(b => b.ind.hma5).map(b => ({ time: toEtDisplay(b.ts), value: b.ind.hma5 }));
+    const hma19_3m = bars3m.filter(b => b.ind.hma19).map(b => ({ time: toEtDisplay(b.ts), value: b.ind.hma19 }));
+    if (hma5_3m.length) {
+      spxChart.addSeries(LightweightCharts.LineSeries, {
+        color: '#f59e0b88', lineWidth: 2, lineStyle: 0, priceLineVisible: false,
+        lastValueVisible: false, crosshairMarkerVisible: false, title: 'HMA5 3m',
+      }).setData(hma5_3m);
+    }
+    if (hma19_3m.length) {
+      spxChart.addSeries(LightweightCharts.LineSeries, {
+        color: '#f59e0b55', lineWidth: 2, lineStyle: 2, priceLineVisible: false,
+        lastValueVisible: false, crosshairMarkerVisible: false, title: 'HMA19 3m',
+      }).setData(hma19_3m);
+    }
+  }
+  if (bars5m && bars5m.length) {
+    const hma5_5m = bars5m.filter(b => b.ind.hma5).map(b => ({ time: toEtDisplay(b.ts), value: b.ind.hma5 }));
+    const hma19_5m = bars5m.filter(b => b.ind.hma19).map(b => ({ time: toEtDisplay(b.ts), value: b.ind.hma19 }));
+    if (hma5_5m.length) {
+      spxChart.addSeries(LightweightCharts.LineSeries, {
+        color: '#a78bfa99', lineWidth: 2, lineStyle: 0, priceLineVisible: false,
+        lastValueVisible: false, crosshairMarkerVisible: false, title: 'HMA5 5m',
+      }).setData(hma5_5m);
+    }
+    if (hma19_5m.length) {
+      spxChart.addSeries(LightweightCharts.LineSeries, {
+        color: '#a78bfa55', lineWidth: 2, lineStyle: 2, priceLineVisible: false,
+        lastValueVisible: false, crosshairMarkerVisible: false, title: 'HMA19 5m',
+      }).setData(hma19_5m);
+    }
+  }
+
+  // Entry/exit markers on SPX chart
+  const markers = [];
+  for (const t of trades) {
+    markers.push({
+      time: toEtDisplay(t.entryTs),
+      position: 'belowBar',
+      color: t.side === 'call' ? '#10b981' : '#f43f5e',
+      shape: 'arrowUp',
+      text: `${t.side === 'call' ? 'C' : 'P'}${t.strike}`,
+    });
+    markers.push({
+      time: toEtDisplay(t.exitTs),
+      position: 'aboveBar',
+      color: t['pnl$'] >= 0 ? '#10b981' : '#f43f5e',
+      shape: 'arrowDown',
+      text: `$${t['pnl$'].toFixed(0)}`,
+    });
+  }
+  markers.sort((a, b) => a.time - b.time);
+  spxMarkers = markers;
+  if (markers.length) LightweightCharts.createSeriesMarkers(spxCandleSeries, markers);
+
+  spxChart.timeScale().fitContent();
+
+  // Resize handler
+  const ro = new ResizeObserver(() => {
+    spxChart.applyOptions({ width: container.clientWidth });
+  });
+  ro.observe(container);
+}
+
+// ── Trades Table ───────────────────────────────────────────────────────────
+
+function renderTradesTable(trades) {
+  const tbody = document.getElementById('trades-body');
+  if (!trades.length) {
+    tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:#444;padding:16px">No trades</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = trades.map((t, i) => {
+    const pnlClass = t['pnl$'] > 0 ? 'pnl-pos' : t['pnl$'] < 0 ? 'pnl-neg' : 'pnl-zero';
+    const sideClass = t.side === 'call' ? 'call' : 'put';
+    const entryStr = t.entryPrice > 0 ? `${t.entryET || ''} @ $${t.entryPrice.toFixed(2)}` : (t.entryET || '—');
+    const exitStr = t.exitPrice > 0 ? `${t.exitET || ''} @ $${t.exitPrice.toFixed(2)}` : (t.exitET || '—');
+    const pctStr = t.pnlPct ? `${t.pnlPct >= 0 ? '+' : ''}${t.pnlPct.toFixed(0)}%` : '';
+    return `<tr data-idx="${i}" onclick="selectTrade(${i})">
+      <td>${i + 1}</td>
+      <td class="${sideClass}">${t.side.toUpperCase()}</td>
+      <td>${t.strike}</td>
+      <td>${entryStr}</td>
+      <td>${exitStr}</td>
+      <td class="${pnlClass}">$${t['pnl$'].toFixed(0)}</td>
+      <td class="${pnlClass}">${pctStr}</td>
+      <td><span class="reason reason-${t.reason}">${formatReason(t.reason)}</span></td>
+    </tr>`;
+  }).join('');
+}
+
+function formatReason(r) {
+  const map = { take_profit: 'TP', stop_loss: 'SL', signal_reversal: 'REV', time_exit: 'EOD' };
+  return map[r] || r;
+}
+
+function selectTrade(idx) {
+  // Highlight row
+  document.querySelectorAll('.trades-table tr.selected').forEach(r => r.classList.remove('selected'));
+  const row = document.querySelector(`tr[data-idx="${idx}"]`);
+  if (row) row.classList.add('selected');
+
+  const trade = allTrades[idx];
+  if (!trade) return;
+
+  // Scroll SPX chart to the trade
+  if (spxChart) {
+    spxChart.timeScale().setVisibleRange({
+      from: toEtDisplay(trade.entryTs) - 300,
+      to: toEtDisplay(trade.exitTs) + 300,
+    });
+  }
+
+  // Open expanded contract chart
+  openExpanded(trade);
+}
+
+// ── Expanded Contract Chart ────────────────────────────────────────────────
+
+async function openExpanded(trade) {
+  const wrap = document.getElementById('expanded-chart-wrap');
+  const container = document.getElementById('expanded-chart');
+  const label = document.getElementById('expanded-chart-label');
+  wrap.style.display = 'block';
+  container.innerHTML = '';
+
+  const sideLabel = trade.side === 'call' ? 'CALL' : 'PUT';
+  label.textContent = `${trade.symbol} — ${sideLabel} ${trade.strike} | ${trade.entryET} -> ${trade.exitET} | $${trade['pnl$'].toFixed(0)}`;
+
+  const date = document.getElementById('date-select').value;
+  const bars = await fetch(`${API}/bars?date=${date}&symbol=${trade.symbol}`).then(r => r.json());
+
+  if (!bars.length) {
+    container.innerHTML = '<div class="no-data">No bar data for this contract</div>';
+    return;
+  }
+
+  if (expandedChart) { expandedChart.remove(); expandedChart = null; }
+
+  expandedChart = LightweightCharts.createChart(container, {
+    width: container.clientWidth,
+    height: 300,
+    layout: { background: { color: '#0a0a0f' }, textColor: '#666' },
+    grid: { vertLines: { color: '#151520' }, horzLines: { color: '#151520' } },
+    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+    timeScale: { timeVisible: true, secondsVisible: false, borderColor: '#222' },
+    rightPriceScale: { borderColor: '#222' },
+  });
+
+  expandedSeries = expandedChart.addSeries(LightweightCharts.CandlestickSeries, {
+    upColor: '#10b981', downColor: '#f43f5e',
+    borderUpColor: '#10b981', borderDownColor: '#f43f5e',
+    wickUpColor: '#10b98188', wickDownColor: '#f43f5e88',
+  });
+
+  expandedSeries.setData(bars.map(b => ({ time: toEtDisplay(b.ts), open: b.o, high: b.h, low: b.l, close: b.c })));
+
+  // HMA overlays
+  const hma5 = bars.filter(b => b.ind.hma5).map(b => ({ time: toEtDisplay(b.ts), value: b.ind.hma5 }));
+  const hma19 = bars.filter(b => b.ind.hma19).map(b => ({ time: toEtDisplay(b.ts), value: b.ind.hma19 }));
+  if (hma5.length) {
+    expandedChart.addSeries(LightweightCharts.LineSeries, {
+      color: '#10b98166', lineWidth: 1, priceLineVisible: false, lastValueVisible: false,
+    }).setData(hma5);
+  }
+  if (hma19.length) {
+    expandedChart.addSeries(LightweightCharts.LineSeries, {
+      color: '#3b82f666', lineWidth: 1, priceLineVisible: false, lastValueVisible: false,
+    }).setData(hma19);
+  }
+
+  // Entry/exit markers
+  const markers = [
+    {
+      time: toEtDisplay(trade.entryTs), position: 'belowBar',
+      color: '#2196F3', shape: 'arrowUp',
+      text: `BUY $${trade.entryPrice.toFixed(2)}`,
+    },
+    {
+      time: toEtDisplay(trade.exitTs), position: 'aboveBar',
+      color: trade['pnl$'] >= 0 ? '#10b981' : '#f43f5e', shape: 'arrowDown',
+      text: `${formatReason(trade.reason)} $${trade.exitPrice.toFixed(2)} (${trade['pnl$'] >= 0 ? '+' : ''}$${trade['pnl$'].toFixed(0)})`,
+    },
+  ];
+  markers.sort((a, b) => a.time - b.time);
+  LightweightCharts.createSeriesMarkers(expandedSeries, markers);
+
+  // Zoom to trade window with padding
+  expandedChart.timeScale().setVisibleRange({
+    from: toEtDisplay(trade.entryTs) - 600,
+    to: toEtDisplay(trade.exitTs) + 600,
+  });
+
+  const ro = new ResizeObserver(() => {
+    if (expandedChart) expandedChart.applyOptions({ width: container.clientWidth });
+  });
+  ro.observe(container);
+}
+
+function closeExpanded() {
+  document.getElementById('expanded-chart-wrap').style.display = 'none';
+  if (expandedChart) { expandedChart.remove(); expandedChart = null; }
+}
+
+// ── Mini Chart Grid ────────────────────────────────────────────────────────
+
+async function renderMiniCharts(date) {
+  const grid = document.getElementById('mini-grid');
+  grid.innerHTML = '<div class="loading">Loading contracts...</div>';
+
+  // Clear old mini charts
+  for (const [, mc] of miniCharts) { mc.chart.remove(); }
+  miniCharts.clear();
+
+  // Filter by current tab
+  let contracts = filterContracts();
+  if (!contracts.length) {
+    grid.innerHTML = '<div class="no-data">No contracts</div>';
+    return;
+  }
+
+  // Limit to manageable count (nearest strikes to SPX)
+  if (contracts.length > 40) {
+    // Keep only strikes within reasonable range
+    contracts = contracts.slice(0, 40);
+  }
+
+  grid.innerHTML = '';
+
+  // Get the traded symbols for badges
+  const tradedSymbols = new Set(allTrades.map(t => t.symbol));
+
+  // Create cards and fetch bars
+  for (const c of contracts) {
+    const card = document.createElement('div');
+    card.className = 'mini-card' + (tradedSymbols.has(c.symbol) ? ' traded' : '');
+    card.onclick = () => openMiniExpanded(c, date);
+
+    const typeLabel = c.type === 'call' ? 'C' : 'P';
+    const traded = tradedSymbols.has(c.symbol) ? '<span class="traded-badge">TRADED</span>' : '';
+
+    card.innerHTML = `
+      <div class="mini-card-header">
+        <span class="strike">${typeLabel}${c.strike}</span>
+        <span class="price">$${c.minPrice.toFixed(2)}-${c.maxPrice.toFixed(2)}</span>
+        ${traded}
+      </div>
+      <div class="mini-card-chart" id="mc-${c.symbol.replace(/[^a-zA-Z0-9]/g, '')}"></div>
+    `;
+    grid.appendChild(card);
+
+    // Fetch bars and render chart (staggered to avoid flooding)
+    renderMiniChart(c, date);
+  }
+}
+
+async function renderMiniChart(contract, date) {
+  const containerId = `mc-${contract.symbol.replace(/[^a-zA-Z0-9]/g, '')}`;
+  const container = document.getElementById(containerId);
+  if (!container) return;
+
+  const bars = await fetch(`${API}/bars?date=${date}&symbol=${contract.symbol}`).then(r => r.json());
+  if (!bars.length) return;
+
+  const chart = LightweightCharts.createChart(container, {
+    width: container.clientWidth,
+    height: 100,
+    layout: { background: { color: '#111118' }, textColor: '#444' },
+    grid: { vertLines: { visible: false }, horzLines: { visible: false } },
+    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+    timeScale: { visible: false, borderVisible: false },
+    rightPriceScale: { visible: false, borderVisible: false },
+    leftPriceScale: { visible: false },
+    handleScroll: false,
+    handleScale: false,
+  });
+
+  const series = chart.addSeries(LightweightCharts.CandlestickSeries, {
+    upColor: '#10b981', downColor: '#f43f5e',
+    borderUpColor: '#10b981', borderDownColor: '#f43f5e',
+    wickUpColor: '#10b98155', wickDownColor: '#f43f5e55',
+  });
+
+  series.setData(bars.map(b => ({ time: toEtDisplay(b.ts), open: b.o, high: b.h, low: b.l, close: b.c })));
+
+  // Add entry/exit markers for this specific contract
+  const contractTrades = allTrades.filter(t => t.symbol === contract.symbol);
+  if (contractTrades.length) {
+    const markers = [];
+    for (const t of contractTrades) {
+      markers.push({ time: toEtDisplay(t.entryTs), position: 'belowBar', color: '#2196F3', shape: 'arrowUp', text: '' });
+      markers.push({ time: toEtDisplay(t.exitTs), position: 'aboveBar', color: t['pnl$'] >= 0 ? '#10b981' : '#f43f5e', shape: 'arrowDown', text: '' });
+    }
+    markers.sort((a, b) => a.time - b.time);
+    LightweightCharts.createSeriesMarkers(series, markers);
+  }
+
+  chart.timeScale().fitContent();
+  miniCharts.set(contract.symbol, { chart, series });
+}
+
+async function openMiniExpanded(contract, date) {
+  // Build a fake trade object for the expanded view if not already traded
+  const contractTrades = allTrades.filter(t => t.symbol === contract.symbol);
+
+  if (contractTrades.length) {
+    openExpanded(contractTrades[0]);
+  } else {
+    // Show full contract chart without trade markers
+    const wrap = document.getElementById('expanded-chart-wrap');
+    const container = document.getElementById('expanded-chart');
+    const label = document.getElementById('expanded-chart-label');
+    wrap.style.display = 'block';
+    container.innerHTML = '';
+
+    label.textContent = `${contract.symbol} — ${contract.type.toUpperCase()} ${contract.strike} (no trades)`;
+
+    const bars = await fetch(`${API}/bars?date=${date}&symbol=${contract.symbol}`).then(r => r.json());
+    if (!bars.length) { container.innerHTML = '<div class="no-data">No data</div>'; return; }
+
+    if (expandedChart) { expandedChart.remove(); expandedChart = null; }
+
+    expandedChart = LightweightCharts.createChart(container, {
+      width: container.clientWidth, height: 300,
+      layout: { background: { color: '#0a0a0f' }, textColor: '#666' },
+      grid: { vertLines: { color: '#151520' }, horzLines: { color: '#151520' } },
+      timeScale: { timeVisible: true, secondsVisible: false, borderColor: '#222' },
+      rightPriceScale: { borderColor: '#222' },
+    });
+
+    expandedSeries = expandedChart.addSeries(LightweightCharts.CandlestickSeries, {
+      upColor: '#10b981', downColor: '#f43f5e',
+      borderUpColor: '#10b981', borderDownColor: '#f43f5e',
+    });
+    expandedSeries.setData(bars.map(b => ({ time: toEtDisplay(b.ts), open: b.o, high: b.h, low: b.l, close: b.c })));
+    expandedChart.timeScale().fitContent();
+
+    const ro = new ResizeObserver(() => {
+      if (expandedChart) expandedChart.applyOptions({ width: container.clientWidth });
+    });
+    ro.observe(container);
+  }
+}
+
+// ── Tab filtering ──────────────────────────────────────────────────────────
+
+function filterContracts() {
+  const tradedSymbols = new Set(allTrades.map(t => t.symbol));
+  if (currentTab === 'calls') return allContracts.filter(c => c.type === 'call');
+  if (currentTab === 'puts') return allContracts.filter(c => c.type === 'put');
+  if (currentTab === 'traded') return allContracts.filter(c => tradedSymbols.has(c.symbol));
+  return allContracts;
+}
+
+function setTab(tab, btn) {
+  currentTab = tab;
+  document.querySelectorAll('.mini-tabs button').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  const date = document.getElementById('date-select').value;
+  renderMiniCharts(date);
+}
+
+// ── Config Modal ──────────────────────────────────────────────────────────
+
+let currentConfig = null; // full config object
+let originalConfigSnapshot = null; // JSON snapshot taken when modal opens
+
+const CONFIG_SECTIONS = [
+  { key: 'signals', title: 'Signals', fields: [
+    { path: 'signals.enableHmaCrosses', label: 'HMA Crosses', type: 'bool' },
+    { path: 'signals.hmaCrossFast', label: 'HMA Fast Period', type: 'num', min: 2, max: 100 },
+    { path: 'signals.hmaCrossSlow', label: 'HMA Slow Period', type: 'num', min: 2, max: 200 },
+    { path: 'signals.enableRsiCrosses', label: 'RSI Crosses', type: 'bool' },
+    { path: 'signals.enablePriceCrossHma', label: 'Price Cross HMA', type: 'bool' },
+    { path: 'signals.enableEmaCrosses', label: 'EMA Crosses', type: 'bool' },
+    { path: 'signals.emaCrossFast', label: 'EMA Fast Period', type: 'select', options: ['9', '21', '50'] },
+    { path: 'signals.emaCrossSlow', label: 'EMA Slow Period', type: 'select', options: ['21', '50', '200'] },
+    { path: 'signals.requireUnderlyingHmaCross', label: 'Require SPX HMA Cross', type: 'bool' },
+    { path: 'signals.signalTimeframe', label: 'Signal Timeframe (default)', type: 'select', options: ['1m', '3m', '5m'] },
+    { path: 'signals.directionTimeframe', label: 'Direction TF (entry gate)', type: 'select', options: ['1m', '3m', '5m'] },
+    { path: 'signals.exitTimeframe', label: 'Exit TF (reversal detect)', type: 'select', options: ['', '1m', '3m', '5m'] },
+    { path: 'signals.hmaCrossTimeframe', label: 'HMA Cross TF override', type: 'select', options: ['', '1m', '3m', '5m'] },
+    { path: 'signals.rsiCrossTimeframe', label: 'RSI Cross TF override', type: 'select', options: ['', '1m', '3m', '5m'] },
+    { path: 'signals.emaCrossTimeframe', label: 'EMA Cross TF override', type: 'select', options: ['', '1m', '3m', '5m'] },
+    { path: 'signals.priceCrossHmaTimeframe', label: 'Price×HMA TF override', type: 'select', options: ['', '1m', '3m', '5m'] },
+    { path: 'signals.rsiOversold', label: 'RSI Oversold', type: 'num', min: 1, max: 50 },
+    { path: 'signals.rsiOverbought', label: 'RSI Overbought', type: 'num', min: 50, max: 99 },
+    { path: 'signals.optionRsiOversold', label: 'Option RSI Oversold', type: 'num', min: 1, max: 50 },
+    { path: 'signals.optionRsiOverbought', label: 'Option RSI Overbought', type: 'num', min: 50, max: 99 },
+    { path: 'signals.allowedSides', label: 'Allowed Sides', type: 'select', options: ['both', 'calls', 'puts'], hint: 'both = calls + puts. calls = long only (bullish). puts = short only (bearish).' },
+    { path: 'signals.targetOtmDistance', label: 'Target OTM/ITM Distance ($)', type: 'num-null', min: -100, max: 200 },
+    { path: 'signals.targetContractPrice', label: 'Target Contract Price ($)', type: 'num-null', min: 0, max: 50 },
+    { path: 'signals.maxEntryPrice', label: 'Max Entry Price ($)', type: 'num-null', min: 0, max: 50, hint: 'Filter: skip trades above this price' },
+  ]},
+  { key: 'position', title: 'Position Management', fields: [
+    { path: 'position.stopLossPercent', label: 'Stop Loss %', type: 'num', min: 0, max: 100 },
+    { path: 'position.takeProfitMultiplier', label: 'Take Profit Multiplier', type: 'num', min: 0, max: 50, step: 0.5 },
+    { path: 'position.maxPositionsOpen', label: 'Max Positions Open', type: 'num', min: 1, max: 20 },
+    { path: 'position.defaultQuantity', label: 'Default Quantity', type: 'num', min: 1, max: 100 },
+    { path: 'position.positionSizeMultiplier', label: 'Position Size Multiplier', type: 'num', min: 0.1, max: 10, step: 0.1 },
+  ]},
+  { key: 'risk', title: 'Risk Management', fields: [
+    { path: 'risk.maxDailyLoss', label: 'Max Daily Loss ($)', type: 'num', min: 0, max: 10000 },
+    { path: 'risk.maxTradesPerDay', label: 'Max Trades / Day', type: 'num', min: 1, max: 100 },
+    { path: 'risk.maxRiskPerTrade', label: 'Max Risk / Trade ($)', type: 'num', min: 0, max: 10000 },
+    { path: 'risk.cutoffTimeET', label: 'Cutoff Time (ET)', type: 'time' },
+    { path: 'risk.minMinutesToClose', label: 'Min Minutes to Close', type: 'num', min: 0, max: 60 },
+  ]},
+  { key: 'strikeSelector', title: 'Strike Selection', fields: [
+    { path: 'strikeSelector.strikeSearchRange', label: 'Strike Search Range ($)', type: 'num', min: 10, max: 300 },
+    { path: 'strikeSelector.contractPriceMin', label: 'Contract Price Min ($)', type: 'num', min: 0, max: 20, step: 0.05 },
+    { path: 'strikeSelector.contractPriceMax', label: 'Contract Price Max ($)', type: 'num', min: 0, max: 50, step: 0.5 },
+  ]},
+  { key: 'timeWindows', title: 'Time Windows', fields: [
+    { path: 'timeWindows.activeStart', label: 'Active Start (ET)', type: 'time' },
+    { path: 'timeWindows.activeEnd', label: 'Active End (ET)', type: 'time' },
+    { path: 'timeWindows.sessionStart', label: 'Session Start (ET)', type: 'time' },
+    { path: 'timeWindows.sessionEnd', label: 'Session End (ET)', type: 'time' },
+  ]},
+  { key: 'exit', title: 'Exit Strategy', fields: [
+    { path: 'exit.strategy', label: 'Strategy', type: 'select', options: ['takeProfit', 'scannerReverse'] },
+    { path: 'exit.exitPricing', label: 'Exit Pricing', type: 'select', options: ['close', 'intrabar'], hint: 'close = exit at bar close (lets winners overshoot TP). intrabar = exit at exact TP/SL price (matches live bracket orders).' },
+    { path: 'exit.trailingStopEnabled', label: 'Trailing Stop', type: 'bool' },
+    { path: 'exit.trailingStopPercent', label: 'Trailing Stop %', type: 'num', min: 1, max: 50 },
+    { path: 'exit.timeBasedExitEnabled', label: 'Time-Based Exit', type: 'bool' },
+    { path: 'exit.timeBasedExitMinutes', label: 'Time Exit (minutes)', type: 'num', min: 1, max: 60 },
+    { path: 'exit.reversalSizeMultiplier', label: 'Reversal Size Mult', type: 'num', min: 0.1, max: 5, step: 0.1 },
+  ]},
+  { key: 'regime', title: 'Regime Classification', collapsed: true, fields: [
+    { path: 'regime.enabled', label: 'Enabled', type: 'bool' },
+    { path: 'regime.mode', label: 'Mode', type: 'select', options: ['enforce', 'advisory', 'disabled'] },
+    { path: 'regime.classification.trendThreshold', label: 'Trend Threshold', type: 'num', min: 0, max: 1, step: 0.01 },
+    { path: 'regime.classification.lookbackBars', label: 'Lookback Bars', type: 'num', min: 5, max: 100 },
+    { path: 'regime.classification.openingRangeMinutes', label: 'Opening Range (min)', type: 'num', min: 5, max: 60 },
+    { path: 'regime.timeWindows.morningEnd', label: 'Morning End (ET)', type: 'time' },
+    { path: 'regime.timeWindows.middayEnd', label: 'Midday End (ET)', type: 'time' },
+    { path: 'regime.timeWindows.gammaExpiryStart', label: 'Gamma Expiry Start', type: 'time' },
+    { path: 'regime.timeWindows.noTradeStart', label: 'No-Trade Start', type: 'time' },
+  ]},
+  { key: 'sizing', title: 'Position Sizing', collapsed: true, fields: [
+    { path: 'sizing.baseDollarsPerTrade', label: 'Base $/Trade', type: 'num', min: 50, max: 10000 },
+    { path: 'sizing.sizeMultiplier', label: 'Size Multiplier', type: 'num', min: 0.1, max: 10, step: 0.1 },
+    { path: 'sizing.minContracts', label: 'Min Contracts', type: 'num', min: 1, max: 50 },
+    { path: 'sizing.maxContracts', label: 'Max Contracts', type: 'num', min: 1, max: 100 },
+  ]},
+  { key: 'pipeline', title: 'Pipeline / Timeframe', collapsed: true, fields: [
+    { path: 'pipeline.timeframe', label: 'Timeframe', type: 'select', options: ['1m', '2m', '3m', '5m', '10m', '15m', '30m', '1h'] },
+    { path: 'pipeline.strikeBand', label: 'Strike Band ($)', type: 'num', min: 10, max: 300 },
+    { path: 'pipeline.gapInterpolateMaxMins', label: 'Gap Interpolate Max (min)', type: 'num', min: 1, max: 120 },
+  ]},
+  { key: 'scanners', title: 'Scanners (AI)', collapsed: true, fields: [
+    { path: 'scanners.enabled', label: 'Enabled', type: 'bool' },
+    { path: 'scanners.cycleIntervalSec', label: 'Cycle Interval (sec)', type: 'num', min: 10, max: 300 },
+    { path: 'scanners.minConfidenceToEscalate', label: 'Min Confidence', type: 'num', min: 0, max: 1, step: 0.1 },
+  ]},
+  { key: 'judges', title: 'Judges (AI)', collapsed: true, fields: [
+    { path: 'judges.enabled', label: 'Enabled', type: 'bool' },
+    { path: 'judges.activeJudge', label: 'Active Judge', type: 'select', options: ['sonnet', 'haiku', 'opus'] },
+    { path: 'judges.confidenceThreshold', label: 'Confidence Threshold', type: 'num', min: 0, max: 1, step: 0.1 },
+    { path: 'judges.escalationCooldownSec', label: 'Cooldown (sec)', type: 'num', min: 30, max: 600 },
+    { path: 'judges.consensusRule', label: 'Consensus', type: 'select', options: ['primary-decides', 'majority', 'unanimous', 'first-agree'] },
+  ]},
+  { key: 'escalation', title: 'Escalation', collapsed: true, fields: [
+    { path: 'escalation.signalTriggersJudge', label: 'Signal Triggers Judge', type: 'bool' },
+    { path: 'escalation.scannerTriggersJudge', label: 'Scanner Triggers Judge', type: 'bool' },
+    { path: 'escalation.requireScannerAgreement', label: 'Require Scanner Agreement', type: 'bool' },
+    { path: 'escalation.requireSignalAgreement', label: 'Require Signal Agreement', type: 'bool' },
+  ]},
+  { key: 'narrative', title: 'Narrative', collapsed: true, fields: [
+    { path: 'narrative.buildOvernightContext', label: 'Build Overnight Context', type: 'bool' },
+    { path: 'narrative.barHistoryDepth', label: 'Bar History Depth', type: 'num', min: 10, max: 200 },
+    { path: 'narrative.trackTrajectory', label: 'Track Trajectory', type: 'bool' },
+  ]},
+];
+
+function getPath(obj, path) {
+  return path.split('.').reduce((o, k) => o && o[k], obj);
+}
+
+function setPath(obj, path, val) {
+  const keys = path.split('.');
+  let cur = obj;
+  for (let i = 0; i < keys.length - 1; i++) {
+    if (!cur[keys[i]]) cur[keys[i]] = {};
+    cur = cur[keys[i]];
+  }
+  cur[keys[keys.length - 1]] = val;
+}
+
+async function openConfigModal() {
+  const modal = document.getElementById('config-modal');
+  modal.classList.add('open');
+
+  // Load defaults if we don't have a config loaded
+  if (!currentConfig) {
+    const configId = document.getElementById('config-select').value;
+    try {
+      currentConfig = await fetch(`${API}/config/${configId}`).then(r => r.json());
+    } catch {
+      currentConfig = await fetch(`${API}/defaults`).then(r => r.json());
+    }
+  }
+
+  // Snapshot the config so we can detect changes on save
+  originalConfigSnapshot = JSON.stringify(currentConfig);
+
+  // Reset user-edited flags so auto-name regenerates from fresh base
+  const idInput = document.getElementById('cfg-id');
+  const nameInput = document.getElementById('cfg-name');
+  if (idInput) delete idInput.dataset.userEdited;
+  if (nameInput) delete nameInput.dataset.userEdited;
+
+  renderConfigForm();
+  updateAutoName();
+}
+
+function closeConfigModal() {
+  document.getElementById('config-modal').classList.remove('open');
+}
+
+function renderConfigForm() {
+  const body = document.getElementById('config-body');
+  let html = '';
+
+  for (const section of CONFIG_SECTIONS) {
+    const collapsed = section.collapsed ? ' collapsed' : '';
+    html += `<div class="cfg-section${collapsed}" id="cfg-sec-${section.key}">`;
+    html += `<div class="cfg-section-title" onclick="toggleSection('${section.key}')">
+      <span>${section.title}</span><span class="chevron">▼</span></div>`;
+    html += `<div class="cfg-fields">`;
+
+    for (const f of section.fields) {
+      const val = getPath(currentConfig, f.path);
+      const inputId = `cfg-${f.path.replace(/\./g, '-')}`;
+
+      if (f.type === 'bool') {
+        html += `<div class="cfg-check-row">
+          <input type="checkbox" id="${inputId}" class="cfg-input" ${val ? 'checked' : ''} onchange="cfgChanged('${f.path}', this.checked)">
+          <label for="${inputId}">${f.label}</label>
+        </div>`;
+      } else if (f.type === 'select') {
+        const isNumeric = f.options.every(o => o !== '' && !isNaN(Number(o)));
+        const valStr = (val === null || val === undefined) ? '' : String(val);
+        // For nullable selects (empty '' option means "use default"), convert '' back to null
+        const hasNullOption = f.options.includes('');
+        const changeHandler = hasNullOption
+          ? `cfgChanged('${f.path}', this.value === '' ? null : ${isNumeric ? 'parseFloat(this.value)' : 'this.value'})`
+          : `cfgChanged('${f.path}', ${isNumeric ? 'parseFloat(this.value)' : 'this.value'})`;
+        html += `<div class="cfg-row">
+          <span class="cfg-label">${f.label}</span>
+          <select id="${inputId}" class="cfg-input" onchange="${changeHandler}">
+            ${f.options.map(o => `<option value="${o}" ${valStr === o ? 'selected' : ''}>${o || '(default)'}</option>`).join('')}
+          </select>
+          ${f.hint ? `<div class="cfg-hint">${f.hint}</div>` : ''}
+        </div>`;
+      } else if (f.type === 'num') {
+        html += `<div class="cfg-row">
+          <span class="cfg-label">${f.label}</span>
+          <input type="number" id="${inputId}" class="cfg-input" value="${val ?? ''}"
+            min="${f.min ?? ''}" max="${f.max ?? ''}" step="${f.step ?? 1}"
+            onchange="cfgChanged('${f.path}', parseFloat(this.value))">
+        </div>`;
+      } else if (f.type === 'num-null') {
+        const isNull = val === null || val === undefined;
+        html += `<div class="cfg-row">
+          <span class="cfg-label">${f.label}</span>
+          <div style="display:flex;gap:6px;align-items:center">
+            <input type="checkbox" ${!isNull ? 'checked' : ''} onchange="cfgNullToggle('${f.path}', '${inputId}', this.checked)">
+            <input type="number" id="${inputId}" class="cfg-input" value="${isNull ? '' : val}"
+              min="${f.min ?? ''}" max="${f.max ?? ''}" step="${f.step ?? 1}"
+              ${isNull ? 'disabled' : ''}
+              onchange="cfgChanged('${f.path}', parseFloat(this.value))">
+          </div>
+        </div>`;
+      } else if (f.type === 'time') {
+        html += `<div class="cfg-row">
+          <span class="cfg-label">${f.label}</span>
+          <input type="text" id="${inputId}" class="cfg-input" value="${val || ''}" placeholder="HH:MM"
+            style="width:80px" onchange="cfgChanged('${f.path}', this.value)">
+        </div>`;
+      }
+    }
+    html += `</div></div>`;
+  }
+
+  body.innerHTML = html;
+}
+
+function toggleSection(key) {
+  document.getElementById(`cfg-sec-${key}`).classList.toggle('collapsed');
+}
+
+function cfgChanged(path, val) {
+  setPath(currentConfig, path, val);
+  updateAutoName();
+}
+
+function cfgNullToggle(path, inputId, enabled) {
+  const input = document.getElementById(inputId);
+  input.disabled = !enabled;
+  if (enabled) {
+    cfgChanged(path, parseFloat(input.value) || 0);
+  } else {
+    cfgChanged(path, null);
+  }
+  updateAutoName();
+}
+
+function updateAutoName() {
+  if (!currentConfig) return;
+  const parts = [];
+  const s = currentConfig.signals || {};
+  if (s.enableHmaCrosses) parts.push(`HMA${s.hmaCrossFast || 5}x${s.hmaCrossSlow || 19}`);
+  if (s.enableRsiCrosses) parts.push('RSI');
+  if (s.enableEmaCrosses) parts.push(`EMA${s.emaCrossFast || 9}x${s.emaCrossSlow || 21}`);
+  if (s.enablePriceCrossHma) parts.push('PxHMA');
+  if (s.requireUnderlyingHmaCross) parts.push('UndHMA');
+  if (s.targetOtmDistance != null) parts.push(s.targetOtmDistance >= 0 ? `OTM${s.targetOtmDistance}` : `ITM${Math.abs(s.targetOtmDistance)}`);
+  if (s.targetContractPrice != null) parts.push(`$${s.targetContractPrice}`);
+  const p = currentConfig.position || {};
+  if (p.takeProfitMultiplier) parts.push(`TP${p.takeProfitMultiplier}x`);
+  if (p.stopLossPercent > 0) parts.push(`SL${p.stopLossPercent}%`);
+  else parts.push('NoSL');
+  const tf = currentConfig.pipeline?.timeframe;
+  if (tf && tf !== '1m') parts.push(tf);
+
+  const autoId = parts.join('-').toLowerCase().replace(/[^a-z0-9-]/g, '');
+  const autoName = parts.join(' | ');
+
+  const idInput = document.getElementById('cfg-id');
+  const nameInput = document.getElementById('cfg-name');
+  if (!idInput.dataset.userEdited) idInput.value = autoId;
+  if (!nameInput.dataset.userEdited) nameInput.value = autoName;
+
+  // Mark as user-edited on input
+  idInput.oninput = () => { idInput.dataset.userEdited = '1'; };
+  nameInput.oninput = () => { nameInput.dataset.userEdited = '1'; };
+}
+
+async function saveAndRun() {
+  const dates = getSelectedDates();
+  if (!dates.length) return alert('Select a date first');
+
+  let configId = document.getElementById('cfg-id').value || `custom-${Date.now()}`;
+  let configName = document.getElementById('cfg-name').value || configId;
+
+  // If config changed from when modal opened, create a new versioned ID
+  const configChanged = originalConfigSnapshot && JSON.stringify(currentConfig) !== originalConfigSnapshot;
+  if (configChanged) {
+    // Check if this ID already exists in the config dropdown
+    const configSel = document.getElementById('config-select');
+    const existingIds = new Set([...configSel.options].map(o => o.value));
+    if (existingIds.has(configId)) {
+      // Find next available version: base-v2, base-v3, etc.
+      const base = configId.replace(/-v\d+$/, '');
+      let v = 2;
+      while (existingIds.has(`${base}-v${v}`)) v++;
+      configId = `${base}-v${v}`;
+      // Update name too if it wasn't manually edited
+      const nameInput = document.getElementById('cfg-name');
+      if (!nameInput.dataset.userEdited) configName = `${configName} v${v}`;
+    }
+  }
+
+  closeConfigModal();
+  await runReplayWithConfig(dates, currentConfig, configId, configName);
+}
+
+function getSelectedDates() {
+  const start = document.getElementById('date-select').value;
+  const end = document.getElementById('date-end-select').value;
+  if (!start) return [];
+  if (!end || end === start) return [start];
+  // Get all dates between start and end from the dropdown options
+  const dateSel = document.getElementById('date-select');
+  const allDates = Array.from(dateSel.options).map(o => o.value);
+  const startIdx = allDates.indexOf(start);
+  const endIdx = allDates.indexOf(end);
+  if (startIdx < 0 || endIdx < 0) return [start];
+  const lo = Math.min(startIdx, endIdx);
+  const hi = Math.max(startIdx, endIdx);
+  return allDates.slice(lo, hi + 1);
+}
+
+// ── Background job polling ──────────────────────────────────────────────────
+let activeJobId = null;
+let jobPollTimer = null;
+
+function startJobPoll(jobId, statusEl, runBtn) {
+  activeJobId = jobId;
+  const indicator = document.getElementById('job-indicator');
+
+  function poll() {
+    fetch(`${API}/job/${jobId}`).then(r => r.json()).then(job => {
+      if (!job || job.error === 'Job not found') {
+        stopJobPoll(statusEl, runBtn);
+        return;
+      }
+
+      const totalTrades = job.results.reduce((s, r) => s + r.trades, 0);
+      const totalPnl = job.results.reduce((s, r) => s + r.totalPnl, 0);
+      const pct = Math.round(job.progress.completed / job.progress.total * 100);
+
+      // Update indicator (always visible during job)
+      indicator.style.display = 'inline';
+      indicator.textContent = `⏳ ${job.progress.completed}/${job.progress.total}`;
+
+      if (job.status === 'pending' || job.status === 'running') {
+        statusEl.className = 'run-status running';
+        statusEl.textContent = job.status === 'pending'
+          ? `Starting batch (${job.progress.total} days)...`
+          : `Running ${job.progress.completed}/${job.progress.total} (${job.progress.currentDate})... ${totalTrades} trades | $${totalPnl.toFixed(0)}`;
+        jobPollTimer = setTimeout(poll, 2000);
+      } else if (job.status === 'completed') {
+        statusEl.className = 'run-status done';
+        statusEl.textContent = `✅ ${job.dates.length} days | ${totalTrades} trades | $${totalPnl.toFixed(0)}`;
+        indicator.textContent = `✅ ${job.dates.length}d`;
+        indicator.style.color = '#4caf50';
+        stopJobPoll(statusEl, runBtn);
+        loadDay(); // refresh chart
+        // Fade out indicator after 30s
+        setTimeout(() => { indicator.style.display = 'none'; indicator.style.color = '#ffa500'; }, 30000);
+      } else if (job.status === 'failed') {
+        statusEl.className = 'run-status error';
+        statusEl.textContent = `❌ Failed: ${job.error}`;
+        indicator.textContent = '❌ Failed';
+        indicator.style.color = '#f44336';
+        stopJobPoll(statusEl, runBtn);
+        setTimeout(() => { indicator.style.display = 'none'; indicator.style.color = '#ffa500'; }, 30000);
+      }
+    }).catch(() => {
+      // Network error — retry
+      jobPollTimer = setTimeout(poll, 5000);
+    });
+  }
+
+  poll();
+}
+
+function stopJobPoll(statusEl, runBtn) {
+  if (jobPollTimer) { clearTimeout(jobPollTimer); jobPollTimer = null; }
+  activeJobId = null;
+  runBtn.disabled = false;
+}
+
+function showJobStatus() {
+  if (!activeJobId) return;
+  fetch(`${API}/job/${activeJobId}`).then(r => r.json()).then(job => {
+    if (!job) return;
+    const totalTrades = job.results.reduce((s, r) => s + r.trades, 0);
+    const totalPnl = job.results.reduce((s, r) => s + r.totalPnl, 0);
+    const elapsed = ((job.completedAt || Date.now()) - job.startedAt) / 1000;
+    const perDay = job.progress.completed > 0 ? elapsed / job.progress.completed : 0;
+    const remaining = (job.progress.total - job.progress.completed) * perDay;
+    alert(
+      `Job: ${job.configName}\n` +
+      `Status: ${job.status}\n` +
+      `Progress: ${job.progress.completed}/${job.progress.total} (${job.progress.currentDate})\n` +
+      `Trades: ${totalTrades} | P&L: $${totalPnl.toFixed(0)}\n` +
+      `Elapsed: ${Math.round(elapsed)}s | ETA: ~${Math.round(remaining)}s`
+    );
+  });
+}
+
+async function runReplay() {
+  const dates = getSelectedDates();
+  const configId = document.getElementById('config-select').value;
+  if (!dates.length || !configId) return;
+
+  const statusEl = document.getElementById('run-status');
+  const runBtn = document.getElementById('run-btn');
+  runBtn.disabled = true;
+
+  // Single day — run synchronously (fast, <5s)
+  if (dates.length === 1) {
+    try {
+      statusEl.className = 'run-status running';
+      statusEl.textContent = 'Running...';
+      const res = await fetch(`${API}/run`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ date: dates[0], configId }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+      statusEl.className = 'run-status done';
+      statusEl.textContent = `${data.summary.trades} trades | $${data.summary.totalPnl.toFixed(0)}`;
+      await loadDay();
+      setTimeout(() => { statusEl.textContent = ''; }, 8000);
+    } catch (err) {
+      statusEl.className = 'run-status error';
+      statusEl.textContent = err.message;
+    } finally {
+      runBtn.disabled = false;
+    }
+    return;
+  }
+
+  // Multi-day — launch background job
+  try {
+    statusEl.className = 'run-status running';
+    statusEl.textContent = `Launching ${dates.length}-day batch...`;
+    const res = await fetch(`${API}/run-batch`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dates, configId }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+    startJobPoll(data.jobId, statusEl, runBtn);
+  } catch (err) {
+    statusEl.className = 'run-status error';
+    statusEl.textContent = err.message;
+    runBtn.disabled = false;
+  }
+}
+
+async function runReplayWithConfig(dates, config, configId, configName) {
+  if (typeof dates === 'string') dates = [dates];
+  const statusEl = document.getElementById('run-status');
+  const runBtn = document.getElementById('run-btn');
+  runBtn.disabled = true;
+
+  // Single day — synchronous
+  if (dates.length === 1) {
+    try {
+      statusEl.className = 'run-status running';
+      statusEl.textContent = 'Running...';
+      const res = await fetch(`${API}/run`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ date: dates[0], config, configId, configName }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+      statusEl.className = 'run-status done';
+      statusEl.textContent = `${data.summary.trades} trades | $${data.summary.totalPnl.toFixed(0)}`;
+
+      // Reload configs dropdown and select the new one
+      const configs = await fetch(`${API}/configs`).then(r => r.json());
+      const configSel = document.getElementById('config-select');
+      const important = configs.filter(c => c.name !== 'Default Configuration');
+      const defaults = configs.filter(c => c.name === 'Default Configuration');
+      const sorted = [...important, ...defaults];
+      configSel.innerHTML = sorted.map(c =>
+        `<option value="${c.id}">${c.id} — ${c.name}</option>`
+      ).join('');
+      configSel.value = data.configId;
+      await loadDay();
+      setTimeout(() => { statusEl.textContent = ''; }, 8000);
+    } catch (err) {
+      statusEl.className = 'run-status error';
+      statusEl.textContent = err.message;
+    } finally {
+      runBtn.disabled = false;
+    }
+    return;
+  }
+
+  // Multi-day — launch background job
+  try {
+    statusEl.className = 'run-status running';
+    statusEl.textContent = `Launching ${dates.length}-day batch...`;
+    const res = await fetch(`${API}/run-batch`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dates, config, configId, configName }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+    startJobPoll(data.jobId, statusEl, runBtn);
+  } catch (err) {
+    statusEl.className = 'run-status error';
+    statusEl.textContent = err.message;
+    runBtn.disabled = false;
+  }
+}
+
+// ── Strategy Analysis Panel ─────────────────────────────────────────────────
+
+let analysisOpen = false;
+let lastAnalysisConfigId = null;
+
+function toggleAnalysis() {
+  analysisOpen = !analysisOpen;
+  document.getElementById('analysis-panel').classList.toggle('collapsed', !analysisOpen);
+  document.getElementById('analysis-toggle').classList.toggle('open', analysisOpen);
+  if (analysisOpen) loadAnalysis();
+}
+
+async function loadAnalysis() {
+  const configId = document.getElementById('config-select').value;
+  if (!configId || configId === lastAnalysisConfigId) return;
+  lastAnalysisConfigId = configId;
+
+  const content = document.getElementById('analysis-content');
+  content.innerHTML = '<div class="analysis-loading">Loading analysis...</div>';
+
+  try {
+    const res = await fetch(`${API}/config/${configId}/analysis`);
+    const a = await res.json();
+    if (a.error) { content.innerHTML = `<div class="analysis-loading">${a.error}</div>`; return; }
+    renderAnalysis(a);
+  } catch (err) {
+    content.innerHTML = `<div class="analysis-loading">Analysis unavailable</div>`;
+  }
+}
+
+function renderAnalysis(a) {
+  const p = a.performance;
+  const s = a.setup;
+  const content = document.getElementById('analysis-content');
+
+  // Inline summary in the toggle bar
+  const inl = document.getElementById('analysis-summary-inline');
+  const wrClass = p.winRate >= 0.55 ? 'pos' : p.winRate < 0.45 ? 'neg' : '';
+  inl.innerHTML = `<span style="color:#10b981">$${(p.totalPnl/1000).toFixed(0)}K</span> · ${(p.winRate*100).toFixed(0)}% WR · ${p.sharpe.toFixed(2)} Sharpe · ${p.greenDays}/${p.days} green`;
+
+  // Setup line
+  const sigStr = s.signals.length ? s.signals.join('+') : 'none';
+  const setupHtml = `<div class="analysis-setup">
+    <b>HMA ${s.hma}</b> · ${s.timeframes} · ${sigStr} · ${s.otm} · SL${s.stopLoss}% TP${s.tpMult}x · MaxPos=${s.maxPositions} · ${s.exitStrategy} · ${s.exitPricing || 'close'} pricing · $${s.contractPriceMax} cap · $${s.baseDollarsPerTrade}/trade
+  </div>`;
+
+  // Helper
+  const sr = (label, val, cls='') => `<div class="stat-row"><span class="stat-label">${label}</span><span class="stat-value ${cls}">${val}</span></div>`;
+  const pnlCls = v => v > 0 ? 'pos' : v < 0 ? 'neg' : '';
+
+  // Exit reasons
+  const totalExits = Object.values(a.exitReasons).reduce((s, v) => s + v, 0);
+  const exitHtml = Object.entries(a.exitReasons)
+    .sort((a, b) => b[1] - a[1])
+    .map(([reason, count]) => {
+      const pct = (count / totalExits * 100).toFixed(0);
+      const labels = { take_profit: 'Take Profit', stop_loss: 'Stop Loss', signal_reversal: 'Reversal', time_exit: 'Time Exit' };
+      return sr(labels[reason] || reason, `${count} (${pct}%)`);
+    }).join('');
+
+  // Equity sparkline via inline SVG
+  const eq = a.equityCurve || [];
+  let sparkHtml = '';
+  if (eq.length > 1) {
+    const vals = eq.map(e => e.equity);
+    const minE = Math.min(0, ...vals);
+    const maxE = Math.max(...vals);
+    const range = maxE - minE || 1;
+    const w = 200, h = 36;
+    const points = vals.map((v, i) => `${(i / (vals.length - 1)) * w},${h - ((v - minE) / range) * h}`).join(' ');
+    sparkHtml = `<svg class="equity-sparkline" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">
+      <polyline points="${points}" fill="none" stroke="#10b981" stroke-width="1.5"/>
+      <line x1="0" y1="${h - ((0 - minE) / range) * h}" x2="${w}" y2="${h - ((0 - minE) / range) * h}" stroke="#333" stroke-width="0.5" stroke-dasharray="3,3"/>
+    </svg>`;
+  }
+
+  // Tags
+  const strengthTags = (a.strengths || []).map(s => `<span class="analysis-tag strength">✅ ${s}</span>`).join('');
+  const exploreTags = (a.explore || []).map(s => `<span class="analysis-tag explore">🔬 ${s}</span>`).join('');
+
+  content.innerHTML = `
+    ${setupHtml}
+    <div class="analysis-grid">
+      <div class="analysis-card">
+        <h4>Performance</h4>
+        ${sr('Total P&L', '$' + p.totalPnl.toLocaleString(undefined, {maximumFractionDigits:0}), pnlCls(p.totalPnl))}
+        ${sr('Expectancy', '$' + p.expectancy.toFixed(0) + '/trade', pnlCls(p.expectancy))}
+        ${sr('Sharpe', p.sharpe.toFixed(3), p.sharpe >= 1.0 ? 'pos' : '')}
+        ${sr('Max Drawdown', '$' + p.maxDrawdown.toLocaleString(undefined, {maximumFractionDigits:0}), p.maxDrawdown > 0 ? 'neg' : 'pos')}
+        ${sr('Green Days', p.greenDays + '/' + p.days, p.greenDays >= p.days - 1 ? 'pos' : '')}
+        ${sparkHtml}
+      </div>
+      <div class="analysis-card">
+        <h4>Win/Loss</h4>
+        ${sr('Win Rate', (p.winRate * 100).toFixed(1) + '%', p.winRate >= 0.55 ? 'pos' : '')}
+        ${sr('Avg Win', '$' + p.avgWin.toFixed(0) + ' (' + p.avgWinPct.toFixed(0) + '%)', 'pos')}
+        ${sr('Avg Loss', '$' + p.avgLoss.toFixed(0) + ' (' + p.avgLossPct.toFixed(0) + '%)', 'neg')}
+        ${sr('W/L Ratio', p.winLossRatio.toFixed(2) + 'x', p.winLossRatio >= 2 ? 'pos' : '')}
+        ${sr('Worst Day', '$' + p.worstDay.toLocaleString(undefined, {maximumFractionDigits:0}), pnlCls(p.worstDay))}
+        ${sr('Best Day', '$' + p.bestDay.toLocaleString(undefined, {maximumFractionDigits:0}), 'pos')}
+      </div>
+      <div class="analysis-card">
+        <h4>Execution</h4>
+        ${sr('Total Trades', p.trades)}
+        ${sr('Avg Hold', p.avgHoldMin.toFixed(0) + 'm (med ' + p.medianHoldMin.toFixed(0) + 'm)')}
+        ${sr('Avg Entry', '$' + p.avgEntryPrice.toFixed(2))}
+        ${sr('Peak BP Needed', '$' + p.peakBuyingPower.toLocaleString(undefined, {maximumFractionDigits:0}), 'hl')}
+        ${exitHtml}
+      </div>
+    </div>
+    <div class="analysis-tags">
+      ${strengthTags}${exploreTags}
+    </div>
+  `;
+}
+
+// Load config when config dropdown changes
+document.addEventListener('DOMContentLoaded', () => {
+  const configSel = document.getElementById('config-select');
+  if (configSel) {
+    configSel.addEventListener('change', () => {
+      currentConfig = null; // reset so modal reloads
+      lastAnalysisConfigId = null; // force analysis reload
+      if (analysisOpen) loadAnalysis();
+    });
+  }
+});
+
+// ── Boot ───────────────────────────────────────────────────────────────────
+// Handle URL params from sweep leaderboard links
+async function boot() {
+  await init();
+  const urlParams = new URLSearchParams(window.location.search);
+  const paramDate = urlParams.get('date');
+  const paramConfig = urlParams.get('config');
+  const paramMaxEntry = urlParams.get('maxEntry');
+  const paramMaxConcurrent = urlParams.get('maxConcurrent');
+  const paramMaxTradesDay = urlParams.get('maxTradesDay');
+
+  if (paramDate) {
+    const dateSel = document.getElementById('date-select');
+    if (dateSel) dateSel.value = paramDate;
+  }
+  if (paramConfig) {
+    const configSel = document.getElementById('config-select');
+    if (configSel) {
+      const exists = Array.from(configSel.options).some(o => o.value === paramConfig);
+      if (exists) configSel.value = paramConfig;
+    }
+  }
+
+  // Apply trade filter params from URL
+  if (paramMaxEntry) {
+    const el = document.getElementById('tf-max-entry');
+    if (el) { el.value = paramMaxEntry; el.classList.add('filter-active'); }
+  }
+  if (paramMaxConcurrent) {
+    const el = document.getElementById('tf-max-concurrent');
+    if (el) { el.value = paramMaxConcurrent; el.classList.add('filter-active'); }
+  }
+  if (paramMaxTradesDay) {
+    const el = document.getElementById('tf-max-trades');
+    if (el) { el.value = paramMaxTradesDay; el.classList.add('filter-active'); }
+  }
+
+  if (paramDate || paramConfig) loadDay();
+
+  // Check hash routing after boot completes
+  if (location.hash === '#live') {
+    setMode('live');
+  }
+}
+boot().then(() => {
+  // On page load, check if there's an active background job to resume polling
+  fetch(`${API}/jobs`).then(r => r.json()).then(jobList => {
+    const running = jobList.find(j => j.status === 'running' || j.status === 'pending');
+    if (running) {
+      const statusEl = document.getElementById('run-status');
+      const runBtn = document.getElementById('run-btn');
+      runBtn.disabled = true;
+      startJobPoll(running.id, statusEl, runBtn);
+    }
+  }).catch(() => {});
+}).catch(err => console.error('Init failed:', err));
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ── LIVE MODE ──────────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════
+
+let currentMode = 'replay'; // 'replay' or 'live'
+let liveWs = null;
+let liveReconnectTimer = null;
+let liveReconnectDelay = 1000;
+let liveAutoScroll = true;
+let liveStatusTimer = null;
+let liveActivityTimer = null;
+let liveContractSymbols = new Set();
+let lastActivityCount = 0;
+
+function setMode(mode) {
+  if (mode === currentMode) return;
+  currentMode = mode;
+
+  // Update toggle buttons
+  const buttons = document.querySelectorAll('#mode-toggle button');
+  buttons.forEach(b => b.classList.remove('active'));
+  if (mode === 'replay') buttons[0].classList.add('active');
+  else buttons[1].classList.add('active');
+
+  if (mode === 'live') {
+    // Hide replay-only elements
+    for (const id of ['date-select', 'config-select', 'run-btn', 'date-end-select', 'run-status', 'sweep-link']) {
+      const el = document.getElementById(id);
+      if (el) el.classList.add('live-hidden');
+    }
+    // Hide Settings button and "to" label
+    document.querySelectorAll('.config-btn').forEach(el => el.classList.add('live-hidden'));
+    const headerSelects = document.querySelectorAll('.header span[style*="color:#444"]');
+    headerSelects.forEach(s => { if (s.textContent.trim() === 'to') s.classList.add('live-hidden'); });
+
+    document.getElementById('analysis-toggle').classList.add('live-hidden');
+    document.getElementById('analysis-panel').classList.add('live-hidden');
+    document.querySelector('.trade-filters').classList.add('live-hidden');
+    document.getElementById('config-modal').classList.add('live-hidden');
+
+    // Show live elements
+    document.getElementById('status-banner').style.display = 'flex';
+    document.getElementById('conn-status').style.display = 'inline-flex';
+
+    // Update page title
+    document.querySelector('.header h1').textContent = 'SPXer Live';
+
+    initLiveMode();
+    location.hash = '#live';
+  } else {
+    // Show replay elements
+    for (const id of ['date-select', 'config-select', 'run-btn', 'date-end-select', 'run-status', 'sweep-link']) {
+      const el = document.getElementById(id);
+      if (el) el.classList.remove('live-hidden');
+    }
+    document.querySelectorAll('.config-btn').forEach(el => el.classList.remove('live-hidden'));
+    const headerSelects = document.querySelectorAll('.header span[style*="color:#444"]');
+    headerSelects.forEach(s => s.classList.remove('live-hidden'));
+
+    document.getElementById('analysis-toggle').classList.remove('live-hidden');
+    document.getElementById('analysis-panel').classList.remove('live-hidden');
+    document.querySelector('.trade-filters').classList.remove('live-hidden');
+    document.getElementById('config-modal').classList.remove('live-hidden');
+
+    // Hide live elements
+    document.getElementById('status-banner').style.display = 'none';
+    document.getElementById('conn-status').style.display = 'none';
+
+    // Restore page title
+    document.querySelector('.header h1').textContent = 'SPXer Replay';
+
+    teardownLiveMode();
+    loadDay();
+    location.hash = '';
+  }
+}
+
+// Normalize live API bar format { open,high,low,close,indicators,ts }
+// to replay format { o,h,l,c,ind,ts } expected by renderSpxChart
+function normalizeLiveBar(b) {
+  if (b.o !== undefined) return b; // already in replay format
+  return {
+    ts: b.ts,
+    o: b.open ?? b.o,
+    h: b.high ?? b.h,
+    l: b.low ?? b.l,
+    c: b.close ?? b.c,
+    v: b.volume ?? b.v ?? 0,
+    ind: b.indicators ?? b.ind ?? {},
+  };
+}
+
+function normalizeLiveBars(bars) {
+  if (!Array.isArray(bars)) return [];
+  return bars.map(normalizeLiveBar);
+}
+
+async function initLiveMode() {
+  try {
+    // Guess ET offset from current time
+    etOffsetSec = isDST(new Date().toISOString().slice(0, 10)) ? -4 * 3600 : -5 * 3600;
+
+    // 1. Fetch SPX bars and render chart
+    // Request enough bars for a full RTH session, then filter to today only
+    // to avoid overnight gaps that make the chart unreadable
+    const rawBars = await fetch(`${API}/live/spx/bars?tf=1m&n=600`).then(r => r.json()).catch(() => []);
+    const allBars = normalizeLiveBars(rawBars);
+    // Filter: keep only today's bars (9:30 ET onward = ts within last 7 hours)
+    const todayOpen = (() => {
+      const now = new Date();
+      const etNow = new Date(now.getTime() + etOffsetSec * 1000);
+      const y = etNow.getUTCFullYear(), m = etNow.getUTCMonth(), d = etNow.getUTCDate();
+      // 9:30 ET in UTC = 9:30 - etOffset
+      const open930 = new Date(Date.UTC(y, m, d, 9, 30, 0));
+      return Math.floor(open930.getTime() / 1000) - etOffsetSec;
+    })();
+    const bars = allBars.filter(b => b.ts >= todayOpen);
+    renderSpxChart(bars.length ? bars : allBars, [], [], []);
+
+    // 2. Fetch and display live agent config
+    await loadLiveConfig();
+
+    // 3. Fetch agent status
+    await pollAgentStatus();
+
+    // 4. Fetch recent activity and render trades
+    await pollActivity();
+
+    // 5. Load active contracts for mini-chart grid (today only)
+    await loadLiveContracts();
+
+    // 5. Connect WebSocket for real-time updates
+    connectLiveWs();
+
+    // 6. Start polling timers
+    liveStatusTimer = setInterval(pollAgentStatus, 5000);
+    liveActivityTimer = setInterval(pollActivity, 10000);
+  } catch (err) {
+    console.error('Live mode init failed:', err);
+  }
+}
+
+function teardownLiveMode() {
+  if (liveWs) {
+    liveWs.onclose = null; // prevent reconnect
+    liveWs.close();
+    liveWs = null;
+  }
+  if (liveReconnectTimer) {
+    clearTimeout(liveReconnectTimer);
+    liveReconnectTimer = null;
+  }
+  if (liveStatusTimer) {
+    clearInterval(liveStatusTimer);
+    liveStatusTimer = null;
+  }
+  if (liveActivityTimer) {
+    clearInterval(liveActivityTimer);
+    liveActivityTimer = null;
+  }
+  liveReconnectDelay = 1000;
+  liveContractSymbols.clear();
+  const configPanel = document.getElementById('live-config-panel');
+  if (configPanel) configPanel.style.display = 'none';
+  lastActivityCount = 0;
+  setConnectionStatus(false);
+}
+
+function connectLiveWs() {
+  if (liveWs && liveWs.readyState <= 1) return;
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  // When accessed via HTTPS (nginx), use /spxer-ws proxy path
+  // When accessed directly (localhost), connect to data service port 3600
+  const wsUrl = location.protocol === 'https:'
+    ? `${proto}//${location.host}/spxer-ws`
+    : `ws://${location.hostname}:3600/ws`;
+  liveWs = new WebSocket(wsUrl);
+
+  liveWs.onopen = () => {
+    setConnectionStatus(true);
+    liveReconnectDelay = 1000;
+    // Subscribe to SPX bars
+    liveWs.send(JSON.stringify({ action: 'subscribe', channel: 'spx' }));
+    // Subscribe to active contracts
+    for (const sym of liveContractSymbols) {
+      liveWs.send(JSON.stringify({ action: 'subscribe', channel: 'contract', symbol: sym }));
+    }
+  };
+
+  liveWs.onmessage = (evt) => {
+    try {
+      const msg = JSON.parse(evt.data);
+      handleLiveWsMessage(msg);
+    } catch {}
+  };
+
+  liveWs.onclose = () => {
+    setConnectionStatus(false);
+    if (currentMode === 'live') {
+      liveReconnectTimer = setTimeout(() => {
+        liveReconnectDelay = Math.min(liveReconnectDelay * 2, 30000);
+        connectLiveWs();
+      }, liveReconnectDelay);
+    }
+  };
+
+  liveWs.onerror = () => liveWs.close();
+}
+
+function handleLiveWsMessage(msg) {
+  if (msg.type === 'spx_bar' && spxCandleSeries) {
+    // Server sends { type: 'spx_bar', data: { ts, open, high, low, close, ... } }
+    const d = msg.data || msg;
+    const candle = {
+      time: toEtDisplay(d.ts),
+      open: d.open ?? d.o,
+      high: d.high ?? d.h,
+      low: d.low ?? d.l,
+      close: d.close ?? d.c,
+    };
+    if (candle.time && candle.open) {
+      spxCandleSeries.update(candle);
+      if (liveAutoScroll && spxChart) {
+        spxChart.timeScale().scrollToRealTime();
+      }
+    }
+  } else if (msg.type === 'contract_bar') {
+    // Server sends { type: 'contract_bar', symbol, data: { open, high, low, close, ... } }
+    const sym = msg.symbol;
+    const mc = miniCharts.get(sym);
+    if (mc && mc.series) {
+      const d = msg.data || msg;
+      const candle = {
+        time: toEtDisplay(d.ts || d.last_ts || Math.floor(Date.now() / 1000)),
+        open: d.open ?? d.o ?? d.last,
+        high: d.high ?? d.h ?? d.last,
+        low: d.low ?? d.l ?? d.last,
+        close: d.close ?? d.c ?? d.last,
+      };
+      if (candle.time && candle.open) {
+        mc.series.update(candle);
+      }
+    }
+  } else if (msg.type === 'market_context') {
+    // Optionally update HMA direction from context
+    const hmaEl = document.getElementById('live-hma-dir');
+    if (hmaEl && msg.hmaDirection) {
+      const dir = msg.hmaDirection;
+      const color = dir === 'up' ? '#10b981' : dir === 'down' ? '#f43f5e' : '#888';
+      hmaEl.innerHTML = `HMA <span style="color:${color}">${dir.toUpperCase()}</span>`;
+    }
+  }
+}
+
+function updateStatusBanner(data) {
+  const banner = document.getElementById('status-banner');
+  if (!data || data.status === 'offline') {
+    document.getElementById('live-mode-badge').innerHTML = '<span style="color:#666">Agent Offline</span>';
+    document.getElementById('live-spx-price').textContent = '';
+    document.getElementById('live-daily-pnl').textContent = '';
+    document.getElementById('live-open-positions').textContent = '';
+    document.getElementById('live-cycle').textContent = '';
+    document.getElementById('live-minutes-close').textContent = '';
+    document.getElementById('live-hma-dir').textContent = '';
+    document.getElementById('live-uptime').textContent = '';
+    return;
+  }
+
+  // data.mode is market mode (rth/premarket), not trading mode
+  // data.paper indicates paper vs live trading mode
+  const marketMode = (data.mode || '').toUpperCase();
+  const tradingMode = data.paper === true ? 'PAPER' : data.paper === false ? 'LIVE' : 'PAPER';
+  const badgeClass = tradingMode === 'LIVE' ? 'badge-live' : 'badge-paper';
+  document.getElementById('live-mode-badge').innerHTML = `<span class="${badgeClass}">${tradingMode}</span>${marketMode ? ` <span style="color:#555;font-size:10px">${marketMode}</span>` : ''}`;
+
+  document.getElementById('live-spx-price').textContent = data.spxPrice
+    ? `SPX $${parseFloat(data.spxPrice).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+    : 'SPX —';
+
+  const pnl = data.dailyPnL ?? data.dailyPnl ?? data.pnl ?? 0;
+  const pnlEl = document.getElementById('live-daily-pnl');
+  pnlEl.textContent = `P&L $${parseFloat(pnl).toFixed(0)}`;
+  pnlEl.className = 'stat ' + (pnl > 0 ? 'pnl-pos' : pnl < 0 ? 'pnl-neg' : '');
+
+  document.getElementById('live-open-positions').textContent = `${data.openPositions || data.positions || 0} open`;
+  document.getElementById('live-cycle').textContent = data.cycle ? `#${data.cycle}` : '';
+  document.getElementById('live-minutes-close').textContent = data.minutesToClose != null ? `${data.minutesToClose}m to close` : '';
+
+  // HMA direction — derive from lastReasoning or status
+  const hmaEl = document.getElementById('live-hma-dir');
+  const reasoning = data.lastReasoning || '';
+  if (reasoning.includes('bullish')) {
+    hmaEl.innerHTML = `HMA <span style="color:#10b981">▲ BULL</span>`;
+  } else if (reasoning.includes('bearish')) {
+    hmaEl.innerHTML = `HMA <span style="color:#f43f5e">▼ BEAR</span>`;
+  } else if (data.hmaDirection) {
+    const dir = data.hmaDirection;
+    const color = dir === 'up' ? '#10b981' : dir === 'down' ? '#f43f5e' : '#888';
+    hmaEl.innerHTML = `HMA <span style="color:${color}">${dir === 'up' ? '▲ BULL' : '▼ BEAR'}</span>`;
+  }
+
+  // Uptime
+  if (data.upSince || data.startTime) {
+    const started = new Date(data.upSince || data.startTime).getTime();
+    const elapsed = Math.floor((Date.now() - started) / 1000);
+    const hours = Math.floor(elapsed / 3600);
+    const mins = Math.floor((elapsed % 3600) / 60);
+    document.getElementById('live-uptime').textContent = `Up ${hours}h${mins}m`;
+  } else if (data.uptimeSec || data.uptime) {
+    const sec = data.uptimeSec || data.uptime || 0;
+    const hours = Math.floor(sec / 3600);
+    const mins = Math.floor((sec % 3600) / 60);
+    document.getElementById('live-uptime').textContent = `Up ${hours}h${mins}m`;
+  }
+}
+
+async function loadLiveConfig() {
+  try {
+    const cfg = await fetch(`${API}/live/agent/config`).then(r => r.json());
+    if (cfg.error) return;
+
+    const panel = document.getElementById('live-config-panel');
+    const idEl = document.getElementById('live-config-id');
+    const detailsEl = document.getElementById('live-config-details');
+    panel.style.display = 'block';
+    idEl.textContent = cfg.id || '?';
+
+    const items = [
+      ['Signal', `HMA(${cfg.signals?.hmaCrossFast})×HMA(${cfg.signals?.hmaCrossSlow})`],
+      ['Timeframe', cfg.signals?.signalTimeframe || '1m'],
+      ['OTM Target', `$${cfg.signals?.targetOtmDistance}`],
+      ['TP', `${cfg.position?.takeProfitMultiplier}x`],
+      ['SL', `${cfg.position?.stopLossPercent}%`],
+      ['Exit', cfg.exit?.strategy || '?'],
+      ['Max Positions', cfg.position?.maxPositionsOpen],
+      ['Strike Range', `±$${cfg.strikeSelector?.strikeSearchRange}`],
+      ['Price Filter', `$${cfg.strikeSelector?.contractPriceMin}–$${cfg.strikeSelector?.contractPriceMax}`],
+      ['Active Window', `${cfg.timeWindows?.activeStart}–${cfg.timeWindows?.activeEnd} ET`],
+      ['Max Daily Loss', `$${cfg.risk?.maxDailyLoss}`],
+      ['Sizing', `$${cfg.sizing?.baseDollarsPerTrade} base / ${cfg.sizing?.riskPercentOfAccount}% of acct`],
+      ['Max Contracts', cfg.sizing?.maxContracts],
+      ['HMA Crosses', cfg.signals?.enableHmaCrosses ? '✅' : '❌'],
+      ['EMA Crosses', cfg.signals?.enableEmaCrosses ? '✅' : '❌'],
+      ['Und. HMA Req', cfg.signals?.requireUnderlyingHmaCross ? '✅' : '❌'],
+    ];
+
+    detailsEl.innerHTML = items.map(([k, v]) =>
+      `<span><span style="color:#555">${k}:</span> <span style="color:#ccc">${v}</span></span>`
+    ).join('');
+  } catch (e) {
+    console.warn('Failed to load live config:', e);
+  }
+}
+
+async function pollAgentStatus() {
+  try {
+    const data = await fetch(`${API}/live/agent/status`).then(r => r.json());
+    updateStatusBanner(data);
+  } catch {
+    updateStatusBanner({ status: 'offline' });
+  }
+}
+
+async function pollActivity() {
+  try {
+    const activities = await fetch(`${API}/live/agent/activity?n=50`).then(r => r.json());
+    if (!Array.isArray(activities)) return;
+
+    // Extract actual trade close events from cycle activity entries
+    // Each activity has details.closeEvents[] with { symbol, reason, pnl }
+    const closedTrades = [];
+    for (const a of activities) {
+      const closes = a.details?.closeEvents || [];
+      for (const ce of closes) {
+        // Parse symbol: SPXW260330C06330000 → type=call, strike=6330
+        const sym = ce.symbol || '';
+        const isCall = sym.includes('C0') || sym.includes('C1');
+        const strikeMatch = sym.match(/[CP](\d{5,})$/);
+        const strike = strikeMatch ? parseInt(strikeMatch[1]) / 1000 : 0;
+        const exitTime = a.timeET || '—';
+        closedTrades.push({
+          side: isCall ? 'call' : 'put',
+          strike: strike,
+          entryET: '',
+          exitET: exitTime,
+          entryPrice: ce.entryPrice || 0,
+          exitPrice: ce.exitPrice || 0,
+          'pnl$': ce.pnl ?? 0,
+          pnlPct: ce.pnlPct || 0,
+          reason: ce.reason || '—',
+          symbol: sym,
+          entryTs: 0,
+          exitTs: a.ts ? a.ts / 1000 : 0,
+        });
+      }
+    }
+
+    // Also get summary stats from latest activity
+    const latest = activities[activities.length - 1];
+    const totalTrades = latest?.details?.tradesTotal || closedTrades.length;
+    const dailyPnl = latest?.details?.dailyPnl ?? 0;
+
+    const hasNew = closedTrades.length > lastActivityCount;
+    lastActivityCount = closedTrades.length;
+
+    const tbody = document.getElementById('trades-body');
+
+    if (closedTrades.length > 0) {
+      // Show closed trades in the trades table
+      allTrades = closedTrades;
+      renderTradesTable(closedTrades);
+
+      // Flash animation for new trades
+      if (hasNew) {
+        const firstRow = document.querySelector('#trades-body tr');
+        if (firstRow) {
+          firstRow.classList.add('trade-new');
+          setTimeout(() => firstRow.classList.remove('trade-new'), 1200);
+        }
+      }
+    } else if (activities.length > 0) {
+      // No closed trades yet — show a summary row
+      const lastSummary = latest?.summary || 'Scanning...';
+      tbody.innerHTML = `<tr><td colspan="8" style="color:#666;text-align:center;padding:12px">
+        ${totalTrades} trades today · ${lastSummary}
+      </td></tr>`;
+    }
+
+    // Update the summary bar
+    const wins = closedTrades.filter(t => t['pnl$'] > 0).length;
+    const summaryEl = document.getElementById('summary');
+    if (closedTrades.length > 0) {
+      const totalPnl = closedTrades.reduce((s, t) => s + (t['pnl$'] || 0), 0);
+      const winRate = closedTrades.length > 0 ? wins / closedTrades.length : 0;
+      const pnlClass = totalPnl > 0 ? 'win' : totalPnl < 0 ? 'loss' : 'neutral';
+      summaryEl.innerHTML = `
+        <span class="neutral">${closedTrades.length} trades</span>
+        <span class="${winRate >= 0.5 ? 'win' : 'loss'}">${(winRate * 100).toFixed(0)}% WR</span>
+        <span class="${pnlClass}">$${totalPnl.toFixed(0)}</span>
+      `;
+    } else {
+      summaryEl.innerHTML = '<span class="neutral">No closed trades</span>';
+    }
+  } catch (err) {
+    console.error('Activity poll failed:', err);
+  }
+}
+
+async function loadLiveContracts() {
+  try {
+    const allLiveContracts = await fetch(`${API}/live/contracts/active`).then(r => r.json());
+    if (!Array.isArray(allLiveContracts) || allLiveContracts.length === 0) {
+      document.getElementById('mini-grid').innerHTML = '<div class="no-data">No active contracts</div>';
+      return;
+    }
+
+    // Filter to today's expiry only (0DTE contracts)
+    // Use ET date since options expire ET, not UTC
+    const nowUTC = new Date();
+    const todayET = new Date(nowUTC.getTime() + etOffsetSec * 1000).toISOString().slice(0, 10);
+    // Try today's expiry first, then fall back to nearest future expiry
+    const expiries = [...new Set(allLiveContracts.map(c => c.expiry).filter(Boolean))].sort();
+    let targetExpiry = todayET;
+    let contracts = allLiveContracts.filter(c => c.expiry === todayET);
+    if (contracts.length === 0) {
+      // No 0DTE contracts — find the nearest future expiry
+      const futureExpiries = expiries.filter(e => e >= todayET);
+      targetExpiry = futureExpiries[0] || expiries[expiries.length - 1] || todayET;
+      contracts = allLiveContracts.filter(c => c.expiry === targetExpiry || !c.expiry);
+    }
+
+    if (contracts.length === 0) {
+      document.getElementById('mini-grid').innerHTML = `<div class="no-data">No contracts for ${todayET} (${allLiveContracts.length} total tracked)</div>`;
+      return;
+    }
+
+    // Store for WS subscriptions (today's contracts only)
+    liveContractSymbols.clear();
+    contracts.forEach(c => {
+      if (c.symbol) liveContractSymbols.add(c.symbol);
+    });
+
+    // Map to the format expected by renderMiniCharts
+    allContracts = contracts.map(c => ({
+      symbol: c.symbol,
+      type: c.type || (c.symbol?.includes('C') ? 'call' : 'put'),
+      strike: c.strike || parseFloat(c.symbol?.match(/(\d+)$/)?.[1] || '0'),
+      minPrice: c.minPrice ?? c.low ?? 0,
+      maxPrice: c.maxPrice ?? c.high ?? 0,
+      state: c.state,
+    }));
+
+    // Render mini-chart grid
+    const grid = document.getElementById('mini-grid');
+    grid.innerHTML = '';
+
+    // Clear old mini charts
+    for (const [, mc] of miniCharts) { mc.chart.remove(); }
+    miniCharts.clear();
+
+    const filtered = filterContracts();
+    if (!filtered.length) {
+      grid.innerHTML = '<div class="no-data">No contracts for this tab</div>';
+      return;
+    }
+
+    const displayContracts = filtered.slice(0, 40);
+
+    for (const c of displayContracts) {
+      const card = document.createElement('div');
+      card.className = 'mini-card';
+      const typeLabel = c.type === 'call' ? 'C' : 'P';
+      const priceRange = (c.minPrice || c.maxPrice)
+        ? `$${c.minPrice.toFixed(2)}-${c.maxPrice.toFixed(2)}`
+        : '';
+      card.innerHTML = `
+        <div class="mini-card-header">
+          <span class="strike">${typeLabel}${c.strike}</span>
+          <span class="price">${priceRange}</span>
+          <span style="color:#10b981;font-size:10px">${c.state || ''}</span>
+        </div>
+        <div class="mini-card-chart" id="mc-${c.symbol.replace(/[^a-zA-Z0-9]/g, '')}"></div>
+      `;
+      grid.appendChild(card);
+
+      // Fetch bars for this contract and render
+      renderLiveMiniChart(c);
+    }
+
+    // Subscribe to contract updates via WS
+    if (liveWs && liveWs.readyState === WebSocket.OPEN) {
+      for (const sym of liveContractSymbols) {
+        liveWs.send(JSON.stringify({ action: 'subscribe', channel: 'contract', symbol: sym }));
+      }
+    }
+  } catch (err) {
+    console.error('Live contracts load failed:', err);
+    document.getElementById('mini-grid').innerHTML = '<div class="no-data">Failed to load contracts</div>';
+  }
+}
+
+async function renderLiveMiniChart(contract) {
+  const containerId = `mc-${contract.symbol.replace(/[^a-zA-Z0-9]/g, '')}`;
+  const container = document.getElementById(containerId);
+  if (!container) return;
+
+  try {
+    const rawBars = await fetch(`${API}/live/contracts/${encodeURIComponent(contract.symbol)}/bars?tf=1m&n=390`).then(r => r.json());
+    const bars = normalizeLiveBars(rawBars);
+    if (!bars.length) return;
+
+    const chart = LightweightCharts.createChart(container, {
+      width: container.clientWidth,
+      height: 100,
+      layout: { background: { color: '#111118' }, textColor: '#444' },
+      grid: { vertLines: { visible: false }, horzLines: { visible: false } },
+      crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+      timeScale: { visible: false, borderVisible: false },
+      rightPriceScale: { visible: false, borderVisible: false },
+      leftPriceScale: { visible: false },
+      handleScroll: false,
+      handleScale: false,
+    });
+
+    const series = chart.addSeries(LightweightCharts.CandlestickSeries, {
+      upColor: '#10b981', downColor: '#f43f5e',
+      borderUpColor: '#10b981', borderDownColor: '#f43f5e',
+      wickUpColor: '#10b98155', wickDownColor: '#f43f5e55',
+    });
+
+    series.setData(bars.map(b => ({ time: toEtDisplay(b.ts), open: b.o, high: b.h, low: b.l, close: b.c })));
+    chart.timeScale().fitContent();
+    miniCharts.set(contract.symbol, { chart, series });
+  } catch {}
+}
+
+function setConnectionStatus(connected) {
+  const el = document.getElementById('conn-status');
+  if (!el) return;
+  el.classList.toggle('connected', connected);
+  el.classList.toggle('disconnected', !connected);
+  el.textContent = connected ? 'WS ✓' : 'WS ✗';
+}
+
+// ── Hash-based URL routing ─────────────────────────────────────────────────
+// Note: #live on initial load is handled inside boot() above.
+
+window.addEventListener('hashchange', () => {
+  if (location.hash === '#live' && currentMode !== 'live') setMode('live');
+  else if (location.hash !== '#live' && currentMode !== 'replay') setMode('replay');
+});
+</script>
+</body>
+</html>

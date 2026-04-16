@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SPXer Dashboard</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+      background: #0a0e17;
+      color: #c5cdd8;
+      font-size: 13px;
+    }
+    .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 12px 20px;
+      background: #111827;
+      border-bottom: 1px solid #1e293b;
+    }
+    .header h1 { font-size: 16px; color: #e2e8f0; }
+    .header .time { color: #64748b; }
+    .controls { display: flex; gap: 8px; }
+    .btn {
+      padding: 6px 14px;
+      border: 1px solid #334155;
+      border-radius: 4px;
+      background: #1e293b;
+      color: #e2e8f0;
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 12px;
+    }
+    .btn:hover { background: #334155; }
+    .btn.danger { border-color: #dc2626; color: #f87171; }
+    .btn.danger:hover { background: #7f1d1d; }
+    .btn.warning { border-color: #d97706; color: #fbbf24; }
+    .btn.warning:hover { background: #78350f; }
+    .btn.success { border-color: #16a34a; color: #4ade80; }
+    .btn.success:hover { background: #14532d; }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      padding: 16px 20px;
+    }
+    .panel {
+      background: #111827;
+      border: 1px solid #1e293b;
+      border-radius: 6px;
+      padding: 14px;
+    }
+    .panel-title {
+      font-size: 11px;
+      text-transform: uppercase;
+      color: #64748b;
+      margin-bottom: 10px;
+      letter-spacing: 1px;
+    }
+    .full-width { grid-column: 1 / -1; }
+    .status-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 4px 0;
+      border-bottom: 1px solid #1e293b33;
+    }
+    .status-row:last-child { border-bottom: none; }
+    .status-label { color: #94a3b8; }
+    .status-value { color: #e2e8f0; font-weight: 500; }
+    .healthy { color: #4ade80; }
+    .unhealthy { color: #f87171; }
+    .warning { color: #fbbf24; }
+    .pnl-positive { color: #4ade80; }
+    .pnl-negative { color: #f87171; }
+    .dot {
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      margin-right: 6px;
+    }
+    .dot.green { background: #4ade80; }
+    .dot.red { background: #f87171; }
+    .dot.yellow { background: #fbbf24; }
+    .dot.gray { background: #64748b; }
+    .trade-row {
+      display: grid;
+      grid-template-columns: 60px 70px 50px 50px 80px 70px;
+      gap: 4px;
+      padding: 4px 0;
+      border-bottom: 1px solid #1e293b33;
+      font-size: 12px;
+    }
+    .trade-header {
+      color: #64748b;
+      font-size: 10px;
+      text-transform: uppercase;
+    }
+    .paused-banner {
+      background: #7f1d1d;
+      color: #fca5a5;
+      text-align: center;
+      padding: 8px;
+      font-weight: bold;
+      display: none;
+    }
+    .paused-banner.active { display: block; }
+    .position-card {
+      background: #1e293b33;
+      border: 1px solid #1e293b;
+      border-radius: 4px;
+      padding: 10px;
+      margin-bottom: 8px;
+    }
+    .pos-header { display: flex; justify-content: space-between; margin-bottom: 6px; }
+    .pos-symbol { color: #e2e8f0; font-weight: 600; }
+    .pos-side { font-size: 10px; padding: 2px 6px; border-radius: 3px; }
+    .pos-side.call { background: #16a34a33; color: #4ade80; }
+    .pos-side.put { background: #dc262633; color: #f87171; }
+    .pos-details { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 12px; font-size: 11px; }
+  </style>
+</head>
+<body>
+  <div class="paused-banner" id="pausedBanner">⏸️ TRADING PAUSED</div>
+  <div class="header">
+    <div>
+      <h1>SPXer Dashboard</h1>
+      <div class="time" id="timeET">--:--:-- ET</div>
+    </div>
+    <div class="controls">
+      <button class="btn warning" id="btnPause" onclick="pauseTrading()">⏸ Pause</button>
+      <button class="btn success" id="btnResume" onclick="resumeTrading()">▶ Resume</button>
+      <button class="btn danger" id="btnKill" onclick="killAll()">🛑 Kill All</button>
+    </div>
+  </div>
+
+  <div class="grid">
+    <!-- System Status -->
+    <div class="panel">
+      <div class="panel-title">System Status</div>
+      <div id="systemStatus">
+        <div class="status-row"><span class="status-label">Data Service</span><span id="dsStatus" class="status-value">—</span></div>
+        <div class="status-row"><span class="status-label">SPX Price</span><span id="spxPrice" class="status-value">—</span></div>
+        <div class="status-row"><span class="status-label">Watchdog</span><span id="wdStatus" class="status-value">—</span></div>
+        <div class="status-row"><span class="status-label">Contracts</span><span id="contracts" class="status-value">—</span></div>
+      </div>
+    </div>
+
+    <!-- Agents -->
+    <div class="panel">
+      <div class="panel-title">Agents</div>
+      <div id="agents">
+        <div class="status-row"><span class="status-label">SPX Agent</span><span id="spxAgent" class="status-value">—</span></div>
+        <div class="status-row"><span class="status-label">XSP Agent</span><span id="xspAgent" class="status-value">—</span></div>
+        <div class="status-row"><span class="status-label">Daily P&L</span><span id="dailyPnl" class="status-value">—</span></div>
+        <div class="status-row"><span class="status-label">Trades Today</span><span id="tradesToday" class="status-value">—</span></div>
+      </div>
+    </div>
+
+    <!-- Positions -->
+    <div class="panel">
+      <div class="panel-title">Open Positions</div>
+      <div id="positions"><span class="status-label">No positions</span></div>
+    </div>
+
+    <!-- Recent Trades -->
+    <div class="panel">
+      <div class="panel-title">Recent Trades</div>
+      <div id="recentTrades">
+        <div class="trade-row trade-header">
+          <span>Time</span><span>Symbol</span><span>Side</span><span>Qty</span><span>Fill</span><span>P&L</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

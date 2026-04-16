@@ -1,0 +1,622 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SPXer Option Surface Viewer</title>
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #0a0a0f; color: #e0e0e0; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 13px; }
+
+  .header { display: flex; align-items: center; gap: 16px; padding: 10px 16px; background: #111118; border-bottom: 1px solid #222; }
+  .header h1 { font-size: 15px; color: #8b8bff; font-weight: 600; white-space: nowrap; }
+  .header a { color: #666; text-decoration: none; font-size: 12px; }
+  .header a:hover { color: #8b8bff; }
+  .header select { background: #1a1a24; color: #e0e0e0; border: 1px solid #333; padding: 5px 10px; border-radius: 4px; font-family: inherit; font-size: 12px; cursor: pointer; }
+  .header label { font-size: 10px; color: #555; text-transform: uppercase; }
+
+  .panels { display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; height: calc(100vh - 46px); gap: 1px; background: #222; }
+  .panel { background: #0a0a0f; position: relative; overflow: hidden; min-height: 0; }
+  .panel-title { position: absolute; top: 6px; left: 10px; z-index: 5; font-size: 11px; color: #8b8bff; text-transform: uppercase; letter-spacing: 0.5px; pointer-events: none; }
+  .panel-3d { grid-row: 1 / 3; }
+
+  /* Info overlay on 3D panel */
+  .info-box { position: absolute; bottom: 10px; left: 10px; z-index: 5; background: rgba(17,17,24,0.9); border: 1px solid #333; border-radius: 4px; padding: 8px 10px; font-size: 10px; line-height: 1.6; }
+  .info-box .val { color: #a78bfa; font-weight: 600; }
+
+  /* Selected contract highlight */
+  .selected-info { position: absolute; top: 6px; right: 10px; z-index: 5; font-size: 11px; color: #f59e0b; }
+
+  /* 3D surface toggle buttons */
+  .surface-toggles { position: absolute; top: 6px; right: 10px; z-index: 5; display: flex; gap: 4px; }
+  .stog { background: rgba(17,17,24,0.85); border: 1px solid #333; color: var(--tc); padding: 3px 10px; border-radius: 4px; font-family: inherit; font-size: 11px; cursor: pointer; transition: all 0.15s; }
+  .stog:hover { border-color: var(--tc); }
+  .stog.active { border-color: var(--tc); background: rgba(17,17,24,0.95); }
+  .stog:not(.active) { color: #444; border-color: #222; background: rgba(10,10,15,0.8); text-decoration: line-through; }
+
+  .loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(10,10,15,0.85); z-index: 15; }
+  .loading.hidden { display: none; }
+  .loading span { color: #8b8bff; font-size: 13px; }
+
+  /* Make Plotly backgrounds transparent */
+  .js-plotly-plot .plotly .main-svg { background: transparent !important; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>📊 Option Surface</h1>
+  <a href="/replay/">← Replay</a>
+  <a href="/replay/sweep">Leaderboard</a>
+  <label>Date</label>
+  <select id="date-select"><option>Loading...</option></select>
+  <label>Strike Range</label>
+  <select id="range-select">
+    <option value="15">±$15</option>
+    <option value="20" selected>±$20</option>
+    <option value="30">±$30</option>
+    <option value="50">±$50</option>
+  </select>
+  <span id="status" style="margin-left:auto;font-size:11px;color:#555"></span>
+</div>
+
+<div class="panels">
+  <!-- Left: 3D surface (full height) -->
+  <div class="panel panel-3d" id="panel-3d">
+    <div class="panel-title">3D Price Surface</div>
+    <div class="surface-toggles" id="surface-toggles">
+      <button class="stog active" id="tog-calls" onclick="toggleTrace('calls')" style="--tc:#10b981">● Calls</button>
+      <button class="stog active" id="tog-puts" onclick="toggleTrace('puts')" style="--tc:#f43f5e">● Puts</button>
+      <button class="stog active" id="tog-spx" onclick="toggleTrace('spx')" style="--tc:#8b8bff">● SPX</button>
+    </div>
+    <div id="surface-chart" style="width:100%;height:100%"></div>
+    <div class="info-box" id="info-box"></div>
+    <div class="loading" id="loading"><span>Loading surface data...</span></div>
+  </div>
+
+  <!-- Top right: Delta heatmap -->
+  <div class="panel" id="panel-heatmap">
+    <div class="panel-title">Realized |Delta| — Calls & Puts (click to select)</div>
+    <div id="heatmap-chart" style="width:100%;height:100%"></div>
+  </div>
+
+  <!-- Bottom right: Synced line charts -->
+  <div class="panel" id="panel-lines">
+    <div class="panel-title">SPX vs Contract Price</div>
+    <div class="selected-info" id="selected-info">Click heatmap to select a contract</div>
+    <div id="line-chart" style="width:100%;height:100%"></div>
+  </div>
+</div>
+
+<script>
+const API = (document.querySelector('meta[name="base-path"]')?.content || '') + '/replay/api';
+const PLOTLY_BG = 'rgba(10,10,15,0)';
+const PLOTLY_GRID = 'rgba(40,40,60,0.3)';
+const PLOTLY_TEXT = '#888';
+
+let surfaceData = null;
+let selectedContract = null;
+let showCalls = true, showPuts = true, showSpx = true;
+let currentCamera = null;
+
+// ── Plotly dark theme defaults ─────────────────────────────────────────
+
+const darkLayout = {
+  paper_bgcolor: PLOTLY_BG,
+  plot_bgcolor: PLOTLY_BG,
+  font: { family: 'SF Mono, Fira Code, monospace', size: 10, color: PLOTLY_TEXT },
+  margin: { l: 50, r: 20, t: 30, b: 40 },
+};
+
+// ── Utility: timestamp to ET time string ───────────────────────────────
+
+function tsToET(ts) {
+  const d = new Date(ts * 1000);
+  // Approx UTC→ET: subtract 4h for EDT
+  const et = new Date(d.getTime() - 4 * 3600 * 1000);
+  return et.getUTCHours() + ':' + String(et.getUTCMinutes()).padStart(2, '0');
+}
+
+function tsToETLabel(ts) {
+  const d = new Date(ts * 1000);
+  const et = new Date(d.getTime() - 4 * 3600 * 1000);
+  const h = et.getUTCHours(), m = et.getUTCMinutes();
+  return `${h}:${String(m).padStart(2, '0')}`;
+}
+
+function toggleTrace(which) {
+  const btn = document.getElementById('tog-' + which);
+  if (which === 'calls') showCalls = !showCalls;
+  else if (which === 'puts') showPuts = !showPuts;
+  else if (which === 'spx') showSpx = !showSpx;
+  btn.classList.toggle('active');
+  build3DSurface();
+}
+
+// ── Panel 1: 3D Price Surface ──────────────────────────────────────────
+
+function build3DSurface() {
+  if (!surfaceData) return;
+  const d = surfaceData;
+  const range = parseInt(document.getElementById('range-select').value);
+
+  const calls = d.contracts.filter(c => c.side === 'call' && Math.abs(c.distance) <= range);
+  const puts = d.contracts.filter(c => c.side === 'put' && Math.abs(c.distance) <= range);
+
+  // Sample every 3rd bar for performance
+  const step = 3;
+  const timePoints = d.spx.filter((_, i) => i % step === 0);
+  const timeLabels = timePoints.map(b => tsToETLabel(b.ts));
+  const tsSet = new Set(timePoints.map(b => b.ts));
+
+  // Build Z matrix: % change from first price (normalizes all contracts to same scale)
+  function buildSurfaceZ(contracts) {
+    const dists = [...new Set(contracts.map(c => c.distance))].sort((a, b) => a - b);
+    const lookup = new Map();
+    for (const c of contracts) {
+      const dm = new Map();
+      for (const b of c.bars) { if (tsSet.has(b.ts)) dm.set(b.ts, b.c); }
+      if (!lookup.has(c.distance) || dm.size > (lookup.get(c.distance)?.size || 0)) {
+        lookup.set(c.distance, dm);
+      }
+    }
+
+    const zPct = [], zPrice = [], usedDists = [];
+    for (const dist of dists) {
+      const dm = lookup.get(dist);
+      if (!dm || dm.size < 5) continue;
+      usedDists.push(dist);
+
+      // Find first valid price as baseline
+      let baseline = null;
+      for (const tp of timePoints) {
+        const p = dm.get(tp.ts);
+        if (p != null && p > 0.05) { baseline = p; break; }
+      }
+      if (!baseline) baseline = 1;
+
+      const pctRow = [], priceRow = [];
+      for (const tp of timePoints) {
+        const p = dm.get(tp.ts);
+        pctRow.push(p != null ? ((p - baseline) / baseline) * 100 : null);
+        priceRow.push(p != null ? p : null);
+      }
+      zPct.push(pctRow);
+      zPrice.push(priceRow);
+    }
+    return { zPct, zPrice, dists: usedDists };
+  }
+
+  const callSurf = buildSurfaceZ(calls);
+  const putSurf = buildSurfaceZ(puts);
+
+  const traces = [];
+
+  if (showCalls && callSurf.zPct.length > 1) {
+    traces.push({
+      type: 'surface',
+      x: timeLabels,
+      y: callSurf.dists,
+      z: callSurf.zPct,
+      customdata: callSurf.zPrice,
+      colorscale: [
+        [0, 'rgba(244,63,94,0.7)'],     // negative = red
+        [0.35, 'rgba(100,40,50,0.6)'],
+        [0.5, 'rgba(30,30,40,0.5)'],     // flat = dark
+        [0.65, 'rgba(40,100,70,0.6)'],
+        [1, 'rgba(16,185,129,0.8)'],     // positive = green
+      ],
+      opacity: 0.85,
+      showscale: false,
+      name: 'Calls',
+      showlegend: true,
+      hovertemplate: 'Time: %{x}<br>Strike: ATM%{y:+d}<br>%{z:+.1f}%<br>Price: $%{customdata:.2f}<extra>CALL</extra>',
+      contours: { z: { show: true, color: 'rgba(16,185,129,0.15)', width: 1 } },
+      lighting: { ambient: 0.7, diffuse: 0.6, roughness: 0.5, fresnel: 0.2 },
+    });
+  }
+
+  if (showPuts && putSurf.zPct.length > 1) {
+    traces.push({
+      type: 'surface',
+      x: timeLabels,
+      y: putSurf.dists,
+      z: putSurf.zPct,
+      customdata: putSurf.zPrice,
+      colorscale: [
+        [0, 'rgba(16,185,129,0.7)'],     // for puts, negative % = SPX went up = put lost value (green→bad for puts)
+        [0.35, 'rgba(40,80,60,0.6)'],
+        [0.5, 'rgba(30,30,40,0.5)'],
+        [0.65, 'rgba(100,40,50,0.6)'],
+        [1, 'rgba(244,63,94,0.8)'],      // positive % for puts = SPX dropped = put gained
+      ],
+      opacity: 0.75,
+      showscale: false,
+      name: 'Puts',
+      showlegend: true,
+      hovertemplate: 'Time: %{x}<br>Strike: ATM%{y:+d}<br>%{z:+.1f}%<br>Price: $%{customdata:.2f}<extra>PUT</extra>',
+      contours: { z: { show: true, color: 'rgba(244,63,94,0.15)', width: 1 } },
+      lighting: { ambient: 0.7, diffuse: 0.6, roughness: 0.5, fresnel: 0.2 },
+    });
+  }
+
+  // SPX % change line along the front edge
+  if (showSpx) {
+    const spxPrices = timePoints.map(b => b.c);
+    const spxBase = spxPrices[0] || 1;
+    const spxPct = spxPrices.map(p => ((p - spxBase) / spxBase) * 100);
+    // Scale SPX % to roughly match option % range for visibility
+    const allZ = [...(callSurf.zPct.flat().filter(v => v != null)), ...(putSurf.zPct.flat().filter(v => v != null))];
+    const zRange = allZ.length > 0 ? Math.max(Math.abs(Math.min(...allZ)), Math.abs(Math.max(...allZ))) : 100;
+    const spxScale = zRange / (Math.max(...spxPct.map(Math.abs)) || 1);
+    const spxScaled = spxPct.map(p => p * Math.min(spxScale, 50));
+
+    // Place at front edge of Y axis
+    const frontY = callSurf.dists.length > 0 ? Math.min(...callSurf.dists) - 5 : -25;
+
+    traces.push({
+      type: 'scatter3d',
+      x: timeLabels,
+      y: Array(timeLabels.length).fill(frontY),
+      z: spxScaled,
+      mode: 'lines',
+      line: { color: '#8b8bff', width: 5 },
+      name: 'SPX % Change',
+      showlegend: true,
+      hovertemplate: 'Time: %{x}<br>SPX: $%{text:.1f}<br>%{customdata:+.2f}%<extra>SPX</extra>',
+      text: spxPrices,
+      customdata: spxPct,
+    });
+
+    // Zero reference plane
+    traces.push({
+      type: 'scatter3d',
+      x: [timeLabels[0], timeLabels[timeLabels.length-1], timeLabels[timeLabels.length-1], timeLabels[0]],
+      y: [frontY - 2, frontY - 2, (callSurf.dists[callSurf.dists.length-1] || 25) + 2, (callSurf.dists[callSurf.dists.length-1] || 25) + 2],
+      z: [0, 0, 0, 0],
+      mode: 'lines',
+      line: { color: 'rgba(100,100,120,0.3)', width: 1 },
+      name: '0% line',
+      showlegend: false,
+      hoverinfo: 'skip',
+      surfaceaxis: 0,
+    });
+  }
+
+  const layout = {
+    ...darkLayout,
+    margin: { l: 0, r: 0, t: 0, b: 0 },
+    scene: {
+      xaxis: { title: 'Time (ET)', color: PLOTLY_TEXT, gridcolor: PLOTLY_GRID, showbackground: false },
+      yaxis: { title: 'Strike Distance from ATM ($)', color: PLOTLY_TEXT, gridcolor: PLOTLY_GRID, showbackground: false },
+      zaxis: { title: '% Change from Open', color: PLOTLY_TEXT, gridcolor: PLOTLY_GRID, showbackground: false },
+      bgcolor: '#0a0a0f',
+      camera: currentCamera || { eye: { x: 1.5, y: -1.8, z: 0.6 } },
+      aspectratio: { x: 1.5, y: 1, z: 0.7 },
+    },
+    showlegend: true,
+    legend: {
+      x: 0.01, y: 0.99, xanchor: 'left', yanchor: 'top',
+      bgcolor: 'rgba(17,17,24,0.85)',
+      bordercolor: '#333', borderwidth: 1,
+      font: { size: 11, color: '#e0e0e0' },
+    },
+  };
+
+  Plotly.newPlot('surface-chart', traces, layout, { responsive: true, displayModeBar: false });
+
+  // Save camera position on user interaction
+  document.getElementById('surface-chart').on('plotly_relayout', function(ed) {
+    if (ed['scene.camera']) currentCamera = ed['scene.camera'];
+  });
+
+  // Update info box
+  const spxLo = Math.min(...d.spx.map(b => b.c)).toFixed(0);
+  const spxHi = Math.max(...d.spx.map(b => b.c)).toFixed(0);
+  document.getElementById('info-box').innerHTML =
+    `<span class="val">${d.date}</span> · SPX Mid: <span class="val">$${d.midSpx}</span> · ` +
+    `Range: <span class="val">$${spxLo}–$${spxHi}</span> · ` +
+    `Calls: <span style="color:#10b981">${calls.length}</span> · Puts: <span style="color:#f43f5e">${puts.length}</span> · ` +
+    `<span style="color:#555">Z = % change from open</span>`;
+}
+
+// ── Panel 2: Delta Heatmap ─────────────────────────────────────────────
+
+function buildHeatmap() {
+  if (!surfaceData) return;
+  const d = surfaceData;
+  const range = parseInt(document.getElementById('range-select').value);
+
+  // Build SPX lookup
+  const spxByTs = new Map(d.spx.map(b => [b.ts, b.c]));
+
+  // Bucket time into 5-min windows for cleaner heatmap
+  const bucketSize = 5;
+  const allTs = d.spx.map(b => b.ts);
+  const buckets = [];
+  for (let i = 0; i < allTs.length; i += bucketSize) {
+    buckets.push(allTs[i]);
+  }
+  const bucketLabels = buckets.map(ts => tsToETLabel(ts));
+
+  // Build delta data for both calls and puts
+  const calls = d.contracts.filter(c => c.side === 'call' && Math.abs(c.distance) <= range);
+  const puts = d.contracts.filter(c => c.side === 'put' && Math.abs(c.distance) <= range);
+  const callDists = [...new Set(calls.map(c => c.distance))].sort((a, b) => a - b);
+  const putDists = [...new Set(puts.map(c => c.distance))].sort((a, b) => a - b);
+
+  function computeDeltaGrid(contracts, dists) {
+    const z = [];
+    for (const dist of dists) {
+      const contract = contracts.find(c => c.distance === dist);
+      if (!contract) { z.push(Array(buckets.length).fill(null)); continue; }
+      const barMap = new Map(contract.bars.map(b => [b.ts, b.c]));
+      const deltaRow = [];
+      for (let bi = 0; bi < buckets.length; bi++) {
+        const tStart = buckets[bi];
+        const tEnd = bi < buckets.length - 1 ? buckets[bi + 1] : allTs[allTs.length - 1] + 60;
+        const ratios = [];
+        for (let t = tStart; t < tEnd; t += 60) {
+          const nextT = t + 60;
+          const opt1 = barMap.get(t), opt2 = barMap.get(nextT);
+          const spx1 = spxByTs.get(t), spx2 = spxByTs.get(nextT);
+          if (opt1 != null && opt2 != null && spx1 != null && spx2 != null) {
+            const dSpx = spx2 - spx1;
+            const dOpt = opt2 - opt1;
+            if (Math.abs(dSpx) > 0.3) ratios.push(dOpt / dSpx);
+          }
+        }
+        deltaRow.push(ratios.length >= 1 ? ratios.reduce((s, v) => s + v, 0) / ratios.length : null);
+      }
+      z.push(deltaRow);
+    }
+    return z;
+  }
+
+  const callZ = computeDeltaGrid(calls, callDists);
+  const putZ = computeDeltaGrid(puts, putDists);
+
+  // Combine: puts on bottom (negative delta displayed as absolute), calls on top
+  // Y labels: "PUT ATM+5" ... "PUT ATM-15" | separator | "CALL ATM-15" ... "CALL ATM+5"
+  const combinedY = [
+    ...putDists.map(d => `PUT ${d >= 0 ? '+' : ''}${d}`).reverse(),
+    ...callDists.map(d => `CALL ${d >= 0 ? '+' : ''}${d}`),
+  ];
+  const combinedZ = [
+    ...putZ.map(row => row.map(v => v != null ? Math.abs(v) : null)).reverse(),
+    ...callZ,
+  ];
+  // Track which side each row belongs to for click handling
+  const combinedMeta = [
+    ...putDists.map(d => ({ side: 'put', dist: d })).reverse(),
+    ...callDists.map(d => ({ side: 'call', dist: d })),
+  ];
+
+  const traces = [{
+    type: 'heatmap',
+    x: bucketLabels,
+    y: combinedY,
+    z: combinedZ,
+    colorscale: [
+      [0, '#0a0a1a'],
+      [0.15, '#1a0a2e'],
+      [0.3, '#2d1b69'],
+      [0.45, '#4a2c8a'],
+      [0.6, '#6366f1'],
+      [0.75, '#818cf8'],
+      [0.9, '#a5b4fc'],
+      [1, '#e0e7ff'],
+    ],
+    hovertemplate: '%{x} · %{y}<br>|Delta|: %{z:.3f}<extra></extra>',
+    showscale: true,
+    colorbar: { title: '|δ|', titleside: 'right', thickness: 12, len: 0.8, tickfont: { size: 9, color: PLOTLY_TEXT } },
+    zmin: 0, zmax: 0.8,
+  }];
+
+  // Add a horizontal line to separate puts from calls
+  const sepIdx = putDists.length - 0.5;
+
+  const layout = {
+    ...darkLayout,
+    margin: { l: 70, r: 50, t: 30, b: 40 },
+    xaxis: { color: PLOTLY_TEXT, gridcolor: PLOTLY_GRID, tickfont: { size: 9 }, dtick: Math.max(1, Math.floor(bucketLabels.length / 12)) },
+    yaxis: { color: PLOTLY_TEXT, gridcolor: PLOTLY_GRID, tickfont: { size: 8 }, title: '' },
+    shapes: [{
+      type: 'line',
+      x0: 0, x1: 1, xref: 'paper',
+      y0: sepIdx, y1: sepIdx, yref: 'y',
+      line: { color: '#555', width: 2, dash: 'dot' },
+    }],
+    annotations: [
+      { x: -0.01, y: sepIdx + putDists.length * 0.3, xref: 'paper', yref: 'y', text: 'CALLS', showarrow: false, font: { size: 9, color: '#10b981' }, textangle: -90 },
+      { x: -0.01, y: sepIdx - putDists.length * 0.3, xref: 'paper', yref: 'y', text: 'PUTS', showarrow: false, font: { size: 9, color: '#f43f5e' }, textangle: -90 },
+    ],
+  };
+
+  Plotly.newPlot('heatmap-chart', traces, layout, { responsive: true, displayModeBar: false });
+
+  // Click handler — select contract from either side
+  document.getElementById('heatmap-chart').on('plotly_click', function(eventData) {
+    if (!eventData.points || !eventData.points[0]) return;
+    const pt = eventData.points[0];
+    const yi = pt.pointIndex[0];
+    const meta = combinedMeta[yi];
+    if (!meta) return;
+
+    const pool = meta.side === 'call' ? calls : puts;
+    const contract = pool.find(c => c.distance === meta.dist);
+    if (contract) selectContract(contract);
+  });
+}
+
+// ── Panel 3: Synced Line Charts ────────────────────────────────────────
+
+function selectContract(contract) {
+  selectedContract = contract;
+  document.getElementById('selected-info').innerHTML =
+    `<span style="color:#f59e0b">▎</span> ${contract.symbol} · ${contract.side.toUpperCase()} · Strike ${contract.strike} (ATM${contract.distance >= 0 ? '+' : ''}${contract.distance})`;
+  buildLineCharts();
+}
+
+function buildLineCharts() {
+  if (!surfaceData) return;
+  const d = surfaceData;
+
+  // SPX trace
+  const spxX = d.spx.map(b => tsToETLabel(b.ts));
+  const spxY = d.spx.map(b => b.c);
+  const spxByTs = new Map(d.spx.map(b => [b.ts, b.c]));
+
+  const traces = [
+    {
+      x: spxX, y: spxY,
+      type: 'scatter', mode: 'lines',
+      line: { color: '#8b8bff', width: 1.5 },
+      name: 'SPX',
+      yaxis: 'y',
+    },
+  ];
+
+  if (selectedContract) {
+    const c = selectedContract;
+    const optX = c.bars.map(b => tsToETLabel(b.ts));
+    const optY = c.bars.map(b => b.c);
+
+    traces.push({
+      x: optX, y: optY,
+      type: 'scatter', mode: 'lines',
+      line: { color: c.side === 'call' ? '#10b981' : '#f43f5e', width: 1.5 },
+      name: `${c.side === 'call' ? 'CALL' : 'PUT'} ${c.strike}`,
+      yaxis: 'y2',
+    });
+
+    // Rolling realized delta (20-bar window)
+    const window = 20;
+    const deltaX = [];
+    const deltaY = [];
+
+    for (let i = window; i < c.bars.length; i++) {
+      const ratios = [];
+      for (let j = i - window; j < i; j++) {
+        const ts1 = c.bars[j].ts, ts2 = c.bars[j + 1]?.ts;
+        if (!ts2) continue;
+        const spx1 = spxByTs.get(ts1), spx2 = spxByTs.get(ts2);
+        if (spx1 != null && spx2 != null) {
+          const dSpx = spx2 - spx1;
+          const dOpt = c.bars[j + 1].c - c.bars[j].c;
+          if (Math.abs(dSpx) > 0.3) ratios.push(dOpt / dSpx);
+        }
+      }
+      if (ratios.length >= 3) {
+        deltaX.push(tsToETLabel(c.bars[i].ts));
+        deltaY.push(ratios.reduce((s, v) => s + v, 0) / ratios.length);
+      }
+    }
+
+    if (deltaX.length > 0) {
+      traces.push({
+        x: deltaX, y: deltaY,
+        type: 'scatter', mode: 'lines',
+        line: { color: '#f59e0b', width: 1.5 },
+        name: 'Delta (20-bar)',
+        yaxis: 'y3',
+        fill: 'tozeroy',
+        fillcolor: 'rgba(245,158,11,0.08)',
+      });
+    }
+  }
+
+  const layout = {
+    ...darkLayout,
+    margin: { l: 50, r: 60, t: 25, b: 35 },
+    xaxis: { color: PLOTLY_TEXT, gridcolor: PLOTLY_GRID, tickfont: { size: 9 }, domain: [0, 1] },
+    yaxis: {
+      title: 'SPX', titlefont: { color: '#8b8bff', size: 10 },
+      color: '#8b8bff', gridcolor: PLOTLY_GRID, tickfont: { size: 9 },
+      domain: [0.68, 1], side: 'left',
+    },
+    yaxis2: {
+      title: selectedContract ? `${selectedContract.side === 'call' ? 'Call' : 'Put'} $` : 'Contract $',
+      titlefont: { color: selectedContract?.side === 'call' ? '#10b981' : '#f43f5e', size: 10 },
+      color: selectedContract?.side === 'call' ? '#10b981' : '#f43f5e',
+      gridcolor: PLOTLY_GRID, tickfont: { size: 9 },
+      domain: [0.35, 0.65], side: 'left',
+    },
+    yaxis3: {
+      title: 'Delta', titlefont: { color: '#f59e0b', size: 10 },
+      color: '#f59e0b', gridcolor: PLOTLY_GRID, tickfont: { size: 9 },
+      domain: [0, 0.32], side: 'left',
+    },
+    showlegend: false,
+    grid: { rows: 3, columns: 1, pattern: 'independent' },
+  };
+
+  Plotly.newPlot('line-chart', traces, layout, { responsive: true, displayModeBar: false });
+}
+
+// ── Data Loading ────────────────────────────────────────────────────────
+
+async function loadDates() {
+  const res = await fetch(`${API}/dates`);
+  const dates = await res.json();
+  const sel = document.getElementById('date-select');
+  sel.innerHTML = dates.slice(-60).reverse().map(d => `<option value="${d}">${d}</option>`).join('');
+  sel.addEventListener('change', () => loadSurface(sel.value));
+
+  const urlDate = new URLSearchParams(window.location.search).get('date');
+  if (urlDate && dates.includes(urlDate)) {
+    sel.value = urlDate;
+    loadSurface(urlDate);
+  } else if (dates.length > 0) {
+    loadSurface(dates[dates.length - 1]);
+  }
+}
+
+async function loadSurface(date) {
+  document.getElementById('loading').classList.remove('hidden');
+  document.getElementById('status').textContent = 'Loading...';
+  selectedContract = null;
+  document.getElementById('selected-info').textContent = 'Click heatmap to select a contract';
+
+  try {
+    const res = await fetch(`${API}/surface?date=${date}`);
+    const data = await res.json();
+    if (data.error) {
+      document.getElementById('loading').innerHTML = `<span>${data.error}</span>`;
+      return;
+    }
+    surfaceData = data;
+    document.getElementById('status').textContent =
+      `${data.contracts.length} contracts · ${data.spx.length} bars`;
+
+    build3DSurface();
+    buildHeatmap();
+    buildLineCharts();
+
+    // Auto-select ATM call
+    const atmCall = data.contracts
+      .filter(c => c.side === 'call')
+      .sort((a, b) => Math.abs(a.distance) - Math.abs(b.distance))[0];
+    if (atmCall) selectContract(atmCall);
+
+  } catch (err) {
+    console.error(err);
+    document.getElementById('status').textContent = 'Error loading data';
+  } finally {
+    document.getElementById('loading').classList.add('hidden');
+  }
+}
+
+// Range change
+document.getElementById('range-select').addEventListener('change', () => {
+  build3DSurface();
+  buildHeatmap();
+});
+
+// ── Init ────────────────────────────────────────────────────────────────
+
+loadDates();
+</script>
+</body>
+</html>

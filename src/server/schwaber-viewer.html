@@ -1,0 +1,559 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Schwaber — ETF Agent</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0a0f; color: #e0e0e0; font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace; font-size: 13px; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+
+/* ── Auth screen (shown first if not authenticated) ── */
+#authScreen {
+  position: fixed; inset: 0; background: #0a0a0f;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  z-index: 200; gap: 0;
+}
+#authScreen.hidden { display: none; }
+
+.auth-logo { font-size: 42px; margin-bottom: 8px; }
+.auth-title { font-size: 22px; font-weight: 700; color: #f59e0b; margin-bottom: 4px; letter-spacing: 0.5px; }
+.auth-sub { font-size: 12px; color: #555; margin-bottom: 40px; }
+
+.auth-card {
+  background: #111118; border: 1px solid #2a2a35; border-radius: 10px;
+  padding: 36px 40px; max-width: 420px; width: 90%; text-align: center;
+}
+.auth-card h2 { font-size: 15px; color: #e0e0e0; margin-bottom: 10px; font-weight: 600; }
+.auth-card p  { font-size: 12px; color: #666; line-height: 1.7; margin-bottom: 28px; }
+
+.auth-step {
+  display: flex; align-items: flex-start; gap: 12px;
+  text-align: left; margin-bottom: 16px; padding: 12px;
+  background: #0d0d14; border-radius: 6px; border: 1px solid #1a1a24;
+}
+.auth-step .num {
+  width: 22px; height: 22px; border-radius: 50%; background: #f59e0b20;
+  color: #f59e0b; font-size: 11px; font-weight: 700; display: flex;
+  align-items: center; justify-content: center; flex-shrink: 0; margin-top: 1px;
+  border: 1px solid #f59e0b40;
+}
+.auth-step .text { font-size: 12px; color: #888; line-height: 1.5; }
+.auth-step .text strong { color: #ccc; display: block; margin-bottom: 2px; }
+
+.auth-btn {
+  display: inline-flex; align-items: center; gap: 8px;
+  background: #f59e0b; color: #0a0a0f; padding: 12px 28px;
+  border-radius: 6px; text-decoration: none; font-weight: 700;
+  font-size: 14px; transition: background 0.15s; margin-top: 8px;
+  border: none; cursor: pointer; width: 100%; justify-content: center;
+}
+.auth-btn:hover { background: #fbbf24; }
+.auth-btn.waiting {
+  background: #1a1a24; color: #555; border: 1px solid #333; cursor: default;
+}
+
+.auth-waiting-row {
+  display: none; align-items: center; justify-content: center; gap: 10px;
+  margin-top: 20px; font-size: 12px; color: #555;
+}
+.auth-waiting-row.show { display: flex; }
+.spinner {
+  width: 14px; height: 14px; border: 2px solid #333;
+  border-top-color: #f59e0b; border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.auth-expiry-warn {
+  display: none; margin-top: 20px; padding: 10px 14px;
+  background: #f59e0b15; border: 1px solid #f59e0b40; border-radius: 6px;
+  font-size: 11px; color: #f59e0b; text-align: left; line-height: 1.6;
+}
+.auth-expiry-warn.show { display: block; }
+
+/* ── Dashboard (hidden until authenticated) ── */
+#dashboard { display: none; flex-direction: column; flex: 1; overflow: hidden; }
+#dashboard.show { display: flex; }
+
+/* ── Header ── */
+.header { display: flex; align-items: center; gap: 14px; padding: 9px 18px; background: #111118; border-bottom: 1px solid #222; flex-shrink: 0; }
+.header h1 { font-size: 15px; color: #f59e0b; font-weight: 700; }
+.header .subtitle { font-size: 11px; color: #555; }
+.badge { padding: 2px 8px; border-radius: 3px; font-size: 11px; font-weight: 600; }
+.badge.paper   { background: #78716c30; color: #a8a29e; border: 1px solid #44403c; }
+.badge.live    { background: #dc262620; color: #f87171; border: 1px solid #7f1d1d; animation: blink 2s infinite; }
+.badge.offline { background: #1a1a1a; color: #555; border: 1px solid #333; }
+@keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.55} }
+.header-right { margin-left: auto; display: flex; align-items: center; gap: 14px; }
+.auth-pill {
+  font-size: 11px; padding: 2px 10px; border-radius: 20px; cursor: pointer;
+  border: 1px solid #10b98150; color: #10b981; background: #10b98110;
+}
+.auth-pill.warn { border-color: #f59e0b50; color: #f59e0b; background: #f59e0b10; }
+.auth-pill.bad  { border-color: #f43f5e50; color: #f43f5e; background: #f43f5e10; }
+.last-update { font-size: 11px; color: #444; }
+
+/* ── Quotes strip ── */
+.quotes-bar { display: flex; border-bottom: 1px solid #1a1a24; flex-shrink: 0; background: #0d0d14; }
+.quote-cell { flex: 1; padding: 7px 16px; border-right: 1px solid #1a1a24; display: flex; align-items: center; gap: 10px; }
+.quote-cell:last-child { border-right: none; }
+.quote-symbol { font-size: 12px; font-weight: 700; color: #888; }
+.quote-price  { font-size: 17px; font-weight: 700; }
+.quote-change { font-size: 11px; }
+.quote-meta   { font-size: 10px; color: #444; margin-left: auto; }
+
+/* ── Stats bar ── */
+.stats-bar { display: flex; border-bottom: 1px solid #1a1a24; flex-shrink: 0; }
+.stat { flex: 1; padding: 10px 16px; border-right: 1px solid #1a1a24; }
+.stat:last-child { border-right: none; }
+.stat .label { font-size: 10px; color: #555; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
+.stat .value { font-size: 20px; font-weight: 700; }
+.stat .sub   { font-size: 11px; color: #555; margin-top: 2px; }
+.green  { color: #10b981; }
+.red    { color: #f43f5e; }
+.amber  { color: #f59e0b; }
+.purple { color: #a78bfa; }
+.dim    { color: #555; }
+
+/* ── Main layout ── */
+.main { display: flex; flex: 1; overflow: hidden; }
+
+/* ── Positions panel ── */
+.positions-panel { width: 320px; border-right: 1px solid #1a1a24; display: flex; flex-direction: column; flex-shrink: 0; }
+.panel-title { padding: 7px 14px; font-size: 10px; color: #555; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid #1a1a24; background: #0d0d14; }
+.position-card { padding: 12px 14px; border-bottom: 1px solid #1a1a24; }
+.position-card:hover { background: #111118; }
+.pos-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.pos-symbol { font-size: 14px; font-weight: 700; }
+.pos-side { font-size: 11px; padding: 2px 7px; border-radius: 3px; font-weight: 600; }
+.pos-side.long  { background: #10b98120; color: #10b981; border: 1px solid #10b98140; }
+.pos-side.short { background: #f43f5e20; color: #f43f5e; border: 1px solid #f43f5e40; }
+.pos-row { display: flex; justify-content: space-between; font-size: 11px; color: #666; margin-bottom: 3px; }
+.pos-row .val { color: #ccc; }
+.no-positions { padding: 32px 14px; text-align: center; color: #333; font-size: 12px; }
+
+/* ── Right panel ── */
+.right-panel { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+.tabs { display: flex; border-bottom: 1px solid #1a1a24; flex-shrink: 0; background: #0d0d14; }
+.tab { padding: 8px 20px; font-size: 11px; color: #555; cursor: pointer; border-bottom: 2px solid transparent; text-transform: uppercase; letter-spacing: 0.5px; }
+.tab:hover { color: #aaa; }
+.tab.active { color: #f59e0b; border-bottom-color: #f59e0b; }
+.tab-content { flex: 1; overflow-y: auto; display: none; }
+.tab-content.active { display: block; }
+
+/* ── Activity ── */
+.activity-item { display: flex; gap: 12px; padding: 8px 14px; border-bottom: 1px solid #0f0f18; }
+.activity-item:hover { background: #0d0d14; }
+.activity-time { font-size: 10px; color: #444; white-space: nowrap; padding-top: 2px; min-width: 68px; }
+.activity-dot { width: 6px; height: 6px; border-radius: 50%; margin-top: 5px; flex-shrink: 0; }
+.dot-entry  { background: #10b981; }
+.dot-exit   { background: #f59e0b; }
+.dot-system { background: #a78bfa; }
+.dot-cycle  { background: #2a2a3a; }
+.activity-text { flex: 1; font-size: 12px; line-height: 1.5; }
+.activity-text .summary { color: #ccc; }
+.activity-text .detail  { font-size: 10px; color: #555; margin-top: 2px; }
+.pnl-pos { color: #10b981; font-weight: 600; }
+.pnl-neg { color: #f43f5e; font-weight: 600; }
+
+/* ── Raw log ── */
+.log-line { padding: 3px 14px; font-size: 11px; color: #444; border-bottom: 1px solid #0d0d14; white-space: pre-wrap; word-break: break-all; line-height: 1.6; }
+.log-line.entry  { color: #10b981; }
+.log-line.exit-w { color: #10b981; }
+.log-line.exit-l { color: #f43f5e; }
+.log-line.warn   { color: #f59e0b; }
+.log-line.err    { color: #f43f5e; }
+
+/* ── Scrollbars ── */
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #1e1e2e; border-radius: 2px; }
+::-webkit-scrollbar-thumb:hover { background: #333; }
+</style>
+</head>
+<body>
+
+<!-- ══════════════════════════════════════════════════════════════
+     AUTH SCREEN — shown until Schwab OAuth tokens are confirmed
+     ══════════════════════════════════════════════════════════════ -->
+<div id="authScreen">
+  <div class="auth-logo">⚡</div>
+  <div class="auth-title">Schwaber</div>
+  <div class="auth-sub">Schwab ETF Trading Agent</div>
+
+  <div class="auth-card">
+    <h2>Connect your Schwab account</h2>
+    <p>Before the agent can fetch quotes or place orders, you need to authorise it with your Schwab brokerage account via OAuth.</p>
+
+    <div class="auth-step">
+      <div class="num">1</div>
+      <div class="text">
+        <strong>Click "Authorise with Schwab" below</strong>
+        A Schwab login page opens in a new tab. Sign in with your <em>brokerage</em> account (not the developer portal).
+      </div>
+    </div>
+
+    <div class="auth-step">
+      <div class="num">2</div>
+      <div class="text">
+        <strong>Select your account &amp; approve access</strong>
+        Schwab will ask which account(s) to share. Approve, then you'll be redirected back to bitloom.cloud.
+      </div>
+    </div>
+
+    <div class="auth-step">
+      <div class="num">3</div>
+      <div class="text">
+        <strong>Return here — this page auto-advances</strong>
+        Once the callback completes, this screen disappears and the dashboard loads automatically.
+      </div>
+    </div>
+
+    <a class="auth-btn" id="authBtn" href="/schwab/auth" target="_blank" rel="noopener" onclick="onAuthClicked()">
+      🔑 Authorise with Schwab
+    </a>
+    <p style="font-size:11px;color:#444;margin-top:10px;">
+      If no window opens, your browser blocked the popup —
+      <a href="/schwab/auth" target="_blank" rel="noopener" style="color:#f59e0b;">click here to open it directly</a>.
+    </p>
+
+    <div class="auth-waiting-row" id="waitingRow">
+      <div class="spinner"></div>
+      <span>Waiting for Schwab callback… this page will update automatically</span>
+    </div>
+
+    <div class="auth-expiry-warn" id="expiryWarn"></div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════
+     DASHBOARD — hidden until authenticated
+     ══════════════════════════════════════════════════════════════ -->
+<div id="dashboard">
+
+  <!-- Header -->
+  <div class="header">
+    <h1>⚡ Schwaber</h1>
+    <span class="subtitle">Schwab ETF Agent</span>
+    <span class="badge offline" id="modeBadge">OFFLINE</span>
+    <div class="header-right">
+      <span class="auth-pill" id="authPill" onclick="showAuthScreen()" title="Click to re-authenticate">✓ Schwab connected</span>
+      <span class="last-update" id="lastUpdate">—</span>
+    </div>
+  </div>
+
+  <!-- Quotes -->
+  <div class="quotes-bar" id="quotesBar">
+    <div class="quote-cell" id="quote-SPY">
+      <span class="quote-symbol">SPY</span>
+      <span class="quote-price dim">—</span>
+      <span class="quote-change dim">—</span>
+      <span class="quote-meta">loading…</span>
+    </div>
+    <div class="quote-cell" id="quote-QQQ">
+      <span class="quote-symbol">QQQ</span>
+      <span class="quote-price dim">—</span>
+      <span class="quote-change dim">—</span>
+      <span class="quote-meta">loading…</span>
+    </div>
+  </div>
+
+  <!-- Stats -->
+  <div class="stats-bar">
+    <div class="stat">
+      <div class="label">Daily P&amp;L</div>
+      <div class="value dim" id="statPnl">$0.00</div>
+      <div class="sub">today</div>
+    </div>
+    <div class="stat">
+      <div class="label">Win Rate</div>
+      <div class="value dim" id="statWr">—</div>
+      <div class="sub" id="statWrSub">0 trades</div>
+    </div>
+    <div class="stat">
+      <div class="label">Open Positions</div>
+      <div class="value dim" id="statPositions">0</div>
+      <div class="sub" id="statSymbols">SPY · QQQ</div>
+    </div>
+    <div class="stat">
+      <div class="label">Cycle</div>
+      <div class="value dim" id="statCycle">#0</div>
+      <div class="sub" id="statCycleSub">—</div>
+    </div>
+  </div>
+
+  <!-- Main -->
+  <div class="main">
+    <div class="positions-panel">
+      <div class="panel-title">Open Positions</div>
+      <div id="positionsList">
+        <div class="no-positions">No open positions</div>
+      </div>
+    </div>
+
+    <div class="right-panel">
+      <div class="tabs">
+        <div class="tab active" onclick="switchTab('activity')">Activity</div>
+        <div class="tab" onclick="switchTab('log')">Raw Log</div>
+      </div>
+      <div class="tab-content active" id="tab-activity">
+        <div id="activityFeed"></div>
+      </div>
+      <div class="tab-content" id="tab-log">
+        <div id="rawLog"></div>
+      </div>
+    </div>
+  </div>
+
+</div><!-- /dashboard -->
+
+<script>
+// ── State ──────────────────────────────────────────────────────────────────
+let isAuthenticated = false;
+let authPolling = null;
+let prevPrices = {};
+
+// ── Auth screen logic ──────────────────────────────────────────────────────
+
+function onAuthClicked() {
+  // Show the waiting state — the browser opens /schwab/auth in a new tab natively
+  // Don't remove href or change the button to avoid popup blocker triggering
+  document.getElementById('waitingRow').classList.add('show');
+  startAuthPolling();
+}
+
+function startAuthPolling() {
+  if (authPolling) return;
+  authPolling = setInterval(checkAuth, 3000); // check every 3s
+}
+
+function showAuthScreen() {
+  document.getElementById('authScreen').classList.remove('hidden');
+  document.getElementById('dashboard').classList.remove('show');
+  document.getElementById('waitingRow').classList.remove('show');
+}
+
+function showDashboard() {
+  document.getElementById('authScreen').classList.add('hidden');
+  document.getElementById('dashboard').classList.add('show');
+  if (authPolling) { clearInterval(authPolling); authPolling = null; }
+  startDashboardPolling();
+}
+
+async function checkAuth() {
+  try {
+    const r = await fetch('/schwaber/api/auth');
+    const data = await r.json();
+
+    if (data.authenticated) {
+      isAuthenticated = true;
+      updateAuthPill(data);
+      showDashboard();
+    } else if (data.needsReauth && data.accessTokenExpiresAt !== null) {
+      // Only show expiry warning if we previously had tokens (not first-time setup)
+      const warn = document.getElementById('expiryWarn');
+      warn.textContent = '⚠️ Your previous Schwab token has expired (7-day limit). Please re-authenticate.';
+      warn.classList.add('show');
+    }
+  } catch {}
+}
+
+function updateAuthPill(data) {
+  const pill = document.getElementById('authPill');
+  if (!data) return;
+  const days = data.refreshTokenDaysLeft ?? 0;
+  if (days <= 1) {
+    pill.className = 'auth-pill bad';
+    pill.textContent = `⚠️ Token expires in ${days}d — click to re-auth`;
+  } else if (days <= 3) {
+    pill.className = 'auth-pill warn';
+    pill.textContent = `⚡ ${days}d until re-auth needed`;
+  } else {
+    pill.className = 'auth-pill';
+    pill.textContent = `✓ Schwab (${days}d left)`;
+  }
+}
+
+// ── Dashboard polling ──────────────────────────────────────────────────────
+
+function startDashboardPolling() {
+  fetchAll();
+  setInterval(fetchStatusAndActivity, 5000);
+  setInterval(fetchQuotes, 10000);
+  setInterval(fetchLog, 15000);
+  setInterval(() => checkAuth().then(d => d && updateAuthPill(d)), 5 * 60 * 1000);
+}
+
+async function fetchAll() {
+  await Promise.all([fetchStatusAndActivity(), fetchQuotes(), fetchLog()]);
+}
+
+// ── Status + activity ──────────────────────────────────────────────────────
+
+async function fetchStatusAndActivity() {
+  await Promise.all([fetchStatus(), fetchActivity()]);
+}
+
+async function fetchStatus() {
+  try {
+    const r = await fetch('/schwaber/api/status');
+    const data = await r.json();
+
+    if (!data.online) {
+      document.getElementById('modeBadge').className = 'badge offline';
+      document.getElementById('modeBadge').textContent = 'OFFLINE';
+      return;
+    }
+
+    const badge = document.getElementById('modeBadge');
+    badge.className = data.paper ? 'badge paper' : 'badge live';
+    badge.textContent = data.paper ? 'PAPER' : 'LIVE';
+
+    const pnl = data.dailyPnl || 0;
+    const pnlEl = document.getElementById('statPnl');
+    pnlEl.textContent = (pnl >= 0 ? '+' : '') + '$' + Math.abs(pnl).toFixed(2);
+    pnlEl.className = 'value ' + (pnl > 0 ? 'green' : pnl < 0 ? 'red' : 'dim');
+
+    const wr = data.winRate || 0;
+    const wrEl = document.getElementById('statWr');
+    wrEl.textContent = wr.toFixed(1) + '%';
+    wrEl.className = 'value ' + (wr >= 50 ? 'green' : wr > 0 ? 'amber' : 'dim');
+    document.getElementById('statWrSub').textContent = (data.tradesTotal || 0) + ' trades';
+
+    const openCount = (data.openPositions || []).length;
+    const posEl = document.getElementById('statPositions');
+    posEl.textContent = openCount;
+    posEl.className = 'value ' + (openCount > 0 ? 'amber' : 'dim');
+    document.getElementById('statSymbols').textContent = (data.symbols || []).join(' · ');
+
+    document.getElementById('statCycle').textContent = '#' + (data.cycleCount || 0);
+    document.getElementById('statCycleSub').textContent = new Date(data.ts).toLocaleTimeString();
+    document.getElementById('lastUpdate').textContent = 'Updated ' + new Date(data.ts).toLocaleTimeString();
+
+    renderPositions(data.openPositions || []);
+  } catch {}
+}
+
+function renderPositions(positions) {
+  const el = document.getElementById('positionsList');
+  if (!positions.length) {
+    el.innerHTML = '<div class="no-positions">No open positions</div>';
+    return;
+  }
+  el.innerHTML = positions.map(pos => {
+    const age = Math.round((Date.now() - pos.enteredAt) / 60000);
+    return `
+      <div class="position-card">
+        <div class="pos-header">
+          <span class="pos-symbol">${pos.symbol}</span>
+          <span class="pos-side ${pos.side}">${pos.side.toUpperCase()}</span>
+        </div>
+        <div class="pos-row"><span>Entry</span><span class="val">$${pos.entryPrice.toFixed(2)}</span></div>
+        <div class="pos-row"><span>Shares</span><span class="val">${pos.shares}</span></div>
+        <div class="pos-row"><span>Take Profit</span><span class="val green">$${pos.takeProfit.toFixed(2)}</span></div>
+        <div class="pos-row"><span>Stop Loss</span><span class="val red">$${pos.stopLoss.toFixed(2)}</span></div>
+        <div class="pos-row"><span>Open</span><span class="val">${age}m ago</span></div>
+        ${pos.orderId ? `<div class="pos-row"><span>Order ID</span><span class="val dim">${pos.orderId}</span></div>` : ''}
+      </div>`;
+  }).join('');
+}
+
+// ── Activity ───────────────────────────────────────────────────────────────
+
+async function fetchActivity() {
+  try {
+    const r = await fetch('/schwaber/api/activity?n=150');
+    const items = await r.json();
+    const el = document.getElementById('activityFeed');
+    if (!items.length) {
+      el.innerHTML = '<div style="padding:32px;text-align:center;color:#333">No activity yet — agent has not started</div>';
+      return;
+    }
+    el.innerHTML = items.map(item => {
+      const t = new Date(item.ts).toLocaleTimeString('en-US', { hour12: false });
+      const d = item.details || {};
+      let detail = '';
+      if (item.event === 'entry') {
+        detail = `$${(d.price||0).toFixed(2)} entry · TP $${(d.tp||0).toFixed(2)} · SL $${(d.sl||0).toFixed(2)} · ${d.shares||1} share(s)`;
+      } else if (item.event === 'exit') {
+        const pnl = d.pnl ?? 0;
+        const pnlHtml = `<span class="${pnl >= 0 ? 'pnl-pos' : 'pnl-neg'}">${pnl >= 0 ? '+' : ''}$${Math.abs(pnl).toFixed(2)}</span>`;
+        detail = `exit $${(d.exitPrice||0).toFixed(2)} · entry $${(d.entryPrice||0).toFixed(2)} · reason: ${d.reason||''} · P&L ${pnlHtml}`;
+      }
+      const dotCls = item.event === 'entry' ? 'dot-entry' : item.event === 'exit' ? 'dot-exit' : item.event === 'system' ? 'dot-system' : 'dot-cycle';
+      return `
+        <div class="activity-item">
+          <span class="activity-time">${t}</span>
+          <div class="activity-dot ${dotCls}"></div>
+          <div class="activity-text">
+            <div class="summary">${item.summary || ''}</div>
+            ${detail ? `<div class="detail">${detail}</div>` : ''}
+          </div>
+        </div>`;
+    }).join('');
+  } catch {}
+}
+
+// ── Quotes ─────────────────────────────────────────────────────────────────
+
+async function fetchQuotes() {
+  try {
+    const r = await fetch('/schwaber/api/quotes?symbols=SPY,QQQ');
+    const data = await r.json();
+    if (data.error || data.needsAuth) return;
+    for (const [sym, info] of Object.entries(data)) {
+      const q = info.quote || info;
+      const price  = q.lastPrice ?? q.last ?? 0;
+      const bid    = q.bidPrice  ?? q.bid  ?? 0;
+      const ask    = q.askPrice  ?? q.ask  ?? 0;
+      const chgPct = q.netPercentChange ?? q.changePercent ?? 0;
+      const cell   = document.getElementById('quote-' + sym);
+      if (!cell || !price) continue;
+      const prev = prevPrices[sym];
+      const flash = prev != null && price !== prev ? (price > prev ? 'green' : 'red') : '';
+      prevPrices[sym] = price;
+      cell.innerHTML = `
+        <span class="quote-symbol">${sym}</span>
+        <span class="quote-price ${flash}" style="transition:color 0.4s">$${price.toFixed(2)}</span>
+        <span class="quote-change ${chgPct >= 0 ? 'green' : 'red'}">${chgPct >= 0 ? '+' : ''}${chgPct.toFixed(2)}%</span>
+        <span class="quote-meta">bid $${bid.toFixed(2)} · ask $${ask.toFixed(2)}</span>`;
+    }
+  } catch {}
+}
+
+// ── Raw log ────────────────────────────────────────────────────────────────
+
+async function fetchLog() {
+  try {
+    const r = await fetch('/schwaber/api/log?n=300');
+    const lines = await r.json();
+    document.getElementById('rawLog').innerHTML = lines.map(line => {
+      let cls = '';
+      if (line.includes('✅ ENTERED') || line.includes('PAPER ENTRY')) cls = 'entry';
+      else if (line.includes('💰')) cls = 'exit-w';
+      else if (line.includes('💸')) cls = 'exit-l';
+      else if (line.includes('⚠️')) cls = 'warn';
+      else if (line.includes('❌')) cls = 'err';
+      return `<div class="log-line ${cls}">${line.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}</div>`;
+    }).join('');
+  } catch {}
+}
+
+// ── Tab switching ──────────────────────────────────────────────────────────
+
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+  document.querySelector(`.tab:nth-child(${name === 'activity' ? 1 : 2})`).classList.add('active');
+  document.getElementById('tab-' + name).classList.add('active');
+}
+
+// ── Boot ───────────────────────────────────────────────────────────────────
+// First check — if already authenticated, skip straight to dashboard
+checkAuth();
+// Also poll during auth screen in case user already completed the flow
+startAuthPolling();
+</script>
+</body>
+</html>

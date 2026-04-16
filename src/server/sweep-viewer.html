@@ -1,0 +1,656 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SPXer Config Leaderboard</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #0a0a0f; color: #e0e0e0; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 13px; }
+
+  .header { display: flex; align-items: center; gap: 16px; padding: 12px 16px; background: #111118; border-bottom: 1px solid #222; }
+  .header h1 { font-size: 15px; color: #8b8bff; font-weight: 600; }
+  .header a { color: #666; text-decoration: none; font-size: 12px; }
+  .header a:hover { color: #8b8bff; }
+  .stats { margin-left: auto; display: flex; gap: 16px; font-size: 12px; color: #888; }
+  .stats .num { color: #a78bfa; font-weight: 600; }
+
+  /* ── Filter bar ── */
+  .filters { display: flex; gap: 6px; padding: 10px 16px; background: #0d0d14; border-bottom: 1px solid #1a1a24; align-items: center; flex-wrap: wrap; }
+  .filter-group { display: flex; align-items: center; gap: 4px; }
+  .filter-group label { font-size: 10px; color: #555; text-transform: uppercase; letter-spacing: 0.5px; white-space: nowrap; }
+  .filter-group select { background: #1a1a24; color: #e0e0e0; border: 1px solid #333; padding: 3px 6px; border-radius: 3px; font-family: inherit; font-size: 11px; cursor: pointer; }
+  .filter-group select:focus { border-color: #8b8bff; outline: none; }
+  .filter-group select.active { border-color: #8b8bff; color: #8b8bff; }
+  .filter-sep { width: 1px; height: 20px; background: #222; margin: 0 4px; }
+  .filter-reset { background: none; border: 1px solid #333; color: #666; padding: 3px 10px; border-radius: 3px; font-family: inherit; font-size: 10px; cursor: pointer; }
+  .filter-reset:hover { color: #f43f5e; border-color: #f43f5e; }
+  .filter-count { font-size: 11px; color: #555; margin-left: auto; }
+
+  /* ── Sort controls ── */
+  .sort-bar { display: flex; gap: 8px; padding: 6px 16px; background: #0a0a0f; border-bottom: 1px solid #1a1a24; align-items: center; }
+  .sort-bar label { font-size: 10px; color: #555; }
+  .sort-btn { background: #1a1a24; color: #888; border: 1px solid #222; padding: 3px 10px; border-radius: 3px; font-size: 11px; cursor: pointer; font-family: inherit; }
+  .sort-btn:hover { border-color: #444; color: #e0e0e0; }
+  .sort-btn.active { border-color: #8b8bff; color: #8b8bff; }
+
+  /* ── Table ── */
+  .table-wrap { overflow-x: auto; max-height: calc(100vh - 170px); overflow-y: auto; position: relative; }
+
+  /* ── Loading overlay ── */
+  .loading-overlay {
+    position: absolute; inset: 0; z-index: 10;
+    background: rgba(10, 10, 15, 0.75);
+    display: flex; align-items: center; justify-content: center;
+    opacity: 0; pointer-events: none;
+    transition: opacity 0.15s ease;
+  }
+  .loading-overlay.active { opacity: 1; pointer-events: auto; }
+  .spinner {
+    width: 28px; height: 28px;
+    border: 3px solid #222;
+    border-top-color: #8b8bff;
+    border-radius: 50%;
+    animation: spin 0.6s linear infinite;
+  }
+  .loading-label { color: #8b8bff; font-size: 12px; margin-left: 10px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  table { width: 100%; border-collapse: collapse; min-width: 1100px; }
+  th { position: sticky; top: 0; z-index: 2; background: #111118; text-align: left; padding: 7px 8px; color: #555; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 2px solid #222; cursor: pointer; white-space: nowrap; user-select: none; }
+  th:hover { color: #8b8bff; }
+  th.sorted { color: #8b8bff; }
+  th .arrow { font-size: 8px; margin-left: 2px; }
+  td { padding: 5px 8px; border-bottom: 1px solid #111118; font-size: 12px; white-space: nowrap; }
+  tr:hover td { background: #1a1a28; }
+
+  .rank { width: 32px; text-align: center; }
+  .medal { font-size: 13px; }
+  .pnl-pos { color: #10b981; }
+  .pnl-neg { color: #f43f5e; }
+  .pnl-zero { color: #666; }
+  .bar { display: inline-block; height: 10px; border-radius: 1px; min-width: 1px; vertical-align: middle; margin-right: 4px; }
+  .bar-g { background: #10b981; }
+  .bar-r { background: #f43f5e; }
+  .cfg-link { color: #8b8bff; text-decoration: none; font-size: 11px; }
+  .cfg-link:hover { text-decoration: underline; }
+  .param { color: #666; font-size: 10px; }
+  .param b { color: #aaa; }
+
+  /* ── Daily expand ── */
+  .daily-row td { background: #0d0d14 !important; padding: 0 !important; }
+  .daily-wrap { padding: 8px 16px 12px 40px; }
+  .daily-wrap h3 { font-size: 11px; color: #8b8bff; margin-bottom: 6px; }
+  .daily-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 3px; }
+  .daily-card { background: #111118; border: 1px solid #1a1a24; border-radius: 3px; padding: 4px 8px; font-size: 10px; display: flex; justify-content: space-between; gap: 6px; cursor: pointer; }
+  .daily-card:hover { border-color: #444; }
+  .hl td { background: #1a1a2f !important; }
+
+  .footer { padding: 8px 16px; text-align: center; color: #333; font-size: 10px; border-top: 1px solid #1a1a24; }
+
+  /* ── Delete button ── */
+  .del-btn { background: none; border: none; color: #333; cursor: pointer; font-size: 12px; padding: 2px 4px; border-radius: 3px; opacity: 0; transition: opacity 0.1s; }
+  tr:hover .del-btn { opacity: 0.6; }
+  .del-btn:hover { opacity: 1 !important; color: #f43f5e; background: #f43f5e18; }
+
+  /* ── Delete confirmation modal ── */
+  .del-modal-overlay { display: none; position: fixed; inset: 0; z-index: 100; background: rgba(0,0,0,0.6); justify-content: center; align-items: center; }
+  .del-modal-overlay.active { display: flex; }
+  .del-modal { background: #111118; border: 1px solid #333; border-radius: 8px; padding: 20px 24px; min-width: 360px; max-width: 480px; }
+  .del-modal h3 { font-size: 14px; color: #f43f5e; margin-bottom: 12px; }
+  .del-modal p { font-size: 12px; color: #aaa; margin-bottom: 8px; line-height: 1.5; }
+  .del-modal .cfg-name { color: #e0e0e0; font-weight: 600; }
+  .del-modal .del-stats { color: #888; font-size: 11px; margin-bottom: 16px; }
+  .del-modal-actions { display: flex; gap: 10px; justify-content: flex-end; }
+  .del-modal-actions button { padding: 6px 16px; border-radius: 4px; font-family: inherit; font-size: 12px; cursor: pointer; }
+  .del-cancel { background: #1a1a24; color: #888; border: 1px solid #333; }
+  .del-cancel:hover { color: #e0e0e0; border-color: #555; }
+  .del-confirm { background: #f43f5e20; color: #f43f5e; border: 1px solid #f43f5e55; }
+  .del-confirm:hover { background: #f43f5e33; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>🏆 Config Leaderboard</h1>
+  <a href="/replay/">← Replay Viewer</a>
+  <div class="stats">
+    <span>Configs: <span class="num" id="total-count">-</span></span>
+    <span>Showing: <span class="num" id="showing-count">-</span></span>
+  </div>
+</div>
+
+<div class="filters" id="filters"></div>
+
+<div class="sort-bar">
+  <label>Sort</label>
+  <button class="sort-btn active" data-sort="compositeScore">Score</button>
+  <button class="sort-btn" data-sort="totalPnl">P&L</button>
+  <button class="sort-btn" data-sort="sharpe">Sharpe</button>
+  <button class="sort-btn" data-sort="winRate">WR%</button>
+  <button class="sort-btn" data-sort="avgDailyPnl">Avg/Day</button>
+  <button class="sort-btn" data-sort="worstDay">Worst ↑</button>
+  <button class="sort-btn" data-sort="profitDays">Green Days</button>
+  <button class="sort-btn" data-sort="trades">Trades</button>
+  <span style="margin-left:auto"></span>
+  <label>Max Entry $</label>
+  <select id="max-entry-price" onchange="loadData()" style="background:#1a1a24;color:#e0e0e0;border:1px solid #333;padding:3px 6px;border-radius:3px;font-family:inherit;font-size:11px">
+    <option value="0" selected>No limit</option>
+    <option value="5">≤ $5</option>
+    <option value="8">≤ $8</option>
+    <option value="10">≤ $10</option>
+    <option value="15">≤ $15</option>
+    <option value="20">≤ $20</option>
+    <option value="25">≤ $25</option>
+    <option value="50">≤ $50</option>
+  </select>
+  <label>Max Concurrent</label>
+  <select id="max-concurrent" onchange="loadData()" style="background:#1a1a24;color:#e0e0e0;border:1px solid #333;padding:3px 6px;border-radius:3px;font-family:inherit;font-size:11px">
+    <option value="0" selected>No limit</option>
+    <option value="1">1</option>
+    <option value="2">2</option>
+    <option value="3">3</option>
+    <option value="5">5</option>
+    <option value="10">10</option>
+  </select>
+  <label>Max Trades/Day</label>
+  <select id="max-trades-day" onchange="loadData()" style="background:#1a1a24;color:#e0e0e0;border:1px solid #333;padding:3px 6px;border-radius:3px;font-family:inherit;font-size:11px">
+    <option value="0" selected>No limit</option>
+    <option value="3">3</option>
+    <option value="5">5</option>
+    <option value="10">10</option>
+    <option value="15">15</option>
+    <option value="20">20</option>
+    <option value="30">30</option>
+  </select>
+  <label>Min Days</label>
+  <select id="min-days" onchange="loadData()" style="background:#1a1a24;color:#e0e0e0;border:1px solid #333;padding:3px 6px;border-radius:3px;font-family:inherit;font-size:11px">
+    <option value="2">2+</option>
+    <option value="10">10+</option>
+    <option value="20" selected>20+</option>
+    <option value="30">30+</option>
+    <option value="40">40+</option>
+    <option value="50">50+</option>
+    <option value="60">60+</option>
+    <option value="80">80+</option>
+    <option value="100">100+</option>
+    <option value="120">120+</option>
+    <option value="140">140+</option>
+    <option value="160">160+</option>
+    <option value="180">180+</option>
+    <option value="200">200+</option>
+    <option value="220">220+</option>
+    <option value="240">240+</option>
+  </select>
+</div>
+
+<div class="table-wrap">
+<div class="loading-overlay" id="loading-overlay">
+  <div class="spinner"></div>
+  <span class="loading-label">Recalculating…</span>
+</div>
+<table>
+  <thead><tr>
+    <th class="rank">#</th>
+    <th>Config</th>
+    <th data-col="compositeScore" class="sorted">Score<span class="arrow">▼</span></th>
+    <th data-col="trades">Trades</th>
+    <th data-col="winRate">WR%</th>
+    <th data-col="totalPnl">P&L</th>
+    <th data-col="avgDailyPnl">Avg/Day</th>
+    <th data-col="worstDay">Worst</th>
+    <th data-col="bestDay">Best</th>
+    <th data-col="sharpe">Sharpe</th>
+    <th data-col="profitDays">Green</th>
+    <th data-col="avgEntryPrice">Avg Entry$</th>
+    <th data-col="days">Days</th>
+    <th>P&L</th>
+    <th style="width:30px"></th>
+  </tr></thead>
+  <tbody id="tbody"><tr><td colspan="15" style="text-align:center;padding:40px;color:#444">Loading...</td></tr></tbody>
+</table>
+</div>
+<div class="footer" id="footer"></div>
+
+<!-- Delete confirmation modal -->
+<div class="del-modal-overlay" id="del-overlay">
+  <div class="del-modal">
+    <h3>🗑 Delete Config</h3>
+    <p>Permanently delete <span class="cfg-name" id="del-name"></span>?</p>
+    <p class="del-stats" id="del-stats"></p>
+    <div class="del-modal-actions">
+      <button class="del-cancel" onclick="closeDeleteModal()">Cancel</button>
+      <button class="del-confirm" id="del-confirm-btn">Delete</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const API = (document.querySelector('meta[name="base-path"]')?.content || '') + '/replay/api';
+let allRows = [];
+let filteredRows = [];
+let currentSort = 'compositeScore';
+let currentDir = 'DESC';
+let filters = {};
+
+// ── Filter definitions — extracted from data ──
+const FILTER_KEYS = [
+  { key: 'hmaFast',      label: 'HMA Fast' },
+  { key: 'hmaSlow',      label: 'HMA Slow' },
+  { key: 'dirTf',        label: 'Dir TF' },
+  { key: 'exitTf',       label: 'Exit TF' },
+  { key: 'signalTf',     label: 'Signal TF' },
+  { key: 'exitStrategy', label: 'Exit Strat' },
+  { key: 'stopLoss',     label: 'Stop Loss' },
+  { key: 'tpMult',       label: 'TP Mult' },
+  { key: 'requireDir',   label: 'Req Dir' },
+  { key: 'enableHma',    label: 'HMA Sig' },
+  { key: 'enableRsi',    label: 'RSI Sig' },
+  { key: 'enablePxHma',  label: 'Px×HMA' },
+  { key: 'enableEma',    label: 'EMA Sig' },
+  { key: 'regimeEnabled',label: 'Regime' },
+  { key: 'scannersEnabled',label:'Scanners' },
+];
+
+function buildFilters() {
+  // Collect unique values per param
+  const valuesMap = {};
+  for (const f of FILTER_KEYS) valuesMap[f.key] = new Set();
+  for (const row of allRows) {
+    if (!row.params) continue;
+    for (const f of FILTER_KEYS) {
+      const v = row.params[f.key];
+      if (v !== undefined && v !== null) valuesMap[f.key].add(String(v));
+    }
+  }
+
+  const container = document.getElementById('filters');
+  let html = '';
+
+  for (const f of FILTER_KEYS) {
+    const vals = [...valuesMap[f.key]].sort((a, b) => {
+      const na = Number(a), nb = Number(b);
+      if (!isNaN(na) && !isNaN(nb)) return na - nb;
+      return a.localeCompare(b);
+    });
+    // Skip filters with only 1 unique value (not useful)
+    if (vals.length <= 1) continue;
+
+    html += `<div class="filter-group">
+      <label>${f.label}</label>
+      <select data-filter="${f.key}" onchange="onFilter()">
+        <option value="">All</option>
+        ${vals.map(v => {
+          const display = v === 'true' ? '✓' : v === 'false' ? '✗' : v;
+          return `<option value="${v}">${display}</option>`;
+        }).join('')}
+      </select>
+    </div>`;
+  }
+
+  html += `<div class="filter-sep"></div>`;
+  html += `<button class="filter-reset" onclick="resetFilters()">Reset</button>`;
+  html += `<span class="filter-count" id="filter-count"></span>`;
+  container.innerHTML = html;
+}
+
+function onFilter() {
+  filters = {};
+  document.querySelectorAll('[data-filter]').forEach(sel => {
+    const key = sel.dataset.filter;
+    const val = sel.value;
+    if (val) filters[key] = val;
+    sel.classList.toggle('active', !!val);
+  });
+  applyFilters();
+}
+
+function resetFilters() {
+  document.querySelectorAll('[data-filter]').forEach(sel => {
+    sel.value = '';
+    sel.classList.remove('active');
+  });
+  filters = {};
+  applyFilters();
+}
+
+function applyFilters() {
+  filteredRows = allRows.filter(row => {
+    if (!row.params) return true;
+    for (const [key, val] of Object.entries(filters)) {
+      if (String(row.params[key]) !== val) return false;
+    }
+    return true;
+  });
+  sortRows();
+  renderTable();
+  document.getElementById('filter-count').textContent =
+    Object.keys(filters).length > 0
+      ? `${filteredRows.length} of ${allRows.length} configs match`
+      : '';
+}
+
+function sortRows() {
+  const col = currentSort;
+  const mult = currentDir === 'DESC' ? -1 : 1;
+  filteredRows.sort((a, b) => {
+    const av = a[col] ?? 0, bv = b[col] ?? 0;
+    return (av - bv) * mult;
+  });
+}
+
+// ── Table rendering ──
+
+function renderTable() {
+  const rows = filteredRows;
+  document.getElementById('showing-count').textContent = rows.length;
+  const tbody = document.getElementById('tbody');
+
+  if (rows.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="15" style="text-align:center;padding:40px;color:#444">No results match filters</td></tr>';
+    return;
+  }
+
+  const maxPnl = Math.max(...rows.map(r => Math.abs(r.totalPnl)), 1);
+
+  tbody.innerHTML = rows.map((r, i) => {
+    const rank = i + 1;
+    const medal = rank === 1 ? '🥇' : rank === 2 ? '🥈' : rank === 3 ? '🥉' : String(rank);
+    const pc = r.totalPnl > 0 ? 'pnl-pos' : r.totalPnl < 0 ? 'pnl-neg' : 'pnl-zero';
+    const wc = r.worstDay > -300 ? 'pnl-pos' : r.worstDay > -600 ? 'pnl-zero' : 'pnl-neg';
+    const bw = Math.max(1, Math.round(Math.abs(r.totalPnl) / maxPnl * 60));
+    const bc = r.totalPnl >= 0 ? 'bar-g' : 'bar-r';
+
+    // Param pills
+    const p = r.params || {};
+    const pills = `<span class="param">` +
+      `<b>${p.hmaFast||'?'}×${p.hmaSlow||'?'}</b> ` +
+      `${p.dirTf||'?'}D/${p.exitTf||'?'}E ` +
+      `${p.exitStrategy === 'scannerReverse' ? 'REV' : 'TP'} ` +
+      `SL${p.stopLoss ?? '?'}% TP${p.tpMult ?? '?'}x` +
+      (p.requireDir ? ' 🎯' : '') +
+      `</span>`;
+
+    return `<tr data-cid="${r.configId}" onclick="toggleDaily('${r.configId}', this)">
+      <td class="rank">${medal}</td>
+      <td><a class="cfg-link" href="#" target="_blank" onclick="event.stopPropagation();event.preventDefault();window.open(replayUrl('${r.configId}'),'_blank')">${r.name || r.configId}</a><br>${pills}</td>
+      <td><b>${r.compositeScore.toFixed(1)}</b></td>
+      <td>${r.trades}</td>
+      <td>${(r.winRate * 100).toFixed(1)}%</td>
+      <td class="${pc}"><b>$${r.totalPnl.toFixed(0)}</b></td>
+      <td class="${pc}">$${r.avgDailyPnl.toFixed(0)}</td>
+      <td class="${wc}">$${r.worstDay.toFixed(0)}</td>
+      <td class="pnl-pos">$${r.bestDay.toFixed(0)}</td>
+      <td>${r.sharpe.toFixed(3)}</td>
+      <td>${r.profitDays}/${r.days}</td>
+      <td>${r.avgEntryPrice ? '$' + r.avgEntryPrice.toFixed(1) : '-'}</td>
+      <td>${r.days}</td>
+      <td><span class="bar ${bc}" style="width:${bw}px"></span></td>
+      <td><button class="del-btn" onclick="event.stopPropagation();openDeleteModal('${r.configId}','${(r.name||r.configId).replace(/'/g,"\\'")}',${r.days},${r.trades})" title="Delete config">🗑</button></td>
+    </tr>`;
+  }).join('');
+
+  document.getElementById('footer').textContent =
+    rows.length > 0
+      ? `${rows.length} configs | Best P&L: $${Math.max(...rows.map(r=>r.totalPnl)).toFixed(0)} | Best Sharpe: ${Math.max(...rows.map(r=>r.sharpe)).toFixed(3)} | Best Score: ${Math.max(...rows.map(r=>r.compositeScore)).toFixed(1)}`
+      : '';
+}
+
+// ── Daily expand ──
+
+async function toggleDaily(configId, rowEl) {
+  const existing = document.querySelector('.daily-row');
+  if (existing) {
+    const wasForSame = existing.dataset.config === configId;
+    existing.remove();
+    document.querySelectorAll('.hl').forEach(r => r.classList.remove('hl'));
+    if (wasForSame) return;
+  }
+
+  rowEl.classList.add('hl');
+
+  // Fetch both daily breakdown and analysis in parallel
+  const [dailyRes, analysisRes] = await Promise.all([
+    fetch(`${API}/sweep/${configId}/daily`).then(r => r.json()),
+    fetch(`${API}/config/${configId}/analysis`).then(r => r.json()).catch(() => null),
+  ]);
+  const daily = dailyRes;
+  const a = analysisRes;
+
+  const tr = document.createElement('tr');
+  tr.className = 'daily-row';
+  tr.dataset.config = configId;
+  const td = document.createElement('td');
+  td.colSpan = 15;
+
+  // Build analysis summary if available
+  let analysisHtml = '';
+  if (a && !a.error) {
+    const p = a.performance;
+    const s = a.setup;
+    const pnlCls = v => v > 0 ? 'pnl-pos' : v < 0 ? 'pnl-neg' : '';
+
+    // Equity sparkline SVG
+    const eq = a.equityCurve || [];
+    let sparkSvg = '';
+    if (eq.length > 1) {
+      const vals = eq.map(e => e.equity);
+      const minE = Math.min(0, ...vals), maxE = Math.max(...vals), range = maxE - minE || 1;
+      const w = 160, h = 30;
+      const pts = vals.map((v, i) => `${(i/(vals.length-1))*w},${h-((v-minE)/range)*h}`).join(' ');
+      sparkSvg = `<svg style="width:100%;height:30px" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none"><polyline points="${pts}" fill="none" stroke="#10b981" stroke-width="1.5"/></svg>`;
+    }
+
+    const tags = [
+      ...(a.strengths || []).map(s => `<span style="background:#10b98118;color:#10b981;border:1px solid #10b98133;font-size:10px;padding:1px 6px;border-radius:3px">✅ ${s}</span>`),
+      ...(a.explore || []).map(s => `<span style="background:#f59e0b18;color:#f59e0b;border:1px solid #f59e0b33;font-size:10px;padding:1px 6px;border-radius:3px">🔬 ${s}</span>`),
+    ].join(' ');
+
+    const stat = (l, v, c='') => `<span style="color:#666">${l}</span> <span style="color:${c||'#e0e0e0'};font-weight:600">${v}</span>`;
+    const exitEntries = Object.entries(a.exitReasons).sort((a,b) => b[1]-a[1]);
+    const exitStr = exitEntries.map(([r,c]) => {
+      const labels = {take_profit:'TP',stop_loss:'SL',signal_reversal:'REV',time_exit:'EOD'};
+      return `${labels[r]||r}:${c}`;
+    }).join(' · ');
+
+    analysisHtml = `
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:10px;font-size:11px">
+      <div style="background:#111118;border:1px solid #1a1a24;border-radius:4px;padding:6px 8px">
+        <div style="font-size:9px;color:#555;text-transform:uppercase;margin-bottom:4px">Performance</div>
+        <div style="display:flex;flex-wrap:wrap;gap:8px 16px">
+          ${stat('Expectancy', '$'+p.expectancy.toFixed(0)+'/t', p.expectancy>0?'#10b981':'#f43f5e')}
+          ${stat('W/L Ratio', p.winLossRatio.toFixed(2)+'x', p.winLossRatio>=2?'#10b981':'')}
+          ${stat('Max DD', '$'+p.maxDrawdown.toLocaleString(undefined,{maximumFractionDigits:0}), p.maxDrawdown>0?'#f43f5e':'#10b981')}
+          ${stat('Worst Streak', p.worstStreak+'d', p.worstStreak>=3?'#f43f5e':'')}
+        </div>
+        ${sparkSvg}
+      </div>
+      <div style="background:#111118;border:1px solid #1a1a24;border-radius:4px;padding:6px 8px">
+        <div style="font-size:9px;color:#555;text-transform:uppercase;margin-bottom:4px">Execution</div>
+        <div style="display:flex;flex-wrap:wrap;gap:8px 16px">
+          ${stat('Avg Hold', p.avgHoldMin.toFixed(0)+'m')}
+          ${stat('Avg Entry', '$'+p.avgEntryPrice.toFixed(2))}
+          ${stat('Peak BP', '$'+p.peakBuyingPower.toLocaleString(undefined,{maximumFractionDigits:0}), '#8b8bff')}
+          ${stat('Exits', exitStr)}
+        </div>
+      </div>
+      <div style="background:#111118;border:1px solid #1a1a24;border-radius:4px;padding:6px 8px">
+        <div style="font-size:9px;color:#555;text-transform:uppercase;margin-bottom:4px">Setup</div>
+        <div style="font-size:11px;color:#aaa;line-height:1.6">
+          <b style="color:#e0e0e0">HMA ${s.hma}</b> · ${s.timeframes} · ${s.signals.join('+')||'—'}<br>
+          ${s.otm} · SL${s.stopLoss}% TP${s.tpMult}x · Pos=${s.maxPositions} · $${s.contractPriceMax} cap
+        </div>
+      </div>
+    </div>
+    <div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:8px">${tags}</div>`;
+  }
+
+  td.innerHTML = `<div class="daily-wrap">
+    <h3>${configId} — Strategy Analysis</h3>
+    ${analysisHtml}
+    <h3 style="margin-top:8px">Daily Breakdown</h3>
+    <div class="daily-grid">
+      ${daily.map(d => {
+        const pc = d.totalPnl > 0 ? 'pnl-pos' : d.totalPnl < 0 ? 'pnl-neg' : 'pnl-zero';
+        return `<div class="daily-card" onclick="window.open(replayUrl('${configId}','${d.date}'),'_blank')">
+          <span style="color:#666">${d.date.slice(5)}</span>
+          <span>${d.trades}t ${(d.winRate*100).toFixed(0)}%</span>
+          <span class="${pc}" style="font-weight:600">$${d.totalPnl.toFixed(0)}</span>
+        </div>`;
+      }).join('')}
+    </div>
+  </div>`;
+  tr.appendChild(td);
+  rowEl.after(tr);
+}
+
+// ── Sort buttons ──
+
+document.querySelectorAll('.sort-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const col = btn.dataset.sort;
+    if (col === currentSort) {
+      currentDir = currentDir === 'DESC' ? 'ASC' : 'DESC';
+    } else {
+      currentSort = col;
+      currentDir = col === 'worstDay' ? 'ASC' : 'DESC';
+    }
+    document.querySelectorAll('.sort-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    // Update header arrows
+    document.querySelectorAll('th').forEach(th => {
+      th.classList.remove('sorted');
+      const a = th.querySelector('.arrow');
+      if (a) a.remove();
+    });
+    const th = document.querySelector(`th[data-col="${col}"]`);
+    if (th) {
+      th.classList.add('sorted');
+      th.innerHTML += `<span class="arrow">${currentDir === 'DESC' ? '▼' : '▲'}</span>`;
+    }
+    sortRows();
+    renderTable();
+  });
+});
+
+// Column header click
+document.querySelectorAll('th[data-col]').forEach(th => {
+  th.addEventListener('click', () => {
+    const col = th.dataset.col;
+    if (col === currentSort) {
+      currentDir = currentDir === 'DESC' ? 'ASC' : 'DESC';
+    } else {
+      currentSort = col;
+      currentDir = col === 'worstDay' ? 'ASC' : 'DESC';
+    }
+    document.querySelectorAll('.sort-btn').forEach(b => {
+      b.classList.toggle('active', b.dataset.sort === col);
+    });
+    document.querySelectorAll('th').forEach(h => {
+      h.classList.remove('sorted');
+      const a = h.querySelector('.arrow');
+      if (a) a.remove();
+    });
+    th.classList.add('sorted');
+    th.innerHTML += `<span class="arrow">${currentDir === 'DESC' ? '▼' : '▲'}</span>`;
+    sortRows();
+    renderTable();
+  });
+});
+
+// ── Replay URL builder (carries filter state) ──
+
+function replayUrl(configId, date) {
+  let url = `/replay/?config=${configId}`;
+  if (date) url += `&date=${date}`;
+  const maxEntry = document.getElementById('max-entry-price').value;
+  const maxConcurrent = document.getElementById('max-concurrent').value;
+  const maxTradesDay = document.getElementById('max-trades-day').value;
+  if (maxEntry && maxEntry !== '0') url += `&maxEntry=${maxEntry}`;
+  if (maxConcurrent && maxConcurrent !== '0') url += `&maxConcurrent=${maxConcurrent}`;
+  if (maxTradesDay && maxTradesDay !== '0') url += `&maxTradesDay=${maxTradesDay}`;
+  return url;
+}
+
+// ── Delete config ──
+
+let pendingDeleteId = null;
+
+function openDeleteModal(configId, name, days, trades) {
+  pendingDeleteId = configId;
+  document.getElementById('del-name').textContent = `${name} (${configId})`;
+  document.getElementById('del-stats').textContent = `This will permanently remove ${days} day(s) of results and ${trades} trade records.`;
+  document.getElementById('del-overlay').classList.add('active');
+  document.getElementById('del-confirm-btn').onclick = confirmDelete;
+}
+
+function closeDeleteModal() {
+  pendingDeleteId = null;
+  document.getElementById('del-overlay').classList.remove('active');
+}
+
+async function confirmDelete() {
+  if (!pendingDeleteId) return;
+  const configId = pendingDeleteId;
+  closeDeleteModal();
+
+  try {
+    const res = await fetch(`${API}/config/${encodeURIComponent(configId)}`, { method: 'DELETE' });
+    const data = await res.json();
+    if (res.ok) {
+      // Remove from in-memory data and re-render
+      allRows = allRows.filter(r => r.configId !== configId);
+      applyFilters();
+      document.getElementById('total-count').textContent = allRows.length;
+    } else {
+      alert(`Delete failed: ${data.error || 'Unknown error'}`);
+    }
+  } catch (err) {
+    alert(`Delete failed: ${err.message}`);
+  }
+}
+
+// Close modal on Escape or overlay click
+document.getElementById('del-overlay').addEventListener('click', (e) => {
+  if (e.target.id === 'del-overlay') closeDeleteModal();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closeDeleteModal();
+});
+
+// ── Load ──
+
+async function loadData() {
+  const overlay = document.getElementById('loading-overlay');
+  overlay.classList.add('active');
+
+  const minDays = document.getElementById('min-days').value;
+  const maxEntry = document.getElementById('max-entry-price').value;
+  const maxConcurrent = document.getElementById('max-concurrent').value;
+  const maxTradesDay = document.getElementById('max-trades-day').value;
+  let url = `${API}/sweep?limit=5000&minDays=${minDays}`;
+  if (maxEntry && maxEntry !== '0') url += `&maxEntryPrice=${maxEntry}`;
+  if (maxConcurrent && maxConcurrent !== '0') url += `&maxConcurrent=${maxConcurrent}`;
+  if (maxTradesDay && maxTradesDay !== '0') url += `&maxTradesPerDay=${maxTradesDay}`;
+  const res = await fetch(url);
+  const data = await res.json();
+  allRows = data.rows;
+  document.getElementById('total-count').textContent = data.total;
+
+  overlay.classList.remove('active');
+
+  buildFilters();
+
+  // Apply URL params as initial filters
+  const urlParams = new URLSearchParams(window.location.search);
+  for (const [key, val] of urlParams) {
+    const sel = document.querySelector(`[data-filter="${key}"]`);
+    if (sel) { sel.value = val; sel.classList.add('active'); filters[key] = val; }
+  }
+
+  applyFilters();
+}
+
+loadData();
+</script>
+</body>
+</html>

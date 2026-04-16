@@ -1,0 +1,23 @@
+[
+  {"date": "2026-02-20", "events": [], "impact": "low", "notes": "Friday - options expiration week"},
+  {"date": "2026-02-23", "events": [], "impact": "low", "notes": "Monday - no major data"},
+  {"date": "2026-02-24", "events": [], "impact": "low", "notes": "Tuesday"},
+  {"date": "2026-02-25", "events": [{"name": "Durable Goods Orders", "time": "08:30 ET", "impact": "medium"}], "impact": "medium", "notes": "Wednesday"},
+  {"date": "2026-02-26", "events": [{"name": "Q4 GDP (Second Estimate)", "time": "08:30 ET", "impact": "high"}, {"name": "Initial Jobless Claims", "time": "08:30 ET", "impact": "low"}, {"name": "Pending Home Sales", "time": "10:00 ET", "impact": "low"}], "impact": "high", "notes": "Thursday"},
+  {"date": "2026-02-27", "events": [{"name": "PCE Price Index", "time": "08:30 ET", "impact": "high"}], "impact": "high", "notes": "Friday - PCE is Fed's preferred inflation gauge"},
+  {"date": "2026-03-02", "events": [], "impact": "low", "notes": "Monday"},
+  {"date": "2026-03-03", "events": [{"name": "ISM Manufacturing PMI", "time": "10:00 ET", "impact": "medium"}], "impact": "medium", "notes": "Tuesday"},
+  {"date": "2026-03-04", "events": [], "impact": "low", "notes": "Wednesday"},
+  {"date": "2026-03-05", "events": [{"name": "ADP Employment Report", "time": "08:15 ET", "impact": "medium"}, {"name": "ISM Services PMI", "time": "10:00 ET", "impact": "high"}, {"name": "JOLTS Job Openings", "time": "10:00 ET", "impact": "medium"}], "impact": "high", "notes": "Thursday - pre-NFP"},
+  {"date": "2026-03-06", "events": [{"name": "Non-Farm Payrolls / Employment Report", "time": "08:30 ET", "impact": "high"}, {"name": "Unemployment Rate", "time": "08:30 ET", "impact": "high"}, {"name": "Average Hourly Earnings", "time": "08:30 ET", "impact": "medium"}], "impact": "critical", "notes": "Friday - NFP is key employment indicator"},
+  {"date": "2026-03-09", "events": [], "impact": "low", "notes": "Monday"},
+  {"date": "2026-03-10", "events": [{"name": "CPI (Consumer Price Index)", "time": "08:30 ET", "impact": "critical"}], "impact": "critical", "notes": "Tuesday - March CPI, major inflation indicator"},
+  {"date": "2026-03-11", "events": [], "impact": "low", "notes": "Wednesday"},
+  {"date": "2026-03-12", "events": [{"name": "Retail Sales", "time": "08:30 ET", "impact": "high"}, {"name": "Producer Price Index (PPI)", "time": "08:30 ET", "impact": "medium"}, {"name": "FOMC Meeting Begins (Day 1)", "time": "11:00 ET", "impact": "high"}], "impact": "high", "notes": "Thursday - FOMC starts"},
+  {"date": "2026-03-13", "events": [{"name": "Initial Jobless Claims", "time": "08:30 ET", "impact": "low"}, {"name": "Import Price Index", "time": "08:30 ET", "impact": "low"}, {"name": "FOMC Rate Decision", "time": "14:00 ET", "impact": "critical"}, {"name": "FOMC Press Conference", "time": "14:30 ET", "impact": "critical"}], "impact": "critical", "notes": "Friday - FOMC decision day, quadruple witching"},
+  {"date": "2026-03-16", "events": [], "impact": "low", "notes": "Monday - post-FOMC"},
+  {"date": "2026-03-17", "events": [{"name": "Empire State Manufacturing", "time": "08:30 ET", "impact": "low"}], "impact": "low", "notes": "Tuesday"},
+  {"date": "2026-03-18", "events": [{"name": "Retail Sales Control", "time": "08:30 ET", "impact": "medium"}, {"name": "Industrial Production", "time": "09:15 ET", "impact": "medium"}, {"name": "PPI (Producer Price Index)", "time": "08:30 ET", "impact": "medium"}], "impact": "medium", "notes": "Wednesday"},
+  {"date": "2026-03-19", "events": [{"name": "Building Permits", "time": "08:30 ET", "impact": "low"}, {"name": "Housing Starts", "time": "08:30 ET", "impact": "low"}, {"name": "Initial Jobless Claims", "time": "08:30 ET", "impact": "low"}, {"name": "FOMC Minutes Release", "time": "14:00 ET", "impact": "high"}], "impact": "high", "notes": "Thursday - FOMC minutes"},
+  {"date": "2026-03-20", "events": [{"name": "Consumer Sentiment", "time": "10:00 ET", "impact": "medium"}], "impact": "medium", "notes": "Friday - options expiration, March quadruple witching"}
+]

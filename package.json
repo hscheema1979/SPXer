@@ -1,0 +1,53 @@
+{
+  "name": "implement",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "agent": "tsx agent.ts",
+    "agent:live": "AGENT_PAPER=false tsx agent.ts",
+    "agent:xsp": "tsx agent-xsp.ts",
+    "agent:xsp:live": "AGENT_PAPER=false tsx agent-xsp.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "monitor": "tsx scripts/monitor/live-monitor.ts",
+    "replay": "tsx src/replay/cli.ts run",
+    "replay:22day": "bash scripts/backtest/run-22day-replay-parallel.sh",
+    "backtest": "tsx src/replay/cli.ts backtest --no-scanners --no-judge",
+    "viewer": "tsx src/server/replay-server.ts",
+    "schwaber": "AGENT_PAPER=true tsx schwaber.ts",
+    "schwaber:live": "AGENT_PAPER=false tsx schwaber.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.79",
+    "@anthropic-ai/sdk": "^0.80.0",
+    "@sinclair/typebox": "^0.34.0",
+    "axios": "^1.13.6",
+    "better-sqlite3": "^12.8.0",
+    "chalk": "^5.6.2",
+    "commander": "^14.0.3",
+    "dotenv": "^17.3.1",
+    "express": "^5.2.1",
+    "openai": "^6.32.0",
+    "ws": "^8.19.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/express": "^5.0.6",
+    "@types/node": "^25.5.0",
+    "@types/ws": "^8.18.1",
+    "ts-node": "^10.9.2",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.0"
+  }
+}
