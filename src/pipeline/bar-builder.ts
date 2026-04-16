@@ -1,8 +1,11 @@
 import type { Bar, GapType, OHLCVRaw, Timeframe } from '../types';
 import { GAP_INTERPOLATE_MAX_MINS } from '../config';
+import { pipelineHealth } from '../ops/pipeline-health';
 
 export function buildBars(symbol: string, timeframe: Timeframe, raws: OHLCVRaw[]): Bar[] {
-  return raws.map(r => rawToBar(symbol, timeframe, r));
+  const bars = raws.map(r => rawToBar(symbol, timeframe, r));
+  pipelineHealth.barBuilder.barsBuilt += bars.length;
+  return bars;
 }
 
 export function rawToBar(symbol: string, timeframe: Timeframe, raw: OHLCVRaw): Bar {
@@ -52,6 +55,12 @@ export function fillGaps(symbol: string, timeframe: Timeframe, bars: Bar[], barS
       const synthetic = interpolateGap(prev.ts, prev.close, curr.ts, curr.close, barSeconds);
       synthetic.forEach(b => { b.symbol = symbol; b.timeframe = timeframe; });
       result.push(...synthetic);
+      // Track synthetic bar stats
+      pipelineHealth.barBuilder.syntheticBars += synthetic.length;
+      for (const sb of synthetic) {
+        if (sb.gapType === 'stale') pipelineHealth.barBuilder.gapsStale++;
+        else pipelineHealth.barBuilder.gapsInterpolated++;
+      }
     }
     result.push(curr);
   }

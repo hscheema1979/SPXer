@@ -6,6 +6,7 @@ import type { Bar, IndicatorState, Timeframe } from '../types';
 import { computeEMA, computeRSI, computeBB, computeATR, computeVWAP, makeHMAState, hmaStep, makeKCState, kcStep } from '../pipeline/indicators/tier1';
 import { computeMACD, computeStochastic, computeADX, computeMomentum, computeCCI } from '../pipeline/indicators/tier2';
 import { MAX_BARS_MEMORY } from '../config';
+import { pipelineHealth } from '../ops/pipeline-health';
 
 const states = new Map<string, IndicatorState>();
 
@@ -43,6 +44,9 @@ export function seedIndicatorState(symbol: string, tf: Timeframe, bars: Bar[]): 
   );
   if (cleanBars.length < bars.length) {
     console.warn(`[indicator-engine] seedIndicatorState ${symbol}@${tf}: filtered ${bars.length - cleanBars.length} invalid bars`);
+    pipelineHealth.indicators.seedsFailed++;
+  } else {
+    pipelineHealth.indicators.seedsCompleted++;
   }
   s.closes = cleanBars.map(b => b.close).slice(-MAX_BARS_MEMORY);
   s.highs  = cleanBars.map(b => b.high).slice(-MAX_BARS_MEMORY);
@@ -66,6 +70,7 @@ export function computeIndicators(bar: Bar, tier: 1 | 2 = 1): Record<string, num
       !Number.isFinite(bar.low)   || !Number.isFinite(bar.open) ||
       bar.close <= 0) {
     console.error(`[indicator-engine] NaN/invalid bar rejected: ${bar.symbol}@${bar.timeframe} ts=${bar.ts} close=${bar.close}`);
+    pipelineHealth.indicators.nanRejected++;
     // Return last known indicator values rather than empty object — callers get
     // stale-but-valid indicators rather than undefined, preventing false signal misfires.
     return s.lastIndicators ?? {};
@@ -151,5 +156,6 @@ export function computeIndicators(bar: Bar, tier: 1 | 2 = 1): Record<string, num
   // Cache last known-good indicators for NaN fallback
   s.lastIndicators = ind;
 
+  pipelineHealth.indicators.computed++;
   return ind;
 }
