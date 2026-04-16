@@ -25,14 +25,14 @@ import { computeQty } from '../core/position-sizer';
 import { isRiskBlocked, type RiskState } from '../core/risk-guard';
 import { isRegimeBlocked } from '../core/regime-gate';
 import { computeRealisticPnl, frictionEntry } from '../core/friction';
-import type { Signal, CoreBar } from '../core/types';
+import type { Signal, CoreBar, Direction } from '../core/types';
 import { makeHMAState, hmaStep, makeKCState, kcStep } from '../pipeline/indicators/tier1';
 import { readBarCacheFile, writeBarCacheFile, hasCacheFile } from './bar-cache-file';
 
 // ── Strategy engine (signal detection + trade decisions) ──────────────────
 import { detectSignal, createInitialSignalState, type SignalState, type CorePosition } from '../core/strategy-engine';
 import { evaluateExit, evaluateEntry, type ExitDecision } from '../core/trade-manager';
-import type { StrikeCandidate } from '../core/strike-selector';
+import { selectStrike, type StrikeCandidate } from '../core/strike-selector';
 
 const DATA_DB_PATH = path.resolve(process.cwd(), 'data/spxer.db');
 
@@ -760,6 +760,10 @@ function runDeterministicReplay(
   const dirCache = tfCacheMap.get(dirTf) ?? cache1m;
   const exitCache = (exitTf === dirTf) ? dirCache : (tfCacheMap.get(exitTf) ?? cache1m);
 
+  // MTF confirmation cache (if enabled, resolve the higher-TF cache)
+  const mtfCfg = config.signals.mtfConfirmation;
+  const mtfCache = mtfCfg?.enabled ? (tfCacheMap.get(mtfCfg.timeframe) ?? null) : null;
+
   for (const ts of timestamps) {
     // ── Resolve bars at each config timeframe ──
     const spxDirBars = getSpxBarsAt(dirCache, ts);
@@ -842,6 +846,22 @@ function runDeterministicReplay(
       });
     }
 
+    // MTF confirmation: resolve higher-TF HMA direction if enabled
+    let mtfDirection: 'bullish' | 'bearish' | null = null;
+    if (mtfCache && mtfCfg?.enabled) {
+      const mtfBars = getSpxBarsAt(mtfCache, ts);
+      if (mtfBars.length >= 2) {
+        const hmaFastKey = `hma${config.signals.hmaCrossFast ?? 5}`;
+        const hmaSlowKey = `hma${config.signals.hmaCrossSlow ?? 19}`;
+        const last = mtfBars[mtfBars.length - 1] as any;
+        const fv = last[hmaFastKey] ?? last.indicators?.[hmaFastKey] ?? null;
+        const sv = last[hmaSlowKey] ?? last.indicators?.[hmaSlowKey] ?? null;
+        if (fv != null && sv != null) {
+          mtfDirection = fv > sv ? 'bullish' : 'bearish';
+        }
+      }
+    }
+
     const { entry } = evaluateEntry(signal, exits, positions.size + exits.length, config, {
       ts,
       spxPrice,
@@ -850,6 +870,7 @@ function runDeterministicReplay(
       tradesCompleted,
       lastEntryTs,
       closeCutoffTs,
+      mtfDirection,
     });
 
     if (entry) {
@@ -1159,7 +1180,7 @@ export async function runReplay(
 
       if (uniqueFlips.size > 0 && config.exit?.strategy === 'scannerReverse') {
         for (const [, flip] of uniqueFlips) {
-          // Check risk limits before flipping
+          // Check risk limits before flipping (cooldown bypassed — flip is a new signal)
           const flipRiskState: RiskState = {
             openPositions: openPositions.size,
             tradesCompleted: trades.length,
@@ -1170,66 +1191,47 @@ export async function runReplay(
           };
           if (isRiskBlocked(flipRiskState, config).blocked) continue;
 
-          // Find best contract on the flip side near the configured OTM distance
+          // Use selectStrike() for parity with live agent and runStrategy()
           const flipContracts = getContractBarsAt(cache1m, spx.close, strikeRange, ts);
-          const spxRounded = Math.round(spx.close / 5) * 5;
-          const targetDist = config.signals.targetOtmDistance ?? 25;
-          const targetStrike = flip.side === 'call'
-            ? spxRounded + targetDist
-            : spxRounded - targetDist;
-
-          let bestSymbol: string | null = null;
-          let bestPrice = 0;
-          let bestStrikeDist = Infinity;
-
-          const cpPattern = flip.side === 'call' ? /C\d/ : /P\d/;
+          const flipDirection: Direction = flip.side === 'call' ? 'bullish' : 'bearish';
+          const flipCandidates: StrikeCandidate[] = [];
           for (const [sym, bars] of flipContracts) {
-            if (!cpPattern.test(sym)) continue;
+            if (bars.length === 0) continue;
             const strike = cache.contractStrikes.get(sym) ?? cache1m.contractStrikes.get(sym);
             if (strike == null) continue;
-
-            // OTM/ITM filter — skip ITM contracts unless targeting ITM (negative targetOtmDistance)
-            if (targetDist >= 0) {
-              if (flip.side === 'call' && strike <= spx.close) continue;
-              if (flip.side === 'put' && strike >= spx.close) continue;
-            }
-
-            const curBar = bars[bars.length - 1];
-            if (!curBar) continue;
-            const price = curBar.close;
-            if (price < (config.strikeSelector?.contractPriceMin ?? 0.2)) continue;
-            if (price > (config.strikeSelector?.contractPriceMax ?? 9999)) continue;
-
-            const dist = Math.abs(strike - targetStrike);
-            if (dist < bestStrikeDist || (dist === bestStrikeDist && config.signals.targetContractPrice != null && Math.abs(price - config.signals.targetContractPrice) < Math.abs(bestPrice - config.signals.targetContractPrice))) {
-              bestStrikeDist = dist;
-              bestSymbol = sym;
-              bestPrice = price;
-            }
+            const parsed = parseOptionSymbol(sym);
+            if (!parsed) continue;
+            flipCandidates.push({
+              symbol: sym,
+              side: parsed.isCall ? 'call' : 'put',
+              strike: parsed.strike,
+              price: bars[bars.length - 1].close,
+              volume: bars[bars.length - 1].volume,
+            });
           }
 
-          if (bestSymbol && bestPrice > 0) {
-            const parsed = parseOptionSymbol(bestSymbol);
-            if (parsed) {
-              const effEntry = frictionEntry(bestPrice);
-              const stopLoss = config.position.stopLossPercent > 0
-                ? effEntry * (1 - config.position.stopLossPercent / 100)
-                : 0;
-              const takeProfit = effEntry * config.position.takeProfitMultiplier;
-              const qty = computeQty(effEntry, config);
+          const flipStrike = selectStrike(flipCandidates, flipDirection, spx.close, config);
+          if (flipStrike) {
+            const bestPrice = flipStrike.candidate.price;
+            const effEntry = frictionEntry(bestPrice);
+            const stopLoss = config.position.stopLossPercent > 0
+              ? effEntry * (1 - config.position.stopLossPercent / 100)
+              : 0;
+            const takeProfit = effEntry * config.position.takeProfitMultiplier;
+            const qty = computeQty(effEntry, config);
 
-              openPositions.set(`${bestSymbol}_${ts}`, {
-                id: `${bestSymbol}_${ts}`,
-                symbol: bestSymbol,
-                side: flip.side,
-                strike: parsed.strike,
-                qty, entryPrice: bestPrice, stopLoss, takeProfit,
-                entryTs: ts, entryET: etLabel(ts),
-                highWaterPrice: bestPrice,
-              });
-              if (verbose) {
-                console.log(`  FLIP → ${flip.side.toUpperCase()} ${bestSymbol} x${qty} @ $${bestPrice.toFixed(2)} (eff $${effEntry.toFixed(2)}) | stop=$${stopLoss.toFixed(2)} tp=$${takeProfit.toFixed(2)}`);
-              }
+            openPositions.set(`${flipStrike.candidate.symbol}_${ts}`, {
+              id: `${flipStrike.candidate.symbol}_${ts}`,
+              symbol: flipStrike.candidate.symbol,
+              side: flip.side,
+              strike: flipStrike.candidate.strike,
+              qty, entryPrice: bestPrice, stopLoss, takeProfit,
+              entryTs: ts, entryET: etLabel(ts),
+              highWaterPrice: bestPrice,
+            });
+            lastEscalationTs = ts; // Update for cooldown tracking
+            if (verbose) {
+              console.log(`  FLIP → ${flip.side.toUpperCase()} ${flipStrike.candidate.symbol} x${qty} @ $${bestPrice.toFixed(2)} (eff $${effEntry.toFixed(2)}) | stop=$${stopLoss.toFixed(2)} tp=$${takeProfit.toFixed(2)} | ${flipStrike.reason}`);
             }
           }
         }

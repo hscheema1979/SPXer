@@ -19,13 +19,7 @@ import { HealthGate } from '../../src/agent/health-gate';
 import { chooseOrderType } from '../../src/agent/trade-executor';
 import { validateTradeQuality, DEFAULT_QUALITY_CONFIG } from '../../src/agent/quality-gate';
 import { parseOptionSymbol, openToCorePosition } from '../../src/agent/reconciliation';
-import {
-  getFileAge,
-  readAgentHeartbeat,
-  checkDataService,
-  writeWatchdogStatus,
-  readWatchdogStatus,
-} from '../../src/watchdog/index';
+// Watchdog removed (2026-04-08) — was causing OCO bracket cancellations
 import {
   startDashboardServer,
   collectState,
@@ -208,39 +202,7 @@ describe('E2E: Full stack integration', () => {
     });
   });
 
-  describe('5. Watchdog → Filesystem', () => {
-    it('detects fresh and stale heartbeat files', async () => {
-      const statusFile = path.join(TEST_DIR, 'agent-status.json');
-
-      // Fresh heartbeat
-      fs.writeFileSync(statusFile, JSON.stringify({ ts: Date.now(), cycle: 100 }));
-      const heartbeat = readAgentHeartbeat(statusFile);
-      expect(heartbeat).not.toBeNull();
-      expect(Date.now() - heartbeat!.ts).toBeLessThan(5000);
-
-      // Stale heartbeat
-      fs.writeFileSync(statusFile, JSON.stringify({ ts: Date.now() - 120_000, cycle: 99 }));
-      const stale = readAgentHeartbeat(statusFile);
-      expect(Date.now() - stale!.ts).toBeGreaterThan(90_000);
-    });
-
-    it('writes and reads watchdog status', () => {
-      writeWatchdogStatus({
-        ts: Date.now(),
-        timeET: '14:30:00',
-        healthy: true,
-        checks: {
-          dataService: { healthy: true, status: 'healthy', responseTimeMs: 5 },
-          agents: {},
-        },
-        actions: [],
-        uptimeSec: 300,
-      });
-      const status = readWatchdogStatus();
-      expect(status).not.toBeNull();
-      expect(status!.healthy).toBe(true);
-    });
-  });
+  // Watchdog tests removed — watchdog disabled (2026-04-08)
 
   describe('6. Dashboard → Full API', () => {
     it('GET /api/status returns complete state', async () => {

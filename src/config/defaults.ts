@@ -132,6 +132,16 @@ export const DEFAULT_CONFIG: Config = {
     kcMultiplier: 2.5,
     kcSlopeLookback: 5,
     kcSlopeThreshold: 0.3,
+
+    // Multi-timeframe confirmation gate (disabled by default)
+    mtfConfirmation: {
+      enabled: false,
+      timeframe: '5m',
+      requireAgreement: true,
+    },
+
+    // Warm-up bar guard (0 = disabled, rely on activeStart for warm-up)
+    minWarmupBars: 0,
   },
 
   position: {
@@ -153,7 +163,8 @@ export const DEFAULT_CONFIG: Config = {
   strikeSelector: {
     strikeSearchRange: 80,
     contractPriceMin: 0.2,
-    contractPriceMax: 9999,  // no ceiling — all OTM contracts eligible; filter at analysis time
+    contractPriceMax: 9999,  // no ceiling — all contracts eligible; filter at analysis time
+    strikeMode: 'otm',      // 'otm' | 'atm' | 'itm' | 'any'
   },
 
   timeWindows: {

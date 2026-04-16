@@ -372,7 +372,7 @@ function renderTable() {
 
     return `<tr data-cid="${r.configId}" onclick="toggleDaily('${r.configId}', this)">
       <td class="rank">${medal}</td>
-      <td><a class="cfg-link" href="#" target="_blank" onclick="event.stopPropagation();event.preventDefault();window.open(replayUrl('${r.configId}'),'_blank')">${r.name || r.configId}</a><br>${pills}</td>
+      <td><a class="cfg-link" href="#" target="_blank" onclick="event.stopPropagation();event.preventDefault();window.open(replayUrl('${r.configId}'),'_blank')">${sweepConfigLabel(r)}</a><br>${pills}</td>
       <td><b>${r.compositeScore.toFixed(1)}</b></td>
       <td>${r.trades}</td>
       <td>${(r.winRate * 100).toFixed(1)}%</td>
@@ -556,6 +556,15 @@ document.querySelectorAll('th[data-col]').forEach(th => {
     renderTable();
   });
 });
+
+// ── Config label — appends start time when it differs from market open (09:30) ──
+
+function sweepConfigLabel(r) {
+  const start = r.params?.activeStart;
+  const isDefault = !start || start === '09:30' || start === '9:30';
+  const suffix = isDefault ? '' : ` [${start}]`;
+  return `${r.name || r.configId}${suffix}`;
+}
 
 // ── Replay URL builder (carries filter state) ──
 

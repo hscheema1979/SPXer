@@ -125,26 +125,53 @@ export function detectSignals(
   const priceMax = config.strikeSelector?.contractPriceMax ?? 9999;
   const targetOtm = sig.targetOtmDistance ?? 0;
 
+  // Resolve strike mode — 'otm' | 'atm' | 'itm' | 'any'
+  const strikeMode = config.strikeSelector?.strikeMode ?? 'otm';
+  const searchRange = config.strikeSelector?.strikeSearchRange ?? 100;
+
+  // Warm-up bar guard — skip signal detection if not enough bars
+  const minWarmupBars = sig.minWarmupBars ?? 0;
+
   for (const [symbol, bars] of contractBars) {
     if (bars.length < 2) continue;
+
+    // Warm-up guard: require minimum bars for indicator stability
+    if (minWarmupBars > 0 && bars.length < minWarmupBars) continue;
 
     // Parse symbol for call/put and strike
     const parsed = parseSymbol(symbol);
     if (!parsed) continue;
     const { isCall, strike } = parsed;
 
-    // OTM/ITM filter based on targetOtmDistance:
-    //   targetOtmDistance >= 0 → OTM only (calls: strike > spx, puts: strike < spx)
-    //   targetOtmDistance < 0  → allow ITM up to |targetOtmDistance| points deep
-    if (targetOtm >= 0) {
-      // OTM only
-      if (isCall && strike <= spxPrice) continue;
-      if (!isCall && strike >= spxPrice) continue;
-    } else {
-      // Allow ITM up to |targetOtmDistance| points
-      const maxItm = Math.abs(targetOtm) + 10; // +10 buffer for strike rounding
-      if (isCall && strike < spxPrice - maxItm) continue;
-      if (!isCall && strike > spxPrice + maxItm) continue;
+    // Moneyness filter based on strikeMode
+    const distFromSpx = Math.abs(strike - spxPrice);
+    if (distFromSpx > searchRange) continue; // always limit to search range
+
+    switch (strikeMode) {
+      case 'otm': {
+        // Legacy: allow ITM if targetOtmDistance < 0
+        if (targetOtm >= 0) {
+          if (isCall && strike <= spxPrice) continue;
+          if (!isCall && strike >= spxPrice) continue;
+        } else {
+          const maxItm = Math.abs(targetOtm) + 10;
+          if (isCall && strike < spxPrice - maxItm) continue;
+          if (!isCall && strike > spxPrice + maxItm) continue;
+        }
+        break;
+      }
+      case 'atm':
+        // Allow all — but only within searchRange (already filtered above)
+        break;
+      case 'itm': {
+        // Only ITM + near-ATM (5pt buffer)
+        if (isCall && strike > spxPrice + 5) continue;
+        if (!isCall && strike < spxPrice - 5) continue;
+        break;
+      }
+      case 'any':
+        // No moneyness filter
+        break;
     }
 
     const curr = bars[bars.length - 1];
@@ -182,7 +209,9 @@ export function detectSignals(
     // Stale-filled bars pre-warm HMA state with artificial flat values, so crosses on
     // the bar immediately after a stale gap are unreliable. Interpolated gaps are allowed
     // since they represent gradual movement and are less likely to cause false crosses.
-    if (prev.synthetic && prev.gapType === 'stale') continue;
+    // Note: synthetic/gapType exist on full Bar type; CoreBar may carry them at runtime.
+    const prevAny = prev as any;
+    if (prevAny.synthetic && prevAny.gapType === 'stale') continue;
 
     // ── HMA crosses ──────────────────────────────────────────────────────
     // Hysteresis: require a minimum price separation to confirm a cross — prevents

@@ -332,7 +332,15 @@
 const BASE = (document.querySelector('meta[name="base-path"]')?.content || '') || '';
 const API = BASE + '/replay/api';
 let allContracts = [];
-let allTrades = [];      // filtered trades (displayed)
+let allTrades = [];
+
+// Config dropdown label — appends start time when it differs from market open (09:30)
+function configLabel(c) {
+  const start = c.activeStart;
+  const isDefault = !start || start === '09:30' || start === '9:30';
+  const suffix = isDefault ? '' : ` [${start}]`;
+  return `${c.id} — ${c.name}${suffix}`;
+}
 let rawTrades = [];      // unfiltered trades from DB
 let lastSpxBars = [];
 let lastSpx3m = [];
@@ -386,7 +394,7 @@ async function init() {
   const defaults = configs.filter(c => c.name === 'Default Configuration');
   const sorted = [...important, ...defaults];
   configSel.innerHTML = sorted.map(c =>
-    `<option value="${c.id}">${c.id} — ${c.name}</option>`
+    `<option value="${c.id}">${configLabel(c)}</option>`
   ).join('');
 
   dateSel.addEventListener('change', loadDay);
@@ -1533,7 +1541,7 @@ async function runReplayWithConfig(dates, config, configId, configName) {
       const defaults = configs.filter(c => c.name === 'Default Configuration');
       const sorted = [...important, ...defaults];
       configSel.innerHTML = sorted.map(c =>
-        `<option value="${c.id}">${c.id} — ${c.name}</option>`
+        `<option value="${c.id}">${configLabel(c)}</option>`
       ).join('');
       configSel.value = data.configId;
       await loadDay();

@@ -44,6 +44,7 @@ import * as path from 'path';
 import type { AgentSignal, AgentDecision, OpenPosition } from './src/agent/types';
 import type { StrikeCandidate } from './src/core/strike-selector';
 import { computeTradeSize } from './src/agent/account-balance';
+import { WsFeed, type BarEvent } from './src/agent/ws-feed';
 import type { CoreBar } from './src/core/types';
 import type { Config } from './src/config/types';
 import {
@@ -89,6 +90,13 @@ const guard = new RiskGuard(CFG);
 const positions = new PositionManager(CFG, isPaper);
 const priceStream = new PriceStream();
 const SPXER_BASE = process.env.SPXER_URL || 'http://localhost:3600';
+
+// ── WebSocket Feed — event-driven bar delivery ──────────────────────────────
+
+const WS_URL = SPXER_BASE.replace(/^http/, 'ws') + '/ws';
+const wsFeed = new WsFeed(WS_URL);
+let wsMode = false;  // true when WS is connected and driving signal checks
+let cycleRunning = false;  // mutex to prevent concurrent cycle execution
 
 let cycleCount = 0;
 let dailyDate = '';
@@ -225,6 +233,84 @@ priceStream.onPrice((symbol, last, bid, ask) => {
     }
   }
 });
+
+// ── Broker P&L — Single Source of Truth ─────────────────────────────────────
+
+/**
+ * Compute today's realized P&L and trade count from Tradier filled orders.
+ * This is the broker's actual data — not our in-memory tracking.
+ */
+async function computeBrokerDailyPnl(): Promise<{ pnl: number; trades: number; wins: number }> {
+  const accountId = EXEC.accountId!;
+  const hdrs = {
+    Authorization: `Bearer ${appConfig.tradierToken}`,
+    Accept: 'application/json',
+  };
+
+  try {
+    const { data } = await axios.get(
+      `${TRADIER_BASE}/accounts/${accountId}/orders`,
+      { headers: hdrs, timeout: 10000 },
+    );
+    const raw = data?.orders?.order;
+    const orders = Array.isArray(raw) ? raw : raw ? [raw] : [];
+
+    const today = todayET();
+
+    interface Fill { symbol: string; side: string; qty: number; avgPrice: number }
+    const fills: Fill[] = [];
+
+    for (const order of orders) {
+      const legs = order.leg ? (Array.isArray(order.leg) ? order.leg : [order.leg]) : [order];
+      for (const leg of legs) {
+        if (leg.status !== 'filled') continue;
+        const created = leg.create_date || order.create_date || '';
+        if (!created.startsWith(today)) continue;
+        const sym = leg.option_symbol || leg.symbol || '';
+        if (!sym) continue;
+        fills.push({
+          symbol: sym,
+          side: leg.side || '',
+          qty: leg.exec_quantity || 0,
+          avgPrice: leg.avg_fill_price || 0,
+        });
+      }
+    }
+
+    const bySymbol = new Map<string, { buyCost: number; buyQty: number; sellProceeds: number; sellQty: number }>();
+    for (const f of fills) {
+      if (!bySymbol.has(f.symbol)) bySymbol.set(f.symbol, { buyCost: 0, buyQty: 0, sellProceeds: 0, sellQty: 0 });
+      const entry = bySymbol.get(f.symbol)!;
+      if (f.side === 'buy_to_open') {
+        entry.buyCost += f.avgPrice * f.qty * 100;
+        entry.buyQty += f.qty;
+      } else if (f.side === 'sell_to_close') {
+        entry.sellProceeds += f.avgPrice * f.qty * 100;
+        entry.sellQty += f.qty;
+      }
+    }
+
+    let totalPnl = 0;
+    let completedTrades = 0;
+    let wins = 0;
+
+    for (const [, entry] of bySymbol) {
+      const closedQty = Math.min(entry.buyQty, entry.sellQty);
+      if (closedQty <= 0) continue;
+      const avgBuy = entry.buyCost / entry.buyQty;
+      const avgSell = entry.sellProceeds / entry.sellQty;
+      const pnl = (avgSell - avgBuy) * closedQty;
+      totalPnl += pnl;
+      completedTrades++;
+      if (pnl > 0) wins++;
+    }
+
+    return { pnl: totalPnl, trades: completedTrades, wins };
+  } catch (e: any) {
+    console.warn(`[xsp] Failed to compute broker P&L: ${e.message}`);
+    return { pnl: 0, trades: 0, wins: 0 };
+  }
+}
 
 // ── Broker Reconciliation ───────────────────────────────────────────────────
 
@@ -676,7 +762,7 @@ async function executeEntry(
 
 function banner(): void {
   console.log('\n╔══════════════════════════════════════════════════════════╗');
-  console.log('║       SPXer XSP Agent — Cash Account — tick()-based    ║');
+  console.log('║       SPXer XSP Agent — Cash Account — WS + REST       ║');
   console.log(`║  Mode: ${isPaper ? 'PAPER (no real orders)              ' : 'LIVE  ⚠️  REAL MONEY                  '}║`);
   console.log('║                                                          ║');
   console.log(`║  Config: ${CFG.id.slice(0, 46).padEnd(46)}║`);
@@ -687,6 +773,7 @@ function banner(): void {
   console.log(`║  Size:    1 contract, trade all day                     ║`);
   console.log(`║  TP/SL:   ${CFG.position.takeProfitMultiplier}x / ${CFG.position.stopLossPercent}%                                     ║`);
   console.log(`║  Account: ${(EXEC.accountId ?? '').padEnd(46)}║`);
+  console.log(`║  Feed:    WebSocket event-driven + REST fallback        ║`);
   console.log(`║  Stream:  HTTP streaming for real-time TP/SL            ║`);
   console.log('╚══════════════════════════════════════════════════════════╝\n');
 }
@@ -922,6 +1009,23 @@ async function runCycle(): Promise<number> {
   const spxCurrentPrice = spxLive?.last ?? spxPrice;
   const candidates = buildCandidates(snap);
 
+  // ── MTF confirmation: fetch higher-TF HMA direction if enabled ──
+  let mtfDirection: 'bullish' | 'bearish' | null = null;
+  const mtfCfg = CFG.signals.mtfConfirmation;
+  if (mtfCfg?.enabled && mtfCfg.timeframe) {
+    const mtfBars = await fetchBarsAtTf(mtfCfg.timeframe, 30);
+    const stripped = stripFormingCandle(mtfBars, tfToSeconds(mtfCfg.timeframe));
+    if (stripped.length >= 2) {
+      const hmaFastKey = `hma${CFG.signals.hmaCrossFast ?? 5}`;
+      const hmaSlowKey = `hma${CFG.signals.hmaCrossSlow ?? 19}`;
+      const last = stripped[stripped.length - 1].indicators;
+      if (last[hmaFastKey] != null && last[hmaSlowKey] != null) {
+        mtfDirection = last[hmaFastKey]! > last[hmaSlowKey]! ? 'bullish' : 'bearish';
+        console.log(`[xsp] MTF ${mtfCfg.timeframe} HMA: ${mtfDirection} (fast=${last[hmaFastKey]!.toFixed(2)} slow=${last[hmaSlowKey]!.toFixed(2)})`);
+      }
+    }
+  }
+
   const { entry, skipReason } = evaluateEntry(signal, exits, positions.count() + exits.length, CFG, {
     ts: Math.floor(Date.now() / 1000),
     spxPrice: spxCurrentPrice,
@@ -930,6 +1034,7 @@ async function runCycle(): Promise<number> {
     tradesCompleted: tradesTotal,
     lastEntryTs,
     closeCutoffTs,
+    mtfDirection,
   });
 
   if (entry && allExitsSucceeded) {
@@ -1088,6 +1193,113 @@ function dailyReview(): void {
   }
 }
 
+// ── WebSocket Event Handlers — bar-driven signal detection ──────────────────
+
+/** Convert BarEvent from WsFeed to CoreBar */
+function wsBarToCoreBar(bar: BarEvent): CoreBar {
+  return {
+    ts: bar.ts,
+    open: bar.open,
+    high: bar.high,
+    low: bar.low,
+    close: bar.close,
+    volume: bar.volume,
+    indicators: bar.indicators,
+  };
+}
+
+/**
+ * Called on every spx_bar event. Runs exit evaluation (fast) and signal
+ * detection (only on configured timeframe boundaries).
+ */
+async function onSpxBar(bar: BarEvent): Promise<void> {
+  if (!isMarketOpen()) return;
+  if (cycleRunning) return; // prevent concurrent execution
+  cycleRunning = true;
+  try {
+    // Check if this is a signal timeframe boundary
+    const signalPeriodSec = tfToSeconds(signalTf);
+    const isSignalBoundary = bar.ts % signalPeriodSec === 0;
+
+    if (isSignalBoundary) {
+      // Full signal detection cycle — uses REST for higher-TF bars + contract bars
+      console.log(`\n[xsp/ws] ⏱️ ${signalTf} bar closed @ ${new Date(bar.ts * 1000).toLocaleTimeString('en-US', { hour12: false })} — running signal check`);
+      await runCycle();
+    } else if (positions.count() > 0) {
+      // Between signal boundaries: still check exits on every 1m bar
+      // The PriceStream already handles TP/SL in real-time, but we also
+      // check for HMA-cross-based exits (scannerReverse) here.
+      await runExitCheckOnly(bar);
+    }
+  } catch (e) {
+    console.error('[xsp/ws] Bar handler error:', e);
+  } finally {
+    cycleRunning = false;
+  }
+}
+
+/**
+ * Lightweight exit check — runs on every 1m bar when holding positions.
+ * Only evaluates exits using cached SPX state + PriceStream prices.
+ * Does NOT run signal detection or entry evaluation.
+ */
+async function runExitCheckOnly(spxBar: BarEvent): Promise<void> {
+  if (positions.count() === 0) return;
+
+  // Handle stream-flagged exits (TP/SL from PriceStream)
+  if (streamExitPending) {
+    console.log(`[xsp/ws] ⚡ Stream flagged exit — force-closing`);
+    for (const pos of positions.getAll()) {
+      const streamPrice = priceStream.getPrice(pos.symbol);
+      const sellPrice = streamPrice?.bid ?? streamPrice?.last ?? pos.entryPrice;
+      const result = await closePosition(pos, 'stream_exit', sellPrice, isPaper, EXEC);
+      const pnl = ((result.fillPrice ?? sellPrice) - pos.entryPrice) * pos.quantity * 100;
+      dailyPnl += pnl;
+      guard.recordLoss(pnl);
+      positions.remove(pos.id);
+      const emoji = pnl >= 0 ? '💰' : '💸';
+      if (pnl > 0) winsTotal++;
+      tradesTotal++;
+      console.log(`[xsp/ws] ${emoji} STREAM-CLOSED ${pos.symbol} @ $${(result.fillPrice ?? sellPrice).toFixed(2)}: P&L $${pnl.toFixed(0)}`);
+    }
+    streamExitPending = false;
+    return;
+  }
+
+  // Check HMA-cross-based exits using the SPX direction/exit state
+  const closeCutoffTs = computeCloseCutoff();
+  for (const openPos of positions.getAll()) {
+    const corePos = toCorePosition(openPos);
+    const cached = priceStream.getPrice(openPos.symbol);
+    const currentPrice = cached?.last ?? null;
+
+    const exitDecision = evaluateExit(
+      corePos, currentPrice, signalState.exitCross, false, // not a fresh cross — checked on TF boundary
+      CFG, Math.floor(Date.now() / 1000), closeCutoffTs,
+    );
+
+    if (exitDecision) {
+      console.log(`[xsp/ws] 📤 Exiting ${exitDecision.symbol} — reason: ${exitDecision.reason} @ $${exitDecision.decisionPrice.toFixed(2)}`);
+      const exitResult = await executeBrokerExit(corePos, exitDecision.reason, exitDecision.decisionPrice);
+      if (exitResult.success) {
+        dailyPnl += exitResult.pnl;
+        guard.recordLoss(exitResult.pnl);
+        if (exitResult.pnl > 0) winsTotal++;
+        tradesTotal++;
+        const emoji = exitResult.pnl >= 0 ? '💰' : '💸';
+        console.log(`[xsp/ws] ${emoji} CLOSED ${corePos.symbol} (${exitDecision.reason}): P&L $${exitResult.pnl.toFixed(0)}`);
+      }
+    }
+  }
+}
+
+/** Setup WebSocket subscriptions for the trading session */
+function setupWsSubscriptions(): void {
+  wsFeed.subscribe('spx');
+  wsFeed.subscribe('signals');
+  console.log('[xsp] 📡 Subscribed to spx + signals channels via WebSocket');
+}
+
 // ── Main ────────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
@@ -1100,6 +1312,37 @@ async function main(): Promise<void> {
 
   await priceStream.start([]);
 
+  // ── WebSocket Feed Setup ────────────────────────────────────────────────
+  wsFeed.on('connected', () => {
+    wsMode = true;
+    console.log('[xsp] ✅ WebSocket connected — switching to event-driven mode');
+    setupWsSubscriptions();
+  });
+
+  wsFeed.on('reconnected', () => {
+    wsMode = true;
+    console.log('[xsp] ✅ WebSocket reconnected — resuming event-driven mode');
+    setupWsSubscriptions();
+  });
+
+  wsFeed.on('disconnected', (reason: string) => {
+    wsMode = false;
+    console.warn(`[xsp] ⚠️ WebSocket disconnected (${reason}) — falling back to REST polling`);
+  });
+
+  // Primary trigger: SPX bar events drive the agent
+  wsFeed.on('spx_bar', (bar: BarEvent) => {
+    if (!isMarketOpen()) return;
+    // Fire-and-forget — onSpxBar handles its own mutex
+    onSpxBar(bar).catch(e => console.error('[xsp/ws] spx_bar handler error:', e));
+  });
+
+  // Informational: log HMA cross signals from the data service
+  wsFeed.on('hma_cross_signal', (signal: any) => {
+    const arrow = signal.direction === 'bullish' ? '🔼' : '🔽';
+    console.log(`[xsp/ws] SPX HMA signal: ${arrow} ${signal.direction} @ $${signal.price?.toFixed(2) ?? '?'}`);
+  });
+
   while (true) {
     console.log('[xsp] Waiting for market open...');
     await sleepUntilMarketOpen();
@@ -1109,24 +1352,18 @@ async function main(): Promise<void> {
     const isResume = existingSession?.date === today;
 
     if (isResume) {
-      dailyPnl         = existingSession!.dailyPnl;
-      tradesTotal      = existingSession!.tradesTotal;
-      winsTotal        = existingSession!.winsTotal;
       dailyDate        = today;
       consecutiveRejections = 0;
       rejectionBackoffUntil = 0;
       sessionHalted    = false;
       restoreXspSessionState(existingSession!);
-      console.log(`[xsp] ⚡ RESUMING session for ${today} (P&L $${dailyPnl.toFixed(0)}, ${tradesTotal} trades)`);
+      console.log(`[xsp] ⚡ RESUMING session for ${today}`);
     } else {
       console.log('[xsp] Market open — starting trading session');
 
       const cancelledPreOpen = await cancelAllOpenOrders();
       if (cancelledPreOpen > 0) console.log(`[xsp] Cancelled ${cancelledPreOpen} stale order(s) pre-open`);
 
-      dailyPnl = 0;
-      tradesTotal = 0;
-      winsTotal = 0;
       consecutiveRejections = 0;
       rejectionBackoffUntil = 0;
       sessionHalted = false;
@@ -1134,9 +1371,16 @@ async function main(): Promise<void> {
       signalState = createInitialSignalState();
       lastEntryTs = 0;
       processedSignalTs.clear();
-      guard.resetIfNewDay();
-      saveXspSession();
     }
+
+    // ── Broker is truth: sync P&L and trade count from actual filled orders ──
+    const brokerPnl = await computeBrokerDailyPnl();
+    dailyPnl    = brokerPnl.pnl;
+    tradesTotal = brokerPnl.trades;
+    winsTotal   = brokerPnl.wins;
+    guard.syncFromBroker(brokerPnl.pnl, brokerPnl.trades);
+    console.log(`[xsp] Broker P&L: $${dailyPnl.toFixed(0)} | ${tradesTotal} trades (${winsTotal}W ${tradesTotal - winsTotal}L)`);
+    saveXspSession();
 
     // Dynamic sizing
     if (CFG.sizing.riskPercentOfAccount) {
@@ -1150,28 +1394,65 @@ async function main(): Promise<void> {
     if (reconciled > 0) {
       console.log(`[xsp] Reconciled ${reconciled} position(s) from broker`);
       const symbols = positions.getAll().map(p => p.symbol);
-      // Fire-and-forget: don't await — connect() blocks forever reading the stream.
       if (symbols.length > 0) priceStream.updateSymbols(symbols).catch(() => {});
+    }
 
-      // Positions are now managed by PositionManager (broker is truth)
-      // No need to sync into strategy state
+    // ── Connect WebSocket (if not already connected) ────────────────────
+    if (!wsFeed.isConnected()) {
+      console.log(`[xsp] 📡 Connecting to data service WebSocket: ${WS_URL}`);
+      wsFeed.connect();
+    } else {
+      setupWsSubscriptions();
     }
 
     console.log('[xsp] First cycle in 5s...\n');
     await new Promise(r => setTimeout(r, 5000));
 
-    while (isMarketOpen()) {
-      let nextSecs = 30;
+    // ── Slow timer: reconciliation, health checks, status reporting ─────
+    // Runs every 30s regardless of WS mode. Handles broker sync, session saves,
+    // and health gate checks that don't need bar-level precision.
+    const slowTimer = setInterval(async () => {
+      if (!isMarketOpen()) return;
       try {
-        nextSecs = await runCycle();
+        // Reconcile broker positions periodically
+        await reconcileBrokerPositions();
+        // Save session
+        saveXspSession();
       } catch (e) {
-        console.error('[xsp] Cycle error:', e);
+        console.error('[xsp] Slow timer error:', e);
       }
-      await new Promise(r => setTimeout(r, nextSecs * 1000));
+    }, 30_000);
+
+    // ── Main loop: WS-driven with REST fallback ─────────────────────────
+    // In WS mode, signal detection is triggered by bar events (onSpxBar).
+    // In REST fallback mode, we poll like before.
+    while (isMarketOpen()) {
+      if (wsMode) {
+        // WS is driving — just sleep and let bar events trigger cycles
+        await new Promise(r => setTimeout(r, 5000));
+      } else {
+        // REST fallback — poll like before
+        if (!cycleRunning) {
+          cycleRunning = true;
+          try {
+            const nextSecs = await runCycle();
+            await new Promise(r => setTimeout(r, nextSecs * 1000));
+          } catch (e) {
+            console.error('[xsp] Cycle error:', e);
+            await new Promise(r => setTimeout(r, 10_000));
+          } finally {
+            cycleRunning = false;
+          }
+        } else {
+          await new Promise(r => setTimeout(r, 5000));
+        }
+      }
     }
 
+    clearInterval(slowTimer);
     console.log('\n[xsp] 🔔 Market closed — ending trading session');
     priceStream.stop();
+    // Don't disconnect WsFeed — keep it for next session
     const cancelledAtClose = await cancelAllOpenOrders();
     if (cancelledAtClose > 0) console.log(`[xsp] Cancelled ${cancelledAtClose} open order(s) at market close`);
     dailyReview();
@@ -1179,7 +1460,7 @@ async function main(): Promise<void> {
   }
 }
 
-process.on('SIGTERM', () => { priceStream.stop(); console.log('\n[xsp] Shutting down'); process.exit(0); });
-process.on('SIGINT', () => { priceStream.stop(); console.log('\n[xsp] Shutting down'); process.exit(0); });
+process.on('SIGTERM', () => { priceStream.stop(); wsFeed.close(); console.log('\n[xsp] Shutting down'); process.exit(0); });
+process.on('SIGINT', () => { priceStream.stop(); wsFeed.close(); console.log('\n[xsp] Shutting down'); process.exit(0); });
 
 main().catch(e => { console.error('[xsp] Fatal:', e); process.exit(1); });

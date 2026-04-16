@@ -114,12 +114,31 @@ export function createReplayRoutes(): Router {
   });
 
   // ── GET /replay/api/configs — saved configs ──────────────────────────────
-  router.get('/api/configs', (_req, res) => {
+  // Only returns configs with ≥200 days of results (use ?all=1 to bypass)
+  router.get('/api/configs', (req, res) => {
     const db = getDb();
+    const showAll = req.query.all === '1';
     try {
-      const rows = db.prepare(`
-        SELECT id, name, description FROM replay_configs ORDER BY createdAt DESC
-      `).all();
+      const rows = showAll
+        ? db.prepare(`
+            SELECT c.id, c.name, c.description,
+                   json_extract(c.config_json, '$.timeWindows.activeStart') as activeStart,
+                   COUNT(DISTINCT r.date) as dayCount
+            FROM replay_configs c
+            LEFT JOIN replay_results r ON c.id = r.configId
+            GROUP BY c.id
+            ORDER BY c.createdAt DESC
+          `).all()
+        : db.prepare(`
+            SELECT c.id, c.name, c.description,
+                   json_extract(c.config_json, '$.timeWindows.activeStart') as activeStart,
+                   COUNT(DISTINCT r.date) as dayCount
+            FROM replay_configs c
+            LEFT JOIN replay_results r ON c.id = r.configId
+            GROUP BY c.id
+            HAVING COUNT(DISTINCT r.date) >= 200
+            ORDER BY c.createdAt DESC
+          `).all();
       res.json(rows);
     } finally {
       db.close();
@@ -590,6 +609,7 @@ export function createReplayRoutes(): Router {
               maxPositions: cfg.position?.maxPositionsOpen ?? 3,
               strikeRange: cfg.strikeSelector?.strikeSearchRange ?? 80,
               contractPriceMax: cfg.strikeSelector?.contractPriceMax ?? 8,
+              activeStart: cfg.timeWindows?.activeStart ?? '09:30',
             };
           } catch {}
 
@@ -711,6 +731,7 @@ export function createReplayRoutes(): Router {
               maxPositions: cfg.position?.maxPositionsOpen ?? 3,
               strikeRange: cfg.strikeSelector?.strikeSearchRange ?? 80,
               contractPriceMax: cfg.strikeSelector?.contractPriceMax ?? 8,
+              activeStart: cfg.timeWindows?.activeStart ?? '09:30',
             };
         } catch {}
 

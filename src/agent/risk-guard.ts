@@ -98,6 +98,16 @@ export class RiskGuard {
     return etTimeToUnixTs('16:00');
   }
 
+  /**
+   * Override daily state from broker data (called on startup to sync with reality).
+   * This ensures the risk guard reflects actual broker P&L, not just what the agent tracked.
+   */
+  syncFromBroker(pnl: number, trades: number): void {
+    this.dailyLoss = pnl;
+    this.tradesCompleted = trades;
+    this.dailyDate = todayET();
+  }
+
   get isPaper(): boolean { return this.paperMode; }
   get currentDailyLoss(): number { return this.dailyLoss; }
   get config(): Config { return this.cfg; }

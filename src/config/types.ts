@@ -121,6 +121,22 @@ export interface Config {
     kcMultiplier: number;                 // default 2.5
     kcSlopeLookback: number;              // default 5 (bars)
     kcSlopeThreshold: number;             // default 0.3 (pts/bar) — below this = range
+
+    // ── Multi-Timeframe Confirmation Gate ─────────────────────────────────
+    /** When enabled, require a higher timeframe HMA direction to agree with
+     *  the signal before entering. Filters choppy single-timeframe signals. */
+    mtfConfirmation?: {
+      enabled: boolean;                   // false by default
+      timeframe: string;                  // higher TF to check, e.g. '5m', '15m'
+      requireAgreement: boolean;          // HMA direction must agree with signal direction
+    };
+
+    // ── Warm-up Bar Guard ─────────────────────────────────────────────────
+    /** Minimum number of closed bars required before signal detection fires.
+     *  Prevents garbage signals on startup/restart when indicators haven't warmed up.
+     *  Default: 0 (disabled — rely on activeStart for warm-up timing).
+     *  Recommended: >= hmaCrossSlow (e.g. 19 for HMA(5)×HMA(19)). */
+    minWarmupBars?: number;
   };
 
   position: {
@@ -143,6 +159,12 @@ export interface Config {
     strikeSearchRange: number;
     contractPriceMin: number;        // min option premium to consider ($)
     contractPriceMax: number;        // max option premium to consider ($)
+    /** Strike moneyness mode: 'otm' (default), 'atm', 'itm', 'any'.
+     *  - 'otm': only OTM strikes (calls > SPX, puts < SPX)
+     *  - 'atm': prefer strikes nearest to SPX price
+     *  - 'itm': prefer ITM strikes (calls < SPX, puts > SPX)
+     *  - 'any': no moneyness filter — score purely on price band + volume */
+    strikeMode?: 'otm' | 'atm' | 'itm' | 'any';
   };
 
   timeWindows: {

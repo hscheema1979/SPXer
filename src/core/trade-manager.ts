@@ -52,6 +52,10 @@ export interface EntryContext {
   tradesCompleted: number;
   lastEntryTs: number;
   closeCutoffTs: number;
+  /** Higher-timeframe HMA direction for MTF confirmation gate.
+   *  Only checked when config.signals.mtfConfirmation.enabled is true.
+   *  null = no data available (gate passes — fail-open). */
+  mtfDirection?: Direction | null;
 }
 
 // ── Exit Evaluation ─────────────────────────────────────────────────────────
@@ -159,6 +163,29 @@ export function evaluateEntry(
   // Positions remaining after pending exits
   const positionsAfterExits = openPositionCount - exits.length;
 
+  // ── Determine entry direction FIRST (needed to decide cooldown bypass) ──
+
+  let entryDirection: Direction | null = null;
+  let entryReason = '';
+  let isFlip = false;
+
+  // Flip-on-reversal: exit with signal_reversal triggers opposite entry
+  const flipExits = exits.filter(e => e.flipTo !== null);
+  if (flipExits.length > 0) {
+    const flipSide = flipExits[0].flipTo!;
+    entryDirection = flipSide === 'call' ? 'bullish' : 'bearish';
+    entryReason = `flip-on-reversal from ${flipExits[0].symbol}`;
+    isFlip = true;
+  }
+
+  // Fresh direction cross — only if no flip and no remaining positions
+  if (entryDirection === null && signal.directionState.freshCross && positionsAfterExits === 0) {
+    entryDirection = signal.directionState.cross;
+    entryReason = `fresh HMA(${hmaCrossFast}x${hmaCrossSlow}) ${signal.directionState.cross} cross`;
+  }
+
+  // ── Gates (risk, time, cooldown) ──────────────────────────────────────
+
   // Risk guard
   const riskState: RiskState = {
     openPositions: positionsAfterExits,
@@ -179,31 +206,16 @@ export function evaluateEntry(
     return { entry: null, skipReason: 'outside active window' };
   }
 
-  // Cooldown gate
-  const cooldownSec = getEntryCooldownSec(config);
-  const elapsed = context.ts - context.lastEntryTs;
-  if (context.lastEntryTs > 0 && elapsed < cooldownSec) {
-    const remaining = cooldownSec - elapsed;
-    return { entry: null, skipReason: `cooldown (${remaining}s remaining)` };
-  }
-
-  // ── Entry direction ───────────────────────────────────────────────────
-
-  let entryDirection: Direction | null = null;
-  let entryReason = '';
-
-  // Flip-on-reversal: exit with signal_reversal triggers opposite entry
-  const flipExits = exits.filter(e => e.flipTo !== null);
-  if (flipExits.length > 0) {
-    const flipSide = flipExits[0].flipTo!;
-    entryDirection = flipSide === 'call' ? 'bullish' : 'bearish';
-    entryReason = `flip-on-reversal from ${flipExits[0].symbol}`;
-  }
-
-  // Fresh direction cross — only if no flip and no remaining positions
-  if (entryDirection === null && signal.directionState.freshCross && positionsAfterExits === 0) {
-    entryDirection = signal.directionState.cross;
-    entryReason = `fresh HMA(${hmaCrossFast}x${hmaCrossSlow}) ${signal.directionState.cross} cross`;
+  // Cooldown gate — flip-on-reversal BYPASSES cooldown.
+  // A signal reversal is a new directional signal, not a re-entry into the same losing trade.
+  // This matches replay behavior where flips execute immediately at the same timestamp.
+  if (!isFlip) {
+    const cooldownSec = getEntryCooldownSec(config);
+    const elapsed = context.ts - context.lastEntryTs;
+    if (context.lastEntryTs > 0 && elapsed < cooldownSec) {
+      const remaining = cooldownSec - elapsed;
+      return { entry: null, skipReason: `cooldown (${remaining}s remaining)` };
+    }
   }
 
   if (entryDirection === null) {
@@ -224,6 +236,19 @@ export function evaluateEntry(
   }
   if (allowedSides === 'puts' && side !== 'put') {
     return { entry: null, skipReason: 'allowedSides=puts — bullish signal blocked' };
+  }
+
+  // MTF confirmation gate — require higher timeframe HMA direction to agree
+  const mtf = config.signals.mtfConfirmation;
+  if (mtf?.enabled && mtf.requireAgreement) {
+    const mtfDir = context.mtfDirection;
+    if (mtfDir != null && mtfDir !== entryDirection) {
+      return {
+        entry: null,
+        skipReason: `MTF gate: ${mtf.timeframe} HMA is ${mtfDir}, signal is ${entryDirection} — blocked`,
+      };
+    }
+    // mtfDir === null → no data, fail-open (don't block)
   }
 
   // Select strike

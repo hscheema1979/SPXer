@@ -213,6 +213,94 @@ priceStream.onPrice((symbol, last, bid, ask) => {
   }
 });
 
+// ── Broker P&L — Single Source of Truth ─────────────────────────────────────
+
+/**
+ * Compute today's realized P&L and trade count from Tradier filled orders.
+ * This is the broker's actual data — not our in-memory tracking.
+ * Called on every startup/resume so the risk guard always reflects reality.
+ */
+async function computeBrokerDailyPnl(): Promise<{ pnl: number; trades: number; wins: number }> {
+  const accountId = EXECUTION.accountId!;
+  const hdrs = {
+    Authorization: `Bearer ${appConfig.tradierToken}`,
+    Accept: 'application/json',
+  };
+
+  try {
+    const { data } = await axios.get(
+      `${TRADIER_BASE}/accounts/${accountId}/orders`,
+      { headers: hdrs, timeout: 10000 },
+    );
+    const raw = data?.orders?.order;
+    const orders = Array.isArray(raw) ? raw : raw ? [raw] : [];
+
+    const today = todayET();
+
+    // Collect all filled legs from today's orders
+    interface Fill { symbol: string; side: string; qty: number; avgPrice: number }
+    const fills: Fill[] = [];
+
+    for (const order of orders) {
+      const legs = order.leg ? (Array.isArray(order.leg) ? order.leg : [order.leg]) : [order];
+      for (const leg of legs) {
+        if (leg.status !== 'filled') continue;
+        const created = leg.create_date || order.create_date || '';
+        // Match today's date in the create_date (UTC timestamp)
+        // We check both the UTC date and the previous day to handle ET offset
+        // A trade at 9:30 ET on Apr 16 = 13:30 UTC on Apr 16, so this works
+        if (!created.startsWith(today)) continue;
+        const sym = leg.option_symbol || leg.symbol || '';
+        if (!sym) continue;
+        fills.push({
+          symbol: sym,
+          side: leg.side || '',
+          qty: leg.exec_quantity || 0,
+          avgPrice: leg.avg_fill_price || 0,
+        });
+      }
+    }
+
+    // Match buys to sells per symbol to compute realized P&L
+    // Group by symbol: sum buy cost, sum sell proceeds
+    const bySymbol = new Map<string, { buyCost: number; buyQty: number; sellProceeds: number; sellQty: number }>();
+    for (const f of fills) {
+      if (!bySymbol.has(f.symbol)) bySymbol.set(f.symbol, { buyCost: 0, buyQty: 0, sellProceeds: 0, sellQty: 0 });
+      const entry = bySymbol.get(f.symbol)!;
+      if (f.side === 'buy_to_open') {
+        entry.buyCost += f.avgPrice * f.qty * 100;
+        entry.buyQty += f.qty;
+      } else if (f.side === 'sell_to_close') {
+        entry.sellProceeds += f.avgPrice * f.qty * 100;
+        entry.sellQty += f.qty;
+      }
+    }
+
+    let totalPnl = 0;
+    let completedTrades = 0;
+    let wins = 0;
+
+    for (const [symbol, entry] of bySymbol) {
+      // Only count fully closed round-trips (sell qty matches buy qty)
+      const closedQty = Math.min(entry.buyQty, entry.sellQty);
+      if (closedQty <= 0) continue;
+
+      // Proportional cost/proceeds for the closed portion
+      const avgBuy = entry.buyCost / entry.buyQty;
+      const avgSell = entry.sellProceeds / entry.sellQty;
+      const pnl = (avgSell - avgBuy) * closedQty;
+      totalPnl += pnl;
+      completedTrades++;
+      if (pnl > 0) wins++;
+    }
+
+    return { pnl: totalPnl, trades: completedTrades, wins };
+  } catch (e: any) {
+    console.warn(`[agent] Failed to compute broker P&L: ${e.message}`);
+    return { pnl: 0, trades: 0, wins: 0 };
+  }
+}
+
 // ── Broker Reconciliation ───────────────────────────────────────────────────
 
 async function reconcileBrokerPositions(): Promise<void> {
@@ -882,6 +970,23 @@ async function runCycle(): Promise<number> {
   const spxCurrentPrice = spxLive?.last ?? spxPrice;
   const candidates = buildCandidates(snap);
 
+  // ── MTF confirmation: fetch higher-TF HMA direction if enabled ──
+  let mtfDirection: 'bullish' | 'bearish' | null = null;
+  const mtfCfg = config.signals.mtfConfirmation;
+  if (mtfCfg?.enabled && mtfCfg.timeframe) {
+    const mtfBars = await fetchBarsAtTf(mtfCfg.timeframe, 30);
+    const stripped = stripFormingCandle(mtfBars, tfToSeconds(mtfCfg.timeframe));
+    if (stripped.length >= 2) {
+      const hmaFastKey = `hma${config.signals.hmaCrossFast ?? 5}`;
+      const hmaSlowKey = `hma${config.signals.hmaCrossSlow ?? 19}`;
+      const last = stripped[stripped.length - 1].indicators;
+      if (last[hmaFastKey] != null && last[hmaSlowKey] != null) {
+        mtfDirection = last[hmaFastKey]! > last[hmaSlowKey]! ? 'bullish' : 'bearish';
+        console.log(`[agent] MTF ${mtfCfg.timeframe} HMA: ${mtfDirection} (fast=${last[hmaFastKey]!.toFixed(2)} slow=${last[hmaSlowKey]!.toFixed(2)})`);
+      }
+    }
+  }
+
   const { entry, skipReason } = evaluateEntry(signal, exits, positions.count() + exits.length, config, {
     ts: Math.floor(Date.now() / 1000),
     spxPrice: spxCurrentPrice,
@@ -890,6 +995,7 @@ async function runCycle(): Promise<number> {
     tradesCompleted: tradesTotal,
     lastEntryTs,
     closeCutoffTs,
+    mtfDirection,
   });
 
   if (entry && allExitsSucceeded) {
@@ -1106,12 +1212,10 @@ async function main(): Promise<void> {
 
     if (isResume) {
       // ── Crash-restart mid-session: restore state ──
-      dailyPnl         = existingSession!.dailyPnl;
-      tradesTotal      = existingSession!.tradesTotal;
-      winsTotal        = existingSession!.winsTotal;
+      // Restore signal state from session (HMA cross direction, etc.)
       dailyDate        = today;
       restoreSessionState(existingSession!);
-      console.log(`[agent] ⚡ RESUMING session for ${today} (P&L $${dailyPnl.toFixed(0)}, ${tradesTotal} trades)`);
+      console.log(`[agent] ⚡ RESUMING session for ${today}`);
     } else {
       // ── Fresh session start ──
       console.log('[agent] Market open — starting trading session');
@@ -1120,16 +1224,11 @@ async function main(): Promise<void> {
       const cancelledPreOpen = await cancelAllOpenOrders();
       if (cancelledPreOpen > 0) console.log(`[agent] Cancelled ${cancelledPreOpen} stale order(s) pre-open`);
 
-      dailyPnl             = 0;
-      tradesTotal          = 0;
-      winsTotal            = 0;
       consecutiveRejections = 0;
       rejectionBackoffUntil = 0;
       dailyDate            = today;
       signalState          = createInitialSignalState();
       lastEntryTs          = 0;
-      guard.resetIfNewDay();
-      saveSession();
 
       // Dynamic sizing (once per day)
       if (config.sizing.riskPercentOfAccount) {
@@ -1141,6 +1240,15 @@ async function main(): Promise<void> {
         console.log(`[agent] Daily sizing: $${tradeSize} per trade (${config.sizing.riskPercentOfAccount}% of account)`);
       }
     }
+
+    // ── Broker is truth: sync P&L and trade count from actual filled orders ──
+    const brokerPnl = await computeBrokerDailyPnl();
+    dailyPnl    = brokerPnl.pnl;
+    tradesTotal = brokerPnl.trades;
+    winsTotal   = brokerPnl.wins;
+    guard.syncFromBroker(brokerPnl.pnl, brokerPnl.trades);
+    console.log(`[agent] Broker P&L: $${dailyPnl.toFixed(0)} | ${tradesTotal} trades (${winsTotal}W ${tradesTotal - winsTotal}L)`);
+    saveSession();
 
     // Reconcile broker positions every start/resume
     const reconciled = await positions.reconcileFromBroker(EXECUTION);
