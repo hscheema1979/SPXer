@@ -115,33 +115,21 @@ if [ "$ET_MINS" -ge "$MARKET_START" ] && [ "$ET_MINS" -lt "$MARKET_STOP" ]; then
   # This prevents the account-monitor from stopping agents or closing positions
   write_maintenance "RTH active — monitor observe only (watchdog)"
   
-  STARTED_ANY=false
-  
   if ! is_agent_online "spxer-agent"; then
     log "WATCHDOG: spxer-agent is stopped during market hours — starting"
     pm2 start ecosystem.config.js --only spxer-agent --update-env >> "$LOG" 2>&1
-    STARTED_ANY=true
-  fi
-  
-  if ! is_agent_online "spxer-xsp"; then
-    log "WATCHDOG: spxer-xsp is stopped during market hours — starting"
-    pm2 start ecosystem.config.js --only spxer-xsp --update-env >> "$LOG" 2>&1
-    STARTED_ANY=true
-  fi
-  
-  if [ "$STARTED_ANY" = true ]; then
-    log "WATCHDOG: Agent(s) restarted at $HOUR:$(printf '%02d' $MIN) ET"
+    log "WATCHDOG: spxer-agent started at $HOUR:$(printf '%02d' $MIN) ET"
   fi
 
 elif [ "$ET_MINS" -ge "$MARKET_STOP" ]; then
   # ── After hours: clear maintenance, stop agents ──────────────────────────
-  
+
   # Release monitor — let it observe post-close state
   clear_maintenance
-  
-  if is_agent_online "spxer-agent" || is_agent_online "spxer-xsp"; then
-    log "WATCHDOG: Stopping agents after market close ($HOUR:$(printf '%02d' $MIN) ET)"
-    pm2 stop spxer-agent spxer-xsp >> "$LOG" 2>&1 || true
-    log "WATCHDOG: Agents stopped"
+
+  if is_agent_online "spxer-agent"; then
+    log "WATCHDOG: Stopping spxer-agent after market close ($HOUR:$(printf '%02d' $MIN) ET)"
+    pm2 stop spxer-agent >> "$LOG" 2>&1 || true
+    log "WATCHDOG: spxer-agent stopped"
   fi
 fi

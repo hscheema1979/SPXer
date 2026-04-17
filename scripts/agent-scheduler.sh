@@ -52,21 +52,19 @@ fi
 case "$ACTION" in
   start)
     # Only start if not already running (avoid killing mid-trade)
-    SPX_STATUS=$(pm2 show spxer-agent 2>/dev/null | grep "status" | head -1 | grep -c "online")
-    XSP_STATUS=$(pm2 show spxer-xsp 2>/dev/null | grep "status" | head -1 | grep -c "online")
-    if [ "$SPX_STATUS" = "1" ] && [ "$XSP_STATUS" = "1" ]; then
-      log "START: Both agents already online — skipping ($TODAY)"
+    SPX_STATUS=$(pm2 show spxer-agent 2>/dev/null | grep "status" | head -1 | grep -c "online" || echo "0")
+    if [ "$SPX_STATUS" = "1" ]; then
+      log "START: spxer-agent already online — skipping ($TODAY)"
     else
-      log "START: Starting agents ($TODAY)"
+      log "START: Starting spxer-agent ($TODAY)"
       pm2 start ecosystem.config.js --only spxer-agent --update-env >> "$LOG" 2>&1
-      pm2 start ecosystem.config.js --only spxer-xsp --update-env >> "$LOG" 2>&1
-      log "START: Both agents started"
+      log "START: spxer-agent started"
     fi
     ;;
   stop)
-    log "STOP: Stopping agents ($TODAY)"
-    pm2 stop spxer-agent spxer-xsp >> "$LOG" 2>&1
-    log "STOP: Both agents stopped"
+    log "STOP: Stopping spxer-agent ($TODAY)"
+    pm2 stop spxer-agent >> "$LOG" 2>&1 || true
+    log "STOP: spxer-agent stopped"
     ;;
   *)
     echo "Usage: $0 {start|stop}" >&2
