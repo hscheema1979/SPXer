@@ -14,6 +14,8 @@ import { refreshPipelineHealth } from '../ops/pipeline-health';
 import { getLatestMetrics, getMetricSeries, getMetricsSummary } from '../ops/metrics-api';
 import { getAlertHistory, getRules as getAlertRules } from '../ops/alert-rules';
 import { getDb } from '../storage/db';
+import Database from 'better-sqlite3';
+import * as path from 'path';
 import {
   buildAuthUrl,
   exchangeCodeForTokens,
@@ -243,10 +245,25 @@ export function startHttpServer(port: number): { app: Express; httpServer: Serve
     res.json(getSchwabAuthStatus());
   });
 
-  // ── Metrics API ──────────────────────────────────────────────
+  // ── Metrics API (reads from separate metrics.db) ────────────
+  const metricsDbPath = process.env.METRICS_DB_PATH || path.join(process.cwd(), 'data', 'metrics.db');
+  let metricsDb: InstanceType<typeof Database> | null = null;
+  function getMetricsDb() {
+    if (!metricsDb) {
+      try {
+        metricsDb = new Database(metricsDbPath, { readonly: true });
+      } catch {
+        return null;
+      }
+    }
+    return metricsDb;
+  }
+
   app.get('/metrics/latest', (_req, res) => {
     try {
-      res.json(getLatestMetrics(getDb()));
+      const mdb = getMetricsDb();
+      if (!mdb) return res.status(503).json({ error: 'metrics DB not available' });
+      res.json(getLatestMetrics(mdb));
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
@@ -254,8 +271,10 @@ export function startHttpServer(port: number): { app: Express; httpServer: Serve
 
   app.get('/metrics/summary', (req, res) => {
     try {
+      const mdb = getMetricsDb();
+      if (!mdb) return res.status(503).json({ error: 'metrics DB not available' });
       const hours = parseInt(req.query.hours as string) || 24;
-      res.json(getMetricsSummary(getDb(), hours));
+      res.json(getMetricsSummary(mdb, hours));
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
@@ -263,11 +282,13 @@ export function startHttpServer(port: number): { app: Express; httpServer: Serve
 
   app.get('/metrics/:name', (req, res) => {
     try {
+      const mdb = getMetricsDb();
+      if (!mdb) return res.status(503).json({ error: 'metrics DB not available' });
       const from = parseInt(req.query.from as string) || (Math.floor(Date.now() / 1000) - 3600);
       const to = parseInt(req.query.to as string) || Math.floor(Date.now() / 1000);
       const step = req.query.step ? parseInt(req.query.step as string) : undefined;
       const tags = req.query.tags as string | undefined;
-      res.json(getMetricSeries(getDb(), req.params.name, from, to, step, tags));
+      res.json(getMetricSeries(mdb, req.params.name, from, to, step, tags));
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }

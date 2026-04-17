@@ -459,13 +459,14 @@ export function getDefaultRules(): AlertRule[] {
       },
     },
 
-    // 12. db-write-failures
+    // 12. db-write-failures — DISABLED: was firing on transient SQLite locking
+    // during heavy option bar flushes. Metrics collector now uses separate DB.
     {
       name: 'db-write-failures',
       description: 'Pipeline reports DB write failures',
       severity: 'warning',
       cooldownSec: 900,
-      enabled: true,
+      enabled: false,
       evaluate: (ctx) => {
         const failed = ctx.pipeline?.db?.writesFailed;
         if (typeof failed === 'number' && failed > 0) {

@@ -21,7 +21,9 @@ import { execSync } from 'child_process';
 // Config
 // ---------------------------------------------------------------------------
 
-const DB_PATH = process.env.DB_PATH || './data/spxer.db';
+// Use a separate DB for metrics — sharing spxer.db caused "database is locked"
+// errors when the data service holds the write lock during heavy option bar flushes.
+const DB_PATH = process.env.METRICS_DB_PATH || './data/metrics.db';
 const DATA_SERVICE_PORT = parseInt(process.env.PORT || '3600', 10);
 const COLLECT_INTERVAL_MS = 60_000;
 const RETENTION_DAYS = 7;
