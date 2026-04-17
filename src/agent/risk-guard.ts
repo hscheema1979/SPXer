@@ -43,7 +43,7 @@ export class RiskGuard {
 
   minutesToMarketClose(): number {
     const { h, m } = nowET();
-    return Math.max(0, 16 * 60 - (h * 60 + m));
+    return Math.max(0, 17 * 60 - (h * 60 + m));
   }
 
   /**
@@ -95,7 +95,7 @@ export class RiskGuard {
   }
 
   private computeCloseCutoffTs(): number {
-    return etTimeToUnixTs('16:00');
+    return etTimeToUnixTs('17:00');
   }
 
   /**

@@ -108,12 +108,12 @@ export function etToUnix(date: string, timeET: string): number {
 
 /**
  * Build session timestamps from a date string.
- * Returns real UTC Unix timestamps for session start (09:30 ET) and end (16:00 ET).
+ * Returns real UTC Unix timestamps for session start (08:00 ET) and end (17:00 ET).
  * Handles EDT/EST correctly via etToUnix.
  */
 export function buildSessionTimestamps(date: string): { start: number; end: number; closeCutoff: number } {
-  const start = etToUnix(date, '09:30');
-  const end = start + 390 * 60;      // 6.5 hours
+  const start = etToUnix(date, '08:00');
+  const end = start + 540 * 60;      // 9 hours (8:00 AM - 5:00 PM)
   const closeCutoff = end - 15 * 60;  // 15 min before close
   return { start, end, closeCutoff };
 }

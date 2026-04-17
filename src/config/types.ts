@@ -227,13 +227,31 @@ export interface Config {
   };
 
   sizing: {
-    baseDollarsPerTrade: number;
-    sizeMultiplier: number;
+    /**
+     * Sizing mode determines how position size is calculated:
+     *   'fixed_dollars'    — spend up to `sizingValue` dollars per trade (default)
+     *   'fixed_contracts'  — always trade exactly `sizingValue` contracts
+     *   'percent_of_account' — spend `sizingValue`% of account value per trade
+     *                          (live: Tradier buying power; replay: startingAccountValue + cumulative P&L)
+     */
+    sizingMode: 'fixed_dollars' | 'fixed_contracts' | 'percent_of_account';
+    /** The value whose meaning depends on sizingMode:
+     *   fixed_dollars → dollars per trade (e.g. 500)
+     *   fixed_contracts → number of contracts (e.g. 10)
+     *   percent_of_account → percentage (e.g. 15 for 15%)
+     */
+    sizingValue: number;
+    /** Starting account value for replay simulations.
+     *  Live agents ignore this — they fetch real buying power from Tradier.
+     *  Default: 10000 */
+    startingAccountValue?: number;
     minContracts: number;
     maxContracts: number;
-    /** If set, overrides baseDollarsPerTrade with this % of account buying power.
-     *  Fetched from Tradier at startup and refreshed every 5 minutes.
-     *  e.g., 15 = use 15% of buying power per trade. */
+    // ── Legacy fields (still read for backward compat) ──
+    baseDollarsPerTrade: number;
+    sizeMultiplier: number;
+    accountPercentPerTrade?: number | null;
+    /** @deprecated Use sizingMode='percent_of_account' instead */
     riskPercentOfAccount?: number;
   };
 

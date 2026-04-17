@@ -145,9 +145,9 @@ function etTime(): { label: string; minutesToClose: number } {
   const [datePart, timePart] = etStr.split(', ');
   const [h, m] = timePart.split(':').map(Number);
   const label = `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')} ET`;
-  // Minutes until 16:00 ET
+  // Minutes until 17:00 ET
   const minsNow = h * 60 + m;
-  const minsClose = 16 * 60;
+  const minsClose = 17 * 60;
   const mins = Math.max(0, minsClose - minsNow);
   return { label, minutesToClose: mins };
 }

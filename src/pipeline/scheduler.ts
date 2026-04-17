@@ -23,10 +23,10 @@ export function getMarketMode(now: Date = new Date()): MarketMode {
   const h = et.h, m = et.m;
   const mins = h * 60 + m;
 
-  const rthEnd = isEarlyCloseDay(dateStr) ? 13 * 60 : 16 * 60 + 15;
+  const rthEnd = isEarlyCloseDay(dateStr) ? 13 * 60 : 17 * 60;
 
-  if (mins >= 9 * 60 + 25 && mins < 9 * 60 + 30) return 'preopen';
-  if (mins >= 9 * 60 + 30 && mins < rthEnd) return 'rth';
+  if (mins >= 7 * 60 + 55 && mins < 8 * 60) return 'preopen';
+  if (mins >= 8 * 60 && mins < rthEnd) return 'rth';
   return 'overnight';
 }
 

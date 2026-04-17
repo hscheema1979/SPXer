@@ -234,10 +234,13 @@ export const DEFAULT_CONFIG: Config = {
   },
 
   sizing: {
-    baseDollarsPerTrade: 250,
+    sizingMode: 'fixed_dollars',
+    sizingValue: 10000,
+    startingAccountValue: 10000,
+    baseDollarsPerTrade: 10000,
     sizeMultiplier: 1.0,
     minContracts: 1,
-    maxContracts: 10,
+    maxContracts: 99,
   },
 };
 

@@ -111,8 +111,8 @@ export function buildCycleSnapshot(ctx: ReplayContext, atTs: number): CycleSnaps
 }
 
 export function createReplayContext(db: Database.Database, date: string): ReplayContext {
-  const sessionStart = etToUnix(date, '09:30');
-  const sessionEnd = sessionStart + 390 * 60;
+  const sessionStart = etToUnix(date, '08:00');
+  const sessionEnd = sessionStart + 540 * 60;
 
   const spxRows = db.prepare(`
     SELECT ts, open, high, low, close, volume, indicators

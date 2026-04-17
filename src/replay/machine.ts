@@ -750,6 +750,8 @@ function runDeterministicReplay(
   let lastEntryTs = 0;
   let dailyPnl = 0;
   let tradesCompleted = 0;
+  // Account value tracking for percentage-based sizing
+  let accountValue = config.sizing.startingAccountValue ?? 10000;
 
   const strikeRange = config.strikeSelector.strikeSearchRange;
 
@@ -820,6 +822,7 @@ function runDeterministicReplay(
 
       positions.delete(exit.positionId);
       dailyPnl += exit.pnl['pnl$'];
+      accountValue += exit.pnl['pnl$'];
       tradesCompleted++;
     }
 
@@ -871,6 +874,7 @@ function runDeterministicReplay(
       lastEntryTs,
       closeCutoffTs,
       mtfDirection,
+      accountValue,
     });
 
     if (entry) {
@@ -1085,6 +1089,7 @@ export async function runReplay(
     let lastEscalationTs = 0;
     let lastScannerTs = 0;
     const strikeRange = config.strikeSelector.strikeSearchRange;
+    let accountValue = config.sizing.startingAccountValue ?? 10000;
     let prevSpxHmaFast: number | null = null;
     let prevSpxHmaSlow: number | null = null;
     let spxDirectionCross: 'bullish' | 'bearish' | null = null;  // entry gating (directionTf)
@@ -1162,6 +1167,7 @@ export async function runReplay(
             console.log(`  CLOSE [${etLabel(ts)}] ${openPos.symbol} ${closeReason}: ${emoji}${pnlPct.toFixed(0)}%`);
           }
 
+          accountValue += pnl$;
           // Track reversal exits for flip-to-opposite logic
           if (closeReason === 'signal_reversal') {
             const flipSide: 'call' | 'put' = openPos.side === 'call' ? 'put' : 'call';
@@ -1218,7 +1224,7 @@ export async function runReplay(
               ? effEntry * (1 - config.position.stopLossPercent / 100)
               : 0;
             const takeProfit = effEntry * config.position.takeProfitMultiplier;
-            const qty = computeQty(effEntry, config);
+            const qty = computeQty(effEntry, config, accountValue);
 
             openPositions.set(`${flipStrike.candidate.symbol}_${ts}`, {
               id: `${flipStrike.candidate.symbol}_${ts}`,
@@ -1552,7 +1558,7 @@ export async function runReplay(
             const takeProfit = judgeTp && judgeTp > effEntry
               ? judgeTp
               : effEntry * config.position.takeProfitMultiplier;
-            const qty = computeQty(effEntry, config);
+            const qty = computeQty(effEntry, config, accountValue);
 
             openPositions.set(posKey, {
               id: posKey,

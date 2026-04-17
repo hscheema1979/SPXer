@@ -610,6 +610,11 @@ export function createReplayRoutes(): Router {
               strikeRange: cfg.strikeSelector?.strikeSearchRange ?? 80,
               contractPriceMax: cfg.strikeSelector?.contractPriceMax ?? 8,
               activeStart: cfg.timeWindows?.activeStart ?? '09:30',
+              baseDollarsPerTrade: cfg.sizing?.baseDollarsPerTrade ?? 250,
+              maxContracts: cfg.sizing?.maxContracts ?? 99,
+              sizingMode: cfg.sizing?.sizingMode ?? 'fixed_dollars',
+              sizingValue: cfg.sizing?.sizingValue ?? cfg.sizing?.baseDollarsPerTrade ?? 250,
+              startingAccountValue: cfg.sizing?.startingAccountValue ?? 10000,
             };
           } catch {}
 
@@ -798,7 +803,10 @@ export function createReplayRoutes(): Router {
             contractPriceMax: cfg.strikeSelector?.contractPriceMax ?? 8,
             exitStrategy: cfg.exit?.strategy ?? 'takeProfit',
             baseDollarsPerTrade: cfg.sizing?.baseDollarsPerTrade ?? 250,
-            maxContracts: cfg.sizing?.maxContracts ?? 10,
+            maxContracts: cfg.sizing?.maxContracts ?? 99,
+            sizingMode: cfg.sizing?.sizingMode ?? 'fixed_dollars',
+            sizingValue: cfg.sizing?.sizingValue ?? cfg.sizing?.baseDollarsPerTrade ?? 250,
+            startingAccountValue: cfg.sizing?.startingAccountValue ?? 10000,
           };
         } catch {}
       }

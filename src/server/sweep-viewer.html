@@ -25,6 +25,11 @@
   .filter-sep { width: 1px; height: 20px; background: #222; margin: 0 4px; }
   .filter-reset { background: none; border: 1px solid #333; color: #666; padding: 3px 10px; border-radius: 3px; font-family: inherit; font-size: 10px; cursor: pointer; }
   .filter-reset:hover { color: #f43f5e; border-color: #f43f5e; }
+  .refresh-btn { background: none; border: 1px solid #333; color: #666; padding: 3px 10px; border-radius: 3px; font-family: inherit; font-size: 10px; cursor: pointer; display: flex; align-items: center; gap: 4px; }
+  .refresh-btn:hover { color: #10b981; border-color: #10b981; }
+  .refresh-btn.refreshing { color: #8b8bff; border-color: #8b8bff; }
+  .refresh-btn.refreshing .refresh-icon { animation: spin 0.6s linear infinite; }
+  .refresh-badge { background: #10b981; color: #0a0a0f; font-size: 9px; font-weight: 700; padding: 0 4px; border-radius: 6px; min-width: 14px; text-align: center; }
   .filter-count { font-size: 11px; color: #555; margin-left: auto; }
 
   /* ── Sort controls ── */
@@ -113,9 +118,13 @@
 <div class="header">
   <h1>🏆 Config Leaderboard</h1>
   <a href="/replay/">← Replay Viewer</a>
+  <button class="refresh-btn" id="refresh-btn" onclick="refreshData()" title="Refresh leaderboard (preserves filters)">
+    <span class="refresh-icon">↻</span> Refresh
+  </button>
   <div class="stats">
     <span>Configs: <span class="num" id="total-count">-</span></span>
     <span>Showing: <span class="num" id="showing-count">-</span></span>
+    <span id="refresh-status" style="color:#555"></span>
   </div>
 </div>
 
@@ -166,7 +175,7 @@
   <select id="min-days" onchange="loadData()" style="background:#1a1a24;color:#e0e0e0;border:1px solid #333;padding:3px 6px;border-radius:3px;font-family:inherit;font-size:11px">
     <option value="2">2+</option>
     <option value="10">10+</option>
-    <option value="20" selected>20+</option>
+    <option value="20">20+</option>
     <option value="30">30+</option>
     <option value="40">40+</option>
     <option value="50">50+</option>
@@ -177,7 +186,7 @@
     <option value="140">140+</option>
     <option value="160">160+</option>
     <option value="180">180+</option>
-    <option value="200">200+</option>
+    <option value="200" selected>200+</option>
     <option value="220">220+</option>
     <option value="240">240+</option>
   </select>
@@ -625,6 +634,101 @@ document.getElementById('del-overlay').addEventListener('click', (e) => {
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') closeDeleteModal();
 });
+
+// ── Refresh (preserves filters + sort) ──
+
+async function refreshData() {
+  const btn = document.getElementById('refresh-btn');
+  btn.classList.add('refreshing');
+  const statusEl = document.getElementById('refresh-status');
+
+  // Snapshot current filter selections
+  const savedFilters = { ...filters };
+  const savedSort = currentSort;
+  const savedDir = currentDir;
+
+  // Snapshot sort-bar dropdown values (these trigger loadData on change normally)
+  const sortBarState = {
+    minDays: document.getElementById('min-days').value,
+    maxEntry: document.getElementById('max-entry-price').value,
+    maxConcurrent: document.getElementById('max-concurrent').value,
+    maxTradesDay: document.getElementById('max-trades-day').value,
+  };
+
+  const prevCount = allRows.length;
+  const prevIds = new Set(allRows.map(r => r.configId));
+
+  try {
+    let url = `${API}/sweep?limit=5000&minDays=${sortBarState.minDays}`;
+    if (sortBarState.maxEntry && sortBarState.maxEntry !== '0') url += `&maxEntryPrice=${sortBarState.maxEntry}`;
+    if (sortBarState.maxConcurrent && sortBarState.maxConcurrent !== '0') url += `&maxConcurrent=${sortBarState.maxConcurrent}`;
+    if (sortBarState.maxTradesDay && sortBarState.maxTradesDay !== '0') url += `&maxTradesPerDay=${sortBarState.maxTradesDay}`;
+
+    const res = await fetch(url);
+    const data = await res.json();
+    allRows = data.rows;
+    document.getElementById('total-count').textContent = data.total;
+
+    // Rebuild filter dropdowns
+    buildFilters();
+
+    // Restore filter selections
+    for (const [key, val] of Object.entries(savedFilters)) {
+      const sel = document.querySelector(`[data-filter="${key}"]`);
+      if (sel) {
+        // Check if the value still exists in the new data
+        const optExists = [...sel.options].some(o => o.value === val);
+        if (optExists) {
+          sel.value = val;
+          sel.classList.add('active');
+          filters[key] = val;
+        }
+      }
+    }
+
+    // Restore sort
+    currentSort = savedSort;
+    currentDir = savedDir;
+    document.querySelectorAll('.sort-btn').forEach(b => b.classList.toggle('active', b.dataset.sort === currentSort));
+    document.querySelectorAll('th').forEach(th => {
+      th.classList.remove('sorted');
+      const a = th.querySelector('.arrow');
+      if (a) a.remove();
+    });
+    const th = document.querySelector(`th[data-col="${currentSort}"]`);
+    if (th) {
+      th.classList.add('sorted');
+      th.innerHTML += `<span class="arrow">${currentDir === 'DESC' ? '▼' : '▲'}</span>`;
+    }
+
+    applyFilters();
+
+    // Show what changed
+    const newIds = new Set(allRows.map(r => r.configId));
+    const added = allRows.filter(r => !prevIds.has(r.configId)).length;
+    const removed = [...prevIds].filter(id => !newIds.has(id)).length;
+    const updated = allRows.filter(r => prevIds.has(r.configId)).length;
+
+    if (added > 0 || removed > 0) {
+      const parts = [];
+      if (added > 0) parts.push(`+${added} new`);
+      if (removed > 0) parts.push(`-${removed} removed`);
+      statusEl.textContent = `Updated: ${parts.join(', ')}`;
+      statusEl.style.color = '#10b981';
+    } else {
+      statusEl.textContent = 'Up to date';
+      statusEl.style.color = '#555';
+    }
+    setTimeout(() => { statusEl.textContent = ''; }, 5000);
+
+  } catch (err) {
+    statusEl.textContent = `Refresh failed: ${err.message}`;
+    statusEl.style.color = '#f43f5e';
+    setTimeout(() => { statusEl.textContent = ''; }, 5000);
+  } finally {
+    btn.classList.remove('refreshing');
+  }
+}
 
 // ── Load ──
 

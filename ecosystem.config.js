@@ -50,7 +50,7 @@ module.exports = {
       env: {
         NODE_ENV: 'production',
         AGENT_PAPER: 'false',
-        AGENT_CONFIG_ID: 'hma3x15-itm5-tp125x-sl40-3m',
+        AGENT_CONFIG_ID: 'hma3x15-itm5-tp125x-sl25-3m-v3',
       },
       log_date_format: 'YYYY-MM-DD HH:mm:ss',
       error_file: '/home/ubuntu/.pm2/logs/spxer-agent-error.log',
@@ -58,29 +58,30 @@ module.exports = {
       merge_logs: true,
     },
 
-    // ── XSP Trading Agent (cash account) ──────────────────────────
-    {
-      name: 'spxer-xsp',
-      script: 'npx',
-      args: 'tsx agent-xsp.ts',
-      cwd: '/home/ubuntu/SPXer',
-      watch: false,
-      autorestart: false,   // never auto-restart
-      max_restarts: 0,
-      min_uptime: '10s',
-      restart_delay: 30000,
-      kill_timeout: 5000,
-      max_memory_restart: '512M',
-      env: {
-        NODE_ENV: 'production',
-        AGENT_PAPER: 'false',
-        AGENT_CONFIG_ID: 'hma3x15-itm5-tp125x-sl40-3m',
-      },
-      log_date_format: 'YYYY-MM-DD HH:mm:ss',
-      error_file: '/home/ubuntu/.pm2/logs/spxer-xsp-error.log',
-      out_file: '/home/ubuntu/.pm2/logs/spxer-xsp-out.log',
-      merge_logs: true,
-    },
+    // ── XSP Trading Agent — ARCHIVED 2026-04-17 ───────────────────
+    // Switched focus to SPX agent with new config (hma3x15-itm5-tp12x-sl20-3m-v2)
+    // {
+    //   name: 'spxer-xsp',
+    //   script: 'npx',
+    //   args: 'tsx agent-xsp.ts',
+    //   cwd: '/home/ubuntu/SPXer',
+    //   watch: false,
+    //   autorestart: false,
+    //   max_restarts: 0,
+    //   min_uptime: '10s',
+    //   restart_delay: 30000,
+    //   kill_timeout: 5000,
+    //   max_memory_restart: '512M',
+    //   env: {
+    //     NODE_ENV: 'production',
+    //     AGENT_PAPER: 'false',
+    //     AGENT_CONFIG_ID: 'hma3x15-itm5-tp12x-sl20-3m-v2',
+    //   },
+    //   log_date_format: 'YYYY-MM-DD HH:mm:ss',
+    //   error_file: '/home/ubuntu/.pm2/logs/spxer-xsp-error.log',
+    //   out_file: '/home/ubuntu/.pm2/logs/spxer-xsp-out.log',
+    //   merge_logs: true,
+    // },
 
     // ── Watchdog — DISABLED ────────────────────────────────────────
     // Removed 2026-04-08: watchdog was cancelling OCO bracket orders
@@ -164,6 +165,28 @@ module.exports = {
       log_date_format: 'YYYY-MM-DD HH:mm:ss',
       error_file: '/home/ubuntu/.pm2/logs/schwaber-error.log',
       out_file: '/home/ubuntu/.pm2/logs/schwaber-out.log',
+      merge_logs: true,
+    },
+
+    // ── Metrics Collector ───────────────────────────────────────────
+    {
+      name: 'metrics-collector',
+      script: 'npx',
+      args: 'tsx src/ops/metrics-collector.ts',
+      cwd: '/home/ubuntu/SPXer',
+      watch: false,
+      autorestart: true,
+      max_restarts: 10,
+      min_uptime: '10s',
+      restart_delay: 30000,
+      kill_timeout: 5000,
+      max_memory_restart: '256M',
+      env: {
+        NODE_ENV: 'production',
+      },
+      log_date_format: 'YYYY-MM-DD HH:mm:ss',
+      error_file: '/home/ubuntu/.pm2/logs/metrics-collector-error.log',
+      out_file: '/home/ubuntu/.pm2/logs/metrics-collector-out.log',
       merge_logs: true,
     },
 

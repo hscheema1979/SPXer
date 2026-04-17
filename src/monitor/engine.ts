@@ -71,12 +71,12 @@ export function getMonitorInterval(now = new Date()): ScheduleResult {
 
   // Early close days: market closes at 13:00 ET
   const isEarlyClose = EARLY_CLOSE_DAYS.has(today);
-  const closeMinute = isEarlyClose ? 13 * 60 : 16 * 60;       // 1:00 PM or 4:00 PM
+  const closeMinute = isEarlyClose ? 13 * 60 : 17 * 60;       // 1:00 PM or 5:00 PM
   const postCloseEnd = closeMinute + 30;                        // +30 min wind-down
 
   // Time windows (in minutes from midnight ET)
-  const preMarketStart = 8 * 60;   // 8:00 AM
-  const rthStart = 9 * 60 + 30;    // 9:30 AM
+  const preMarketStart = 7 * 60;   // 7:00 AM
+  const rthStart = 8 * 60;         // 8:00 AM
 
   if (minuteOfDay < preMarketStart) {
     return { intervalMs: INTERVALS.overnight, mode: 'overnight' };

@@ -18,6 +18,7 @@ import { todayET, nowET } from './utils/et-time';
 import type { Bar, Timeframe } from './types';
 import { pipelineHealth, recordModeTransition } from './ops/pipeline-health';
 import { startAlertMonitor } from './ops/alerter';
+import { startAlertEngine } from './ops/alert-rules';
 
 const HIGHER_TIMEFRAMES: [Timeframe, number][] = [['3m', 180], ['5m', 300], ['10m', 600], ['15m', 900], ['1h', 3600]];
 
@@ -624,9 +625,9 @@ async function pollOptions(): Promise<void> {
     const todayStr = todayET();
     const expiredBefore = expireContractsBefore(todayStr);
     if (expiredBefore > 0) console.log(`[contracts] Expired ${expiredBefore} contracts with expiry < ${todayStr}`);
-    // Also expire today's contracts after RTH close (4:15 PM ET)
+    // Also expire today's contracts after RTH close (5:00 PM ET)
     const etNow = nowET();
-    if (etNow.h > 16 || (etNow.h === 16 && etNow.m >= 15)) {
+    if (etNow.h >= 17) {
       const expiredToday = expireContractsOnDate(todayStr);
       if (expiredToday > 0) console.log(`[contracts] Expired ${expiredToday} contracts for today (${todayStr}) after RTH close`);
     }
@@ -873,6 +874,7 @@ async function main(): Promise<void> {
 
   console.log(`[SPXer] Running on port ${config.port}`);
   startAlertMonitor();
+  startAlertEngine(60_000); // Centralized alert rules — 60s check interval
 
   if (config.tradierToken) {
     // Delay first polls by 2 seconds so the HTTP server can process requests

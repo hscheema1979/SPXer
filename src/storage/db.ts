@@ -20,28 +20,64 @@ export function initDb(path: string): void {
   runMigrations();
   runConfigMigrations();
 
-  // Hourly TRUNCATE to reclaim the WAL file's disk allocation.
-  // Auto-checkpoint (above) keeps WAL pages flushed to the main DB, but the WAL *file*
-  // on disk retains its allocated size until explicitly truncated. This runs less often
-  // since WAL content is always current — we're just reclaiming the file size.
+  // WAL management — two strategies:
+  //
+  // 1. Every 15 min: PASSIVE checkpoint (non-blocking, flushes committed pages)
+  // 2. Every 2 hours: TRUNCATE checkpoint (resets WAL file to zero)
+  //    Uses RESTART first to flush all pages, then TRUNCATE.
+  //    If readers block TRUNCATE, falls back to RESTART (which still shrinks WAL).
+  //
+  // The old hourly TRUNCATE was always skipped because other processes (metrics,
+  // dashboard, agents) hold open read connections. RESTART+TRUNCATE is more aggressive.
+
+  // Frequent PASSIVE flush — keeps WAL pages committed to main DB
+  setInterval(() => {
+    try {
+      const d = getDb();
+      const result = d.pragma('wal_checkpoint(PASSIVE)') as Array<{busy: number; log: number; checkpointed: number}>;
+      const { log, checkpointed } = result[0] ?? { log: 0, checkpointed: 0 };
+      if (log > 0) {
+        console.log(`[db] WAL passive checkpoint: ${checkpointed}/${log} pages flushed`);
+      }
+    } catch (err) {
+      console.error('[db] WAL passive checkpoint failed:', err);
+    }
+  }, 15 * 60 * 1000); // every 15 min
+
+  // Aggressive TRUNCATE — reclaim WAL disk space
   setInterval(() => {
     try {
       const d = getDb();
       const before = getDbStats();
-      const passive = d.pragma('wal_checkpoint(PASSIVE)') as Array<{busy: number; log: number; checkpointed: number}>;
-      const { busy, log, checkpointed } = passive[0] ?? { busy: 0, log: 0, checkpointed: 0 };
 
-      if (busy === 0) {
+      // Skip if WAL is already small
+      if (before.walSizeMb < 50) {
+        console.log(`[db] WAL is ${before.walSizeMb}MB — truncate not needed`);
+        return;
+      }
+
+      // Try TRUNCATE directly (resets WAL file to zero)
+      try {
         d.pragma('wal_checkpoint(TRUNCATE)');
         const after = getDbStats();
-        console.log(`[db] WAL truncated: ${before.walSizeMb}MB → ${after.walSizeMb}MB (log=${log} checkpointed=${checkpointed})`);
-      } else {
-        console.warn(`[db] WAL truncate skipped: ${busy} active readers (log=${log} checkpointed=${checkpointed} walMb=${before.walSizeMb})`);
+        console.log(`[db] WAL truncated: ${before.walSizeMb}MB → ${after.walSizeMb}MB`);
+        return;
+      } catch {
+        // TRUNCATE failed (readers blocking) — fall back to RESTART
+      }
+
+      // RESTART flushes all pages and resets but doesn't truncate the file
+      try {
+        d.pragma('wal_checkpoint(RESTART)');
+        const after = getDbStats();
+        console.log(`[db] WAL restart checkpoint: ${before.walSizeMb}MB → ${after.walSizeMb}MB (truncate blocked by readers)`);
+      } catch (err) {
+        console.warn(`[db] WAL restart checkpoint failed: ${err}`);
       }
     } catch (err) {
-      console.error('[db] WAL truncate failed:', err);
+      console.error('[db] WAL truncate cycle failed:', err);
     }
-  }, 60 * 60 * 1000); // hourly — auto-checkpoint handles the actual page flushing
+  }, 2 * 60 * 60 * 1000); // every 2 hours
 
   // Daily backup
   setInterval(() => backupDb(), 24 * 60 * 60 * 1000);

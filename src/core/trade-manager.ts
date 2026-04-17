@@ -56,6 +56,10 @@ export interface EntryContext {
    *  Only checked when config.signals.mtfConfirmation.enabled is true.
    *  null = no data available (gate passes — fail-open). */
   mtfDirection?: Direction | null;
+  /** Current account value for percentage-based sizing.
+   *  Live: buying power from Tradier. Replay: simulated account.
+   *  Null = fall back to baseDollarsPerTrade. */
+  accountValue?: number | null;
 }
 
 // ── Exit Evaluation ─────────────────────────────────────────────────────────
@@ -271,7 +275,7 @@ export function evaluateEntry(
   const effectiveEntry = frictionEntry(candidate.price);
   const stopLoss = effectiveEntry * (1 - config.position.stopLossPercent / 100);
   const takeProfit = effectiveEntry * config.position.takeProfitMultiplier;
-  const qty = computeQty(effectiveEntry, config);
+  const qty = computeQty(effectiveEntry, config, context.accountValue);
 
   return {
     entry: {

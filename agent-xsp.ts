@@ -43,7 +43,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import type { AgentSignal, AgentDecision, OpenPosition } from './src/agent/types';
 import type { StrikeCandidate } from './src/core/strike-selector';
-import { computeTradeSize } from './src/agent/account-balance';
+import { computeTradeSize, getAccountBalance } from './src/agent/account-balance';
 import { WsFeed, type BarEvent } from './src/agent/ws-feed';
 import type { CoreBar } from './src/core/types';
 import type { Config } from './src/config/types';
@@ -125,6 +125,7 @@ function isTradingPaused(): boolean {
 
 let signalState: SignalState = createInitialSignalState();
 let lastEntryTs = 0;  // cooldown tracking
+let cachedAccountValue = 0;  // for percentage-based sizing
 
 // ── Option Contract Signal Dedup ─────────────────────────────────────────────
 // Tracks the bar timestamp for each contract signal we've already processed.
@@ -1035,6 +1036,7 @@ async function runCycle(): Promise<number> {
     lastEntryTs,
     closeCutoffTs,
     mtfDirection,
+    accountValue: cachedAccountValue || null,
   });
 
   if (entry && allExitsSucceeded) {
@@ -1382,11 +1384,14 @@ async function main(): Promise<void> {
     console.log(`[xsp] Broker P&L: $${dailyPnl.toFixed(0)} | ${tradesTotal} trades (${winsTotal}W ${tradesTotal - winsTotal}L)`);
     saveXspSession();
 
-    // Dynamic sizing
-    if (CFG.sizing.riskPercentOfAccount) {
-      const tradeSize = await computeTradeSize(CFG.sizing.riskPercentOfAccount, EXEC.accountId);
-      CFG.sizing.baseDollarsPerTrade = tradeSize;
-      console.log(`[xsp] Daily sizing: $${tradeSize} per trade (${CFG.sizing.riskPercentOfAccount}% of account)`);
+    // Dynamic sizing — fetch account buying power
+    const sizingPct = CFG.sizing.accountPercentPerTrade ?? CFG.sizing.riskPercentOfAccount;
+    if (sizingPct) {
+      const balance = await getAccountBalance(EXEC.accountId);
+      if (balance) {
+        cachedAccountValue = balance.optionBuyingPower;
+        console.log(`[xsp] Account buying power: $${cachedAccountValue.toFixed(0)} (${sizingPct}% per trade)`);
+      }
     }
 
     // Reconcile broker positions

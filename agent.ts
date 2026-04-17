@@ -43,7 +43,7 @@ import type { AgentSignal, AgentDecision, OpenPosition } from './src/agent/types
 import type { StrikeCandidate } from './src/core/strike-selector';
 import { computeQty } from './src/core/position-sizer';
 import { frictionEntry, computeRealisticPnl } from './src/core/friction';
-import { computeTradeSize } from './src/agent/account-balance';
+import { computeTradeSize, getAccountBalance } from './src/agent/account-balance';
 import type { CoreBar } from './src/core/types';
 import type { Config } from './src/config/types';
 import {
@@ -115,6 +115,7 @@ function isTradingPaused(): boolean {
 
 let signalState: SignalState = createInitialSignalState();
 let lastEntryTs = 0;  // cooldown tracking
+let cachedAccountValue = 0;  // for percentage-based sizing
 
 // ── Option Contract Signal Dedup ─────────────────────────────────────────────
 // Tracks the bar timestamp for each contract signal we've already processed.
@@ -996,6 +997,7 @@ async function runCycle(): Promise<number> {
     lastEntryTs,
     closeCutoffTs,
     mtfDirection,
+    accountValue: cachedAccountValue || null,
   });
 
   if (entry && allExitsSucceeded) {
@@ -1230,14 +1232,14 @@ async function main(): Promise<void> {
       signalState          = createInitialSignalState();
       lastEntryTs          = 0;
 
-      // Dynamic sizing (once per day)
-      if (config.sizing.riskPercentOfAccount) {
-        const tradeSize = await computeTradeSize(
-          config.sizing.riskPercentOfAccount,
-          EXECUTION.accountId,
-        );
-        config.sizing.baseDollarsPerTrade = tradeSize;
-        console.log(`[agent] Daily sizing: $${tradeSize} per trade (${config.sizing.riskPercentOfAccount}% of account)`);
+      // Dynamic sizing (once per day) — fetch account buying power
+      const sizingPct = config.sizing.accountPercentPerTrade ?? config.sizing.riskPercentOfAccount;
+      if (sizingPct) {
+        const balance = await getAccountBalance(EXECUTION.accountId);
+        if (balance) {
+          cachedAccountValue = balance.optionBuyingPower;
+          console.log(`[agent] Account buying power: $${cachedAccountValue.toFixed(0)} (${sizingPct}% per trade)`);
+        }
       }
     }
 

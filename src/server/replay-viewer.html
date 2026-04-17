@@ -334,12 +334,21 @@ const API = BASE + '/replay/api';
 let allContracts = [];
 let allTrades = [];
 
-// Config dropdown label — appends start time when it differs from market open (09:30)
+// Config dropdown label — includes day count and start time when non-default
 function configLabel(c) {
   const start = c.activeStart;
   const isDefault = !start || start === '09:30' || start === '9:30';
-  const suffix = isDefault ? '' : ` [${start}]`;
-  return `${c.id} — ${c.name}${suffix}`;
+  const timeSuffix = isDefault ? '' : ` [${start}]`;
+  const daysSuffix = c.dayCount != null ? ` (${c.dayCount}d)` : '';
+  return `${c.id} — ${c.name}${timeSuffix}${daysSuffix}`;
+}
+// Format sizing params for display
+function formatSizing(s) {
+  const mode = s.sizingMode || (s.accountPercentPerTrade ? 'percent_of_account' : 'fixed_dollars');
+  const val = s.sizingValue ?? s.accountPercentPerTrade ?? s.baseDollarsPerTrade ?? 250;
+  if (mode === 'fixed_contracts') return `${val} contracts`;
+  if (mode === 'percent_of_account') return `${val}% of account`;
+  return `$${Number(val).toLocaleString()}/trade`;
 }
 let rawTrades = [];      // unfiltered trades from DB
 let lastSpxBars = [];
@@ -1135,11 +1144,13 @@ const CONFIG_SECTIONS = [
     { path: 'regime.timeWindows.gammaExpiryStart', label: 'Gamma Expiry Start', type: 'time' },
     { path: 'regime.timeWindows.noTradeStart', label: 'No-Trade Start', type: 'time' },
   ]},
-  { key: 'sizing', title: 'Position Sizing', collapsed: true, fields: [
-    { path: 'sizing.baseDollarsPerTrade', label: 'Base $/Trade', type: 'num', min: 50, max: 10000 },
-    { path: 'sizing.sizeMultiplier', label: 'Size Multiplier', type: 'num', min: 0.1, max: 10, step: 0.1 },
+  { key: 'sizing', title: 'Position Sizing', collapsed: false, fields: [
+    { path: 'sizing.sizingMode', label: 'Sizing Mode', type: 'select', options: ['fixed_dollars', 'fixed_contracts', 'percent_of_account'],
+      hint: 'fixed_dollars = $ per trade · fixed_contracts = exact qty · percent_of_account = % of cash' },
+    { path: 'sizing.sizingValue', label: 'Sizing Value', type: 'num', min: 1, max: 10000000, hint: 'Meaning depends on mode: $, contracts, or %' },
+    { path: 'sizing.startingAccountValue', label: 'Starting Account $', type: 'num', min: 100, max: 10000000, hint: 'Replay starting cash. Live agents use real broker balance.' },
+    { path: 'sizing.maxContracts', label: 'Max Contracts', type: 'num', min: 1, max: 999, hint: 'Hard cap per trade. Use 999 for unlimited.' },
     { path: 'sizing.minContracts', label: 'Min Contracts', type: 'num', min: 1, max: 50 },
-    { path: 'sizing.maxContracts', label: 'Max Contracts', type: 'num', min: 1, max: 100 },
   ]},
   { key: 'pipeline', title: 'Pipeline / Timeframe', collapsed: true, fields: [
     { path: 'pipeline.timeframe', label: 'Timeframe', type: 'select', options: ['1m', '2m', '3m', '5m', '10m', '15m', '30m', '1h'] },
@@ -1189,27 +1200,53 @@ async function openConfigModal() {
   const modal = document.getElementById('config-modal');
   modal.classList.add('open');
 
-  // Load defaults if we don't have a config loaded
+  // Load the selected config (or defaults if none loaded)
+  const selectedConfigId = document.getElementById('config-select').value;
   if (!currentConfig) {
-    const configId = document.getElementById('config-select').value;
     try {
-      currentConfig = await fetch(`${API}/config/${configId}`).then(r => r.json());
+      currentConfig = await fetch(`${API}/config/${selectedConfigId}`).then(r => r.json());
     } catch {
       currentConfig = await fetch(`${API}/defaults`).then(r => r.json());
     }
   }
 
+  // Backfill new sizing fields for old configs that don't have them
+  if (currentConfig.sizing && !currentConfig.sizing.sizingMode) {
+    const s = currentConfig.sizing;
+    const pct = s.accountPercentPerTrade ?? s.riskPercentOfAccount;
+    if (pct && pct > 0) {
+      s.sizingMode = 'percent_of_account';
+      s.sizingValue = pct;
+    } else {
+      s.sizingMode = 'fixed_dollars';
+      s.sizingValue = (s.baseDollarsPerTrade ?? 250) * (s.sizeMultiplier ?? 1);
+    }
+    if (!s.startingAccountValue) s.startingAccountValue = 10000;
+    if (!s.maxContracts) s.maxContracts = 99;
+    if (!s.minContracts) s.minContracts = 1;
+  }
+
   // Snapshot the config so we can detect changes on save
   originalConfigSnapshot = JSON.stringify(currentConfig);
 
-  // Reset user-edited flags so auto-name regenerates from fresh base
+  // Pre-fill id/name from the stored config
   const idInput = document.getElementById('cfg-id');
   const nameInput = document.getElementById('cfg-name');
-  if (idInput) delete idInput.dataset.userEdited;
-  if (nameInput) delete nameInput.dataset.userEdited;
+  // Start by showing the stored config's name and ID
+  idInput.value = currentConfig.id || selectedConfigId || '';
+  nameInput.value = currentConfig.name || '';
+  // Track that these are the original stored values — NOT manually typed by user
+  delete idInput.dataset.userEdited;
+  delete nameInput.dataset.userEdited;
+  idInput._storedValue = idInput.value;
+  nameInput._storedValue = nameInput.value;
+  // Mark as user-edited ONLY when the user manually types in the field
+  idInput.oninput = () => { idInput.dataset.userEdited = '1'; };
+  nameInput.oninput = () => { nameInput.dataset.userEdited = '1'; };
 
   renderConfigForm();
-  updateAutoName();
+  // Don't call updateAutoName() here — keep showing the stored name until
+  // the user changes a config setting (cfgChanged → updateAutoName)
 }
 
 function closeConfigModal() {
@@ -1617,7 +1654,7 @@ function renderAnalysis(a) {
   // Setup line
   const sigStr = s.signals.length ? s.signals.join('+') : 'none';
   const setupHtml = `<div class="analysis-setup">
-    <b>HMA ${s.hma}</b> · ${s.timeframes} · ${sigStr} · ${s.otm} · SL${s.stopLoss}% TP${s.tpMult}x · MaxPos=${s.maxPositions} · ${s.exitStrategy} · ${s.exitPricing || 'close'} pricing · $${s.contractPriceMax} cap · $${s.baseDollarsPerTrade}/trade
+    <b>HMA ${s.hma}</b> · ${s.timeframes} · ${sigStr} · ${s.otm} · SL${s.stopLoss}% TP${s.tpMult}x · MaxPos=${s.maxPositions} · ${s.exitStrategy} · ${s.exitPricing || 'close'} pricing · $${s.contractPriceMax} cap · ${formatSizing(s)} · max ${s.maxContracts} contracts
   </div>`;
 
   // Helper
@@ -2098,8 +2135,9 @@ async function loadLiveConfig() {
       ['Price Filter', `$${cfg.strikeSelector?.contractPriceMin}–$${cfg.strikeSelector?.contractPriceMax}`],
       ['Active Window', `${cfg.timeWindows?.activeStart}–${cfg.timeWindows?.activeEnd} ET`],
       ['Max Daily Loss', `$${cfg.risk?.maxDailyLoss}`],
-      ['Sizing', `$${cfg.sizing?.baseDollarsPerTrade} base / ${cfg.sizing?.riskPercentOfAccount}% of acct`],
-      ['Max Contracts', cfg.sizing?.maxContracts],
+      ['Sizing', formatSizing(cfg.sizing || {})],
+      ['Starting Account', cfg.sizing?.sizingMode === 'percent_of_account' ? `$${(cfg.sizing?.startingAccountValue ?? 10000).toLocaleString()}` : '—'],
+      ['Contracts', `${cfg.sizing?.minContracts ?? 1}–${cfg.sizing?.maxContracts ?? 99}`],
       ['HMA Crosses', cfg.signals?.enableHmaCrosses ? '✅' : '❌'],
       ['EMA Crosses', cfg.signals?.enableEmaCrosses ? '✅' : '❌'],
       ['Und. HMA Req', cfg.signals?.requireUnderlyingHmaCross ? '✅' : '❌'],

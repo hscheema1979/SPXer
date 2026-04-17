@@ -63,8 +63,8 @@ describe('getMonitorInterval', () => {
     expect(result.intervalMs).toBe(30 * 60 * 1000);
   });
 
-  it('returns pre-market for 8:30 AM ET', () => {
-    const preMarket = etDate('2026-03-30', '08:30');
+  it('returns pre-market for 7:30 AM ET', () => {
+    const preMarket = etDate('2026-03-30', '07:30');
     const result = getMonitorInterval(preMarket);
     expect(result.mode).toBe('pre-market');
     expect(result.intervalMs).toBe(5 * 60 * 1000);
@@ -77,33 +77,33 @@ describe('getMonitorInterval', () => {
     expect(result.intervalMs).toBe(30 * 1000);
   });
 
-  it('returns rth for 9:30 AM ET (market open)', () => {
-    const open = etDate('2026-03-30', '09:30');
+  it('returns rth for 8:00 AM ET (market open)', () => {
+    const open = etDate('2026-03-30', '08:00');
     const result = getMonitorInterval(open);
     expect(result.mode).toBe('rth');
   });
 
-  it('returns rth for 15:59 ET (1 min before close)', () => {
-    const beforeClose = etDate('2026-03-30', '15:59');
+  it('returns rth for 16:59 ET (1 min before close)', () => {
+    const beforeClose = etDate('2026-03-30', '16:59');
     const result = getMonitorInterval(beforeClose);
     expect(result.mode).toBe('rth');
   });
 
-  it('returns post-close for 16:00 ET', () => {
-    const close = etDate('2026-03-30', '16:00');
+  it('returns post-close for 17:00 ET', () => {
+    const close = etDate('2026-03-30', '17:00');
     const result = getMonitorInterval(close);
     expect(result.mode).toBe('post-close');
     expect(result.intervalMs).toBe(2 * 60 * 1000);
   });
 
-  it('returns post-close for 16:15 ET', () => {
-    const postClose = etDate('2026-03-30', '16:15');
+  it('returns post-close for 17:15 ET', () => {
+    const postClose = etDate('2026-03-30', '17:15');
     const result = getMonitorInterval(postClose);
     expect(result.mode).toBe('post-close');
   });
 
-  it('returns overnight for 16:30 ET', () => {
-    const evening = etDate('2026-03-30', '16:30');
+  it('returns overnight for 17:30 ET', () => {
+    const evening = etDate('2026-03-30', '17:30');
     const result = getMonitorInterval(evening);
     expect(result.mode).toBe('overnight');
   });

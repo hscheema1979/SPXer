@@ -11,6 +11,9 @@ import { getWsClientCount } from './ws';
 import { config } from '../config';
 import { createReplayRoutes } from './replay-routes';
 import { refreshPipelineHealth } from '../ops/pipeline-health';
+import { getLatestMetrics, getMetricSeries, getMetricsSummary } from '../ops/metrics-api';
+import { getAlertHistory, getRules as getAlertRules } from '../ops/alert-rules';
+import { getDb } from '../storage/db';
 import {
   buildAuthUrl,
   exchangeCodeForTokens,
@@ -239,6 +242,45 @@ export function startHttpServer(port: number): { app: Express; httpServer: Serve
   // Status check — shows auth health without exposing tokens
   app.get('/schwab/status', (_req, res) => {
     res.json(getSchwabAuthStatus());
+  });
+
+  // ── Metrics API ──────────────────────────────────────────────
+  app.get('/metrics/latest', (_req, res) => {
+    try {
+      res.json(getLatestMetrics(getDb()));
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.get('/metrics/summary', (req, res) => {
+    try {
+      const hours = parseInt(req.query.hours as string) || 24;
+      res.json(getMetricsSummary(getDb(), hours));
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.get('/metrics/:name', (req, res) => {
+    try {
+      const from = parseInt(req.query.from as string) || (Math.floor(Date.now() / 1000) - 3600);
+      const to = parseInt(req.query.to as string) || Math.floor(Date.now() / 1000);
+      const step = req.query.step ? parseInt(req.query.step as string) : undefined;
+      const tags = req.query.tags as string | undefined;
+      res.json(getMetricSeries(getDb(), req.params.name, from, to, step, tags));
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // ── Alerts API ──────────────────────────────────────────────
+  app.get('/alerts/history', (_req, res) => {
+    res.json(getAlertHistory());
+  });
+
+  app.get('/alerts/rules', (_req, res) => {
+    res.json(getAlertRules());
   });
 
   // ── Schwaber viewer ──
