@@ -9,7 +9,7 @@ import { ContractTracker } from './pipeline/contract-tracker';
 import { getMarketMode, getActiveExpirations } from './pipeline/scheduler';
 import { startHttpServer, setLastSpxPrice, setTrackerCountFn, setOptionStreamStatusFn } from './server/http';
 import { startWsServer, broadcast } from './server/ws';
-import { config, STRIKE_BAND, STRIKE_INTERVAL, POLL_UNDERLYING_MS, POLL_OPTIONS_RTH_MS, POLL_OPTIONS_OVERNIGHT_MS, POLL_SCREENER_MS, OPTION_STREAM_WAKE_ET, OPTION_STREAM_CLOSE_ET } from './config';
+import { config, STRIKE_BAND, STRIKE_INTERVAL, POLL_UNDERLYING_MS, POLL_OPTIONS_RTH_MS, POLL_OPTIONS_OVERNIGHT_MS, POLL_SCREENER_MS, OPTION_STREAM_WAKE_ET, OPTION_STREAM_LOCK_ET, OPTION_STREAM_CLOSE_ET } from './config';
 import { healthTracker } from './utils/health';
 import { OptionStream } from './pipeline/option-stream';
 import { OptionCandleBuilder } from './pipeline/option-candle-builder';
@@ -138,14 +138,18 @@ function getPoolExpiries(): string[] {
 }
 
 /**
- * Initialize the option WebSocket stream at 9:30 ET (market open):
+ * Initialize the option WebSocket stream:
  *   1. Get SPX price (from lastSpxPrice, DB, or live Tradier quote)
  *   2. Build contract pool: ±STRIKE_BAND pts × $5 × calls+puts × active expiries
  *   3. Create OptionCandleBuilder with onClose → rawToBar → indicators → DB → broadcast
  *   4. Wire optionStream.onTick → candleBuilder
  *   5. Start the stream — REST polling (pollOptions) is suppressed once connected
  *
- * Before 9:30, pollOptions() runs via REST every 30s to build bars and seed indicators.
+ * Called twice daily:
+ *   Phase 1 (8:00 ET): Preliminary band — uses last known price or Tradier quote.
+ *     Starts building tick-level option bars 90 min before market open for indicator warmup.
+ *   Phase 2 (9:30 ET): Band lock — recenterOptionStream() stops this, then re-calls
+ *     initOptionStream() with the firm SPX opening price.
  */
 async function initOptionStream(): Promise<void> {
   // Step 1: Get a price to center the pool on
@@ -285,6 +289,55 @@ function stopOptionStream(): void {
 }
 
 /**
+ * Re-center the option stream's strike band on the current SPX price.
+ * Called at 9:30 AM ET when SPX has a firm opening price ("band lock").
+ * Adds any new contracts that entered the band; existing contracts stay
+ * (sticky band model — never drop a contract early).
+ */
+async function recenterOptionStream(): Promise<void> {
+  let centerPrice = lastSpxPrice;
+  if (!centerPrice) {
+    try {
+      const quote = await fetchSpxQuote();
+      if (quote && quote.last > 0) centerPrice = quote.last;
+    } catch (e) {
+      console.error('[option-stream] Failed to fetch SPX quote for band lock:', e);
+    }
+  }
+  if (!centerPrice) {
+    console.warn('[option-stream] No price available for band lock — keeping preliminary band');
+    return;
+  }
+
+  const expiries = getPoolExpiries();
+  const newPool = OptionStream.buildContractPool(centerPrice, STRIKE_BAND, STRIKE_INTERVAL, expiries);
+  if (newPool.length === 0) {
+    console.warn('[option-stream] Empty contract pool on recenter — keeping current pool');
+    return;
+  }
+
+  // Register all contracts in the new pool with the tracker + DB
+  for (const sym of newPool) {
+    const match = sym.match(/^(SPXW?)(\d{6})([CP])(\d{8})$/);
+    if (match) {
+      const [, , expiryCode, type, strikeCode] = match;
+      const strike = parseInt(strikeCode) / 1000;
+      const expiry = `20${expiryCode.slice(0, 2)}-${expiryCode.slice(2, 4)}-${expiryCode.slice(4, 6)}`;
+      const added = tracker.updateBand(centerPrice, [{
+        symbol: sym, strike, expiry, type: type === 'C' ? 'call' : 'put',
+      }]);
+      for (const c of added) upsertContract(c);
+    }
+  }
+
+  // OptionStream doesn't support incremental symbol add — stop and restart with the
+  // full locked pool. Existing indicator state is preserved (in-memory IndicatorState map).
+  console.log(`[option-stream] Band lock: SPX≈${centerPrice.toFixed(0)}, rebuilding pool (${newPool.length} symbols, ±${STRIKE_BAND})`);
+  stopOptionStream();
+  await initOptionStream();
+}
+
+/**
  * Check option stream health — if disconnected, fall back to polling.
  * If reconnected, suppress polling again.
  */
@@ -317,15 +370,23 @@ function parseETTime(timeStr: string): number {
 }
 
 /**
- * Schedule option stream lifecycle:
- *   - At OPTION_STREAM_WAKE_ET (~9:15 ET): init stream
- *   - At OPTION_STREAM_CLOSE_ET (~16:15 ET): stop stream
+ * Schedule option stream lifecycle (two-phase):
+ *   Phase 1 — OPTION_STREAM_WAKE_ET (8:00 ET): init stream with preliminary band
+ *             Uses last known SPX price or Tradier quote. Starts building option
+ *             bars and warming up indicators 90 minutes before market open.
+ *   Phase 2 — OPTION_STREAM_LOCK_ET (9:30 ET): "lock" the band on firm SPX price
+ *             Market open gives a definitive SPX price. Re-center the strike band,
+ *             add any new contracts that entered the ±$100 range.
+ *   Close  — OPTION_STREAM_CLOSE_ET (17:00 ET): stop stream, expire 0DTE contracts.
+ *
  * Also checks for fallback/reconnection every 30s.
  */
 function scheduleOptionStream(): void {
   const wakeMinutes = parseETTime(OPTION_STREAM_WAKE_ET);
+  const lockMinutes = parseETTime(OPTION_STREAM_LOCK_ET);
   const closeMinutes = parseETTime(OPTION_STREAM_CLOSE_ET);
   let streamInitialized = false;
+  let bandLocked = false;
   let streamStopped = false;
 
   optionStreamScheduleTimer = setInterval(async () => {
@@ -334,16 +395,28 @@ function scheduleOptionStream(): void {
 
     // Check if we're in the streaming window
     if (nowMinutes >= wakeMinutes && nowMinutes < closeMinutes) {
-      // Inside window — init stream if not done yet
+      // Phase 1: Init stream with preliminary band
       if (!streamInitialized && !optionStreamActive) {
         streamInitialized = true;
         streamStopped = false;
-        console.log(`[option-stream] Wake time reached (${OPTION_STREAM_WAKE_ET} ET) — initializing`);
+        bandLocked = false;
+        console.log(`[option-stream] Phase 1: Wake time reached (${OPTION_STREAM_WAKE_ET} ET) — initializing with preliminary band`);
         try {
           await initOptionStream();
         } catch (e) {
           console.error('[option-stream] Init failed:', e);
           streamInitialized = false;
+        }
+      }
+
+      // Phase 2: Lock band at market open
+      if (streamInitialized && !bandLocked && nowMinutes >= lockMinutes) {
+        bandLocked = true;
+        console.log(`[option-stream] Phase 2: Lock time reached (${OPTION_STREAM_LOCK_ET} ET) — re-centering band on firm SPX price`);
+        try {
+          await recenterOptionStream();
+        } catch (e) {
+          console.error('[option-stream] Band lock failed:', e);
         }
       }
 
@@ -357,9 +430,11 @@ function scheduleOptionStream(): void {
       }
       streamStopped = true;
       streamInitialized = false;
+      bandLocked = false;
     } else if (nowMinutes < wakeMinutes) {
       // Before wake time — reset flags for new day
       streamInitialized = false;
+      bandLocked = false;
       streamStopped = false;
     }
   }, 30_000); // check every 30s
@@ -817,10 +892,11 @@ async function main(): Promise<void> {
   intervals.push(setInterval(pollOptions, optionsInterval));
   intervals.push(setInterval(pollScreener, POLL_SCREENER_MS));
 
-  // Schedule option stream lifecycle (9:30 ET wake → 17:00 ET close)
-  // Before 9:30, REST polling (pollOptions every 30s) builds bars + indicators.
-  // At 9:30, option stream inits: centers strike band on SPX, connects WebSocket.
-  // REST polling auto-suppresses once WebSocket is connected.
+  // Schedule option stream lifecycle (two-phase):
+  //   8:00 ET — Phase 1: Connect WebSocket with preliminary strike band, start building option bars
+  //   9:30 ET — Phase 2: "Lock" band on firm SPX opening price, add new contracts if needed
+  //  17:00 ET — Stop stream, expire 0DTE contracts
+  // REST polling (pollOptions) auto-suppresses once WebSocket is connected.
   if (config.tradierToken) {
     scheduleOptionStream();
 

@@ -39,9 +39,12 @@ export const POLL_SCREENER_MS = 60_000;
 export const GAP_INTERPOLATE_MAX_MINS = 60;
 export const MAX_BARS_MEMORY = 2000;
 
-/** ET time to initialize option stream (center band on SPX + connect WebSocket).
- *  Set to 9:30 — market open, SPX has a firm price to center the strike band.
- *  REST polling (pollOptions) builds bars/indicators from 8:00 AM until this kicks in. */
-export const OPTION_STREAM_WAKE_ET = '09:30';
+/** ET time to initialize option stream (connect WebSocket, start building option bars).
+ *  Set to 8:00 — Tradier SPX data begins, preliminary band centered on last known price.
+ *  At OPTION_STREAM_LOCK_ET (9:30), band re-centers on firm SPX opening price. */
+export const OPTION_STREAM_WAKE_ET = '08:00';
+/** ET time to re-center ("lock") the strike band on SPX opening price.
+ *  At market open, SPX has a firm price — rebuild the contract pool around it. */
+export const OPTION_STREAM_LOCK_ET = '09:30';
 /** ET time to stop option stream (close WebSocket, expire 0DTE contracts) */
 export const OPTION_STREAM_CLOSE_ET = '17:00';

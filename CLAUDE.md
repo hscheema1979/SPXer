@@ -109,7 +109,7 @@ providers/tv-screener.ts──┘    pipeline/aggregator.ts       storage/archiv
 
 Note: `src/pipeline/indicator-engine.ts` is a re-export shim — actual indicator logic lives in `src/core/indicator-engine.ts`. Tier-specific indicator computations are in `src/pipeline/indicators/tier1.ts` and `tier2.ts`.
 
-**Time-based source switching**: `scheduler.ts` auto-switches between Yahoo `ES=F` (overnight 6PM-9:30AM ET) and Tradier SPX timesales (RTH 9:30AM-4:15PM ET). Market holidays and early-close days are hardcoded in `src/config.ts`.
+**Time-based data flow**: No overnight data collection (Yahoo ES removed). Tradier SPX timesales start at 8:00 AM ET (RTH mode). The option stream uses a two-phase approach: Phase 1 at 8:00 AM connects the WebSocket with a preliminary strike band for early indicator building; Phase 2 at 9:30 AM "locks" the band by re-centering on the firm SPX opening price. Market holidays and early-close days are hardcoded in `src/config.ts`.
 
 **Contract lifecycle**: Contracts follow `UNSEEN → ACTIVE → STICKY → EXPIRED`. Once a contract enters the ±$100 strike band around SPX, it's tracked until expiry — never dropped early. This is the "sticky band model" in `contract-tracker.ts`.
 
