@@ -120,8 +120,8 @@ CRON_BLOCK="${CRON_MARKER_START}
 # Bar purge — Sunday 3 AM ET (7 UTC)
 0 7 * * 0 cd ${SPXER_DIR} && npx tsx scripts/purge-bars.ts >> ${LOG_DIR}/purge.log 2>&1
 
-# Agent start — 9:25 AM ET (13:25 UTC) weekdays
-25 13 * * 1-5 ${SPXER_DIR}/scripts/agent-scheduler.sh start >> ${LOG_DIR}/agent-scheduler.log 2>&1
+# Agent start — 9:31 AM ET (13:31 UTC) weekdays (1 min after open, SPX price established)
+31 13 * * 1-5 ${SPXER_DIR}/scripts/agent-scheduler.sh start >> ${LOG_DIR}/agent-scheduler.log 2>&1
 
 # Agent stop — 4:20 PM ET (20:20 UTC) weekdays
 20 20 * * 1-5 ${SPXER_DIR}/scripts/agent-scheduler.sh stop >> ${LOG_DIR}/agent-scheduler.log 2>&1

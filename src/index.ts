@@ -1,6 +1,5 @@
 import { initDb, getDb, closeDb } from './storage/db';
 import { getAllActiveContracts, upsertBar, upsertBars, upsertContract, getDbSizeMb, getBars, getLatestBar, expireContractsBefore, expireContractsOnDate } from './storage/queries';
-import { fetchYahooBars } from './providers/yahoo';
 import { fetchSpxQuote, fetchOptionsChain, fetchExpirations, fetchSpxTimesales, fetchBatchQuotes, fetchTimesales } from './providers/tradier';
 import { fetchScreenerSnapshot } from './providers/tv-screener';
 import { buildBars, fillGaps, rawToBar } from './pipeline/bar-builder';
@@ -79,7 +78,7 @@ function initSpxStream(): void {
 }
 
 function closeSpxCandle(candle: NonNullable<typeof spxCandle>): void {
-  const symbol = getMarketMode() === 'rth' ? 'SPX' : 'ES';
+  const symbol = 'SPX';
   const bar = rawToBar(symbol, '1m', {
     ts: candle.minuteTs,
     open: candle.open,
@@ -123,7 +122,7 @@ let optionStreamActive = false;       // true when stream is live — suppresses
 let optionStreamScheduleTimer: ReturnType<typeof setInterval> | null = null;
 
 /** ES→SPX fair value offset: ES trades ~46 pts above SPX (simple fixed estimate) */
-const ES_SPX_OFFSET = 46;
+// ES_SPX_OFFSET removed — no longer polling ES futures overnight
 
 /**
  * Get today's and tomorrow's expiry dates for the contract pool.
@@ -139,34 +138,34 @@ function getPoolExpiries(): string[] {
 }
 
 /**
- * Initialize the option WebSocket stream:
- *   1. Fetch ES price (from lastSpxPrice or DB) to center the pool
- *   2. Estimate SPX from ES using the fair value offset
- *   3. Build contract pool: ±100 pts × $5 × calls+puts × 2 expiries ≈ 160 symbols
- *   4. Create OptionCandleBuilder with onClose → rawToBar → indicators → DB → broadcast
- *   5. Wire optionStream.onTick → candleBuilder
- *   6. Start the stream
+ * Initialize the option WebSocket stream at 9:30 ET (market open):
+ *   1. Get SPX price (from lastSpxPrice, DB, or live Tradier quote)
+ *   2. Build contract pool: ±STRIKE_BAND pts × $5 × calls+puts × active expiries
+ *   3. Create OptionCandleBuilder with onClose → rawToBar → indicators → DB → broadcast
+ *   4. Wire optionStream.onTick → candleBuilder
+ *   5. Start the stream — REST polling (pollOptions) is suppressed once connected
+ *
+ * Before 9:30, pollOptions() runs via REST every 30s to build bars and seed indicators.
  */
 async function initOptionStream(): Promise<void> {
   // Step 1: Get a price to center the pool on
   let centerPrice = lastSpxPrice;
   if (!centerPrice) {
-    // Try ES from DB
-    const esBar = getLatestBar('ES', '1m');
-    if (esBar) {
-      centerPrice = esBar.close - ES_SPX_OFFSET;
+    // Try SPX from DB
+    const spxBar = getLatestBar('SPX', '1m');
+    if (spxBar) {
+      centerPrice = spxBar.close;
     }
   }
   if (!centerPrice) {
-    // Try fetching ES from Yahoo as last resort
+    // Try live Tradier quote as last resort
     try {
-      const rawBars = await fetchYahooBars('ES=F', '1m', '1d');
-      if (rawBars.length > 0) {
-        const lastEs = rawBars[rawBars.length - 1];
-        centerPrice = lastEs.close - ES_SPX_OFFSET;
+      const quote = await fetchSpxQuote();
+      if (quote && quote.last > 0) {
+        centerPrice = quote.last;
       }
     } catch (e) {
-      console.error('[option-stream] Failed to fetch ES for pool centering:', e);
+      console.error('[option-stream] Failed to fetch SPX quote for pool centering:', e);
     }
   }
   if (!centerPrice) {
@@ -477,71 +476,65 @@ async function backfillOptionBars(): Promise<void> {
 }
 
 async function warmup(): Promise<void> {
-  console.log('[startup] Warming up ES=F overnight bars...');
-  const rawBars = await fetchYahooBars('ES=F', '1m', '2d');
-  const bars = fillGaps('ES', '1m', buildBars('ES', '1m', rawBars), 60);
-  const enriched = bars.map(b => ({ ...b, indicators: computeIndicators(b, 2) }));
-  upsertBars(enriched);
-
-  // Aggregate to higher timeframes (3m, 5m, 15m, 1h)
-  aggregateAndStore(enriched, 2);
-  console.log(`[startup] Warmed ${enriched.length} ES 1m bars`);
+  // Seed SPX price from Tradier quote if we don't have one yet
+  if (!lastSpxPrice) {
+    try {
+      const quote = await fetchSpxQuote();
+      if (quote && quote.last > 0) {
+        lastSpxPrice = quote.last;
+        setLastSpxPrice(lastSpxPrice);
+        console.log(`[startup] Primed SPX price from Tradier quote: $${lastSpxPrice}`);
+      }
+    } catch (e) {
+      console.warn('[startup] Could not fetch SPX quote — price will be set when RTH data arrives');
+    }
+  }
 }
 
 async function pollUnderlying(): Promise<void> {
   const mode = getMarketMode();
-  const today = new Date().toISOString().split('T')[0];
+
+  // Only poll during RTH — no overnight ES data needed
+  if (mode !== 'rth') return;
 
   try {
     let bars: ReturnType<typeof buildBars> | undefined;
-    if (mode === 'rth') {
-      // Fetch without date filter — Tradier returns null for SPX timesales with explicit dates
-      // but returns proper 1m OHLCV bars without date params (defaults to current session)
-      const raw = await fetchTimesales('SPX');
-      if (raw.length) {
-        bars = buildBars('SPX', '1m', raw.slice(-5));
-      } else {
-        // Timesales may lag on session open — fall back to live quote to prime lastSpxPrice ONLY.
-        // Do NOT persist this as a bar: it's a mid-minute quote snapshot (open=close=last,
-        // high=ask, low=bid, volume=0) — not a closed candle. Storing it would corrupt HMA
-        // calculations on the aggregated 3m/5m bar series.
-        const quote = await fetchSpxQuote();
-        if (quote && quote.last > 0) {
-          lastSpxPrice = quote.last;
-          setLastSpxPrice(lastSpxPrice);
-          healthTracker.recordBar('SPX', Date.now());
-        }
-      }
-      healthTracker.recordSuccess('tradier');
+    // Fetch without date filter — Tradier returns null for SPX timesales with explicit dates
+    // but returns proper 1m OHLCV bars without date params (defaults to current session)
+    const raw = await fetchTimesales('SPX');
+    if (raw.length) {
+      bars = buildBars('SPX', '1m', raw.slice(-5));
     } else {
-      const raw = await fetchYahooBars('ES=F', '1m', '1d');
-      bars = buildBars('ES', '1m', raw.slice(-5));
-      healthTracker.recordSuccess('yahoo');
+      // Timesales may lag on session open — fall back to live quote to prime lastSpxPrice ONLY.
+      // Do NOT persist this as a bar: it's a mid-minute quote snapshot (open=close=last,
+      // high=ask, low=bid, volume=0) — not a closed candle. Storing it would corrupt HMA
+      // calculations on the aggregated 3m/5m bar series.
+      const quote = await fetchSpxQuote();
+      if (quote && quote.last > 0) {
+        lastSpxPrice = quote.last;
+        setLastSpxPrice(lastSpxPrice);
+        healthTracker.recordBar('SPX', Date.now());
+      }
     }
+    healthTracker.recordSuccess('tradier');
 
     if (bars?.length) {
-      const symbol = mode === 'rth' ? 'SPX' : 'ES';
       const enriched = bars.map(b => ({ ...b, indicators: computeIndicators(b, 2) }));
       upsertBars(enriched);
 
       // Aggregate to higher timeframes — fetch recent 1m bars for proper aggregation
-      const recent1m = getBars(symbol, '1m', 60);
+      const recent1m = getBars('SPX', '1m', 60);
       if (recent1m.length > 0) aggregateAndStore(recent1m, 2);
 
       lastSpxPrice = enriched[enriched.length - 1].close;
       setLastSpxPrice(lastSpxPrice);
       const lastBar = enriched[enriched.length - 1];
-      healthTracker.recordBar(symbol, lastBar.ts * 1000);
+      healthTracker.recordBar('SPX', lastBar.ts * 1000);
       broadcast({ type: 'spx_bar', data: lastBar });
-
-      // Detect HMA cross signal on the newly closed candle
-      // Only check during RTH on SPX bars (not overnight ES)
-      if (symbol === 'SPX') {
-        detectHmaCrossSignal(lastBar);
-      }
+      detectHmaCrossSignal(lastBar);
     }
   } catch (e) {
-    healthTracker.recordFailure(mode === 'rth' ? 'tradier' : 'yahoo');
+    healthTracker.recordFailure('tradier');
     console.error('[poll:underlying]', e);
   }
 }
@@ -784,8 +777,8 @@ async function main(): Promise<void> {
   try {
     const allTimeframes = ['1m', ...HIGHER_TIMEFRAMES.map(([t]) => t)];
 
-    // Seed underlying (SPX/ES) with tier 2 indicators
-    for (const sym of ['SPX', 'ES']) {
+    // Seed underlying SPX with tier 2 indicators
+    for (const sym of ['SPX']) {
       for (const tf of allTimeframes) {
         const histBars = getBars(sym, tf, 50);
         if (histBars.length > 0) {
@@ -824,7 +817,10 @@ async function main(): Promise<void> {
   intervals.push(setInterval(pollOptions, optionsInterval));
   intervals.push(setInterval(pollScreener, POLL_SCREENER_MS));
 
-  // Schedule option stream lifecycle (9:15 ET wake → 16:15 ET close)
+  // Schedule option stream lifecycle (9:30 ET wake → 17:00 ET close)
+  // Before 9:30, REST polling (pollOptions every 30s) builds bars + indicators.
+  // At 9:30, option stream inits: centers strike band on SPX, connects WebSocket.
+  // REST polling auto-suppresses once WebSocket is connected.
   if (config.tradierToken) {
     scheduleOptionStream();
 
@@ -846,10 +842,8 @@ async function main(): Promise<void> {
       recordModeTransition(prevMode ?? 'startup', mode);
     }
     if (mode === 'rth' && prevMode !== 'rth') {
-      for (const sym of ['SPX', 'ES']) {
-        resetVWAP(sym, '1m');
-        for (const [tf] of HIGHER_TIMEFRAMES) resetVWAP(sym, tf);
-      }
+      resetVWAP('SPX', '1m');
+      for (const [tf] of HIGHER_TIMEFRAMES) resetVWAP('SPX', tf);
     }
     prevMode = mode;
     pipelineHealth.currentMode = mode;

@@ -39,7 +39,9 @@ export const POLL_SCREENER_MS = 60_000;
 export const GAP_INTERPOLATE_MAX_MINS = 60;
 export const MAX_BARS_MEMORY = 2000;
 
-/** ET time to initialize option stream (build pool + connect WebSocket) */
-export const OPTION_STREAM_WAKE_ET = '07:45';
+/** ET time to initialize option stream (center band on SPX + connect WebSocket).
+ *  Set to 9:30 — market open, SPX has a firm price to center the strike band.
+ *  REST polling (pollOptions) builds bars/indicators from 8:00 AM until this kicks in. */
+export const OPTION_STREAM_WAKE_ET = '09:30';
 /** ET time to stop option stream (close WebSocket, expire 0DTE contracts) */
 export const OPTION_STREAM_CLOSE_ET = '17:00';

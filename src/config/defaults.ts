@@ -170,7 +170,7 @@ export const DEFAULT_CONFIG: Config = {
   timeWindows: {
     sessionStart: '09:30',
     sessionEnd: '15:45',
-    activeStart: '09:30',
+    activeStart: '10:00',    // No trades in first 30 min — let indicators warm up
     activeEnd: '15:45',
     skipWeekends: true,
     skipHolidays: true,

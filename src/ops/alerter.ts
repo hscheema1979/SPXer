@@ -156,7 +156,7 @@ export function startAlertMonitor(): void {
     // ── Bar validation rejections ──────────────────────────────────────────
     const totalRejected = ph.barBuilder.barsRejected +
       ph.providers.tradier.barsRejected +
-      ph.providers.yahoo.barsRejected;
+      (ph.providers.yahoo?.barsRejected ?? 0);
     if (totalRejected > 5) {
       await sendAlert(
         'bar-validation-failures',

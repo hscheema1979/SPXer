@@ -25,6 +25,8 @@ export function getMarketMode(now: Date = new Date()): MarketMode {
 
   const rthEnd = isEarlyCloseDay(dateStr) ? 13 * 60 : 17 * 60;
 
+  // RTH starts at 8:00 AM ET (Tradier SPX data begins)
+  // preopen is 7:55-8:00 AM ET (5-min warmup window)
   if (mins >= 7 * 60 + 55 && mins < 8 * 60) return 'preopen';
   if (mins >= 8 * 60 && mins < rthEnd) return 'rth';
   return 'overnight';

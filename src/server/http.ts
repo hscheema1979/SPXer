@@ -80,15 +80,14 @@ export function startHttpServer(port: number): { app: Express; httpServer: Serve
   });
 
   app.get('/spx/snapshot', (_, res) => {
-    const bar = getLatestBar('SPX', '1m') ?? getLatestBar('ES', '1m');
+    const bar = getLatestBar('SPX', '1m');
     res.json(bar ?? { error: 'no data' });
   });
 
   app.get('/spx/bars', (req, res) => {
     const tf = (req.query.tf as string) || '1m';
     const n = Math.min(parseInt(req.query.n as string) || 100, 2000);
-    const symbol = getMarketMode() === 'rth' ? 'SPX' : 'ES';
-    res.json(getBars(symbol, tf, n));
+    res.json(getBars('SPX', tf, n));
   });
 
   // Pipeline telemetry — per-stage counters updated by the pipeline as it runs
