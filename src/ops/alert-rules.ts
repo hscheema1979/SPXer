@@ -275,10 +275,10 @@ export function getDefaultRules(): AlertRule[] {
     // 5. daily-loss-limit
     {
       name: 'daily-loss-limit',
-      description: 'Agent daily P&L below -$500',
-      severity: 'critical',
+      description: 'Agent daily P&L below -$500 (informational only — does NOT stop trading)',
+      severity: 'warning',
       cooldownSec: 1800,
-      enabled: true,
+      enabled: false,
       evaluate: (ctx) => {
         const breached: string[] = [];
         for (const [label, status] of [['SPX', ctx.agentSpx]] as const) {
@@ -423,13 +423,13 @@ export function getDefaultRules(): AlertRule[] {
       },
     },
 
-    // 11. circuit-breaker-open
+    // 11. circuit-breaker-open — transient during restarts, auto-heals in <90s
     {
       name: 'circuit-breaker-open',
-      description: 'Pipeline circuit breaker in open state',
+      description: 'Pipeline circuit breaker in open state (transient during restarts)',
       severity: 'warning',
       cooldownSec: 900,
-      enabled: true,
+      enabled: false,
       evaluate: (ctx) => {
         if (!ctx.pipeline?.providers) return null;
         const open: string[] = [];
@@ -478,13 +478,14 @@ export function getDefaultRules(): AlertRule[] {
       },
     },
 
-    // 14. excessive-restarts
+    // 14. excessive-restarts — DISABLED: PM2 restart counts are cumulative
+    // and never reset. Normal deploys trigger this constantly. Not actionable.
     {
       name: 'excessive-restarts',
-      description: 'PM2 process restarted more than 5 times',
+      description: 'PM2 process restarted more than 5 times (cumulative, not useful)',
       severity: 'warning',
       cooldownSec: 3600,
-      enabled: true,
+      enabled: false,
       evaluate: (ctx) => {
         const restartThreshold = 5;
         const restarted: string[] = [];
