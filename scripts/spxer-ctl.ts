@@ -11,7 +11,11 @@
 import { execSync, exec as execCb } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as http from 'node:http';
+import * as https from 'node:https';
 import * as path from 'node:path';
+import * as dotenv from 'dotenv';
+
+dotenv.config({ path: '/home/ubuntu/SPXer/.env' });
 
 // ─── Paths ───────────────────────────────────────────────────────────────────
 
@@ -204,6 +208,66 @@ function shellAsync(cmd: string): Promise<string> {
 
 function sqlite(query: string): string {
   return shell(`sqlite3 "${DB_PATH}" "${query}"`);
+}
+
+// ─── Tradier API ──────────────────────────────────────────────────────────────
+
+const TRADIER_TOKEN = process.env.TRADIER_TOKEN || '';
+const TRADIER_BASE = 'https://api.tradier.com/v1';
+
+const ACCOUNTS: Record<string, { id: string; label: string; type: string }> = {
+  spx: { id: '6YA51425', label: 'SPX (Margin)', type: 'margin' },
+  xsp: { id: '6YA58635', label: 'XSP (Cash)',   type: 'cash' },
+};
+
+function tradierGet(endpoint: string, timeoutMs = 8000): Promise<any> {
+  if (!TRADIER_TOKEN) return Promise.reject(new Error('TRADIER_TOKEN not set'));
+  const url = new URL(`${TRADIER_BASE}${endpoint}`);
+  return new Promise((resolve, reject) => {
+    const req = https.get(url, {
+      headers: { Authorization: `Bearer ${TRADIER_TOKEN}`, Accept: 'application/json' },
+      timeout: timeoutMs,
+    }, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => {
+        try { resolve(JSON.parse(data)); }
+        catch { reject(new Error(`Invalid JSON from ${endpoint}: ${data.slice(0, 200)}`)); }
+      });
+    });
+    req.on('error', reject);
+    req.on('timeout', () => { req.destroy(); reject(new Error(`Timeout: ${endpoint}`)); });
+  });
+}
+
+function resolveAccountId(hint?: string): { id: string; label: string } {
+  if (!hint || hint === 'all') return { id: 'all', label: 'All Accounts' };
+  const lower = hint.toLowerCase();
+  if (ACCOUNTS[lower]) return { id: ACCOUNTS[lower].id, label: ACCOUNTS[lower].label };
+  // Try direct account ID
+  for (const [, acc] of Object.entries(ACCOUNTS)) {
+    if (acc.id === hint) return { id: acc.id, label: acc.label };
+  }
+  // Default to SPX
+  return { id: ACCOUNTS.spx.id, label: ACCOUNTS.spx.label };
+}
+
+function parseOptionSymbol(sym: string): { expiry: string; type: string; strike: number; prefix: string } | null {
+  const m = sym.match(/^(SPXW?|XSP)(\d{6})([CP])(\d{8})$/);
+  if (!m) return null;
+  const [, prefix, expiryCode, type, strikeCode] = m;
+  return {
+    prefix,
+    expiry: `20${expiryCode.slice(0, 2)}-${expiryCode.slice(2, 4)}-${expiryCode.slice(4, 6)}`,
+    type: type === 'C' ? 'Call' : 'Put',
+    strike: parseInt(strikeCode) / 1000,
+  };
+}
+
+function formatOptionSymbol(sym: string): string {
+  const parsed = parseOptionSymbol(sym);
+  if (!parsed) return sym;
+  return `${parsed.prefix} ${parsed.expiry} ${parsed.strike} ${parsed.type}`;
 }
 
 function parseArgs(argv: string[]): { positional: string[]; flags: Record<string, string> } {
@@ -1234,6 +1298,571 @@ function cmdAlerts(flags: Record<string, string>) {
   }
 }
 
+// ─── Broker Commands (Tradier API) ──────────────────────────────────────────
+
+async function cmdPositions(flags: Record<string, string>) {
+  const acctHint = flags.account || flags.acct || 'all';
+  const accountIds = acctHint === 'all'
+    ? Object.values(ACCOUNTS)
+    : [resolveAccountId(acctHint)].map(a => ({ ...a, ...Object.values(ACCOUNTS).find(acc => acc.id === a.id) }));
+
+  for (const acc of Object.values(ACCOUNTS)) {
+    if (acctHint !== 'all' && acc.id !== resolveAccountId(acctHint).id) continue;
+
+    console.log(bold(`\n  Positions — ${acc.label} (${acc.id})`));
+    console.log('');
+
+    try {
+      const data = await tradierGet(`/accounts/${acc.id}/positions`);
+      const positions = data?.positions?.position;
+      if (!positions || positions === 'null') {
+        console.log(dim('    No open positions'));
+        continue;
+      }
+      const posList = Array.isArray(positions) ? positions : [positions];
+
+      const widths = [30, 6, 10, 12, 12, 10];
+      console.log(tableTop(widths));
+      console.log(tableRow([
+        bold('Symbol'), bold('Qty'), bold('Cost'), bold('Value'), bold('P&L'), bold('P&L %')
+      ], widths));
+      console.log(tableSep(widths));
+
+      let totalPnl = 0;
+      for (const p of posList) {
+        const cost = p.cost_basis ?? 0;
+        const value = (p.quantity ?? 0) * (p.cost_basis ? p.cost_basis / (p.quantity || 1) : 0);
+        const pnl = (p.market_value ?? value) - cost;
+        totalPnl += pnl;
+        const pnlPct = cost !== 0 ? (pnl / Math.abs(cost)) * 100 : 0;
+        const symDisplay = formatOptionSymbol(p.symbol);
+
+        console.log(tableRow([
+          cyan(symDisplay),
+          String(p.quantity),
+          `$${(cost).toFixed(2)}`,
+          `$${(p.market_value ?? 0).toFixed(2)}`,
+          formatMoney(pnl),
+          `${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(1)}%`,
+        ], widths));
+      }
+      console.log(tableSep(widths));
+      console.log(tableRow([
+        bold('Total'), '', '', '', formatMoney(totalPnl), ''
+      ], widths));
+      console.log(tableBot(widths));
+    } catch (e: any) {
+      console.log(red(`    Error: ${e.message}`));
+    }
+  }
+}
+
+async function cmdOrders(flags: Record<string, string>) {
+  const acctHint = flags.account || flags.acct || 'all';
+  const showAll = flags.all === 'true';
+  const limit = parseInt(flags.lines || flags.n || '20', 10);
+
+  for (const acc of Object.values(ACCOUNTS)) {
+    if (acctHint !== 'all' && acc.id !== resolveAccountId(acctHint).id) continue;
+
+    console.log(bold(`\n  Orders — ${acc.label} (${acc.id})`));
+    console.log('');
+
+    try {
+      const data = await tradierGet(`/accounts/${acc.id}/orders`);
+      let orders = data?.orders?.order;
+      if (!orders || orders === 'null') {
+        console.log(dim('    No orders'));
+        continue;
+      }
+      orders = Array.isArray(orders) ? orders : [orders];
+
+      // Filter to today by default, or show all
+      if (!showAll) {
+        const todayStr = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+        orders = orders.filter((o: any) => {
+          const created = o.create_date || o.transaction_date || '';
+          return created.startsWith(todayStr);
+        });
+        if (orders.length === 0) {
+          console.log(dim('    No orders today (use --all for all orders)'));
+          continue;
+        }
+      }
+
+      // Most recent first, limit
+      orders = orders.slice(-limit).reverse();
+
+      const widths = [8, 10, 8, 24, 6, 8, 10, 12];
+      console.log(tableTop(widths));
+      console.log(tableRow([
+        bold('ID'), bold('Status'), bold('Type'), bold('Symbol'), bold('Side'), bold('Qty'),
+        bold('Price'), bold('Fill'),
+      ], widths));
+      console.log(tableSep(widths));
+
+      for (const o of orders) {
+        const status = o.status || '?';
+        const statusStr = status === 'filled' ? green(status)
+          : status === 'open' || status === 'pending' ? yellow(status)
+          : status === 'canceled' || status === 'rejected' ? red(status)
+          : dim(status);
+
+        // Handle OTOCO (multi-leg) and single orders
+        const legs = o.leg ? (Array.isArray(o.leg) ? o.leg : [o.leg]) : null;
+        if (legs && legs.length > 0) {
+          // Multi-leg order header
+          console.log(tableRow([
+            String(o.id), statusStr, cyan(o.class || o.type || '?'),
+            dim(`(${legs.length} legs)`), '', '', '', '',
+          ], widths));
+
+          for (const leg of legs) {
+            const symDisplay = formatOptionSymbol(leg.option_symbol || leg.symbol || '');
+            const fillPrice = leg.avg_fill_price ? `$${Number(leg.avg_fill_price).toFixed(2)}` : dim('—');
+            const price = leg.price ? `$${Number(leg.price).toFixed(2)}`
+              : leg.stop_price ? `stop $${Number(leg.stop_price).toFixed(2)}` : dim('—');
+
+            console.log(tableRow([
+              dim(`  └${leg.id || ''}`), statusStr, leg.type || '?',
+              symDisplay,
+              leg.side || '?', String(leg.quantity || '?'),
+              price, fillPrice,
+            ], widths));
+          }
+        } else {
+          // Single order
+          const symDisplay = formatOptionSymbol(o.option_symbol || o.symbol || '');
+          const fillPrice = o.avg_fill_price ? `$${Number(o.avg_fill_price).toFixed(2)}` : dim('—');
+          const price = o.price ? `$${Number(o.price).toFixed(2)}`
+            : o.stop_price ? `stop $${Number(o.stop_price).toFixed(2)}` : dim('—');
+
+          console.log(tableRow([
+            String(o.id), statusStr, o.type || '?',
+            symDisplay,
+            o.side || '?', String(o.quantity || '?'),
+            price, fillPrice,
+          ], widths));
+        }
+      }
+      console.log(tableBot(widths));
+      console.log(dim(`    Showing ${orders.length} orders` + (showAll ? '' : ' (today only, use --all for all)')));
+    } catch (e: any) {
+      console.log(red(`    Error: ${e.message}`));
+    }
+  }
+}
+
+async function cmdBalance(flags: Record<string, string>) {
+  const acctHint = flags.account || flags.acct || 'all';
+
+  for (const acc of Object.values(ACCOUNTS)) {
+    if (acctHint !== 'all' && acc.id !== resolveAccountId(acctHint).id) continue;
+
+    try {
+      const data = await tradierGet(`/accounts/${acc.id}/balances`);
+      const bal = data?.balances;
+      if (!bal) {
+        console.log(red(`  ${acc.label}: No balance data`));
+        continue;
+      }
+
+      const W = 52;
+      console.log('');
+      console.log(boxTop(W));
+      console.log(boxRow(bold(`${acc.label} (${acc.id})`), W));
+      console.log(hline(W));
+
+      // Common fields
+      const equity = bal.total_equity ?? bal.equity ?? 0;
+      const cash = bal.total_cash ?? bal.cash?.cash_available ?? 0;
+      const marketValue = bal.market_value ?? 0;
+      const optionBP = bal.option_buying_power ?? bal.cash?.cash_available ?? 0;
+      const dayTradeBP = bal.day_trading_buying_power ?? null;
+      const pendingCash = bal.pending_cash ?? 0;
+      const unclearedFunds = bal.uncleared_funds ?? 0;
+
+      console.log(boxRow(`Total Equity:       ${bold(`$${Number(equity).toLocaleString('en-US', { minimumFractionDigits: 2 })}`)}`, W));
+      console.log(boxRow(`Cash:               $${Number(cash).toLocaleString('en-US', { minimumFractionDigits: 2 })}`, W));
+      console.log(boxRow(`Market Value:       $${Number(marketValue).toLocaleString('en-US', { minimumFractionDigits: 2 })}`, W));
+      console.log(boxRow(`Option Buying Power: ${green(`$${Number(optionBP).toLocaleString('en-US', { minimumFractionDigits: 2 })}`)}`, W));
+      if (dayTradeBP !== null) {
+        console.log(boxRow(`Day Trade BP:       $${Number(dayTradeBP).toLocaleString('en-US', { minimumFractionDigits: 2 })}`, W));
+      }
+      if (pendingCash) {
+        console.log(boxRow(`Pending Cash:       $${Number(pendingCash).toLocaleString('en-US', { minimumFractionDigits: 2 })}`, W));
+      }
+      if (unclearedFunds) {
+        console.log(boxRow(`Uncleared Funds:    $${Number(unclearedFunds).toLocaleString('en-US', { minimumFractionDigits: 2 })}`, W));
+      }
+
+      // Margin-specific
+      if (bal.margin) {
+        const mg = bal.margin;
+        console.log(hline(W));
+        console.log(boxRow(dim('Margin Details'), W));
+        if (mg.fed_call !== undefined) console.log(boxRow(`  Fed Call:         $${Number(mg.fed_call).toFixed(2)}`, W));
+        if (mg.maintenance_call !== undefined) console.log(boxRow(`  Maint Call:       $${Number(mg.maintenance_call).toFixed(2)}`, W));
+        if (mg.stock_buying_power !== undefined) console.log(boxRow(`  Stock BP:         $${Number(mg.stock_buying_power).toFixed(2)}`, W));
+        if (mg.option_short_value !== undefined) console.log(boxRow(`  Short Value:      $${Number(mg.option_short_value).toFixed(2)}`, W));
+      }
+
+      // Cash-specific
+      if (bal.cash) {
+        const ca = bal.cash;
+        console.log(hline(W));
+        console.log(boxRow(dim('Cash Details'), W));
+        if (ca.cash_available !== undefined) console.log(boxRow(`  Cash Available:   $${Number(ca.cash_available).toFixed(2)}`, W));
+        if (ca.unsettled_funds !== undefined) console.log(boxRow(`  Unsettled:        $${Number(ca.unsettled_funds).toFixed(2)}`, W));
+        if (ca.sweep !== undefined) console.log(boxRow(`  Sweep:            $${Number(ca.sweep).toFixed(2)}`, W));
+      }
+
+      console.log(boxBot(W));
+    } catch (e: any) {
+      console.log(red(`  ${acc.label}: ${e.message}`));
+    }
+  }
+}
+
+async function cmdQuote(args: string[]) {
+  if (args.length === 0) {
+    // Default: SPX + VIX
+    args = ['SPX', 'VIX'];
+  }
+  const symbols = args.map(s => s.toUpperCase()).join(',');
+
+  try {
+    const data = await tradierGet(`/markets/quotes?symbols=${symbols}`);
+    const quotes = data?.quotes?.quote;
+    if (!quotes) {
+      console.log(dim('  No quotes returned'));
+      return;
+    }
+    const quoteList = Array.isArray(quotes) ? quotes : [quotes];
+
+    for (const q of quoteList) {
+      const W = 52;
+      console.log('');
+      console.log(boxTop(W));
+      console.log(boxRow(bold(`${q.symbol} — ${q.description || ''}`), W));
+      console.log(hline(W));
+
+      const change = q.change ?? 0;
+      const changePct = q.change_percentage ?? 0;
+      const changeStr = change >= 0
+        ? green(`+${change.toFixed(2)} (+${changePct.toFixed(2)}%)`)
+        : red(`${change.toFixed(2)} (${changePct.toFixed(2)}%)`);
+
+      console.log(boxRow(`Last:    ${bold(`$${Number(q.last ?? 0).toFixed(2)}`)}  ${changeStr}`, W));
+      console.log(boxRow(`Bid:     $${Number(q.bid ?? 0).toFixed(2)}    Ask: $${Number(q.ask ?? 0).toFixed(2)}`, W));
+      console.log(boxRow(`Open:    $${Number(q.open ?? 0).toFixed(2)}    Prev Close: $${Number(q.prevclose ?? q.close ?? 0).toFixed(2)}`, W));
+      console.log(boxRow(`High:    $${Number(q.high ?? 0).toFixed(2)}    Low:  $${Number(q.low ?? 0).toFixed(2)}`, W));
+      console.log(boxRow(`Volume:  ${Number(q.volume ?? 0).toLocaleString()}`, W));
+      console.log(boxBot(W));
+    }
+  } catch (e: any) {
+    console.log(red(`  Error: ${e.message}`));
+  }
+}
+
+async function cmdOptionQuote(args: string[]) {
+  if (args.length === 0) {
+    console.log(red('  Usage: spxer-ctl option-quote <symbol> [symbol...]'));
+    console.log(dim('  Example: spxer-ctl option-quote SPXW260417C07100000'));
+    return;
+  }
+
+  const symbols = args.map(s => s.toUpperCase()).join(',');
+  try {
+    const data = await tradierGet(`/markets/quotes?symbols=${symbols}`);
+    const quotes = data?.quotes?.quote;
+    if (!quotes) {
+      console.log(dim('  No quotes returned'));
+      return;
+    }
+    const quoteList = Array.isArray(quotes) ? quotes : [quotes];
+
+    const widths = [28, 8, 8, 8, 10, 8, 10];
+    console.log('');
+    console.log(tableTop(widths));
+    console.log(tableRow([
+      bold('Contract'), bold('Last'), bold('Bid'), bold('Ask'), bold('Spread'),
+      bold('Volume'), bold('OI'),
+    ], widths));
+    console.log(tableSep(widths));
+
+    for (const q of quoteList) {
+      const bid = q.bid ?? 0;
+      const ask = q.ask ?? 0;
+      const spread = ask - bid;
+      const spreadStr = spread <= 0.75 ? green(`$${spread.toFixed(2)}`) : red(`$${spread.toFixed(2)}`);
+
+      console.log(tableRow([
+        cyan(formatOptionSymbol(q.symbol)),
+        `$${Number(q.last ?? 0).toFixed(2)}`,
+        `$${bid.toFixed(2)}`,
+        `$${ask.toFixed(2)}`,
+        spreadStr,
+        String(q.volume ?? 0),
+        String(q.open_interest ?? 0),
+      ], widths));
+    }
+    console.log(tableBot(widths));
+  } catch (e: any) {
+    console.log(red(`  Error: ${e.message}`));
+  }
+}
+
+async function cmdChain(args: string[], flags: Record<string, string>) {
+  const expiry = args[0] || new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  const symbol = flags.symbol || 'SPX';
+  const strikeRange = parseInt(flags.range || '50', 10);
+
+  try {
+    // Get current SPX price for centering
+    const quoteData = await tradierGet(`/markets/quotes?symbols=${symbol}`);
+    const price = quoteData?.quotes?.quote?.last ?? 0;
+
+    const data = await tradierGet(`/markets/options/chains?symbol=${symbol}&expiration=${expiry}&greeks=true`);
+    let options = data?.options?.option;
+    if (!options) {
+      console.log(dim(`  No chain data for ${symbol} ${expiry}`));
+      // Show available expirations
+      const expData = await tradierGet(`/markets/options/expirations?symbol=${symbol}&includeAllRoots=true`);
+      const exps = expData?.expirations?.date;
+      if (exps) {
+        const expList = Array.isArray(exps) ? exps : [exps];
+        console.log(dim(`  Available expirations: ${expList.slice(0, 10).join(', ')}`));
+      }
+      return;
+    }
+    options = Array.isArray(options) ? options : [options];
+
+    // Filter to ±range around current price
+    if (price > 0) {
+      options = options.filter((o: any) =>
+        Math.abs(o.strike - price) <= strikeRange
+      );
+    }
+
+    // Separate calls and puts, sort by strike
+    const calls = options.filter((o: any) => o.option_type === 'call').sort((a: any, b: any) => a.strike - b.strike);
+    const puts = options.filter((o: any) => o.option_type === 'put').sort((a: any, b: any) => a.strike - b.strike);
+
+    console.log('');
+    console.log(bold(`  ${symbol} Option Chain — ${expiry} (±$${strikeRange} from $${price.toFixed(0)})`));
+    console.log('');
+
+    // Print calls
+    if (calls.length > 0) {
+      console.log(bold('  CALLS'));
+      const widths = [8, 8, 8, 8, 8, 8, 8];
+      console.log('  ' + tableTop(widths));
+      console.log('  ' + tableRow([
+        bold('Strike'), bold('Bid'), bold('Ask'), bold('Last'), bold('Vol'),
+        bold('OI'), bold('Delta'),
+      ], widths));
+      console.log('  ' + tableSep(widths));
+
+      for (const o of calls) {
+        const delta = o.greeks?.delta;
+        const strikeStr = price > 0 && o.strike > price ? dim(o.strike.toFixed(0)) : bold(String(o.strike.toFixed(0)));
+        console.log('  ' + tableRow([
+          strikeStr,
+          `$${(o.bid ?? 0).toFixed(2)}`,
+          `$${(o.ask ?? 0).toFixed(2)}`,
+          `$${(o.last ?? 0).toFixed(2)}`,
+          String(o.volume ?? 0),
+          String(o.open_interest ?? 0),
+          delta != null ? delta.toFixed(3) : dim('—'),
+        ], widths));
+      }
+      console.log('  ' + tableBot(widths));
+    }
+
+    // Print puts
+    if (puts.length > 0) {
+      console.log('');
+      console.log(bold('  PUTS'));
+      const widths = [8, 8, 8, 8, 8, 8, 8];
+      console.log('  ' + tableTop(widths));
+      console.log('  ' + tableRow([
+        bold('Strike'), bold('Bid'), bold('Ask'), bold('Last'), bold('Vol'),
+        bold('OI'), bold('Delta'),
+      ], widths));
+      console.log('  ' + tableSep(widths));
+
+      for (const o of puts) {
+        const delta = o.greeks?.delta;
+        const strikeStr = price > 0 && o.strike < price ? dim(o.strike.toFixed(0)) : bold(String(o.strike.toFixed(0)));
+        console.log('  ' + tableRow([
+          strikeStr,
+          `$${(o.bid ?? 0).toFixed(2)}`,
+          `$${(o.ask ?? 0).toFixed(2)}`,
+          `$${(o.last ?? 0).toFixed(2)}`,
+          String(o.volume ?? 0),
+          String(o.open_interest ?? 0),
+          delta != null ? delta.toFixed(3) : dim('—'),
+        ], widths));
+      }
+      console.log('  ' + tableBot(widths));
+    }
+
+    console.log(dim(`  ${calls.length} calls, ${puts.length} puts shown`));
+  } catch (e: any) {
+    console.log(red(`  Error: ${e.message}`));
+  }
+}
+
+async function cmdHistory(flags: Record<string, string>) {
+  const acctHint = flags.account || flags.acct || 'spx';
+  const limit = parseInt(flags.lines || flags.n || '30', 10);
+  const acc = resolveAccountId(acctHint);
+
+  const accountEntry = Object.values(ACCOUNTS).find(a => a.id === acc.id);
+  console.log(bold(`\n  Trade History — ${accountEntry?.label || acc.id}`));
+  console.log('');
+
+  try {
+    const data = await tradierGet(`/accounts/${acc.id}/history?limit=${limit}&type=trade`);
+    const events = data?.history?.event;
+    if (!events || events === 'null') {
+      console.log(dim('    No trade history'));
+      return;
+    }
+    const eventList = (Array.isArray(events) ? events : [events]).reverse();
+
+    const widths = [12, 12, 24, 8, 8, 10, 10];
+    console.log(tableTop(widths));
+    console.log(tableRow([
+      bold('Date'), bold('Type'), bold('Symbol'), bold('Side'), bold('Qty'),
+      bold('Price'), bold('Amount'),
+    ], widths));
+    console.log(tableSep(widths));
+
+    for (const ev of eventList) {
+      const trade = ev.trade;
+      if (!trade) continue;
+
+      const date = (ev.date || '').slice(0, 10);
+      const symDisplay = formatOptionSymbol(trade.symbol || '');
+      const side = trade.trade_type || '?';
+      const sideStr = side.includes('buy') ? green(side) : red(side);
+      const amount = trade.amount ?? trade.cost ?? 0;
+
+      console.log(tableRow([
+        date,
+        ev.type || '?',
+        cyan(symDisplay),
+        sideStr,
+        String(trade.quantity || '?'),
+        `$${Number(trade.price ?? 0).toFixed(2)}`,
+        formatMoney(amount),
+      ], widths));
+    }
+    console.log(tableBot(widths));
+    console.log(dim(`    Showing last ${eventList.length} trades`));
+  } catch (e: any) {
+    console.log(red(`    Error: ${e.message}`));
+  }
+}
+
+async function cmdGainloss(flags: Record<string, string>) {
+  const acctHint = flags.account || flags.acct || 'spx';
+  const limit = parseInt(flags.lines || flags.n || '30', 10);
+  const acc = resolveAccountId(acctHint);
+  const accountEntry = Object.values(ACCOUNTS).find(a => a.id === acc.id);
+  console.log(bold(`\n  Gain/Loss — ${accountEntry?.label || acc.id}`));
+  console.log('');
+
+  try {
+    const data = await tradierGet(`/accounts/${acc.id}/gainloss?count=${limit}`);
+    const positions = data?.gainloss?.closed_position;
+    if (!positions || positions === 'null') {
+      console.log(dim('    No closed positions'));
+      return;
+    }
+    const posList = (Array.isArray(positions) ? positions : [positions]);
+
+    const widths = [24, 12, 6, 10, 10, 10, 8];
+    console.log(tableTop(widths));
+    console.log(tableRow([
+      bold('Symbol'), bold('Closed'), bold('Qty'), bold('Cost'),
+      bold('Proceeds'), bold('P&L'), bold('P&L %'),
+    ], widths));
+    console.log(tableSep(widths));
+
+    let totalPnl = 0;
+    for (const p of posList) {
+      const cost = p.cost ?? 0;
+      const proceeds = p.proceeds ?? 0;
+      const pnl = p.gain_loss ?? (proceeds - cost);
+      totalPnl += pnl;
+      const pnlPct = cost !== 0 ? (pnl / Math.abs(cost)) * 100 : 0;
+      const closeDate = (p.close_date || '').slice(0, 10);
+      const symDisplay = formatOptionSymbol(p.symbol || '');
+
+      console.log(tableRow([
+        cyan(symDisplay),
+        closeDate,
+        String(p.quantity || '?'),
+        `$${Math.abs(cost).toFixed(2)}`,
+        `$${proceeds.toFixed(2)}`,
+        formatMoney(pnl),
+        `${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(1)}%`,
+      ], widths));
+    }
+    console.log(tableSep(widths));
+    console.log(tableRow([
+      bold('Total'), '', '', '', '', formatMoney(totalPnl), ''
+    ], widths));
+    console.log(tableBot(widths));
+  } catch (e: any) {
+    console.log(red(`    Error: ${e.message}`));
+  }
+}
+
+async function cmdBroker(subArgs: string[], flags: Record<string, string>) {
+  const sub = subArgs[0];
+  if (!sub) {
+    // Summary: positions + balance for all accounts
+    console.log(bold('\n  Broker Summary'));
+    await cmdBalance(flags);
+    await cmdPositions(flags);
+    return;
+  }
+
+  switch (sub) {
+    case 'positions': case 'pos':
+      await cmdPositions(flags);
+      break;
+    case 'orders': case 'ord':
+      await cmdOrders(flags);
+      break;
+    case 'balance': case 'bal':
+      await cmdBalance(flags);
+      break;
+    case 'quote': case 'q':
+      await cmdQuote(subArgs.slice(1));
+      break;
+    case 'option-quote': case 'oq':
+      await cmdOptionQuote(subArgs.slice(1));
+      break;
+    case 'chain':
+      await cmdChain(subArgs.slice(1), flags);
+      break;
+    case 'history': case 'hist':
+      await cmdHistory(flags);
+      break;
+    case 'gainloss': case 'gl': case 'pnl':
+      await cmdGainloss(flags);
+      break;
+    default:
+      console.log(red(`Unknown broker subcommand: ${sub}`));
+      console.log(dim(`Available: positions|pos, orders|ord, balance|bal, quote|q, option-quote|oq, chain, history|hist, gainloss|gl|pnl`));
+  }
+}
+
 async function cmdCheck() {
   const checks: { name: string; pass: boolean; detail: string }[] = [];
 
@@ -1360,13 +1989,24 @@ ${bold('COMMANDS')}
 
   ${cyan('alerts')} [--lines=20]             Recent alerts from monitor log
   ${cyan('check')}                           Health check (exit 0 or 1)
+
+${bold('BROKER')} (Tradier API — add --account=spx|xsp to filter)
+  ${cyan('broker')}                          Summary (balance + positions, all accounts)
+  ${cyan('positions')}  ${dim('(pos)')}               Open positions
+  ${cyan('orders')}     ${dim('(ord)')}  [--all]       Today's orders (--all for all)
+  ${cyan('balance')}    ${dim('(bal)')}               Account balances & buying power
+  ${cyan('quote')}      ${dim('(q)')}   [symbols...]  Market quotes (default: SPX VIX)
+  ${cyan('chain')}      [expiry] [--range=50]  Option chain (default: today, ±$50)
+  ${cyan('gainloss')}   ${dim('(gl, pnl)')}  [--n=30]  Closed position P&L
+  ${cyan('history')}    ${dim('(hist)')}  [--n=30]     Trade history
+
   ${cyan('help')}                            Show this help
 
 ${bold('TARGETS')} (for restart/stop/start)
-  pipeline, agent-spx, agent-xsp, agents, monitor, dashboard, viewer, schwaber, all
+  pipeline, agent-spx, agents, monitor, dashboard, viewer, schwaber, all
 
 ${bold('LOG PROCESSES')} (for logs command)
-  spxer, agent, xsp, monitor, dashboard, viewer, schwaber, all
+  spxer, agent, monitor, dashboard, viewer, schwaber, all
 `);
 }
 
@@ -1448,6 +2088,46 @@ async function main() {
       case 'alerts':
       case 'alert':
         cmdAlerts(flags);
+        break;
+
+      case 'broker':
+      case 'b':
+        await cmdBroker(subArgs, flags);
+        break;
+
+      case 'positions':
+      case 'pos':
+        await cmdPositions(flags);
+        break;
+
+      case 'orders':
+      case 'ord':
+        await cmdOrders(flags);
+        break;
+
+      case 'balance':
+      case 'bal':
+        await cmdBalance(flags);
+        break;
+
+      case 'quote':
+      case 'q':
+        await cmdQuote(subArgs);
+        break;
+
+      case 'chain':
+        await cmdChain(subArgs, flags);
+        break;
+
+      case 'gainloss':
+      case 'gl':
+      case 'pnl':
+        await cmdGainloss(flags);
+        break;
+
+      case 'history':
+      case 'hist':
+        await cmdHistory(flags);
         break;
 
       case 'check':

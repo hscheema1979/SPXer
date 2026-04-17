@@ -221,7 +221,7 @@ export function getDefaultRules(): AlertRule[] {
       enabled: true,
       evaluate: (ctx) => {
         if (!isRTH()) return null;
-        const agentNames = ['spxer-agent', 'spxer-xsp'];
+        const agentNames = ['spxer-agent'];
         const crashed: string[] = [];
         for (const name of agentNames) {
           const proc = ctx.processes.find((p: any) => p.name === name);
@@ -255,7 +255,7 @@ export function getDefaultRules(): AlertRule[] {
         const stale: string[] = [];
         const maxAgeMs = 5 * 60 * 1000;
 
-        for (const [label, status] of [['SPX', ctx.agentSpx], ['XSP', ctx.agentXsp]] as const) {
+        for (const [label, status] of [['SPX', ctx.agentSpx]] as const) {
           if (!status?.ts) continue;
           const ageMs = ctx.timestamp - status.ts;
           if (ageMs > maxAgeMs) {
@@ -281,7 +281,7 @@ export function getDefaultRules(): AlertRule[] {
       enabled: true,
       evaluate: (ctx) => {
         const breached: string[] = [];
-        for (const [label, status] of [['SPX', ctx.agentSpx], ['XSP', ctx.agentXsp]] as const) {
+        for (const [label, status] of [['SPX', ctx.agentSpx]] as const) {
           if (status && typeof status.dailyPnL === 'number' && status.dailyPnL < -500) {
             breached.push(`${label}: $${status.dailyPnL.toFixed(0)}`);
           }
@@ -307,7 +307,7 @@ export function getDefaultRules(): AlertRule[] {
         const twoHoursMs = 2 * 60 * 60 * 1000;
         const stuck: string[] = [];
 
-        for (const [label, status] of [['SPX', ctx.agentSpx], ['XSP', ctx.agentXsp]] as const) {
+        for (const [label, status] of [['SPX', ctx.agentSpx]] as const) {
           if (!status) continue;
           const key = `position-${label}`;
 
