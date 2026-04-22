@@ -733,7 +733,6 @@ function renderHardcodedCharts() {
 }
 
 function renderEquityCurve() {
-  // Fetch daily P&L from API
   Promise.all([
     fetch('/replay/api/sweep/spx-hma3x25-itm5-tp3x-sl90/daily').then(r=>r.json()).catch(()=>null),
     fetch('/replay/api/sweep/spx-hma3x12-itm5-basket-3strike-tp10x-sl25-3m-15c-$10000/daily').then(r=>r.json()).catch(()=>null),
@@ -741,9 +740,9 @@ function renderEquityCurve() {
   ]).then(([top, basket, loser]) => {
     const datasets = [];
     function buildCum(data, label, color) {
-      if (!data?.rows) return;
+      if (!data || !Array.isArray(data) || data.length === 0) return;
       let cum = 0;
-      const points = data.rows.map(r => { cum += r.pnl; return { x: r.date, y: Math.round(cum) }; });
+      const points = data.map(r => { cum += r.totalPnl; return { x: r.date, y: Math.round(cum) }; });
       datasets.push({ label, data: points, borderColor: color, backgroundColor: 'transparent', borderWidth: 2, pointRadius: 0, tension: 0.1 });
     }
     buildCum(top, 'HMA 3x25 TP3x SL90% (edge +39%)', '#3fb950');
@@ -769,77 +768,130 @@ function renderEquityCurve() {
 }
 
 function renderQuarterChart() {
-  const qData = {
-    'HMA3x25 TP3x': [40.8, 41.0, 37.8, 36.8],
-    'HMA3x19 TP2.5x': [40.1, 35.7, 38.5, 37.8],
-    'Sweep TP2x': [35.5, 33.8, 36.7, 35.3],
-    'Basket TP10x': [35.7, 28.8, 32.0, 36.8],
-    'Basket TP1.25x': [27.5, 20.6, 23.9, 27.0],
-    'TP1.1x SL50% (loser)': [-9.6, -6.9, -8.8, -8.2],
-  };
+  const configIds = [
+    { id: 'spx-hma3x25-itm5-tp3x-sl90', label: 'HMA3x25 TP3x' },
+    { id: 'spx-hma3x19-itm5-tp125x-sl25-3m-50c-$55', label: 'HMA3x19 TP2.5x' },
+    { id: 'spx-sweep-tpsl-tp25-sl20', label: 'Sweep TP2x' },
+    { id: 'spx-hma3x12-itm5-basket-3strike-tp10x-sl25-3m-15c-$10000', label: 'Basket TP10x' },
+    { id: 'spx-hma3x12-itm5-basket-3strike-tp2x-sl25-3m-25c-$25000', label: 'Basket TP1.25x' },
+    { id: 'spx-hma3x15-itm5-tp11x-sl50-3m-25c-$30000', label: 'TP1.1x SL50% (loser)' },
+  ];
   const colors = ['#3fb950','#58a6ff','#bc8cff','#d29922','#79c0ff','#f85149'];
 
-  const ctx = document.getElementById('quarter-chart').getContext('2d');
-  new Chart(ctx, {
-    type: 'bar',
-    data: {
-      labels: ['Q1 (Mar-Jul 25)', 'Q2 (Jul-Oct 25)', 'Q3 (Oct-Jan 26)', 'Q4 (Jan-Apr 26)'],
-      datasets: Object.entries(qData).map(([label, data], i) => ({
-        label, data, backgroundColor: colors[i] + '99', borderColor: colors[i], borderWidth: 1,
-      }))
-    },
-    options: {
-      responsive: true,
-      plugins: { legend: { labels: { color: '#8b949e' } } },
-      scales: {
-        x: { ticks: { color: '#8b949e' }, grid: { display: false } },
-        y: { title: { display: true, text: 'Edge (%)', color: '#8b949e' }, ticks: { color: '#8b949e' }, grid: { color: '#21262d' } },
-      }
-    }
-  });
+  Promise.all(configIds.map(c => fetch(`/replay/api/sweep/${encodeURIComponent(c.id)}/daily`).then(r=>r.json()).catch(()=>null)))
+    .then(results => {
+      const quarterLabels = ['Q1 (Mar-Jul 25)', 'Q2 (Jul-Oct 25)', 'Q3 (Oct-Jan 26)', 'Q4 (Jan-Apr 26)'];
+      const datasets = results.map((rows, i) => {
+        if (!rows || !Array.isArray(rows)) return null;
+        const q1 = rows.filter(r => r.date >= '2025-03-27' && r.date <= '2025-07-31');
+        const q2 = rows.filter(r => r.date >= '2025-08-01' && r.date <= '2025-10-31');
+        const q3 = rows.filter(r => r.date >= '2025-11-01' && r.date <= '2026-01-31');
+        const q4 = rows.filter(r => r.date >= '2026-02-01' && r.date <= '2026-04-30');
+        const edges = [q1,q2,q3,q4].map(q => {
+          const trades = q.reduce((s,r)=>s+r.trades,0);
+          const wins = q.reduce((s,r)=>s+r.wins,0);
+          const sumWinPct = q.reduce((s,r)=>s+r.sumWinPct,0);
+          const sumLossPct = q.reduce((s,r)=>s+r.sumLossPct,0);
+          const cntWins = q.reduce((s,r)=>s+r.cntWins,0);
+          const cntLosses = q.reduce((s,r)=>s+r.cntLosses,0);
+          const wr = trades > 0 ? wins/trades : 0;
+          const avgWinPct = cntWins > 0 ? sumWinPct/cntWins : 0;
+          const avgLossPct = cntLosses > 0 ? sumLossPct/cntLosses : 0;
+          const rMult = avgLossPct !== 0 ? avgWinPct/Math.abs(avgLossPct) : 0;
+          const beWR = (avgWinPct + Math.abs(avgLossPct)) > 0 ? Math.abs(avgLossPct)/(avgWinPct + Math.abs(avgLossPct)) : 0.5;
+          return Math.round((wr - beWR) * 1000) / 10;
+        });
+        return { label: configIds[i].label, data: edges, backgroundColor: colors[i] + '99', borderColor: colors[i], borderWidth: 1 };
+      }).filter(Boolean);
 
-  // Table
-  const tbody = document.getElementById('quarter-tbody');
-  tbody.innerHTML = Object.entries(qData).map(([label, qs]) => {
-    const mean = qs.reduce((s,v)=>s+v,0)/qs.length;
-    const std = Math.sqrt(qs.reduce((s,v)=>s+(v-mean)**2,0)/qs.length);
-    const cv = Math.abs(mean) > 0 ? (std/Math.abs(mean)).toFixed(3) : '---';
-    const stable = parseFloat(cv) < 0.10;
-    const neg = mean < 0;
-    return `<tr${neg?' style="background:rgba(248,81,73,0.08)"':''}>
-      <td style="text-align:left">${label}</td>
-      ${qs.map(q => `<td class="${q>0?'pos':'neg'}">${q>0?'+':''}${q.toFixed(1)}%</td>`).join('')}
-      <td class="${mean>0?'pos':'neg'}"><strong>${mean>0?'+':''}${mean.toFixed(1)}%</strong></td>
-      <td>${cv}</td>
-      <td class="${stable?'pos':'neg'}">${stable?'YES':'no'}</td>
-    </tr>`;
-  }).join('');
+      const ctx = document.getElementById('quarter-chart').getContext('2d');
+      new Chart(ctx, {
+        type: 'bar',
+        data: { labels: quarterLabels, datasets },
+        options: {
+          responsive: true,
+          plugins: { legend: { labels: { color: '#8b949e' } } },
+          scales: {
+            x: { ticks: { color: '#8b949e' }, grid: { display: false } },
+            y: { title: { display: true, text: 'Edge (%)', color: '#8b949e' }, ticks: { color: '#8b949e' }, grid: { color: '#21262d' } },
+          }
+        }
+      });
+
+      // Table
+      const tbody = document.getElementById('quarter-tbody');
+      tbody.innerHTML = datasets.map((ds, i) => {
+        const qs = ds.data;
+        const mean = qs.reduce((s,v)=>s+v,0)/qs.length;
+        const std = Math.sqrt(qs.reduce((s,v)=>s+(v-mean)**2,0)/qs.length);
+        const cv = Math.abs(mean) > 0 ? (std/Math.abs(mean)).toFixed(3) : '---';
+        const stable = parseFloat(cv) < 0.10;
+        const neg = mean < 0;
+        return `<tr${neg?' style="background:rgba(248,81,73,0.08)"':''}>
+          <td style="text-align:left">${ds.label}</td>
+          ${qs.map(q => `<td class="${q>0?'pos':'neg'}">${q>0?'+':''}${q.toFixed(1)}%</td>`).join('')}
+          <td class="${mean>0?'pos':'neg'}"><strong>${mean>0?'+':''}${mean.toFixed(1)}%</strong></td>
+          <td>${cv}</td>
+          <td class="${stable?'pos':'neg'}">${stable?'YES':'NO'}</td>
+        </tr>`;
+      }).join('');
+    });
 }
 
 function renderMonthlyChart() {
-  const months = ['2025-03','2025-04','2025-05','2025-06','2025-07','2025-08','2025-09','2025-10','2025-11','2025-12','2026-01','2026-02','2026-03','2026-04'];
-  const topEdge = [29.4,39.3,43.4,39.7,42.7,36.5,43.4,38.8,43.0,34.0,35.5,40.9,32.5,41.3];
-  const loserEdge = [-10.0,-10.9,-6.8,-9.1,-8.3,-5.2,-12.2,-7.3,-10.8,-9.4,-7.1,-9.7,-7.9,-7.5];
+  Promise.all([
+    fetch('/replay/api/sweep/spx-hma3x25-itm5-tp3x-sl90/daily').then(r=>r.json()).catch(()=>null),
+    fetch('/replay/api/sweep/spx-hma3x15-itm5-tp11x-sl50-3m-25c-$30000/daily').then(r=>r.json()).catch(()=>null),
+  ]).then(([topRows, loserRows]) => {
+    const topEdge = computeMonthlyEdge(topRows);
+    const loserEdge = computeMonthlyEdge(loserRows);
 
-  const ctx = document.getElementById('monthly-chart').getContext('2d');
-  new Chart(ctx, {
-    type: 'bar',
-    data: {
-      labels: months,
-      datasets: [
-        { label: 'HMA 3x25 TP3x SL90% (top)', data: topEdge, backgroundColor: 'rgba(63,185,80,0.7)', borderColor: '#3fb950', borderWidth: 1 },
-        { label: 'TP1.1x SL50% (loser)', data: loserEdge, backgroundColor: 'rgba(248,81,73,0.5)', borderColor: '#f85149', borderWidth: 1 },
-      ]
-    },
-    options: {
-      responsive: true,
-      plugins: { legend: { labels: { color: '#8b949e' } } },
-      scales: {
-        x: { ticks: { color: '#8b949e' }, grid: { display: false } },
-        y: { title: { display: true, text: 'Edge (%)', color: '#8b949e' }, ticks: { color: '#8b949e' }, grid: { color: '#21262d' } },
+    const labels = Object.keys(topEdge).sort();
+    const ctx = document.getElementById('monthly-chart').getContext('2d');
+    new Chart(ctx, {
+      type: 'bar',
+      data: {
+        labels,
+        datasets: [
+          { label: 'HMA 3x25 TP3x SL90% (top)', data: labels.map(l => topEdge[l]), backgroundColor: 'rgba(63,185,80,0.7)', borderColor: '#3fb950', borderWidth: 1 },
+          { label: 'TP1.1x SL50% (loser)', data: labels.map(l => loserEdge[l]), backgroundColor: 'rgba(248,81,73,0.5)', borderColor: '#f85149', borderWidth: 1 },
+        ]
+      },
+      options: {
+        responsive: true,
+        plugins: { legend: { labels: { color: '#8b949e' } } },
+        scales: {
+          x: { ticks: { color: '#8b949e' }, grid: { display: false } },
+          y: { title: { display: true, text: 'Edge (%)', color: '#8b949e' }, ticks: { color: '#8b949e' }, grid: { color: '#21262d' } },
+        }
       }
-    }
+    });
   });
+}
+
+function computeMonthlyEdge(rows) {
+  if (!rows || !Array.isArray(rows)) return {};
+  const byMonth = {};
+  rows.forEach(r => {
+    const month = r.date.substring(0, 7);
+    if (!byMonth[month]) byMonth[month] = { trades:0, wins:0, sumWinPct:0, sumLossPct:0, cntWins:0, cntLosses:0 };
+    byMonth[month].trades += r.trades;
+    byMonth[month].wins += r.wins;
+    byMonth[month].sumWinPct += r.sumWinPct || 0;
+    byMonth[month].sumLossPct += r.sumLossPct || 0;
+    byMonth[month].cntWins += r.cntWins || 0;
+    byMonth[month].cntLosses += r.cntLosses || 0;
+  });
+  const result = {};
+  Object.entries(byMonth).forEach(([month, d]) => {
+    const wr = d.trades > 0 ? d.wins / d.trades : 0;
+    const avgWinPct = d.cntWins > 0 ? d.sumWinPct / d.cntWins : 0;
+    const avgLossPct = d.cntLosses > 0 ? d.sumLossPct / d.cntLosses : 0;
+    const rMult = avgLossPct !== 0 ? avgWinPct / Math.abs(avgLossPct) : 0;
+    const beWR = (avgWinPct + Math.abs(avgLossPct)) > 0 ? Math.abs(avgLossPct) / (avgWinPct + Math.abs(avgLossPct)) : 0.5;
+    result[month] = Math.round((wr - beWR) * 1000) / 10;
+  });
+  return result;
 }
 
 function renderSampleTrades() {

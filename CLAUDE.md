@@ -109,8 +109,8 @@ Note: `src/pipeline/indicator-engine.ts` is a re-export shim — actual indicato
 **Time-based data flow**: No overnight data collection (Yahoo ES removed). Tradier SPX timesales start at 8:00 AM ET (RTH mode); SPX underlying indicators warm up pre-market from this poll. The option stream uses a **single-phase wake at 09:22 ET** — 8 minutes before market open. Pre-market SPX from Tradier is firm enough by 09:22 to pick the ideal ±100 strike band; one subscribe event (~200 contracts to Theta WS + Tradier WS) settles well before 9:30 so OPRA prints flow instantly at open. No re-lock phase, no subscribe-storm at market open. Controlled by `OPTION_STREAM_WAKE_ET` in `src/config.ts`. Market holidays and early-close days are hardcoded in `src/config.ts`. (The fill-model Phases 1–4 in `docs/FILL-MODEL.md` and bracket-rollout Phases in `docs/BRACKET-PLAN.md` are a different namespace — unrelated to the option-stream schedule.)
 
 **Live data provider architecture**:
-- **Options WS** — ThetaData is primary (`src/providers/thetadata-stream.ts`, `ws://127.0.0.1:25520/v1/events`), Tradier is cold standby (`src/pipeline/option-stream.ts`). `thetaIsPrimary()` in `src/index.ts` returns `thetaStream.isConnected()` — pure connection-state switch, no hysteresis window. On ATM 0DTE, Theta fires OPRA trades continuously; if Theta's WS drops, Tradier takes over instantly. Both streams feed the same `OptionCandleBuilder`; Tradier's onTick returns early whenever Theta is connected, so there's no double-count.
-- **SPX underlying** — Tradier REST timesales is the only source (pre-market, RTH, and post-market). Not backed up. If Tradier fails, the agent's health-gate halts entries — safe stop.
+- **Options WS** — ThetaData is primary (`src/providers/thetadata-stream.ts`, `ws://127.0.0.1:25520/v1/events`), Tradier is cold standby (`src/pipeline/spx/option-stream.ts`). `thetaIsPrimary()` in `src/index.ts` returns `thetaStream.isConnected()` — pure connection-state switch, no hysteresis window. On ATM 0DTE, Theta fires OPRA trades continuously; if Theta's WS drops, Tradier takes over instantly. Both streams feed the same `PriceLine`; Tradier's onTick returns early whenever Theta is connected, so there's no double-count.
+- **SPX underlying** — Tradier HTTP streaming PriceStream (`src/agent/price-stream.ts`) for full 1m OHLCV candle building.
 - **Order execution** — Tradier is the only path. Account 6YA51425 (margin).
 - **Historical backfill** — SPX from Polygon (`I:SPX` index aggregates), options from ThetaData REST (`fetchOptionTimesales`). The `replay_bars.source` column tracks origin (`'polygon'` | `'thetadata'` | `'live'` | `'aggregated'`). Replay engine reads all sources without filter — source merging is transparent. Polygon subscription is retained for SPX historical only.
 
@@ -119,6 +119,15 @@ Note: `src/pipeline/indicator-engine.ts` is a re-export shim — actual indicato
 **Indicator engine**: Incremental computation (not recomputed from scratch). Tier 1 (all instruments): HMA 5/19/25, EMA 9/21, RSI 14, Bollinger Bands, ATR 14, VWAP. Tier 2 (underlying only): EMA 50/200, SMA 20/50, Stochastic, CCI, Momentum, MACD, ADX. State is maintained per-symbol in memory via `IndicatorState`.
 
 **Bar interpolation**: Options go minutes without trades. Gaps 2-60 min get linear interpolation (`synthetic: true, gapType: 'interpolated'`). Gaps >60 min get flat fill (`gapType: 'stale'`). Indicators are computed on synthetic bars for continuity.
+
+**Live candle validation (PriceLine)**: For live 0DTE option bars, SPXer uses `PriceLine` (`src/pipeline/price-line.ts`) — a minimal price tracker that records only the last price per minute per symbol, then validates against REST quote mids before storing. This is simpler than full candle building and more resistant to stale/replay ticks from ThetaData reconnects. The validation flow at each minute boundary:
+1. Tick stream (Theta or Tradier WS) feeds `PriceLine.processTick()` / `PriceLine.processQuote()`
+2. `PriceLine.snapshotAndFlush()` collects forming price points from past minutes
+3. Fetches `fetchBatchQuotes()` for active band contracts, sorted by ATM proximity (nearest strikes first for minimal validation lag)
+4. For each symbol: if `|streamClose - restMid| / streamClose > 5%`, override close with REST mid
+5. Bars are then built via `rawToBar()` and stored — H/L are carried forward from prior bars for context
+
+**Why PriceLine instead of candles**: SPX candles use full OHLCV (high-liquidity underlying). 0DTE options have sparse prints — H/L from quote-only bars are noise. PriceLine captures close-only which is all HMA needs. Full replay bars still come from historical parquet/SQLite with complete OHLCV data.
 
 ### Trading Agent (`spx_agent.ts`)
 
@@ -177,6 +186,8 @@ src/replay/
 ```
 
 **Performance-critical**: `machine.ts` uses an in-memory bar cache — loads all bars for a date once from SQLite, then iterates with binary search. Mar 20 (159K bars, 648 contracts) replays in ~5 seconds. NEVER go back to SQL-per-tick (caused OOM at 3+ GB per process with 8 parallel sessions).
+
+**Edge framework paper** (`docs/edge-framework-paper.html`): A self-contained HTML paper with live data fetched from `/replay/api/sweep` endpoints. Charts (equity curves, quarterly walk-forward, monthly edge) pull from `/replay/api/sweep/:configId/daily` for configs with 267 days of data. Served at `GET /replay/paper`. The three chart render functions (`renderEquityCurve`, `renderQuarterChart`, `renderMonthlyChart`) call their respective API endpoints at page load; ensure the `renderHardcodedCharts()` flow is consistent with the chart canvas IDs.
 
 **Storage architecture**: Two tiers — **parquet** for historical bar data, **SQLite** (`spxer.db`) for everything else.
 - **Parquet** (`data/parquet/bars/{profile}/{date}.parquet`): All historical bar data (SPX, NDX, options). 268 dates × ~60K bars each. **Primary data source for replay** — the replay engine reads parquet first, falls back to SQLite `replay_bars` table only if parquet is missing for a date.
@@ -274,6 +285,7 @@ Other: `POLYGON_API_KEY` (historical data backfill), `LITELLM_BASE_URL` + `LITEL
 - `GET /replay/api/sweep/:configId/daily` — Daily P&L breakdown for sweep
 - `GET /replay/api/live/*` — Proxy to live data service
 - `GET /replay/sweep` — Sweep viewer HTML UI
+- `GET /replay/paper` — Edge framework paper (live data from `/replay/api/sweep/:configId/daily`)
 
 ## WebSocket (port 3600, path `/ws`)
 

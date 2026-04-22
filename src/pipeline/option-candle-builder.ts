@@ -41,6 +41,8 @@ export interface FormingCandle {
   // Spread aggregation: running average of (ask - bid) observed during the bar
   spreadSum: number;
   spreadSamples: number;
+  /** Source of the close price: 'trade' | 'quote' | 'rest' */
+  closeSource: 'trade' | 'quote' | 'rest';
 }
 
 export type CandleCloseCallback = (symbol: string, candle: FormingCandle) => void;
@@ -98,6 +100,7 @@ export class OptionCandleBuilder {
         ticks: 0,
         spreadSum: 0,
         spreadSamples: 0,
+        closeSource: 'trade',
       };
       this.candles.set(symbol, candle);
     }
@@ -146,6 +149,7 @@ export class OptionCandleBuilder {
     if (mid > candle.high) candle.high = mid;
     if (mid < candle.low) candle.low = mid;
     candle.close = mid;
+    candle.closeSource = 'quote';
 
     // Aggregate spread (ask - bid) for this bar
     const spread = ask - bid;
@@ -183,6 +187,36 @@ export class OptionCandleBuilder {
   /** Number of symbols with active forming candles */
   get activeSymbols(): number {
     return this.candles.size;
+  }
+
+  /**
+   * Validate forming candle closes against a ground-truth source (e.g., REST quote mid).
+   * If the candle close diverges from restMid by more than maxDivergencePct,
+   * replace the close with restMid and mark the source as 'rest'.
+   *
+   * Call this just before flushAll() at each minute boundary.
+   *
+   * @param restMids — Map of symbol → REST quote mid price
+   * @param maxDivergencePct — Max allowed divergence before override (default 5%)
+   * @param validateSymbols — Set of symbols to validate. If undefined, validates all active candles.
+   */
+  validateCandles(
+    restMids: Map<string, number>,
+    maxDivergencePct = 5,
+    validateSymbols?: Set<string>,
+  ): void {
+    const threshold = maxDivergencePct / 100;
+    for (const [symbol, candle] of this.candles) {
+      if (validateSymbols && !validateSymbols.has(symbol)) continue;
+      const restMid = restMids.get(symbol);
+      if (restMid === undefined) continue;
+      if (candle.close <= 0) continue;
+      const divergence = Math.abs(candle.close - restMid) / candle.close;
+      if (divergence > threshold) {
+        candle.close = restMid;
+        candle.closeSource = 'rest';
+      }
+    }
   }
 
   /** Get the forming candle for a symbol (for diagnostics only — not for trading decisions) */

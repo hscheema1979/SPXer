@@ -15,7 +15,7 @@ import { startWsServer, broadcast } from './server/ws';
 import { config, STRIKE_BAND, STRIKE_INTERVAL, POLL_UNDERLYING_MS, POLL_OPTIONS_RTH_MS, POLL_OPTIONS_OVERNIGHT_MS, POLL_SCREENER_MS, OPTION_STREAM_WAKE_ET, OPTION_STREAM_CLOSE_ET, OPTION_STREAM_THETA_STALE_MS } from './config';
 import { healthTracker } from './utils/health';
 import { OptionStream } from './pipeline/spx/option-stream';
-import { OptionCandleBuilder } from './pipeline/option-candle-builder';
+import { PriceLine } from './pipeline/price-line';
 import { ThetaDataStream } from './providers/thetadata-stream';
 import { todayET, nowET } from './utils/et-time';
 import type { Bar, Timeframe } from './types';
@@ -114,14 +114,16 @@ function stopSpxStream(): void {
   if (spxCandleTimer) { clearInterval(spxCandleTimer); spxCandleTimer = null; }
 }
 
-// ── Option WebSocket Stream → 1m Candle Builder ─────────────────────────────
-// Streams real-time trade/quote events for ~160 option contracts via Tradier
-// WebSocket. Replaces 30s REST polling with tick-level candle building.
-// Falls back to pollOptions() if the stream disconnects.
+// ── Option WebSocket Stream → Price Line → 1m Bars ──────────────────────────
+// Streams real-time trade/quote events for ~250-480 option contracts via ThetaData
+// (primary) + Tradier WS (hot standby). Tick stream feeds PriceLine which tracks
+// last price per symbol per minute. At each minute boundary, validates against
+// Tradier REST quote mids and records closed bars. Replaces the old candle-builder
+// approach with something much simpler: just track close price + REST validate.
 
 const optionStream = new OptionStream();
 const thetaStream = new ThetaDataStream();
-let optionCandleBuilder: OptionCandleBuilder | null = null;
+let priceLine: PriceLine | null = null;
 let optionCandleTimer: ReturnType<typeof setInterval> | null = null;
 let optionStreamActive = false;       // true when stream is live — suppresses pollOptions()
 let optionStreamScheduleTimer: ReturnType<typeof setInterval> | null = null;
@@ -215,43 +217,18 @@ async function initOptionStream(): Promise<void> {
   }
   console.log(`[option-stream] Pool: ${pool.length} symbols centered on SPX≈${centerPrice.toFixed(0)} (±${STRIKE_BAND}), expiries=${expiries.join(',')}`);
 
-  // Step 3: Create candle builder with onClose callback
-  optionCandleBuilder = new OptionCandleBuilder((symbol, candle) => {
-    // Build a proper Bar from the closed candle
-    const bar = rawToBar(symbol, '1m', {
-      ts: candle.minuteTs,
-      open: candle.open,
-      high: candle.high,
-      low: candle.low,
-      close: candle.close,
-      volume: candle.volume,
-    });
-    // Attach observed bid-ask spread (if any quote ticks arrived) — used by friction model
-    const avgSpread = OptionCandleBuilder.averageSpread(candle);
-    if (avgSpread !== undefined) (bar as any).spread = avgSpread;
-    const enriched = { ...bar, indicators: computeIndicators(bar, 2) };
-    upsertBars([enriched]);
-
-    // Aggregate to higher timeframes
-    const recent1m = getBars(symbol, '1m', 60);
-    if (recent1m.length > 0) aggregateAndStore(recent1m, 2);
-
-    // Track the bar for health monitoring
-    healthTracker.recordBar(symbol, candle.minuteTs * 1000);
-
-    // Broadcast to WebSocket clients
-    broadcast({ type: 'contract_bar', symbol, data: enriched });
-  });
+  // Step 3: Create price line
+  priceLine = new PriceLine();
 
   // Step 4a: Wire Tradier ticks — ignored when ThetaData is primary
   optionStream.onTick((tick) => {
-    if (!optionCandleBuilder) return;
+    if (!priceLine) return;
     if (thetaIsPrimary()) return; // drop Tradier ticks — theta is delivering
 
     if (tick.type === 'trade' && tick.price && tick.price > 0) {
-      optionCandleBuilder.processTick(tick.symbol, tick.price, tick.size ?? 0, tick.ts);
+      priceLine.processTick(tick.symbol, tick.price, tick.ts, tick.size ?? 0);
     } else if (tick.type === 'quote' && tick.bid && tick.ask) {
-      optionCandleBuilder.processQuote(tick.symbol, tick.bid, tick.ask, tick.ts);
+      priceLine.processQuote(tick.symbol, tick.bid, tick.ask, tick.ts);
     }
 
     healthTracker.recordSuccess('option-stream');
@@ -259,12 +236,12 @@ async function initOptionStream(): Promise<void> {
 
   // Step 4b: Wire ThetaData ticks — always pass through, this is the primary feed
   thetaStream.onTick((tick) => {
-    if (!optionCandleBuilder) return;
+    if (!priceLine) return;
 
     if (tick.type === 'trade' && tick.price && tick.price > 0) {
-      optionCandleBuilder.processTick(tick.symbol, tick.price, tick.size ?? 0, tick.ts);
+      priceLine.processTick(tick.symbol, tick.price, tick.ts, tick.size ?? 0);
     } else if (tick.type === 'quote' && tick.bid && tick.ask) {
-      optionCandleBuilder.processQuote(tick.symbol, tick.bid, tick.ask, tick.ts);
+      priceLine.processQuote(tick.symbol, tick.bid, tick.ask, tick.ts);
     }
 
     healthTracker.recordSuccess('thetadata-stream');
@@ -291,18 +268,55 @@ async function initOptionStream(): Promise<void> {
     healthTracker.recordFailure('thetadata-stream');
   }
 
-  // Step 6: Minute-boundary timer to flush forming candles (safety net)
+  // Step 6: Minute-boundary timer — REST validate + snapshot price line into bars
   if (optionCandleTimer) clearInterval(optionCandleTimer);
-  optionCandleTimer = setInterval(() => {
-    if (!optionCandleBuilder) return;
-    const now = Math.floor(Date.now() / 1000);
-    const currentMinute = now - (now % 60);
-    // Flush candles from previous minutes that haven't been closed by new ticks
-    // The builder's flushAll() closes all forming candles — we only call it
-    // when we're past the minute boundary. Individual symbols auto-close when
-    // a new-minute tick arrives, but illiquid symbols may not get ticks every minute.
-    // We check every 5s; if any candle is from a past minute, flushAll() handles it.
-    optionCandleBuilder.flushAll();
+  optionCandleTimer = setInterval(async () => {
+    if (!priceLine) return;
+
+    // Fetch REST mids for active band contracts — validates closes before storage
+    // Poll ATM and nearest strikes FIRST so the most-traded contracts are validated first,
+    // minimizing lag for the contracts that matter for signals.
+    if (optionStreamActive) {
+      const activeContracts = tracker.getActive();
+      if (activeContracts.length > 0) {
+        try {
+          // Sort by distance from ATM — nearest strikes first
+          const atm = lastSpxPrice ?? 5000;
+          activeContracts.sort((a, b) => {
+            const distA = Math.abs(a.strike - atm);
+            const distB = Math.abs(b.strike - atm);
+            return distA - distB;
+          });
+          const sortedSymbols = activeContracts.map(c => c.symbol);
+          const mids = await fetchBatchQuotes(sortedSymbols);
+          const restMids = new Map<string, number>();
+          for (const [sym, q] of mids) {
+            if (q.bid != null && q.ask != null) {
+              restMids.set(sym, (q.bid + q.ask) / 2);
+            }
+          }
+          const bars = priceLine.snapshotAndFlush(restMids, 5);
+          for (const bar of bars) {
+            const b = rawToBar(bar.symbol, '1m', {
+              ts: bar.ts,
+              open: bar.open,
+              high: bar.high,
+              low: bar.low,
+              close: bar.close,
+              volume: bar.volume,
+            });
+            const enriched = { ...b, indicators: computeIndicators(b, 2) };
+            upsertBars([enriched]);
+            const recent1m = getBars(bar.symbol, '1m', 60);
+            if (recent1m.length > 0) aggregateAndStore(recent1m, 2);
+            healthTracker.recordBar(bar.symbol, bar.ts * 1000);
+            broadcast({ type: 'contract_bar', symbol: bar.symbol, data: enriched });
+          }
+        } catch (e) {
+          console.warn('[price-line] REST validation failed:', e);
+        }
+      }
+    }
   }, 5_000);
 
   // Also register tracked contracts with the contract tracker for the sticky band
@@ -331,9 +345,22 @@ function stopOptionStream(): void {
   thetaStream.stop();
   optionStreamActive = false;
 
-  if (optionCandleBuilder) {
-    optionCandleBuilder.flushAll();
-    optionCandleBuilder = null;
+  if (priceLine) {
+    const restMids = new Map<string, number>();
+    const bars = priceLine.snapshotAndFlush(restMids, 5);
+    for (const bar of bars) {
+      const b = rawToBar(bar.symbol, '1m', {
+        ts: bar.ts,
+        open: bar.open,
+        high: bar.high,
+        low: bar.low,
+        close: bar.close,
+        volume: bar.volume,
+      });
+      const enriched = { ...b, indicators: computeIndicators(b, 2) };
+      upsertBars([enriched]);
+    }
+    priceLine = null;
   }
 
   if (optionCandleTimer) {
