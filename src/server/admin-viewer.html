@@ -1,0 +1,1198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#0a0a0f">
+<title>SPXer Admin</title>
+<style>
+  /* ───────── shadcn-style design tokens (dark) ───────── */
+  :root {
+    --background: #0a0a0f;
+    --foreground: #e0e0e0;
+    --muted: #888;
+    --muted-foreground: #555;
+    --card: #111118;
+    --card-elevated: #0d0d14;
+    --border: #1a1a24;
+    --border-strong: #222;
+    --input: #1a1a24;
+    --primary: #8b8bff;
+    --primary-soft: #a78bfa;
+    --success: #10b981;
+    --destructive: #f43f5e;
+    --info: #3b82f6;
+    --warning: #f59e0b;
+    --radius: 8px;
+    --radius-sm: 6px;
+    --font-sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", "Fira Code", Consolas, monospace;
+    --panel: #0d0d14;
+    --text: #e0e0e0;
+  }
+
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    background: var(--background);
+    color: var(--foreground);
+    font-family: var(--font-sans);
+    font-size: 13px;
+    line-height: 1.45;
+    min-height: 100dvh;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* ───────── Nav bar ───────── */
+  .nav-bar {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    padding: 0 12px;
+    background: var(--card-elevated);
+    border-bottom: 1px solid var(--border);
+    font-size: 12px;
+    overflow-x: auto;
+    white-space: nowrap;
+    -webkit-overflow-scrolling: touch;
+  }
+  .nav-bar::-webkit-scrollbar { height: 0; display: none; }
+  .nav-bar a {
+    color: var(--muted-foreground);
+    text-decoration: none;
+    padding: 10px 14px;
+    transition: color 0.15s, border-color 0.15s;
+    border-bottom: 2px solid transparent;
+    flex-shrink: 0;
+  }
+  .nav-bar a:hover { color: var(--primary-soft); }
+  .nav-bar a.active { color: var(--primary); border-bottom-color: var(--primary); }
+  .nav-brand {
+    color: var(--primary) !important;
+    font-weight: 700;
+    font-size: 13px;
+    padding-right: 16px !important;
+    border: none !important;
+    cursor: default;
+    letter-spacing: -0.01em;
+  }
+  .nav-spacer { flex: 1; min-width: 0; }
+  @media (min-width: 640px) {
+    .nav-bar { padding: 0 16px; }
+    .nav-brand { padding-right: 20px !important; }
+  }
+
+  /* ───────── Header ───────── */
+  .header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px;
+    background: var(--card);
+    border-bottom: 1px solid var(--border-strong);
+    min-width: 0;
+  }
+  @media (min-width: 768px) {
+    .header { gap: 12px; padding: 10px 16px; }
+  }
+  .header h1 { font-size: 15px; color: var(--primary); font-weight: 600; white-space: nowrap; }
+
+  /* ───────── Mini Tabs ───────── */
+  .mini-tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 12px;
+    padding: 0 4px;
+  }
+  .mini-tabs button {
+    background: var(--input);
+    color: var(--muted);
+    border: 1px solid var(--border-strong);
+    padding: 6px 14px;
+    border-radius: var(--radius-sm);
+    font-size: 12px;
+    cursor: pointer;
+    font-family: inherit;
+    min-height: 32px;
+    transition: border-color .15s, color .15s, background-color .15s;
+    touch-action: manipulation;
+  }
+  .mini-tabs button:hover { border-color: #444; color: var(--foreground); }
+  .mini-tabs button.active {
+    background: rgba(139,139,255,0.08);
+    color: var(--foreground);
+    border-color: var(--primary);
+  }
+
+  /* ───────── Buttons ───────── */
+  .config-btn, .run-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 7px 14px;
+    min-height: 34px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 12px;
+    font-weight: 500;
+    white-space: nowrap;
+    transition: background-color .15s, border-color .15s, color .15s, opacity .15s;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .config-btn {
+    background: var(--input);
+    color: var(--primary);
+    border: 1px solid rgba(139,139,255,0.3);
+  }
+  .config-btn:hover { background: #2a2a3a; border-color: var(--primary); }
+  .run-btn {
+    background: rgba(16,185,129,0.12);
+    color: var(--success);
+    border: 1px solid rgba(16,185,129,0.3);
+  }
+  .run-btn:hover:not(:disabled) { background: rgba(16,185,129,0.2); border-color: var(--success); }
+  .run-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .btn-danger {
+    background: rgba(244,63,94,0.12);
+    color: var(--destructive);
+    border: 1px solid rgba(244,63,94,0.3);
+  }
+  .btn-danger:hover { background: rgba(244,63,94,0.2); border-color: var(--destructive); }
+  .btn-warning {
+    background: rgba(245,158,11,0.12);
+    color: var(--warning);
+    border: 1px solid rgba(245,158,11,0.3);
+  }
+  .btn-warning:hover { background: rgba(245,158,11,0.2); border-color: var(--warning); }
+
+  /* ───────── Content Area ───────── */
+  .content-area {
+    padding: 12px;
+    max-width: 1400px;
+    margin: 0 auto;
+  }
+  @media (min-width: 768px) {
+    .content-area { padding: 16px 20px; }
+  }
+
+  /* ───────── Cards ───────── */
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 14px 16px;
+    margin-bottom: 12px;
+  }
+  .card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 12px;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .card-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--foreground);
+  }
+
+  /* ───────── Process Grid ───────── */
+  .process-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 10px;
+  }
+  .process-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 12px;
+  }
+  .process-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 10px;
+  }
+  .process-name {
+    font-weight: 600;
+    font-size: 12px;
+    font-family: var(--font-mono);
+  }
+  .process-status {
+    font-size: 9px;
+    padding: 2px 6px;
+    border-radius: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .process-status.online { background: rgba(16,185,129,.15); color: var(--success); }
+  .process-status.stopped { background: rgba(149,149,165,.15); color: var(--muted); }
+  .process-status.errored { background: rgba(244,63,94,.15); color: var(--destructive); }
+  .process-stats {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+    margin-bottom: 10px;
+    font-size: 11px;
+    font-family: var(--font-mono);
+  }
+  .process-stat { color: var(--muted); }
+  .process-stat-value { color: var(--foreground); }
+  .process-actions {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  .process-actions button {
+    padding: 5px 10px;
+    font-size: 11px;
+    flex: 1;
+    min-width: 60px;
+  }
+
+  /* ───────── Tables ───────── */
+  table { width: 100%; border-collapse: collapse; }
+  th, td {
+    text-align: left;
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--border);
+  }
+  th {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--muted);
+    font-weight: 600;
+  }
+  td { font-size: 12px; }
+  tr:hover td { background: rgba(255,255,255,0.02); }
+
+  /* ───────── Config List ───────── */
+  .config-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .config-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    background: var(--input);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+  }
+  .config-item:hover { border-color: #333; }
+  .config-info { flex: 1; min-width: 0; }
+  .config-name { font-weight: 500; font-size: 12px; }
+  .config-id { font-size: 11px; color: var(--muted); font-family: var(--font-mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .config-actions { display: flex; gap: 6px; flex-shrink: 0; }
+
+  /* ───────── Modal ───────── */
+  .modal-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.65);
+    backdrop-filter: blur(4px);
+    z-index: 100;
+    justify-content: center;
+    align-items: flex-start;
+    padding: 16px;
+    overflow-y: auto;
+  }
+  @media (min-width: 640px) { .modal-overlay { padding: 40px 20px; } }
+  .modal-overlay.open { display: flex; }
+  .modal {
+    background: var(--card);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius);
+    width: 100%;
+    max-width: min(600px, 95vw);
+    max-height: calc(100dvh - 32px);
+    overflow-y: auto;
+    box-shadow: 0 20px 50px rgba(0,0,0,0.5);
+  }
+  @media (min-width: 640px) { .modal { max-height: calc(100dvh - 80px); } }
+  .modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--border-strong);
+    position: sticky;
+    top: 0;
+    background: var(--card);
+    z-index: 1;
+  }
+  .modal-header h2 { font-size: 15px; color: var(--primary); font-weight: 600; }
+  .modal-close {
+    color: var(--muted-foreground);
+    cursor: pointer;
+    font-size: 22px;
+    line-height: 1;
+    background: none;
+    border: none;
+    padding: 6px 10px;
+    border-radius: var(--radius-sm);
+  }
+  .modal-close:hover { color: var(--foreground); background: rgba(255,255,255,0.05); }
+  .modal-body { padding: 16px; }
+  .modal-footer {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    padding: 14px 16px;
+    border-top: 1px solid var(--border-strong);
+  }
+
+  /* ───────── Form ───────── */
+  .form-group { margin-bottom: 14px; }
+  .form-label {
+    display: block;
+    margin-bottom: 6px;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--muted-foreground);
+  }
+  .form-hint {
+    font-size: 10px;
+    color: var(--muted);
+    margin-top: 4px;
+  }
+  input, select, textarea {
+    background: var(--input);
+    color: var(--foreground);
+    border: 1px solid var(--border-strong);
+    padding: 7px 10px;
+    border-radius: var(--radius-sm);
+    font-size: 12px;
+    font-family: inherit;
+    width: 100%;
+  }
+  input:focus, select:focus, textarea:focus {
+    border-color: var(--primary);
+    outline: none;
+    box-shadow: 0 0 0 2px rgba(139,139,255,.18);
+  }
+
+  /* ───────── Logs Viewer ───────── */
+  .logs-viewer {
+    background: #000;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 12px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    max-height: 400px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+  .log-line { padding: 1px 0; }
+  .log-line.out { color: #e0e0e0; }
+  .log-line.err { color: #f43f5e; }
+
+  /* ───────── Ecosystem Editor ───────── */
+  #ecosystem-editor {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    min-height: 500px;
+    white-space: pre;
+    tab-size: 2;
+  }
+
+  /* ───────── Badge ───────── */
+  .badge {
+    display: inline-block;
+    padding: 2px 6px;
+    border-radius: 10px;
+    font-size: 10px;
+    font-weight: 600;
+  }
+  .badge-live { background: rgba(244,63,94,.12); color: var(--destructive); }
+  .badge-paper { background: rgba(245,158,11,.12); color: var(--warning); }
+  .badge-default { background: rgba(139,139,255,.12); color: var(--primary); }
+
+  /* ───────── Section Visibility ───────── */
+  .section { display: none; }
+  .section.active { display: block; }
+
+  /* ───────── Scrollbar ───────── */
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track { background: var(--background); }
+  ::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 10px; }
+  ::-webkit-scrollbar-thumb:hover { background: #3a3a4a; }
+
+    /* ── Event Stream ─────────────────────────────────────────────────── */
+    .handler-config-card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 14px;
+    }
+    .hc-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    .hc-name {
+      font-weight: 600;
+      font-size: 13px;
+      color: var(--foreground);
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .hc-badges {
+      display: flex;
+      gap: 5px;
+      flex-shrink: 0;
+    }
+    .hc-badge {
+      font-size: 9px;
+      padding: 2px 7px;
+      border-radius: 10px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      font-family: var(--font-mono);
+    }
+    .hc-badge.hma { background: rgba(139,139,255,0.12); color: var(--primary); border: 1px solid rgba(139,139,255,0.3); }
+    .hc-badge.live { background: rgba(244,63,94,0.12); color: var(--destructive); border: 1px solid rgba(244,63,94,0.3); }
+    .hc-badge.paper { background: rgba(245,158,11,0.12); color: var(--warning); border: 1px solid rgba(245,158,11,0.3); }
+    .hc-badge.offline { background: rgba(100,116,139,0.12); color: var(--muted); border: 1px solid rgba(100,116,139,0.3); }
+
+    .hc-stats {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 4px 12px;
+      margin-bottom: 10px;
+      font-size: 12px;
+      font-family: var(--font-mono);
+    }
+    .hc-stat-label { color: var(--muted-foreground); font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; }
+    .hc-stat-value { color: var(--foreground); font-weight: 500; }
+
+    .hc-actions {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      padding-top: 8px;
+      border-top: 1px solid var(--border-soft);
+    }
+    .hc-actions button { font-size: 11px; padding: 5px 10px; }
+
+    .hc-positions {
+      margin-top: 8px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+    }
+    .hc-pos-row {
+      display: grid;
+      grid-template-columns: auto 40px 1fr auto auto auto;
+      gap: 4px 10px;
+      padding: 4px 0;
+      border-bottom: 1px solid var(--border-soft);
+      color: var(--muted);
+      align-items: center;
+    }
+    .hc-pos-row:last-child { border-bottom: none; }
+    .hc-pos-symbol { color: var(--foreground); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .hc-pos-side { font-size: 9px; padding: 1px 5px; border-radius: 3px; text-align: center; }
+    .hc-pos-side.call { background: rgba(16,185,129,0.15); color: var(--success); }
+    .hc-pos-side.put { background: rgba(244,63,94,0.15); color: var(--destructive); }
+
+    .routing-entry {
+      background: var(--card-elevated);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 10px 12px;
+      margin-bottom: 6px;
+    }
+    .routing-signal {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 6px;
+      font-family: var(--font-mono);
+      font-size: 12px;
+    }
+    .routing-time { color: var(--muted-foreground); font-size: 10px; min-width: 56px; }
+    .routing-dir { font-weight: 700; font-size: 11px; text-transform: uppercase; }
+    .routing-dir.bullish { color: var(--success); }
+    .routing-dir.bearish { color: var(--destructive); }
+    .routing-meta { color: var(--muted); font-size: 11px; }
+    .routing-decisions {
+      display: grid;
+      grid-template-columns: 100px 60px 1fr;
+      gap: 2px 8px;
+      font-size: 11px;
+      font-family: var(--font-mono);
+      padding-top: 4px;
+      border-top: 1px solid var(--border-soft);
+    }
+    .rd-entered { color: var(--success); font-weight: 600; }
+    .rd-skipped { color: var(--muted-foreground); }
+    .rd-reason { color: var(--muted); font-size: 10px; }
+
+    .filter-stat {
+      background: var(--card-elevated);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 8px 10px;
+    }
+    .filter-stat-label { color: var(--muted-foreground); font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; }
+    .filter-stat-value { color: var(--foreground); font-size: 16px; font-weight: 600; }
+</style>
+</head>
+<body>
+
+<!-- Nav Bar -->
+<div class="nav-bar">
+  <span class="nav-brand">SPXer</span>
+  <a href="https://bitloom.cloud/spxer/replay/" data-path="/spxer/replay/">Replay</a>
+  <a href="https://bitloom.cloud/spxer/replay/#live" data-path="/spxer/replay/#live">Live</a>
+  <a href="https://bitloom.cloud/spxer/replay/sweep" data-path="/spxer/replay/sweep">🏆 Leaderboard</a>
+  <a href="https://bitloom.cloud/spxer/replay/analytics" data-path="/spxer/replay/analytics">Analytics</a>
+  <a href="https://bitloom.cloud/spxer/replay/backfill" data-path="/spxer/replay/backfill">Backfill</a>
+  <a href="https://bitloom.cloud/spxer/replay/journal" data-path="/spxer/replay/journal">📓 Journal</a>
+  <a href="https://bitloom.cloud/spxer/replay/account" data-path="/spxer/replay/account">💰 Account</a>
+  <a href="https://bitloom.cloud/spxer/admin/" class="active" data-path="/spxer/admin/">🔧 Admin</a>
+  <span class="nav-spacer"></span>
+</div>
+
+<!-- Header -->
+<div class="header">
+  <h1>Admin</h1>
+  <div class="mini-tabs" id="section-tabs">
+    <button class="active" data-section="processes">Processes</button>
+    <button data-section="configs">Configs</button>
+    <button data-section="events">Event Stream</button>
+    <button data-section="ecosystem">Ecosystem</button>
+    <button data-section="logs">Logs</button>
+  </div>
+  <div style="flex:1;min-width:0"></div>
+  <button class="config-btn" onclick="refreshCurrent()">🔄 Refresh</button>
+</div>
+
+<!-- Content Area -->
+<div class="content-area">
+  <!-- Processes Section -->
+  <div id="section-processes" class="section active">
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">PM2 Processes</span>
+        <button class="run-btn" onclick="reloadAll()">↻ Reload All</button>
+      </div>
+      <div class="process-grid" id="process-grid"></div>
+    </div>
+  </div>
+
+  <!-- Configs Section -->
+  <div id="section-configs" class="section">
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">Trading Configs</span>
+        <button class="run-btn" onclick="openConfigModal()">+ New Config</button>
+      </div>
+      <div class="config-list" id="config-list"></div>
+    </div>
+  </div>
+
+  <!-- Ecosystem Section -->
+  <div id="section-ecosystem" class="section">
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">ecosystem.config.js</span>
+        <div>
+          <button class="config-btn" onclick="downloadEcosystem()">⬇ Download</button>
+          <button class="run-btn" onclick="saveEcosystem()">💾 Save & Reload</button>
+        </div>
+      </div>
+      <textarea id="ecosystem-editor"></textarea>
+    </div>
+  </div>
+
+  <!-- Logs Section -->
+  <div id="section-logs" class="section">
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">Process Logs</span>
+        <select id="log-process-select" style="width: 180px;" onchange="loadLogs()">
+          <option value="">Select process...</option>
+        </select>
+      </div>
+      <div class="logs-viewer" id="logs-viewer"></div>
+    </div>
+  </div>
+
+  <!-- Event Stream Section -->
+  <div id="section-events" class="section">
+    <div id="handler-banner" style="display:none" class="card" style="border-color:var(--border-strong)">
+      <div style="display:flex;align-items:center;gap:10px;padding:2px 0">
+        <span id="handler-dot" class="dot gray"></span>
+        <span id="handler-status" style="font-weight:600;font-size:13px">Not running</span>
+        <span style="flex:1"></span>
+        <span id="handler-meta" style="color:var(--muted);font-size:11px;font-family:var(--font-mono)"></span>
+      </div>
+    </div>
+
+    <div id="handler-configs-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:10px"></div>
+
+    <div class="card" style="margin-top:12px">
+      <div class="card-header">
+        <span class="card-title">Signal Routing Log</span>
+        <span id="routing-count" style="color:var(--muted);font-size:11px;font-family:var(--font-mono)"></span>
+      </div>
+      <div id="routing-log" style="max-height:500px;overflow-y:auto">
+        <div style="color:var(--muted);padding:20px;text-align:center">No signals yet</div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:10px">
+      <div class="card-header">
+        <span class="card-title">Filter Stats</span>
+      </div>
+      <div id="filter-stats" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:8px;font-size:12px;font-family:var(--font-mono)">
+        <div style="color:var(--muted)">No data</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Config Modal -->
+<div class="modal-overlay" id="config-modal">
+  <div class="modal">
+    <div class="modal-header">
+      <h2 id="modal-title">New Config</h2>
+      <button class="modal-close" onclick="closeConfigModal()">&times;</button>
+    </div>
+    <div class="modal-body">
+      <form id="config-form">
+        <input type="hidden" id="config-id">
+        <div class="form-group">
+          <label class="form-label">Name</label>
+          <input type="text" id="config-name" required placeholder="e.g., SPX HMA 3x12">
+        </div>
+        <div class="form-group">
+          <label class="form-label">ID</label>
+          <input type="text" id="config-id-input" placeholder="Auto-generated from name">
+          <div class="form-hint">Leave empty to auto-generate from name</div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Description</label>
+          <textarea id="config-description" rows="3" placeholder="Optional description..."></textarea>
+        </div>
+      </form>
+    </div>
+    <div class="modal-footer">
+      <button class="config-btn" onclick="closeConfigModal()">Cancel</button>
+      <button class="run-btn" onclick="saveConfig()">Save Config</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const API = '/admin/api';
+let currentSection = 'processes';
+let processes = [];
+let configs = [];
+
+// ── Section Navigation ─────────────────────────────────────────────────────
+document.querySelectorAll('#section-tabs button').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const section = btn.dataset.section;
+    document.querySelectorAll('#section-tabs button').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+
+    document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
+    document.getElementById(`section-${section}`).classList.add('active');
+
+    currentSection = section;
+    if (currentSection === 'events') startHandlerRefresh();
+    else stopHandlerRefresh();
+    refreshCurrent();
+  });
+});
+
+function refreshCurrent() {
+  if (currentSection === 'processes') refreshProcesses();
+  else if (currentSection === 'configs') refreshConfigs();
+  else if (currentSection === 'events') refreshEventHandler();
+  else if (currentSection === 'ecosystem') loadEcosystem();
+  else if (currentSection === 'logs') loadLogProcessList();
+}
+
+// ── Processes ──────────────────────────────────────────────────────────────
+async function refreshProcesses() {
+  try {
+    const res = await fetch(`${API}/processes`);
+    if (!res.ok) throw new Error('Failed to fetch processes');
+    processes = await res.json();
+    renderProcesses();
+  } catch (e) {
+    console.error('Error:', e);
+    document.getElementById('process-grid').innerHTML = `<div style="color:var(--destructive);padding:20px">Error: ${e.message}</div>`;
+  }
+}
+
+function renderProcesses() {
+  const grid = document.getElementById('process-grid');
+  if (!processes.length) {
+    grid.innerHTML = '<div style="color:var(--muted);padding:20px">No processes found</div>';
+    return;
+  }
+
+  grid.innerHTML = processes.map(p => `
+    <div class="process-card">
+      <div class="process-header">
+        <span class="process-name">${p.name}</span>
+        <span class="process-status ${p.status}">${p.status}</span>
+      </div>
+      <div class="process-stats">
+        <div><span class="process-stat">PID:</span> <span class="process-stat-value">${p.pid || '-'}</span></div>
+        <div><span class="process-stat">CPU:</span> <span class="process-stat-value">${p.cpu?.toFixed(1) || '-'}%</span></div>
+        <div><span class="process-stat">Mem:</span> <span class="process-stat-value">${p.memory ? (p.memory / 1024 / 1024).toFixed(0) + ' MB' : '-'}</span></div>
+        <div><span class="process-stat">Uptime:</span> <span class="process-stat-value">${p.uptime ? formatUptime(p.uptime) : '-'}</span></div>
+      </div>
+      <div class="process-actions">
+        ${p.status === 'online'
+          ? `<button class="btn-danger" onclick="controlProcess('${p.name}', 'stop')">Stop</button>
+             <button class="config-btn" onclick="controlProcess('${p.name}', 'restart')">Restart</button>`
+          : `<button class="run-btn" onclick="controlProcess('${p.name}', 'start')">Start</button>`
+        }
+        <button class="config-btn" onclick="viewLogs('${p.name}')">Logs</button>
+      </div>
+    </div>
+  `).join('');
+}
+
+async function controlProcess(name, action) {
+  try {
+    const res = await fetch(`${API}/process/${name}/${action}`, { method: 'POST' });
+    if (!res.ok) throw new Error('Failed to control process');
+    await refreshProcesses();
+  } catch (e) {
+    alert(`Error: ${e.message}`);
+  }
+}
+
+async function reloadAll() {
+  if (!confirm('Reload all processes from ecosystem.config.js?')) return;
+  try {
+    const res = await fetch(`${API}/process/reload-all`, { method: 'POST' });
+    if (!res.ok) throw new Error('Failed to reload');
+    alert('All processes reloaded!');
+    await refreshProcesses();
+  } catch (e) {
+    alert(`Error: ${e.message}`);
+  }
+}
+
+function formatUptime(seconds) {
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
+  return `${Math.floor(seconds / 86400)}d`;
+}
+
+function viewLogs(name) {
+  document.querySelector('[data-section="logs"]').click();
+  document.getElementById('log-process-select').value = name;
+  loadLogs();
+}
+
+// ── Configs ───────────────────────────────────────────────────────────────
+async function refreshConfigs() {
+  try {
+    const res = await fetch(`${API}/configs`);
+    if (!res.ok) throw new Error('Failed to fetch configs');
+    configs = await res.json();
+    renderConfigs();
+  } catch (e) {
+    console.error('Error:', e);
+    document.getElementById('config-list').innerHTML = `<div style="color:var(--destructive);padding:20px">Error: ${e.message}</div>`;
+  }
+}
+
+function renderConfigs() {
+  const list = document.getElementById('config-list');
+  if (!configs.length) {
+    list.innerHTML = '<div style="color:var(--muted);padding:20px">No configs found</div>';
+    return;
+  }
+
+  list.innerHTML = configs.map(c => `
+    <div class="config-item">
+      <div class="config-info">
+        <div class="config-name">${escapeHtml(c.name)}</div>
+        <div class="config-id" title="${escapeHtml(c.id)}">${escapeHtml(c.id)}</div>
+      </div>
+      <div class="config-actions">
+        <button class="config-btn" onclick="editConfig('${escapeHtml(c.id)}')">Edit</button>
+        <button class="btn-danger" onclick="deleteConfig('${escapeHtml(c.id)}')">Delete</button>
+      </div>
+    </div>
+  `).join('');
+}
+
+function openConfigModal(config = null) {
+  const modal = document.getElementById('config-modal');
+  const title = document.getElementById('modal-title');
+
+  if (config) {
+    title.textContent = 'Edit Config';
+    document.getElementById('config-id').value = config.id;
+    document.getElementById('config-id-input').value = config.id;
+    document.getElementById('config-name').value = config.name;
+    document.getElementById('config-description').value = config.description || '';
+  } else {
+    title.textContent = 'New Config';
+    document.getElementById('config-form').reset();
+    document.getElementById('config-id').value = '';
+  }
+
+  modal.classList.add('open');
+}
+
+function closeConfigModal() {
+  document.getElementById('config-modal').classList.remove('open');
+}
+
+async function editConfig(id) {
+  try {
+    const res = await fetch(`${API}/config/${id}`);
+    if (!res.ok) throw new Error('Failed to fetch config');
+    const config = await res.json();
+    openConfigModal(config);
+  } catch (e) {
+    alert(`Error: ${e.message}`);
+  }
+}
+
+async function deleteConfig(id) {
+  if (!confirm('Are you sure you want to delete this config?')) return;
+  try {
+    const res = await fetch(`${API}/config/${id}`, { method: 'DELETE' });
+    if (!res.ok) throw new Error('Failed to delete config');
+    await refreshConfigs();
+  } catch (e) {
+    alert(`Error: ${e.message}`);
+  }
+}
+
+async function saveConfig() {
+  const id = document.getElementById('config-id').value || document.getElementById('config-id-input').value;
+  const name = document.getElementById('config-name').value;
+  const description = document.getElementById('config-description').value;
+
+  if (!name) {
+    alert('Name is required');
+    return;
+  }
+
+  try {
+    const res = await fetch(`${API}/config${id ? `/${id}` : ''}`, {
+      method: id ? 'PUT' : 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, name, description, config: {} }),
+    });
+    if (!res.ok) throw new Error('Failed to save config');
+    closeConfigModal();
+    await refreshConfigs();
+  } catch (e) {
+    alert(`Error: ${e.message}`);
+  }
+}
+
+// ── Ecosystem ─────────────────────────────────────────────────────────────
+async function loadEcosystem() {
+  try {
+    const res = await fetch(`${API}/ecosystem`);
+    if (!res.ok) throw new Error('Failed to load ecosystem');
+    const data = await res.json();
+    document.getElementById('ecosystem-editor').value = data.content;
+  } catch (e) {
+    alert(`Error: ${e.message}`);
+  }
+}
+
+async function saveEcosystem() {
+  const content = document.getElementById('ecosystem-editor').value;
+  try {
+    const res = await fetch(`${API}/ecosystem`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content }),
+    });
+    if (!res.ok) throw new Error('Failed to save ecosystem');
+    alert('Ecosystem config saved and PM2 reloaded!');
+  } catch (e) {
+    alert(`Error: ${e.message}`);
+  }
+}
+
+function downloadEcosystem() {
+  const content = document.getElementById('ecosystem-editor').value;
+  const blob = new Blob([content], { type: 'text/javascript' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'ecosystem.config.js';
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+// ── Logs ─────────────────────────────────────────────────────────────────
+function loadLogProcessList() {
+  const select = document.getElementById('log-process-select');
+  const currentValue = select.value;
+  select.innerHTML = '<option value="">Select process...</option>' +
+    processes.map(p => `<option value="${p.name}">${p.name}</option>`).join('');
+  select.value = currentValue;
+  if (currentValue) loadLogs();
+}
+
+async function loadLogs() {
+  const processName = document.getElementById('log-process-select').value;
+  if (!processName) {
+    document.getElementById('logs-viewer').innerHTML = '<div style="color:var(--muted)">Select a process to view logs</div>';
+    return;
+  }
+
+  try {
+    const res = await fetch(`${API}/process/${processName}/logs?lines=200`);
+    if (!res.ok) throw new Error('Failed to fetch logs');
+    const data = await res.json();
+
+    const viewer = document.getElementById('logs-viewer');
+    viewer.innerHTML = data.logs.map(log =>
+      `<div class="log-line ${log.type}">${escapeHtml(log.line)}</div>`
+    ).join('');
+    viewer.scrollTop = viewer.scrollHeight;
+  } catch (e) {
+    document.getElementById('logs-viewer').innerHTML = `<div style="color:var(--destructive)">Error: ${e.message}</div>`;
+  }
+}
+
+function escapeHtml(text) {
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+// ── Event Stream ────────────────────────────────────────────────────────
+let handlerRefreshTimer = null;
+let handlerState = null;
+
+function startHandlerRefresh() {
+  stopHandlerRefresh();
+  refreshEventHandler();
+  handlerRefreshTimer = setInterval(refreshEventHandler, 5000);
+}
+
+function stopHandlerRefresh() {
+  if (handlerRefreshTimer) {
+    clearInterval(handlerRefreshTimer);
+    handlerRefreshTimer = null;
+  }
+}
+
+async function refreshEventHandler() {
+  try {
+    const [stateRes, routingRes] = await Promise.all([
+      fetch(`${API}/handler/state`),
+      fetch(`${API}/handler/routing?n=50`),
+    ]);
+    handlerState = stateRes.ok ? await stateRes.json() : null;
+    const routing = routingRes.ok ? await routingRes.json() : [];
+    renderHandlerState();
+    renderRoutingLog(routing);
+    renderFilterStats();
+  } catch (e) {
+    console.error('[events] refresh error:', e);
+  }
+}
+
+function renderHandlerState() {
+  const banner = document.getElementById('handler-banner');
+  const grid = document.getElementById('handler-configs-grid');
+  if (!handlerState) {
+    banner.style.display = 'block';
+    banner.style.borderColor = 'var(--border)';
+    document.getElementById('handler-dot').className = 'dot gray';
+    document.getElementById('handler-status').textContent = 'Not running';
+    document.getElementById('handler-meta').textContent = '';
+    grid.innerHTML = '<div class="card" style="text-align:center;color:var(--muted);padding:30px">No event handler process detected. Start one from the Ecosystem tab or run manually:<br><code style="font-family:var(--font-mono);font-size:11px;color:var(--primary)">AGENT_CONFIG_IDS=cfg1,cfg2 AGENT_PAPER=true npx tsx event_handler_mvp.ts</code></div>';
+    return;
+  }
+
+  banner.style.display = 'block';
+  const dot = document.getElementById('handler-dot');
+  const status = document.getElementById('handler-status');
+  const meta = document.getElementById('handler-meta');
+
+  if (handlerState.connected) {
+    dot.className = 'dot green';
+    status.textContent = 'Connected';
+    banner.style.borderColor = 'var(--success-border)';
+  } else if (handlerState.running) {
+    dot.className = 'dot yellow';
+    status.textContent = 'Connecting...';
+    banner.style.borderColor = 'var(--warning-border)';
+  } else {
+    dot.className = 'dot gray';
+    status.textContent = 'Offline';
+    banner.style.borderColor = 'var(--border)';
+  }
+
+  const uptimeSec = Math.floor((Date.now() - new Date(handlerState.upSince).getTime()) / 1000);
+  meta.textContent = `SPX $${handlerState.spxPrice.toFixed(2)} | ${handlerState.accountId} | ${formatUptime(uptimeSec)}`;
+
+  if (!handlerState.configs || Object.keys(handlerState.configs).length === 0) {
+    grid.innerHTML = '<div style="color:var(--muted);padding:20px;text-align:center">No configs loaded</div>';
+    return;
+  }
+
+  grid.innerHTML = Object.values(handlerState.configs).map(c => {
+    const pnlClass = c.state.dailyPnl >= 0 ? 'pnl-positive' : 'pnl-negative';
+    const pnlSign = c.state.dailyPnl >= 0 ? '+' : '';
+    const modeBadge = !c.enabled ? 'offline' : c.paper ? 'paper' : 'live';
+    const modeLabel = !c.enabled ? 'OFF' : c.paper ? 'PAPER' : 'LIVE';
+    const posCount = c.positions ? c.positions.length : 0;
+
+    return `<div class="handler-config-card" style="${!c.enabled ? 'opacity:0.45' : ''}">
+      <div class="hc-header">
+        <span class="hc-name" title="${escapeHtml(c.id)}">${escapeHtml(c.name || c.id)}</span>
+        <div class="hc-badges">
+          <span class="hc-badge hma">${escapeHtml(c.hmaPair)}</span>
+          <span class="hc-badge ${modeBadge}">${modeLabel}</span>
+        </div>
+      </div>
+      <div class="hc-stats">
+        <div><span class="hc-stat-label">Daily P&L</span><span class="hc-stat-value ${pnlClass}">${pnlSign}$${Math.abs(c.state.dailyPnl).toFixed(2)}</span></div>
+        <div><span class="hc-stat-label">Positions</span><span class="hc-stat-value">${c.state.positionsOpen}</span></div>
+        <div><span class="hc-stat-label">Trades</span><span class="hc-stat-value">${c.state.tradesCompleted}</span></div>
+        <div><span class="hc-stat-label">Cooldown</span><span class="hc-stat-value">${c.state.cooldownRemainingSec > 0 ? c.state.cooldownRemainingSec + 's' : '-'}</span></div>
+      </div>
+      <div class="hc-actions">
+        <button class="${c.paper ? 'btn-warning' : 'btn-danger'}" onclick="togglePaper('${escapeHtml(c.id)}', ${!c.paper})">${c.paper ? 'Switch to Live' : 'Switch to Paper'}</button>
+        <button class="config-btn" onclick="toggleEnabled('${escapeHtml(c.id)}', ${!c.enabled})">${c.enabled ? 'Disable' : 'Enable'}</button>
+        ${posCount > 0 ? `<button class="btn-danger" onclick="forceClose('${escapeHtml(c.id)}')">Force Close (${posCount})</button>` : ''}
+        <button class="config-btn" onclick="reloadConfig('${escapeHtml(c.id)}')">Reload</button>
+      </div>
+      ${c.positions && c.positions.length > 0 ? `<div class="hc-positions">
+        <div style="font-size:9px;color:var(--muted-foreground);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:4px;padding:4px 0;border-bottom:1px solid var(--border-soft)">Open Positions</div>
+        ${c.positions.map(p => `<div class="hc-pos-row">
+          <span class="hc-pos-symbol" title="${escapeHtml(p.symbol)}">${escapeHtml(p.symbol)}</span>
+          <span class="hc-pos-side ${p.side}">${p.side.toUpperCase()}</span>
+          <span>Strike ${p.strike}</span>
+          <span>x${p.quantity} @ $${p.entryPrice.toFixed(2)}</span>
+          <span style="color:var(--muted);font-size:10px">SL $${p.stopLoss.toFixed(2)}</span>
+        </div>`).join('')}
+      </div>` : ''}
+    </div>`;
+  }).join('');
+}
+
+function renderRoutingLog(decisions) {
+  const container = document.getElementById('routing-log');
+  const countEl = document.getElementById('routing-count');
+  if (!decisions.length) {
+    container.innerHTML = '<div style="color:var(--muted);padding:20px;text-align:center">No signals yet</div>';
+    countEl.textContent = '';
+    return;
+  }
+
+  countEl.textContent = `${decisions.length} events`;
+  container.innerHTML = decisions.map(d => {
+    const decisionsHtml = d.decisions.map(dc => {
+      if (dc.action === 'entered') {
+        return `<span class="rd-entered">ENTERED</span><span></span><span>${escapeHtml(dc.details || '')}</span>`;
+      }
+      return `<span class="rd-skipped">SKIPPED</span><span>${escapeHtml(dc.reason || '?')}</span><span class="rd-reason">${escapeHtml(dc.details || '')}</span>`;
+    }).map(row => `<div style="display:contents">${row}</div>`).join('');
+
+    return `<div class="routing-entry">
+      <div class="routing-signal">
+        <span class="routing-time">${escapeHtml(d.timeET)}</span>
+        <span class="hc-badge hma" style="font-size:8px;padding:1px 5px">${d.signal.hmaFastPeriod}x${d.signal.hmaSlowPeriod}</span>
+        <span class="routing-dir ${d.signal.direction}">${d.signal.direction}</span>
+        <span class="routing-meta">${escapeHtml(d.signal.symbol)} strike ${d.signal.strike} @ $${d.signal.price.toFixed(2)}</span>
+      </div>
+      <div class="routing-decisions">
+        <div style="font-size:10px;color:var(--muted-foreground)">${d.decisions.length} configs</div>
+        ${decisionsHtml}
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function renderFilterStats() {
+  const container = document.getElementById('filter-stats');
+  if (!handlerState) {
+    container.innerHTML = '<div style="color:var(--muted)">No data</div>';
+    return;
+  }
+
+  const { totalSignalsReceived, totalEntries, filterReasons } = handlerState.filterStats;
+  const rate = totalSignalsReceived > 0 ? ((totalEntries / totalSignalsReceived) * 100).toFixed(0) : '0';
+
+  const reasonHtml = Object.entries(filterReasons || {}).sort((a, b) => b[1] - a[1]).map(([reason, count]) =>
+    `<div class="filter-stat"><div class="filter-stat-label">${escapeHtml(reason)}</div><div class="filter-stat-value">${count}</div></div>`
+  ).join('');
+
+  container.innerHTML = `
+    <div class="filter-stat"><div class="filter-stat-label">Signals Received</div><div class="filter-stat-value">${totalSignalsReceived}</div></div>
+    <div class="filter-stat"><div class="filter-stat-label">Entries Executed</div><div class="filter-stat-value">${totalEntries}</div></div>
+    <div class="filter-stat"><div class="filter-stat-label">Entry Rate</div><div class="filter-stat-value" style="color:${Number(rate) > 20 ? 'var(--success)' : 'var(--warning)'}">${rate}%</div></div>
+    ${reasonHtml}
+  `;
+}
+
+async function sendHandlerCommand(body) {
+  try {
+    const res = await fetch(`${API}/handler/command`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) throw new Error((await res.json()).error || 'Command failed');
+    setTimeout(() => refreshEventHandler(), 2000);
+  } catch (e) {
+    console.error('[events] command error:', e);
+  }
+}
+
+function togglePaper(configId, paper) {
+  sendHandlerCommand({ action: 'toggle_paper', configId, paper });
+}
+
+function toggleEnabled(configId, enabled) {
+  sendHandlerCommand({ action: 'toggle_enabled', configId, enabled });
+}
+
+function forceClose(configId) {
+  sendHandlerCommand({ action: 'force_close', configId });
+}
+
+function reloadConfig(configId) {
+  sendHandlerCommand({ action: 'reload_config', configId });
+}
+
+// ── Init ───────────────────────────────────────────────────────────────────
+refreshProcesses();
+</script>
+</body>
+</html>
