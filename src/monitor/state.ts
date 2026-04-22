@@ -13,7 +13,7 @@ const STATE_FILE = path.join(process.cwd(), 'logs', 'monitor-state.json');
 
 export interface ActionRecord {
   action: string;       // 'stop_agent' | 'close_position' | 'cancel_order' | 'cancel_all_orders'
-  target: string;       // 'spx' | 'xsp' | order ID
+  target: string;       // 'spx' | order ID
   reason: string;
   timestamp: number;    // unix ms
 }

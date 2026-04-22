@@ -38,6 +38,9 @@ export interface FormingCandle {
   close: number;
   volume: number;
   ticks: number;     // number of trade ticks in this candle
+  // Spread aggregation: running average of (ask - bid) observed during the bar
+  spreadSum: number;
+  spreadSamples: number;
 }
 
 export type CandleCloseCallback = (symbol: string, candle: FormingCandle) => void;
@@ -45,6 +48,8 @@ export type CandleCloseCallback = (symbol: string, candle: FormingCandle) => voi
 export class OptionCandleBuilder {
   private candles = new Map<string, FormingCandle>();
   private closeCallback: CandleCloseCallback;
+  /** Per-symbol last seen tick timestamp — rejects out-of-order ticks from reconnects/replays. */
+  private lastTickTs = new Map<string, number>();
 
   constructor(onClose: CandleCloseCallback) {
     this.closeCallback = onClose;
@@ -68,6 +73,13 @@ export class OptionCandleBuilder {
     const ts = Math.floor(tsMs / 1000);
     const minuteTs = ts - (ts % 60);
 
+    // Out-of-order guard: reject ticks older than the last tick we processed for
+    // this symbol (with 2s tolerance for minor clock skew between data sources).
+    // Prevents stale ticks from ThetaData reconnects from corrupting forming candles.
+    const prevTs = this.lastTickTs.get(symbol);
+    if (prevTs != null && ts < prevTs - 2) return;
+    this.lastTickTs.set(symbol, ts);
+
     let candle = this.candles.get(symbol);
 
     if (!candle || candle.minuteTs !== minuteTs) {
@@ -84,6 +96,8 @@ export class OptionCandleBuilder {
         close: price,
         volume: 0,
         ticks: 0,
+        spreadSum: 0,
+        spreadSamples: 0,
       };
       this.candles.set(symbol, candle);
     }
@@ -111,6 +125,13 @@ export class OptionCandleBuilder {
   processQuote(symbol: string, bid: number, ask: number, tsMs: number): void {
     if (bid <= 0 || ask <= 0) return;
 
+    const ts = Math.floor(tsMs / 1000);
+
+    // Out-of-order guard (same as processTick)
+    const prevTs = this.lastTickTs.get(symbol);
+    if (prevTs != null && ts < prevTs - 2) return;
+    this.lastTickTs.set(symbol, ts);
+
     const mid = (bid + ask) / 2;
 
     // Only update an existing candle — don't open a new one from just a quote
@@ -118,7 +139,6 @@ export class OptionCandleBuilder {
     if (!candle) return;
 
     // Check the quote is for the current candle's minute
-    const ts = Math.floor(tsMs / 1000);
     const minuteTs = ts - (ts % 60);
     if (candle.minuteTs !== minuteTs) return; // stale quote for a previous minute
 
@@ -126,6 +146,22 @@ export class OptionCandleBuilder {
     if (mid > candle.high) candle.high = mid;
     if (mid < candle.low) candle.low = mid;
     candle.close = mid;
+
+    // Aggregate spread (ask - bid) for this bar
+    const spread = ask - bid;
+    if (spread >= 0) {
+      candle.spreadSum += spread;
+      candle.spreadSamples++;
+    }
+  }
+
+  /**
+   * Average spread observed during a forming candle's lifetime.
+   * Returns `undefined` when no quote samples were collected.
+   */
+  static averageSpread(candle: FormingCandle): number | undefined {
+    if (candle.spreadSamples <= 0) return undefined;
+    return candle.spreadSum / candle.spreadSamples;
   }
 
   /**

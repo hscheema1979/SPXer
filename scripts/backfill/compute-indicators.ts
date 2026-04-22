@@ -10,6 +10,10 @@
  *   npx tsx scripts/backfill/compute-indicators.ts 2026-02-20 2026-03-20   # date range
  *
  *   BAR_TABLE=replay_bars npx tsx scripts/backfill/compute-indicators.ts   # use replay_bars table
+ *   FORCE=1 npx tsx scripts/backfill/compute-indicators.ts 2026-04-17      # recompute rows even
+ *                                                                         # if indicators are
+ *                                                                         # partially populated
+ *                                                                         # (fixes partial backfills)
  */
 import * as dotenv from 'dotenv';
 dotenv.config();
@@ -22,6 +26,16 @@ import type { Bar, Timeframe } from '../../src/types';
 const DB_PATH = path.resolve(__dirname, '../../data/spxer.db');
 // Configurable table: 'bars' (default) or 'replay_bars' (sanitized)
 const BAR_TABLE = process.env.BAR_TABLE || 'bars';
+// FORCE=1 processes every row in the date range, even rows whose indicators
+// JSON is already non-empty. Required to fix partial-backfill corruption
+// (e.g. rows that have hma3/hma15 but null hma5/hma19/ema/rsi/vwap).
+const FORCE = process.env.FORCE === '1' || process.env.FORCE === 'true';
+// SYMBOL=NDX (or comma-separated list) restricts processing to specific
+// symbols. Useful when fixing partial backfill for one underlying without
+// touching every option contract in the date range.
+const SYMBOL_FILTER = process.env.SYMBOL
+  ? process.env.SYMBOL.split(',').map(s => s.trim()).filter(Boolean)
+  : null;
 
 function getDb() {
   const db = new Database(DB_PATH);
@@ -98,14 +112,34 @@ async function main() {
     dateFilter = `AND DATE(ts, 'unixepoch') = '${args[0]}'`;
   }
 
-  // Get all unique (symbol, timeframe) pairs with empty indicators
-  const pairs = db.prepare(`
+  // Get all unique (symbol, timeframe) pairs needing recomputation.
+  // Default: only rows where indicators is empty ('{}').
+  // FORCE=1: every row in the date range — required when indicators are
+  // partially populated (e.g. 2026-04-17 has hma3/hma15 but null hma5/hma19).
+  const baseWhere = FORCE
+    ? (dateFilter ? `WHERE ${dateFilter.replace(/^AND /, '')}` : '')
+    : `WHERE indicators = '{}' ${dateFilter}`;
+  // Tack on symbol filter if SYMBOL env var is set
+  let whereClause = baseWhere;
+  if (SYMBOL_FILTER && SYMBOL_FILTER.length) {
+    const placeholders = SYMBOL_FILTER.map(() => '?').join(',');
+    whereClause = baseWhere
+      ? `${baseWhere} AND symbol IN (${placeholders})`
+      : `WHERE symbol IN (${placeholders})`;
+  }
+  const pairsStmt = db.prepare(`
     SELECT DISTINCT symbol, timeframe
     FROM ${BAR_TABLE}
-    WHERE indicators = '{}'
-    ${dateFilter}
+    ${whereClause}
     ORDER BY symbol, timeframe
-  `).all() as any[];
+  `);
+  const pairs = (SYMBOL_FILTER && SYMBOL_FILTER.length
+    ? pairsStmt.all(...SYMBOL_FILTER)
+    : pairsStmt.all()) as any[];
+
+  if (FORCE) {
+    console.log(`  [FORCE=1] Reprocessing ALL rows in date range regardless of indicator state`);
+  }
 
   console.log(`\n${'═'.repeat(60)}`);
   console.log(`  Computing Indicators — ${pairs.length} symbol/timeframe combos`);

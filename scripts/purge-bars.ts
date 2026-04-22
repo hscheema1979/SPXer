@@ -3,7 +3,7 @@
  *
  * Keeps only the last 3 trading days for active/sticky contracts.
  * Deletes all bars for expired contracts.
- * Runs VACUUM to reclaim disk space.
+ * SQLite reuses freed pages for new bars — no VACUUM needed.
  *
  * Usage:
  *   npx tsx scripts/purge-bars.ts [--dry-run]
@@ -103,12 +103,6 @@ function main() {
   // 3. Also delete expired contracts from contracts table
   const contractResult = db.prepare(`DELETE FROM contracts WHERE state = 'EXPIRED'`).run();
   console.log(`  Deleted ${contractResult.changes} expired contract records`);
-
-  // 4. VACUUM to reclaim space
-  console.log(`\nRunning VACUUM (this may take a minute)...\n`);
-  db.pragma('journal_mode = DELETE'); // VACUUM requires DELETE mode
-  db.exec('VACUUM');
-  db.pragma('journal_mode = WAL');
 
   // Final count
   const finalBars = db.prepare('SELECT count(*) as cnt FROM bars').get() as any;

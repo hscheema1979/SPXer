@@ -1,7 +1,7 @@
 /**
  * Position Reconciliation — compares agent state with broker reality.
  *
- * Extracted from agent.ts / agent-xsp.ts for reuse and testability.
+ * Extracted from spx_agent.ts for reuse and testability.
  * Runs every cycle during trading hours to:
  *   1. Adopt orphaned positions from broker (agent restarted)
  *   2. Drop phantom positions from agent (closed externally)
@@ -150,7 +150,9 @@ export function openToCorePosition(pos: OpenPosition): CorePosition {
     qty: pos.quantity,
     entryPrice: pos.entryPrice,
     stopLoss: pos.stopLoss,
-    takeProfit: pos.takeProfit,
+    // Adopted orphans may lack a TP leg. Use Infinity so the TP check never fires;
+    // the agent will re-submit OCO protection on the next reconcile cycle.
+    takeProfit: pos.takeProfit ?? Number.POSITIVE_INFINITY,
     entryTs: Math.floor(pos.openedAt / 1000),
     highWaterPrice: pos.entryPrice,
   };

@@ -1,6 +1,6 @@
 # SPXer — 0DTE SPX Options Trading System
 
-SPXer is three systems sharing a unified core: a **data service** that polls SPX/ES futures and tracks ~250–480 SPXW 0DTE options contracts with 1-minute OHLCV bars and a full indicator battery; **trading agents** that execute a deterministic HMA(3)×HMA(17) crossover strategy on SPX and XSP options via Tradier; and a **replay system** for config-driven backtesting through the same signal → strike selection → exit pipeline used in production.
+SPXer is three systems sharing a unified core: a **data service** that polls SPX/ES futures and tracks ~250–480 SPXW 0DTE options contracts with 1-minute OHLCV bars and a full indicator battery; a **trading agent** that executes a deterministic HMA(3)×HMA(17) crossover strategy on SPX options via Tradier; and a **replay system** for config-driven backtesting through the same signal → strike selection → exit pipeline used in production.
 
 **Strategy**: HMA(3)×HMA(17) cross on SPX underlying → OTM strike selection → OTOCO bracket order (TP 1.4× / SL 70%) → exit on HMA reversal, immediately flip to opposite side (scannerReverse). Pure deterministic — no LLM in the trading loop.
 
@@ -18,8 +18,8 @@ Data Pipeline (spxer, port 3600)
   TV Scrn ──┘    Indicators          HMA/RSI/BB/EMA/        /spx/bars
                  Contract Tracker     VWAP/ATR/MACD/...     /contracts/active
 
-Trading Agents (spxer-agent, spxer-xsp)
-────────────────────────────────────────
+Trading Agent (spxer-agent)
+───────────────────────────
   Market Snapshot ──► HMA(3)×HMA(17) cross ──► Strike Selector ($15 OTM)
        (from data      detection on 1m bars      computeQty (15% buying power)
         service)              │                         │
@@ -28,11 +28,11 @@ Trading Agents (spxer-agent, spxer-xsp)
                         HMA reversal                    │
                                                   Tradier API (live)
 
-Monitor (account-monitor)               Replay (src/replay/)
-──────────────────────                 ─────────────────────
-  Pi SDK LLM agent                     In-memory bar cache
-  reads positions/orders               Same src/core/ logic
-  flags issues, does NOT trade         Config-driven backtesting
+Replay (src/replay/)
+─────────────────────
+  In-memory bar cache
+  Same src/core/ logic
+  Config-driven backtesting
 ```
 
 **Shared core** (`src/core/`): Signal detection, exit conditions, risk checks, strike selection, position sizing, and trade friction — all imported by both the live agents and replay system. Test in replay → deploy live.
@@ -47,8 +47,6 @@ All processes managed via `ecosystem.config.js`:
 |---------|-------------|
 | `spxer` | Data pipeline — SPX/ES bars, options contracts, indicators (port 3600) |
 | `spxer-agent` | SPX 0DTE agent — margin account, up to 10 contracts, 15% of buying power |
-| `spxer-xsp` | XSP 1DTE agent — cash account, 1 contract, SPX→XSP strike conversion |
-| `account-monitor` | LLM-powered oversight — monitors both accounts, positions/orders, flags issues (doesn't trade) |
 | `replay-viewer` | Replay viewer web UI (port 3601) |
 
 ---
@@ -66,18 +64,15 @@ pm2 save
 # Start individual processes
 pm2 start ecosystem.config.js --only spxer
 pm2 start ecosystem.config.js --only spxer-agent
-pm2 start ecosystem.config.js --only spxer-xsp
 
 # Dev mode (data service only)
 npm run dev
 
 # Agent in paper mode
 npm run agent          # SPX paper
-npm run agent:xsp      # XSP paper
 
 # Agent live (AGENT_PAPER=false)
 npm run agent:live
-npm run agent:xsp:live
 
 # Monitor
 pm2 logs spxer-agent --lines 50
@@ -144,7 +139,7 @@ npx tsx scripts/autoresearch/verify-metric.ts --dates=2026-03-19 --cooldownSec=1
 
 **Startup reconciliation.** On restart, agents query the broker for open positions, adopt orphaned ones, and submit missing OCO protection. Survives PM2 restarts cleanly.
 
-**LLMs observe, code executes.** The XSP monitor agent uses LLM reasoning to flag issues but cannot place orders. Scanner/judge infrastructure exists in the codebase for replay experiments but is disabled in live trading.
+**Deterministic execution.** No LLM in the live trading loop. Scanner/judge infrastructure exists in the codebase for replay experiments but is disabled in live trading.
 
 **Single source of truth.** All trading logic lives in `src/core/`. Live agents wrap core functions with stateful classes. Replay calls core functions directly. Never duplicate logic.
 

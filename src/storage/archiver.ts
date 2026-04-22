@@ -1,6 +1,7 @@
 import { execSync } from 'child_process';
 import { existsSync } from 'fs';
 import { getExpiredContracts, deleteBarsBySymbols } from './queries';
+import { getDbPath } from './db';
 import { config } from '../config';
 
 const MAX_RETRIES = 3;
@@ -41,7 +42,7 @@ async function exportToParquet(symbols: string[], outPath: string): Promise<void
     db.run('INSTALL sqlite; LOAD sqlite;', (err: Error | null) => err ? reject(err) : resolve());
   });
   await new Promise<void>((resolve, reject) => {
-    db.run(`ATTACH '${config.dbPath}' AS spxer (TYPE sqlite);`, (err: Error | null) => err ? reject(err) : resolve());
+    db.run(`ATTACH '${getDbPath()}' AS spxer (TYPE sqlite);`, (err: Error | null) => err ? reject(err) : resolve());
   });
   const symbolList = symbols.map(s => `'${s}'`).join(',');
   const sql = `

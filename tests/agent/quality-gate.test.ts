@@ -124,8 +124,8 @@ describe('validateTradeQuality', () => {
 
   // ── Real-world scenarios from audit log ─────────────────────────────
 
-  it('blocks the XSP $2.97 spread trade from today', () => {
-    // From audit: bid=1.93, ask=4.90
+  it('blocks a trade with a $2.97 spread', () => {
+    // bid=1.93, ask=4.90
     const result = validateTradeQuality(makeInput({
       bid: 1.93,
       ask: 4.90,

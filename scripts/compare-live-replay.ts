@@ -32,7 +32,7 @@ function getFlag(name: string, defaultVal: string): string {
 }
 
 const targetDate = dateArg;
-const configId = getFlag('config', 'hma3x17-undhma-otm15-tp14x-sl70');
+const configId = getFlag('config', 'spx-hma3x17-undhma-otm15-tp14x-sl70');
 const auditPath = getFlag('audit', 'logs/agent-audit.jsonl');
 
 // ── Types ────────────────────────────────────────────────────────────────────

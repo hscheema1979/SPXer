@@ -34,6 +34,13 @@
  *   --emaCrossFast=N           EMA fast period (9, 21, 50)
  *   --emaCrossSlow=N           EMA slow period (21, 50, 200)
  *   --timeframe=TF             Bar timeframe (1m, 2m, 3m, 5m)
+ *   --reentryTpEnabled=true    Enable take-profit re-entries (same-side follow-on after TP fills)
+ *   --reentryTpStrategy=X      'same_direction' (default) or 'fresh_signal_required' (option HMA must still confirm)
+ *   --reentryTpMaxPerDay=N     Max TP re-entries per session (default 3)
+ *   --reentryTpMaxPerSignal=N  Max chain depth per original entry (default 1)
+ *   --reentryTpCooldownSec=N   Cooldown between TP exit and re-entry (default 30)
+ *   --reentryTpSizeMult=N      Size multiplier vs computeQty() (default 1.0)
+ *   --reentryTpRequireHmaConfirm=true  Require option-contract HMA still matches the side
  *   --label=NAME               Label for results tracking
  */
 
@@ -119,6 +126,37 @@ async function main() {
   if (flags.cooldownSec) overrides.judges = { ...config.judges, entryCooldownSec: Number(flags.cooldownSec) };
   if (flags.maxDailyLoss) overrides.risk = { ...config.risk, maxDailyLoss: Number(flags.maxDailyLoss) };
   if (flags.timeframe) overrides.pipeline = { ...config.pipeline, timeframe: flags.timeframe as any };
+
+  // ── TP re-entry overrides ──
+  if (
+    flags.reentryTpEnabled || flags.reentryTpStrategy || flags.reentryTpMaxPerDay ||
+    flags.reentryTpMaxPerSignal || flags.reentryTpCooldownSec || flags.reentryTpSizeMult ||
+    flags.reentryTpRequireHmaConfirm
+  ) {
+    const baseExit = overrides.exit ?? config.exit;
+    const baseReentry = baseExit.reentryOnTakeProfit ?? {
+      enabled: false,
+      strategy: 'same_direction' as const,
+      maxReentriesPerDay: 3,
+      maxReentriesPerSignal: 1,
+      cooldownSec: 30,
+      sizeMultiplier: 1.0,
+      requireOptionHmaConfirm: false,
+    };
+    overrides.exit = {
+      ...baseExit,
+      reentryOnTakeProfit: {
+        ...baseReentry,
+        ...(flags.reentryTpEnabled ? { enabled: flags.reentryTpEnabled === 'true' } : {}),
+        ...(flags.reentryTpStrategy ? { strategy: flags.reentryTpStrategy as any } : {}),
+        ...(flags.reentryTpMaxPerDay ? { maxReentriesPerDay: Number(flags.reentryTpMaxPerDay) } : {}),
+        ...(flags.reentryTpMaxPerSignal ? { maxReentriesPerSignal: Number(flags.reentryTpMaxPerSignal) } : {}),
+        ...(flags.reentryTpCooldownSec ? { cooldownSec: Number(flags.reentryTpCooldownSec) } : {}),
+        ...(flags.reentryTpSizeMult ? { sizeMultiplier: Number(flags.reentryTpSizeMult) } : {}),
+        ...(flags.reentryTpRequireHmaConfirm ? { requireOptionHmaConfirm: flags.reentryTpRequireHmaConfirm === 'true' } : {}),
+      },
+    };
+  }
 
   if (Object.keys(overrides).length > 0) {
     config = mergeConfig(config, overrides);

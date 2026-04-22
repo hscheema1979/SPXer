@@ -7,9 +7,9 @@
 #   agents            Agent detail: cycles, signals, positions, risk state
 #   health            Data pipeline: providers, staleness, WAL, circuit breakers
 #   pipeline          Per-stage pipeline counters (bar validation, indicators, DB writes)
-#   logs [process]    Tail PM2 logs (spxer | agent | xsp | monitor | dashboard | all)
+#   logs [process]    Tail PM2 logs (spxer | agent | monitor | dashboard | all)
 #   errors [n]        Last N error lines across all PM2 logs (default 20)
-#   restart <target>  Safe restart: spxer | agent | xsp | monitor | dashboard | all
+#   restart <target>  Safe restart: spxer | agent | monitor | dashboard | all
 #   stop <target>     Stop a process
 #   pause             Pause trading (set maintenance mode)
 #   resume            Resume trading (clear maintenance mode)
@@ -100,8 +100,6 @@ for pname, p in h.get('providers', {}).items():
   hdr "AGENTS"
   echo -e "  ${BOLD}SPX Agent:${RESET}"
   agent_status "spx"
-  echo -e "\n  ${BOLD}XSP Agent:${RESET}"
-  agent_status "xsp"
 
   hdr "MAINTENANCE"
   if [[ -f "$MAINTENANCE_FILE" ]]; then
@@ -115,8 +113,6 @@ for pname, p in h.get('providers', {}).items():
 cmd_agents() {
   hdr "SPX AGENT"
   agent_status "spx"
-  hdr "XSP AGENT"
-  agent_status "xsp"
   hdr "RECENT ACTIVITY"
   api /agent/activity?n=10 | python3 -c "
 import sys, json
@@ -192,8 +188,6 @@ cmd_logs() {
   local process_map=(
     "spxer:spxer"
     "agent:spxer-agent"
-    "xsp:spxer-xsp"
-    "monitor:account-monitor"
     "dashboard:spxer-dashboard"
     "viewer:replay-viewer"
   )
@@ -233,20 +227,20 @@ cmd_errors() {
 cmd_restart() {
   local target="${1:-}"
   if [[ -z "$target" ]]; then
-    err "Usage: ops restart <spxer|agent|xsp|monitor|dashboard|all>"
+    err "Usage: ops restart <spxer|agent|monitor|dashboard|all>"
     exit 1
   fi
 
   case "$target" in
-    agent|xsp)
-      local pm2_name="spxer-$target"
+    agent)
+      local pm2_name="spxer-agent"
       warn "Safe-restarting $pm2_name via agent-ctl..."
-      bash "$SPXER_DIR/scripts/agent-ctl.sh" restart "$pm2_name" 2>/dev/null || pm2 restart "$pm2_name"
+      bash "$SPXER_DIR/scripts/agent-ctl.sh" restart spx 2>/dev/null || pm2 restart "$pm2_name"
       ok "$pm2_name restarted"
       ;;
-    spxer|monitor|dashboard|viewer)
+    spxer|dashboard|viewer)
       local pm2_name
-      pm2_name=$(case "$target" in spxer) echo spxer;; monitor) echo account-monitor;; dashboard) echo spxer-dashboard;; viewer) echo replay-viewer;; esac)
+      pm2_name=$(case "$target" in spxer) echo spxer;; dashboard) echo spxer-dashboard;; viewer) echo replay-viewer;; esac)
       pm2 restart "$pm2_name"
       ok "$pm2_name restarted"
       ;;
@@ -265,10 +259,10 @@ cmd_restart() {
 cmd_stop() {
   local target="${1:-}"
   case "$target" in
-    agent|xsp)
-      local pm2_name="spxer-$target"
+    agent)
+      local pm2_name="spxer-agent"
       warn "Safe-stopping $pm2_name..."
-      bash "$SPXER_DIR/scripts/agent-ctl.sh" stop "$pm2_name" 2>/dev/null || pm2 stop "$pm2_name"
+      bash "$SPXER_DIR/scripts/agent-ctl.sh" stop spx 2>/dev/null || pm2 stop "$pm2_name"
       ok "$pm2_name stopped"
       ;;
     *)

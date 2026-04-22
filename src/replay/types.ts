@@ -43,6 +43,10 @@ export interface Trade {
   pnlPct: number;
   pnl$: number;
   signalType: string;
+  /** If this trade was opened via TP re-entry, the depth in the chain (1 = first re-entry). */
+  reentryDepth?: number;
+  /** If this trade was opened via TP re-entry, the position id of the original (chain root). */
+  reentryOf?: string;
 }
 
 export interface ReplayResult {
@@ -60,6 +64,14 @@ export interface ReplayResult {
   maxConsecutiveWins: number;
   maxConsecutiveLosses: number;
   sharpeRatio?: number;
+  /** Sum of pnlPct for winning trades (pnlPct > 0) — for R-multiple aggregation */
+  sumWinPct: number;
+  /** Count of winning trades (by pnlPct > 0) — for R-multiple aggregation */
+  cntWins: number;
+  /** Sum of pnlPct for losing trades (pnlPct < 0) — for R-multiple aggregation */
+  sumLossPct: number;
+  /** Count of losing trades (by pnlPct < 0) — for R-multiple aggregation */
+  cntLosses: number;
   trades_json: string;
 }
 

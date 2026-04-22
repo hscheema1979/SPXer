@@ -2,181 +2,665 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#0a0e17">
   <title>SPXer Dashboard</title>
   <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body {
-      font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
-      background: #0a0e17;
-      color: #c5cdd8;
-      font-size: 13px;
+    /* ───────── shadcn-style design tokens (dark) ───────── */
+    :root {
+      --background: #0a0e17;
+      --foreground: #e2e8f0;
+      --muted: #94a3b8;
+      --muted-foreground: #64748b;
+      --card: #111827;
+      --card-elevated: #0f172a;
+      --border: #1e293b;
+      --border-soft: rgba(30, 41, 59, 0.6);
+      --input: #1e293b;
+      --primary: #60a5fa;
+      --success: #4ade80;
+      --success-bg: rgba(22, 163, 74, 0.18);
+      --success-border: rgba(22, 163, 74, 0.45);
+      --warning: #fbbf24;
+      --warning-bg: rgba(217, 119, 6, 0.18);
+      --warning-border: rgba(217, 119, 6, 0.45);
+      --destructive: #f87171;
+      --destructive-bg: rgba(220, 38, 38, 0.18);
+      --destructive-border: rgba(220, 38, 38, 0.45);
+      --info: #38bdf8;
+      --info-bg: rgba(14, 165, 233, 0.15);
+      --info-border: rgba(14, 165, 233, 0.4);
+      --radius: 10px;
+      --radius-sm: 6px;
+      --radius-lg: 14px;
+      --shadow-sm: 0 1px 2px rgba(0,0,0,.3);
+      --shadow: 0 4px 12px rgba(0,0,0,.35);
+      --font-sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial;
+      --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", "Fira Code", Consolas, monospace;
     }
+
+    /* ───────── Reset & base ───────── */
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+    html { -webkit-text-size-adjust: 100%; }
+    body {
+      font-family: var(--font-sans);
+      background: var(--background);
+      color: var(--foreground);
+      font-size: 14px;
+      line-height: 1.5;
+      min-height: 100dvh;
+      -webkit-font-smoothing: antialiased;
+    }
+    .mono { font-family: var(--font-mono); }
+
+    /* ───────── Paused banner ───────── */
+    .paused-banner {
+      background: var(--destructive-bg);
+      color: var(--destructive);
+      border-bottom: 1px solid var(--destructive-border);
+      text-align: center;
+      padding: 10px 16px;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      display: none;
+    }
+    .paused-banner.active { display: block; }
+
+    /* ───────── Header ───────── */
     .header {
       display: flex;
-      justify-content: space-between;
-      align-items: center;
-      padding: 12px 20px;
-      background: #111827;
-      border-bottom: 1px solid #1e293b;
+      flex-direction: column;
+      gap: 12px;
+      padding: 14px 16px;
+      background: var(--card);
+      border-bottom: 1px solid var(--border);
     }
-    .header h1 { font-size: 16px; color: #e2e8f0; }
-    .header .time { color: #64748b; }
-    .controls { display: flex; gap: 8px; }
-    .btn {
-      padding: 6px 14px;
-      border: 1px solid #334155;
-      border-radius: 4px;
-      background: #1e293b;
-      color: #e2e8f0;
-      cursor: pointer;
-      font-family: inherit;
+    .header-left { display: flex; flex-direction: column; gap: 2px; }
+    .header h1 {
+      font-size: 17px;
+      font-weight: 600;
+      color: var(--foreground);
+      letter-spacing: -0.01em;
+    }
+    .header .time {
+      color: var(--muted-foreground);
+      font-family: var(--font-mono);
       font-size: 12px;
     }
-    .btn:hover { background: #334155; }
-    .btn.danger { border-color: #dc2626; color: #f87171; }
-    .btn.danger:hover { background: #7f1d1d; }
-    .btn.warning { border-color: #d97706; color: #fbbf24; }
-    .btn.warning:hover { background: #78350f; }
-    .btn.success { border-color: #16a34a; color: #4ade80; }
-    .btn.success:hover { background: #14532d; }
-    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
-    .grid {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 12px;
-      padding: 16px 20px;
+    .controls {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
     }
+    @media (min-width: 640px) {
+      .header {
+        flex-direction: row;
+        justify-content: space-between;
+        align-items: center;
+        padding: 14px 24px;
+      }
+      .controls { flex-wrap: nowrap; }
+    }
+
+    /* ───────── Buttons (shadcn-style) ───────── */
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      padding: 8px 14px;
+      min-height: 36px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      background: var(--input);
+      color: var(--foreground);
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 13px;
+      font-weight: 500;
+      line-height: 1;
+      transition: background-color .15s ease, border-color .15s ease, color .15s ease, opacity .15s ease;
+      -webkit-tap-highlight-color: transparent;
+      touch-action: manipulation;
+      white-space: nowrap;
+      flex: 1 1 auto;
+    }
+    .btn:hover { background: #273449; }
+    .btn:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+    .btn:active { transform: translateY(1px); }
+    .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+    .btn.warning { border-color: var(--warning-border); color: var(--warning); background: var(--warning-bg); }
+    .btn.warning:hover:not(:disabled) { background: rgba(217, 119, 6, 0.32); }
+    .btn.success { border-color: var(--success-border); color: var(--success); background: var(--success-bg); }
+    .btn.success:hover:not(:disabled) { background: rgba(22, 163, 74, 0.32); }
+    .btn.danger { border-color: var(--destructive-border); color: var(--destructive); background: var(--destructive-bg); }
+    .btn.danger:hover:not(:disabled) { background: rgba(220, 38, 38, 0.32); }
+    @media (min-width: 640px) { .btn { flex: 0 0 auto; } }
+
+    /* ───────── Layout ───────── */
+    .main-stack {
+      max-width: 1600px;
+      margin: 0 auto;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    @media (min-width: 768px) { .main-stack { padding: 20px; gap: 16px; } }
+
+    .grid-2col {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 12px;
+    }
+    @media (min-width: 768px) { .grid-2col { grid-template-columns: repeat(2, 1fr); gap: 16px; } }
+
+    .grid-3col {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 12px;
+    }
+    @media (min-width: 768px) { .grid-3col { grid-template-columns: repeat(2, 1fr); gap: 16px; } }
+    @media (min-width: 1280px) { .grid-3col { grid-template-columns: repeat(3, 1fr); } }
+
+    /* ───────── Card (shadcn) ───────── */
     .panel {
-      background: #111827;
-      border: 1px solid #1e293b;
-      border-radius: 6px;
-      padding: 14px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 16px;
+      box-shadow: var(--shadow-sm);
+      overflow: hidden;
     }
     .panel-title {
       font-size: 11px;
+      font-weight: 600;
       text-transform: uppercase;
-      color: #64748b;
-      margin-bottom: 10px;
-      letter-spacing: 1px;
+      color: var(--muted-foreground);
+      margin-bottom: 12px;
+      letter-spacing: 0.08em;
     }
-    .full-width { grid-column: 1 / -1; }
+
+    /* ───────── Config banner ───────── */
+    .config-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+      gap: 6px 16px;
+      font-size: 12px;
+      font-family: var(--font-mono);
+    }
+    .config-item {
+      display: flex;
+      justify-content: space-between;
+      gap: 6px;
+      padding: 4px 0;
+    }
+    .config-key { color: var(--muted-foreground); }
+    .config-val { color: var(--foreground); font-weight: 600; }
+
+    /* ───────── Status rows ───────── */
     .status-row {
       display: flex;
       justify-content: space-between;
-      padding: 4px 0;
-      border-bottom: 1px solid #1e293b33;
+      align-items: center;
+      gap: 12px;
+      padding: 8px 0;
+      border-bottom: 1px solid var(--border-soft);
+      font-size: 13px;
     }
     .status-row:last-child { border-bottom: none; }
-    .status-label { color: #94a3b8; }
-    .status-value { color: #e2e8f0; font-weight: 500; }
-    .healthy { color: #4ade80; }
-    .unhealthy { color: #f87171; }
-    .warning { color: #fbbf24; }
-    .pnl-positive { color: #4ade80; }
-    .pnl-negative { color: #f87171; }
+    .status-label { color: var(--muted); }
+    .status-value {
+      color: var(--foreground);
+      font-weight: 500;
+      font-family: var(--font-mono);
+      text-align: right;
+      word-break: break-all;
+    }
+
+    .healthy { color: var(--success); }
+    .unhealthy { color: var(--destructive); }
+    .pnl-positive { color: var(--success); font-weight: 600; }
+    .pnl-negative { color: var(--destructive); font-weight: 600; }
+
     .dot {
       display: inline-block;
       width: 8px;
       height: 8px;
       border-radius: 50%;
       margin-right: 6px;
+      vertical-align: middle;
+      flex-shrink: 0;
     }
-    .dot.green { background: #4ade80; }
-    .dot.red { background: #f87171; }
-    .dot.yellow { background: #fbbf24; }
-    .dot.gray { background: #64748b; }
-    .trade-row {
-      display: grid;
-      grid-template-columns: 60px 70px 50px 50px 80px 70px;
-      gap: 4px;
-      padding: 4px 0;
-      border-bottom: 1px solid #1e293b33;
-      font-size: 12px;
+    .dot.green { background: var(--success); box-shadow: 0 0 0 3px rgba(74,222,128,.12); }
+    .dot.red   { background: var(--destructive); box-shadow: 0 0 0 3px rgba(248,113,113,.12); }
+    .dot.yellow{ background: var(--warning); box-shadow: 0 0 0 3px rgba(251,191,36,.12); }
+    .dot.gray  { background: var(--muted-foreground); }
+
+    /* ───────── Signal banner ───────── */
+    .signal-banner {
+      padding: 10px 14px;
+      border-radius: var(--radius-sm);
+      font-family: var(--font-mono);
+      font-size: 13px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
     }
-    .trade-header {
-      color: #64748b;
-      font-size: 10px;
+    .signal-banner.bullish {
+      background: var(--success-bg);
+      border: 1px solid var(--success-border);
+      color: var(--success);
+    }
+    .signal-banner.bearish {
+      background: var(--destructive-bg);
+      border: 1px solid var(--destructive-border);
+      color: var(--destructive);
+    }
+    .signal-banner.none {
+      background: var(--card-elevated);
+      border: 1px solid var(--border);
+      color: var(--muted);
+    }
+    .signal-dir {
+      font-weight: 700;
+      font-size: 14px;
       text-transform: uppercase;
+      letter-spacing: 0.04em;
     }
-    .paused-banner {
-      background: #7f1d1d;
-      color: #fca5a5;
-      text-align: center;
-      padding: 8px;
-      font-weight: bold;
-      display: none;
+    .signal-detail {
+      font-size: 11px;
+      color: var(--muted);
     }
-    .paused-banner.active { display: block; }
+
+    /* ───────── Positions ───────── */
     .position-card {
-      background: #1e293b33;
-      border: 1px solid #1e293b;
-      border-radius: 4px;
-      padding: 10px;
+      background: var(--card-elevated);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 12px;
+      margin-bottom: 10px;
+    }
+    .position-card:last-child { margin-bottom: 0; }
+    .pos-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
       margin-bottom: 8px;
     }
-    .pos-header { display: flex; justify-content: space-between; margin-bottom: 6px; }
-    .pos-symbol { color: #e2e8f0; font-weight: 600; }
-    .pos-side { font-size: 10px; padding: 2px 6px; border-radius: 3px; }
-    .pos-side.call { background: #16a34a33; color: #4ade80; }
-    .pos-side.put { background: #dc262633; color: #f87171; }
-    .pos-details { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 12px; font-size: 11px; }
+    .pos-symbol {
+      color: var(--foreground);
+      font-weight: 600;
+      font-family: var(--font-mono);
+      font-size: 13px;
+      word-break: break-all;
+    }
+    .pos-side {
+      font-size: 10px;
+      font-weight: 700;
+      padding: 3px 8px;
+      border-radius: 999px;
+      letter-spacing: 0.06em;
+      flex-shrink: 0;
+    }
+    .pos-side.call { background: var(--success-bg); color: var(--success); border: 1px solid var(--success-border); }
+    .pos-side.put  { background: var(--destructive-bg); color: var(--destructive); border: 1px solid var(--destructive-border); }
+    .pos-details {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 4px 12px;
+      font-size: 12px;
+      font-family: var(--font-mono);
+    }
+
+    /* ───────── Order cards ───────── */
+    .order-card {
+      background: var(--card-elevated);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 10px 12px;
+      margin-bottom: 8px;
+      font-size: 12px;
+    }
+    .order-card:last-child { margin-bottom: 0; }
+    .order-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 6px;
+    }
+    .order-type {
+      font-weight: 600;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .order-status {
+      font-size: 10px;
+      font-weight: 700;
+      padding: 2px 8px;
+      border-radius: 999px;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+    .order-status.filled { background: var(--success-bg); color: var(--success); border: 1px solid var(--success-border); }
+    .order-status.open, .order-status.pending { background: var(--info-bg); color: var(--info); border: 1px solid var(--info-border); }
+    .order-status.canceled, .order-status.rejected, .order-status.expired {
+      background: rgba(100,116,139,0.15); color: var(--muted); border: 1px solid rgba(100,116,139,0.3);
+    }
+    .order-status.partially_filled { background: var(--warning-bg); color: var(--warning); border: 1px solid var(--warning-border); }
+    .order-details {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 3px 14px;
+      font-family: var(--font-mono);
+      color: var(--muted);
+      font-size: 11px;
+    }
+    .order-details strong { color: var(--foreground); }
+    .order-legs {
+      margin-top: 6px;
+      padding-top: 6px;
+      border-top: 1px solid var(--border-soft);
+    }
+    .order-leg {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 3px 0;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--muted);
+    }
+    .order-leg .leg-symbol { color: var(--foreground); font-weight: 500; }
+
+    /* ───────── Round-trip trade table ───────── */
+    .rt-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-family: var(--font-mono);
+      font-size: 11px;
+    }
+    .rt-table th {
+      text-align: left;
+      padding: 8px 6px;
+      color: var(--muted-foreground);
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      border-bottom: 1px solid var(--border);
+      font-weight: 600;
+      white-space: nowrap;
+    }
+    .rt-table td {
+      padding: 8px 6px;
+      border-bottom: 1px solid var(--border-soft);
+      white-space: nowrap;
+    }
+    .rt-table tr:last-child td { border-bottom: none; }
+    .rt-match { color: var(--success); }
+    .rt-mismatch { color: var(--warning); }
+    .rt-exit-tp { color: var(--success); font-weight: 600; }
+    .rt-exit-sl { color: var(--destructive); font-weight: 600; }
+    .rt-exit-signal { color: var(--info); font-weight: 600; }
+    .rt-exit-open { color: var(--warning); font-weight: 600; }
+    .rt-table-wrap {
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+    }
+
+    /* ───────── Trade rows (responsive) ───────── */
+    .trade-list { display: flex; flex-direction: column; }
+    .trade-header {
+      display: none;
+      color: var(--muted-foreground);
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      padding: 8px 0;
+      border-bottom: 1px solid var(--border-soft);
+    }
+    .trade-row {
+      padding: 10px 0;
+      border-bottom: 1px solid var(--border-soft);
+      font-size: 12px;
+      font-family: var(--font-mono);
+    }
+    .trade-row:last-child { border-bottom: none; }
+
+    /* Mobile: label/value pairs */
+    .trade-row {
+      display: grid;
+      grid-template-columns: max-content 1fr;
+      gap: 4px 10px;
+    }
+    .trade-row .cell { display: contents; }
+    .trade-row .cell::before {
+      content: attr(data-label);
+      color: var(--muted-foreground);
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      align-self: center;
+    }
+    .trade-row.empty { display: block; color: var(--muted); text-align: center; padding: 16px 0; }
+
+    @media (min-width: 640px) {
+      .trade-header,
+      .trade-row {
+        display: grid;
+        grid-template-columns: 72px 1fr 48px 48px 80px 72px;
+        gap: 8px;
+        align-items: center;
+      }
+      .trade-row .cell { display: inline; }
+      .trade-row .cell::before { content: none; }
+      .trade-row.empty { display: block; grid-template-columns: 1fr; }
+    }
+
+    /* ───────── Provider pills ───────── */
+    .provider-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+    .provider-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-family: var(--font-mono);
+      font-weight: 500;
+      border: 1px solid var(--border);
+      background: var(--card-elevated);
+    }
+    .provider-pill.ok { border-color: var(--success-border); }
+    .provider-pill.bad { border-color: var(--destructive-border); }
+    .provider-pill.standby { border-color: rgba(100,116,139,0.3); color: var(--muted); }
+
+    /* ───────── Chart ───────── */
+    .chart-container {
+      position: relative;
+      width: 100%;
+      height: 360px;
+      border-radius: var(--radius-sm);
+      overflow: hidden;
+    }
+    @media (min-width: 768px) { .chart-container { height: 480px; } }
+    @media (min-width: 1280px) { .chart-container { height: 540px; } }
+    .chart-toolbar {
+      display: flex;
+      gap: 6px;
+      margin-bottom: 10px;
+      flex-wrap: wrap;
+    }
+    .tf-btn {
+      padding: 4px 10px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      background: var(--card-elevated);
+      color: var(--muted);
+      cursor: pointer;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      font-weight: 600;
+      transition: all .15s ease;
+    }
+    .tf-btn:hover { border-color: var(--primary); color: var(--foreground); }
+    .tf-btn.active { border-color: var(--primary); color: var(--primary); background: rgba(96,165,250,0.1); }
+    .chart-legend {
+      display: flex;
+      gap: 12px;
+      margin-top: 8px;
+      font-size: 11px;
+      font-family: var(--font-mono);
+      color: var(--muted);
+      flex-wrap: wrap;
+    }
+    .chart-legend span { display: inline-flex; align-items: center; gap: 4px; }
+    .legend-dot { width: 10px; height: 3px; border-radius: 2px; display: inline-block; }
+
+    /* ───────── Scrollbar polish ───────── */
+    ::-webkit-scrollbar { width: 10px; height: 10px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 10px; }
+    ::-webkit-scrollbar-thumb:hover { background: #334155; }
   </style>
 </head>
 <body>
-  <div class="paused-banner" id="pausedBanner">⏸️ TRADING PAUSED</div>
-  <div class="header">
-    <div>
-      <h1>SPXer Dashboard</h1>
-      <div class="time" id="timeET">--:--:-- ET</div>
+  <div class="paused-banner" id="pausedBanner">TRADING PAUSED</div>
+  <header class="header">
+    <div class="header-left">
+      <h1>SPXer <span style="color:var(--success);font-size:13px;font-weight:700;letter-spacing:0.05em">LIVE</span></h1>
+      <div style="display:flex;gap:12px;align-items:center">
+        <a href="/spxer/dashboard/" style="color:var(--primary);text-decoration:none;font-size:12px;font-weight:600">Live</a>
+        <a href="/replay/" style="color:var(--muted-foreground);text-decoration:none;font-size:12px">Replay</a>
+        <a href="/replay/sweep" style="color:var(--muted-foreground);text-decoration:none;font-size:12px">Leaderboard</a>
+        <span class="time mono" id="timeET" style="margin-left:4px">--:--:-- ET</span>
+      </div>
     </div>
     <div class="controls">
-      <button class="btn warning" id="btnPause" onclick="pauseTrading()">⏸ Pause</button>
-      <button class="btn success" id="btnResume" onclick="resumeTrading()">▶ Resume</button>
-      <button class="btn danger" id="btnKill" onclick="killAll()">🛑 Kill All</button>
+      <button class="btn warning" id="btnPause" onclick="pauseTrading()">Pause</button>
+      <button class="btn success" id="btnResume" onclick="resumeTrading()">Resume</button>
+      <button class="btn danger" id="btnKill" onclick="killAll()">Kill All</button>
     </div>
-  </div>
+  </header>
 
-  <div class="grid">
-    <!-- System Status -->
-    <div class="panel">
-      <div class="panel-title">System Status</div>
-      <div id="systemStatus">
-        <div class="status-row"><span class="status-label">Data Service</span><span id="dsStatus" class="status-value">—</span></div>
-        <div class="status-row"><span class="status-label">SPX Price</span><span id="spxPrice" class="status-value">—</span></div>
-        <div class="status-row"><span class="status-label">Watchdog</span><span id="wdStatus" class="status-value">—</span></div>
-        <div class="status-row"><span class="status-label">Contracts</span><span id="contracts" class="status-value">—</span></div>
+  <div class="main-stack">
+
+    <!-- ═══════ 1. ACTIVE CONFIG ═══════ -->
+    <section class="panel">
+      <div class="panel-title">Active Config</div>
+      <div id="configPanel" class="config-grid">
+        <span class="status-label">Loading config...</span>
       </div>
+    </section>
+
+    <!-- ═══════ 2. SIGNAL + AGENT ROW ═══════ -->
+    <div class="grid-2col">
+      <section class="panel">
+        <div class="panel-title">Last Signal</div>
+        <div id="signalBanner" class="signal-banner none">No signal</div>
+      </section>
+      <section class="panel">
+        <div class="panel-title">Agent</div>
+        <div id="agents">
+          <div class="status-row"><span class="status-label">SPX Agent</span><span id="spxAgent" class="status-value"></span></div>
+          <div class="status-row"><span class="status-label">Daily P&amp;L</span><span id="dailyPnl" class="status-value"></span></div>
+          <div class="status-row"><span class="status-label">Trades Today</span><span id="tradesToday" class="status-value"></span></div>
+          <div class="status-row"><span class="status-label">Last Action</span><span id="lastAction" class="status-value"></span></div>
+          <div class="status-row"><span class="status-label">Min to Close</span><span id="minToClose" class="status-value"></span></div>
+        </div>
+      </section>
     </div>
 
-    <!-- Agents -->
-    <div class="panel">
-      <div class="panel-title">Agents</div>
-      <div id="agents">
-        <div class="status-row"><span class="status-label">SPX Agent</span><span id="spxAgent" class="status-value">—</span></div>
-        <div class="status-row"><span class="status-label">XSP Agent</span><span id="xspAgent" class="status-value">—</span></div>
-        <div class="status-row"><span class="status-label">Daily P&L</span><span id="dailyPnl" class="status-value">—</span></div>
-        <div class="status-row"><span class="status-label">Trades Today</span><span id="tradesToday" class="status-value">—</span></div>
+    <!-- ═══════ 3. SPX CHART ═══════ -->
+    <section class="panel">
+      <div class="panel-title">SPX Live</div>
+      <div class="chart-toolbar">
+        <button class="tf-btn active" data-tf="1m" onclick="switchTf('1m')">1m</button>
+        <button class="tf-btn" data-tf="5m" onclick="switchTf('5m')">5m</button>
+        <button class="tf-btn" data-tf="15m" onclick="switchTf('15m')">15m</button>
+        <button class="tf-btn" data-tf="1h" onclick="switchTf('1h')">1h</button>
       </div>
-    </div>
+      <div class="chart-container" id="chartContainer"></div>
+      <div class="chart-legend">
+        <span><span class="legend-dot" style="background:#f59e0b"></span>HMA 3 (fast)</span>
+        <span><span class="legend-dot" style="background:#8b5cf6"></span>HMA 12 (slow)</span>
+        <span><span class="legend-dot" style="background:#06b6d4"></span>EMA 9</span>
+        <span><span class="legend-dot" style="background:#64748b"></span>EMA 21</span>
+        <span><span class="legend-dot" style="background:#4ade80;height:0;width:0;border-left:5px solid transparent;border-right:5px solid transparent;border-bottom:8px solid #4ade80;border-radius:0"></span>Entry</span>
+        <span><span class="legend-dot" style="background:#f87171;height:0;width:0;border-left:5px solid transparent;border-right:5px solid transparent;border-top:8px solid #f87171;border-radius:0"></span>Exit</span>
+      </div>
+    </section>
 
-    <!-- Positions -->
-    <div class="panel">
+    <!-- ═══════ 4. ROUND-TRIP TRADE TABLE ═══════ -->
+    <section class="panel">
+      <div class="panel-title">Trades — Actual vs Config Intent</div>
+      <div id="roundTrips" class="rt-table-wrap">
+        <span class="status-label">Loading trades...</span>
+      </div>
+    </section>
+
+    <!-- ═══════ 5. POSITIONS ═══════ -->
+    <section class="panel">
       <div class="panel-title">Open Positions</div>
       <div id="positions"><span class="status-label">No positions</span></div>
+    </section>
+
+    <!-- ═══════ 6. STATUS GRID ═══════ -->
+    <div class="grid-3col">
+      <!-- System Status -->
+      <section class="panel">
+        <div class="panel-title">System Status</div>
+        <div id="systemStatus">
+          <div class="status-row"><span class="status-label">Data Service</span><span id="dsStatus" class="status-value"></span></div>
+          <div class="status-row"><span class="status-label">SPX Price</span><span id="spxPrice" class="status-value"></span></div>
+          <div class="status-row"><span class="status-label">Mode</span><span id="marketMode" class="status-value"></span></div>
+          <div class="status-row"><span class="status-label">Contracts</span><span id="contracts" class="status-value"></span></div>
+          <div class="status-row"><span class="status-label">WS Clients</span><span id="wsClients" class="status-value"></span></div>
+        </div>
+      </section>
+
+      <!-- Live Stream -->
+      <section class="panel">
+        <div class="panel-title">Live Stream</div>
+        <div id="streamStatus">
+          <div class="status-row"><span class="status-label">Option Stream</span><span id="optStream" class="status-value"></span></div>
+          <div class="status-row"><span class="status-label">Theta WS</span><span id="thetaWs" class="status-value"></span></div>
+          <div class="status-row"><span class="status-label">Symbols</span><span id="streamSymbols" class="status-value"></span></div>
+          <div class="status-row"><span class="status-label">Last Tick</span><span id="lastTick" class="status-value"></span></div>
+        </div>
+        <div class="panel-title" style="margin-top: 14px">Providers</div>
+        <div id="providers" class="provider-row"></div>
+      </section>
+
+      <!-- Today's Orders (raw) -->
+      <section class="panel">
+        <div class="panel-title">Today's Orders (raw)</div>
+        <div id="orders" style="max-height:400px;overflow-y:auto"><span class="status-label">No orders today</span></div>
+      </section>
     </div>
 
-    <!-- Recent Trades -->
-    <div class="panel">
-      <div class="panel-title">Recent Trades</div>
-      <div id="recentTrades">
-        <div class="trade-row trade-header">
-          <span>Time</span><span>Symbol</span><span>Side</span><span>Qty</span><span>Fill</span><span>P&L</span>
+    <!-- ═══════ 7. AUDIT LOG ═══════ -->
+    <section class="panel">
+      <div class="panel-title">Recent Trades (audit log)</div>
+      <div id="recentTrades" class="trade-list">
+        <div class="trade-header">
+          <span>Time</span><span>Symbol</span><span>Side</span><span>Qty</span><span>Fill</span><span>P&amp;L</span>
         </div>
       </div>
-    </div>
+    </section>
   </div>
 
+  <script src="https://unpkg.com/lightweight-charts@5.0.5/dist/lightweight-charts.standalone.production.js"></script>
   <script src="/app.js"></script>
+  <script src="/chart.js"></script>
 </body>
 </html>

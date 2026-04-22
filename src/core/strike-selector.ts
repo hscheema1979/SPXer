@@ -64,6 +64,44 @@ export function selectStrike(
   const strikeMode = config.strikeSelector.strikeMode ?? 'otm';
   const { targetOtmDistance, targetContractPrice } = config.signals;
 
+  // ── Fast path: atm-offset mode (basket members) ─────────────────────────
+  // Targets exact strike = roundedSpx ± atmOffset. Bypasses price band.
+  // Returns null if no contract exists at the target strike (±1 interval).
+  if (strikeMode === 'atm-offset') {
+    const atmOffset = config.strikeSelector.atmOffset ?? 0;
+    const interval = config.pipeline?.strikeInterval ?? 5;
+    const spxRounded = Math.round(spxPrice / interval) * interval;
+    // For calls: positive offset = OTM (strike above spot).
+    // For puts:  positive offset = OTM (strike below spot).
+    const targetStrike = side === 'call'
+      ? spxRounded + atmOffset
+      : spxRounded - atmOffset;
+
+    const sideMatches = candidates.filter(c => c.side === side);
+    if (sideMatches.length === 0) return null;
+
+    // Prefer exact match on targetStrike; else nearest within one interval.
+    let best: StrikeCandidate | null = null;
+    let bestDist = Infinity;
+    for (const c of sideMatches) {
+      const d = Math.abs(c.strike - targetStrike);
+      if (d > interval) continue;            // must be within one strike interval
+      // Tiebreaker: closer strike, then higher volume
+      if (d < bestDist || (d === bestDist && best && c.volume > best.volume)) {
+        best = c;
+        bestDist = d;
+      }
+    }
+    if (!best) return null;
+
+    const distPts = Math.abs(best.strike - spxPrice).toFixed(0);
+    const moneyLabel = atmOffset === 0
+      ? 'ATM'
+      : atmOffset > 0 ? `OTM${atmOffset}` : `ITM${-atmOffset}`;
+    const reason = `${side.toUpperCase()} ${best.strike} @ $${best.price.toFixed(2)} — ${distPts}pts ${moneyLabel} (atm-offset)`;
+    return { candidate: best, reason };
+  }
+
   // ── 1. Filter to contracts in the price band + moneyness ───────────────
   const searchRange = config.strikeSelector.strikeSearchRange ?? 100;
 

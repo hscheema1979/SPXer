@@ -49,6 +49,7 @@ import Database from 'better-sqlite3';
 import * as path from 'path';
 import { runReplay } from './machine';
 import type { ReplayOptions } from './machine';
+import { runBasketReplay } from './basket-runner';
 import { DEFAULT_CONFIG, mergeConfig } from '../config/defaults';
 import type { Config } from '../config/types';
 import { ReplayStore, createStore } from './store';
@@ -57,7 +58,9 @@ import { getAvailableDays } from './framework';
 import { computeMetrics } from './metrics';
 import type { ReplayConfig } from './types';
 
-const DATA_DB_PATH = path.resolve(process.cwd(), 'data/spxer.db');
+import { REPLAY_DB_DEFAULT } from '../storage/replay-db';
+
+const DATA_DB_PATH = REPLAY_DB_DEFAULT;
 
 // ── Arg parsing ────────────────────────────────────────────────────────────
 
@@ -114,10 +117,32 @@ async function cmdRun() {
 
   const config = resolveConfig();
 
-  // Ensure config is saved to store (FK constraint for results)
+  // Ensure config is saved to store (FK constraint for results).
+  // If --config-id was used and the ID already exists, skip saveConfig to
+  // avoid auto-versioning from trivial DEFAULT_CONFIG merges.
   const store = createStore();
-  store.saveConfig(config);
+  const loadedId = flagMap['config-id'];
+  if (!loadedId || !store.getConfigRaw(loadedId)) {
+    store.saveConfig(config);
+  }
   store.close();
+
+  // Basket fan-out: run N isolated single-strike replays and aggregate.
+  if (config.basket?.enabled && config.basket.members?.length) {
+    const basketRun = await runBasketReplay(config, dateArg, getReplayOpts());
+    const agg = basketRun.aggregate;
+    console.log(`\nRESULT:${JSON.stringify({
+      date: agg.date,
+      configId: agg.configId,
+      basket: true,
+      members: basketRun.memberResults.length,
+      trades: agg.trades,
+      wins: agg.wins,
+      winRate: agg.winRate,
+      totalPnl: agg.totalPnl,
+    })}`);
+    return;
+  }
 
   const result = await runReplay(config, dateArg, getReplayOpts());
 
@@ -137,18 +162,23 @@ async function cmdRun() {
 async function cmdBacktest() {
   const config = resolveConfig();
 
-  // Get available dates from DB
+  // Get available dates from DB — scoped to the config's underlying symbol.
+  const underlyingSymbol = config.execution?.symbol || 'SPX';
   const db = new Database(DATA_DB_PATH, { readonly: true });
-  const allDates = getAvailableDays(db);
+  const allDates = getAvailableDays(db, underlyingSymbol);
   db.close();
 
   // Parse date filter
   const cliFlags = parseCliFlags(restArgs);
   const dates = parseDates(cliFlags, allDates);
 
-  // Save config to store
+  // Save config to store — skip if loading an existing config by ID
+  // to avoid auto-versioning from DEFAULT_CONFIG merge drift.
   const store = createStore();
-  store.saveConfig(config);
+  const loadedId = flagMap['config-id'];
+  if (!loadedId || !store.getConfigRaw(loadedId)) {
+    store.saveConfig(config);
+  }
   store.close();
 
   const verbose = flagMap['quiet'] !== 'true';
@@ -156,8 +186,10 @@ async function cmdBacktest() {
   const parallel = parseInt(flagMap['parallel'] || '0', 10);
 
   if (verbose) {
+    const basketTag = (config.basket?.enabled && config.basket.members?.length)
+      ? ` | BASKET (${config.basket.members.length} members)` : '';
     console.log(`\n${'='.repeat(60)}`);
-    console.log(`  BACKTEST: ${dates.length} days | config: ${config.id}`);
+    console.log(`  BACKTEST: ${dates.length} days | config: ${config.id}${basketTag}`);
     console.log(`  Scanners: ${config.scanners.enabled ? 'ON' : 'OFF'} | Judge: ${noJudge ? 'OFF' : 'ON'}${parallel > 1 ? ` | Parallel: ${parallel}` : ''}`);
     console.log(`${'='.repeat(60)}\n`);
   }
@@ -172,6 +204,16 @@ async function cmdBacktest() {
   // Collect results for sorted display in parallel mode
   const dateResults: { date: string; result?: { trades: number; wins: number; totalPnl: number }; error?: string }[] = [];
 
+  const isBasket = !!(config.basket?.enabled && config.basket.members?.length);
+  // Per-date runner: basket fan-out or single replay.
+  const runOne = async (date: string) => {
+    if (isBasket) {
+      const br = await runBasketReplay(config, date, { verbose: false, noJudge });
+      return br.aggregate;
+    }
+    return runReplay(config, date, { verbose: false, noJudge });
+  };
+
   if (parallel > 1 && dates.length > 1) {
     // ── Parallel execution: run N dates concurrently ──
     // Process in batches to limit memory usage
@@ -179,7 +221,7 @@ async function cmdBacktest() {
     for (let i = 0; i < dates.length; i += batchSize) {
       const batch = dates.slice(i, i + batchSize);
       const results = await Promise.allSettled(
-        batch.map(date => runReplay(config, date, { verbose: false, noJudge }))
+        batch.map(date => runOne(date))
       );
 
       for (let j = 0; j < results.length; j++) {
@@ -214,7 +256,7 @@ async function cmdBacktest() {
     // ── Sequential execution (original path) ──
     for (const date of dates) {
       try {
-        const result = await runReplay(config, date, { verbose: false, noJudge });
+        const result = await runOne(date);
         totalTrades += result.trades;
         totalWins += result.wins;
         totalPnl += result.totalPnl;

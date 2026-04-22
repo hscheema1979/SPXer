@@ -19,12 +19,13 @@ import { ReplayStore } from './store';
 import { etLabel, buildSymbolFilter, buildSymbolRange, buildSessionTimestamps, computeMetrics } from './metrics';
 
 // ── Core modules (shared with live agent) ─────────────────────────────────
-import { detectSignals } from '../core/signal-detector';
+import { detectSignals, validateSignalConfig } from '../core/signal-detector';
 import { checkExit, type ExitContext } from '../core/position-manager';
 import { computeQty } from '../core/position-sizer';
-import { isRiskBlocked, type RiskState } from '../core/risk-guard';
 import { isRegimeBlocked } from '../core/regime-gate';
-import { computeRealisticPnl, frictionEntry } from '../core/friction';
+import { computeRealisticPnl, frictionEntry, resolveSpreadModel, type SpreadModel } from '../core/friction';
+import { resolveSlippage, slipBuyPrice } from '../core/fill-model';
+import { roundToOptionTick } from '../core/option-tick';
 import type { Signal, CoreBar, Direction } from '../core/types';
 import { makeHMAState, hmaStep, makeKCState, kcStep } from '../pipeline/indicators/tier1';
 import { readBarCacheFile, writeBarCacheFile, hasCacheFile } from './bar-cache-file';
@@ -33,8 +34,27 @@ import { readBarCacheFile, writeBarCacheFile, hasCacheFile } from './bar-cache-f
 import { detectSignal, createInitialSignalState, type SignalState, type CorePosition } from '../core/strategy-engine';
 import { evaluateExit, evaluateEntry, type ExitDecision } from '../core/trade-manager';
 import { selectStrike, type StrikeCandidate } from '../core/strike-selector';
+import { evaluateReentry } from '../core/reentry-evaluator';
+import { checkEntryGates, computeCloseCutoffTs } from '../core/entry-gate';
 
-const DATA_DB_PATH = path.resolve(process.cwd(), 'data/spxer.db');
+import { REPLAY_DB_DEFAULT } from '../storage/replay-db';
+
+// Parquet readers are optional — only available when DuckDB + parquet files are set up.
+// Falls through to SQLite if not available.
+let hasParquetDate: ((profileId: string, date: string) => boolean) | undefined;
+let symbolToProfileId: ((symbol: string) => string) | undefined;
+let loadBarCacheFromParquetSync: ((opts: any) => any) | undefined;
+try {
+  const pr = require('../storage/parquet-reader');
+  const prs = require('../storage/parquet-reader-sync');
+  hasParquetDate = pr.hasParquetDate;
+  symbolToProfileId = pr.symbolToProfileId;
+  loadBarCacheFromParquetSync = prs.loadBarCacheFromParquetSync;
+} catch {
+  // Parquet reader not available — all reads go through SQLite
+}
+
+const DATA_DB_PATH = REPLAY_DB_DEFAULT;
 
 // Configurable data source: 'bars' (live) or 'replay_bars' (sanitized Polygon)
 const REPLAY_DATA_SOURCE = process.env.REPLAY_DATA_SOURCE || 'replay_bars';
@@ -45,6 +65,7 @@ const REPLAY_DATA_SOURCE = process.env.REPLAY_DATA_SOURCE || 'replay_bars';
 interface Bar {
   ts: number; open: number; high: number; low: number; close: number; volume: number;
   indicators: Record<string, number | null>;
+  spread?: number;
 }
 
 interface SimPosition {
@@ -53,6 +74,10 @@ interface SimPosition {
   entryPrice: number; stopLoss: number; takeProfit: number;
   entryTs: number; entryET: string;
   highWaterPrice: number; // tracks peak price for trailing stop
+  /** TP re-entry chain depth (0 for original entries, 1+ for chained re-entries). */
+  reentryDepth?: number;
+  /** Position id of the chain root (the original non-reentry entry). */
+  reentryOf?: string;
 }
 
 // ── In-memory bar cache (loaded once per replay) ───────────────────────────
@@ -91,24 +116,48 @@ function loadBarCache(
   db: Database.Database, start: number, end: number,
   symbolRange: { lo: string; hi: string },
   timeframe: string = '1m',
-  opts?: { skipContractIndicators?: boolean; date?: string },
+  opts?: { skipContractIndicators?: boolean; date?: string; underlyingSymbol?: string },
 ): BarCache {
   // Load bars at the requested timeframe directly from DB (pre-computed by build-mtf-bars.ts)
   const tf = timeframe || '1m';
   const skipContractInd = opts?.skipContractIndicators ?? false;
   const date = opts?.date;
+  const underlyingSymbol = opts?.underlyingSymbol ?? 'SPX';
 
   // ── Try binary cache first (avoids SQL entirely) ──
-  if (date && hasCacheFile(date, tf, skipContractInd)) {
-    const cached = readBarCacheFile(date, tf, skipContractInd);
+  // Cache keys are per-symbol to avoid cross-ticker collision.
+  const cacheKeyTf = underlyingSymbol === 'SPX' ? tf : `${underlyingSymbol}_${tf}`;
+  if (date && hasCacheFile(date, cacheKeyTf, skipContractInd)) {
+    const cached = readBarCacheFile(date, cacheKeyTf, skipContractInd);
     if (cached) return cached;
+  }
+
+  // ── Try parquet file (preferred over SQLite for historical data) ──
+  const profileId = symbolToProfileId?.(underlyingSymbol);
+  if (date && profileId && hasParquetDate?.(profileId, date) && loadBarCacheFromParquetSync) {
+    const cache = loadBarCacheFromParquetSync({
+      profileId,
+      date,
+      underlyingSymbol,
+      symbolRange,
+      timeframe: tf,
+      startTs: start,
+      endTs: end,
+      skipContractIndicators: skipContractInd,
+    });
+    if (cache.spxBars.length > 0) {
+      // Write binary cache for next run
+      try { writeBarCacheFile(cache, date, cacheKeyTf, skipContractInd); } catch {}
+      return cache;
+    }
+    // Fall through to SQLite if parquet returned no data
   }
 
   const spxRows = db.prepare(`
     SELECT ts, open, high, low, close, volume, ${INDICATOR_SELECT}
-    FROM ${REPLAY_DATA_SOURCE} WHERE symbol='SPX' AND timeframe=?
+    FROM ${REPLAY_DATA_SOURCE} WHERE symbol=? AND timeframe=?
     AND ts >= ? AND ts <= ? ORDER BY ts
-  `).all(tf, start, end) as any[];
+  `).all(underlyingSymbol, tf, start, end) as any[];
 
   const spxBars = spxRows.map((r: any) => ({
     ts: r.ts, open: r.open, high: r.high, low: r.low,
@@ -120,9 +169,10 @@ function loadBarCache(
 
   // Load contract bars using index-friendly range query (100x faster than LIKE)
   // In price-only mode, skip indicator columns entirely (deterministic replay only needs OHLCV)
+  // `spread` is always selected — used by friction model for SL slippage scaling.
   const contractSelect = skipContractInd
-    ? 'symbol, ts, open, high, low, close, volume'
-    : `symbol, ts, open, high, low, close, volume, ${INDICATOR_SELECT}`;
+    ? 'symbol, ts, open, high, low, close, volume, spread'
+    : `symbol, ts, open, high, low, close, volume, spread, ${INDICATOR_SELECT}`;
 
   const contractRows = db.prepare(`
     SELECT ${contractSelect},
@@ -137,11 +187,13 @@ function loadBarCache(
   const contractStrikes = new Map<string, number>();
   for (const r of contractRows) {
     if (!contractBars.has(r.symbol)) contractBars.set(r.symbol, []);
-    contractBars.get(r.symbol)!.push({
+    const bar: Bar = {
       ts: r.ts, open: r.open, high: r.high, low: r.low,
       close: r.close, volume: r.volume,
       indicators: skipContractInd ? EMPTY_INDICATORS : rowToIndicators(r),
-    });
+    };
+    if (r.spread != null && !Number.isNaN(r.spread)) bar.spread = r.spread;
+    contractBars.get(r.symbol)!.push(bar);
     if (!contractStrikes.has(r.symbol)) contractStrikes.set(r.symbol, r.strike);
   }
 
@@ -150,7 +202,7 @@ function loadBarCache(
   // ── Write binary cache for next run ──
   if (date) {
     try {
-      writeBarCacheFile(cache, date, tf, skipContractInd);
+      writeBarCacheFile(cache, date, cacheKeyTf, skipContractInd);
     } catch {
       // Non-fatal — just skip caching
     }
@@ -172,7 +224,7 @@ function loadBarCache(
  *
  * @param warmupBars - Number of prior bars to load for HMA warmup (3x period)
  */
-function ensureHmaPeriods(cache: BarCache, periods: number[], tf: string, verbose: boolean): void {
+function ensureHmaPeriods(cache: BarCache, periods: number[], tf: string, verbose: boolean, underlyingSymbol: string = 'SPX'): void {
   if (periods.length === 0) return;
 
   // Check which periods are missing from SPX bars (spot-check a bar with indicators)
@@ -204,13 +256,13 @@ function ensureHmaPeriods(cache: BarCache, periods: number[], tf: string, verbos
   let priorCloses = new Map<string, number[]>(); // symbol → prior close prices
   try {
     const warmupDb = new Database(DATA_DB_PATH, { readonly: true });
-    // SPX warmup
+    // Underlying warmup (SPX / NDX / SPY / QQQ depending on profile)
     const spxWarmup = warmupDb.prepare(`
       SELECT close FROM ${REPLAY_DATA_SOURCE}
-      WHERE symbol='SPX' AND timeframe=? AND ts < ?
+      WHERE symbol=? AND timeframe=? AND ts < ?
       ORDER BY ts DESC LIMIT ?
-    `).all(tf, earliestTs, warmupCount) as { close: number }[];
-    priorCloses.set('SPX', spxWarmup.reverse().map(r => r.close));
+    `).all(underlyingSymbol, tf, earliestTs, warmupCount) as { close: number }[];
+    priorCloses.set(underlyingSymbol, spxWarmup.reverse().map(r => r.close));
 
     // Contract warmup — batch query for all symbols
     for (const [symbol] of cache.contractBars) {
@@ -233,7 +285,7 @@ function ensureHmaPeriods(cache: BarCache, periods: number[], tf: string, verbos
     const key = `hma${period}`;
     const state = makeHMAState(period);
     // Seed with prior closes
-    const prior = priorCloses.get('SPX') || [];
+    const prior = priorCloses.get(underlyingSymbol) || [];
     for (const c of prior) hmaStep(state, c);
     // Now compute on session bars
     for (const bar of cache.spxBars) {
@@ -291,7 +343,7 @@ function ensureHmaPeriods(cache: BarCache, periods: number[], tf: string, verbos
     });
 
     const allBars: { symbol: string; bars: Bar[] }[] = [
-      { symbol: 'SPX', bars: cache.spxBars },
+      { symbol: underlyingSymbol, bars: cache.spxBars },
     ];
     for (const [symbol, bars] of cache.contractBars) {
       allBars.push({ symbol, bars });
@@ -312,7 +364,7 @@ function ensureHmaPeriods(cache: BarCache, periods: number[], tf: string, verbos
 // ── On-the-fly KC computation ──────────────────────────────────────────────
 // Computes Keltner Channel indicators if missing from bars.
 
-function ensureKcFields(cache: BarCache, tf: string, config: ReplayConfig, verbose: boolean): void {
+function ensureKcFields(cache: BarCache, tf: string, config: ReplayConfig, verbose: boolean, underlyingSymbol: string = 'SPX'): void {
   if (!config.signals.enableKeltnerGate) {
     if (verbose) console.log(`  KC gate disabled, skipping KC computation`);
     return;
@@ -343,9 +395,9 @@ function ensureKcFields(cache: BarCache, tf: string, config: ReplayConfig, verbo
     const warmupDb = new Database(DATA_DB_PATH, { readonly: true });
     const rows = warmupDb.prepare(`
       SELECT close, high, low FROM ${REPLAY_DATA_SOURCE}
-      WHERE symbol='SPX' AND timeframe=? AND ts < ?
+      WHERE symbol=? AND timeframe=? AND ts < ?
       ORDER BY ts DESC LIMIT ?
-    `).all(tf, earliestTs, warmupCount) as { close: number; high: number; low: number }[];
+    `).all(underlyingSymbol, tf, earliestTs, warmupCount) as { close: number; high: number; low: number }[];
     priorCloses = rows.reverse().map(r => r.close);
     priorHighs = rows.map(r => r.high);
     priorLows = rows.map(r => r.low);
@@ -397,7 +449,7 @@ function ensureKcFields(cache: BarCache, tf: string, config: ReplayConfig, verbo
           bar.indicators.kcLower ?? null,
           bar.indicators.kcWidth ?? null,
           bar.indicators.kcSlope ?? null,
-          'SPX', tf, bar.ts,
+          underlyingSymbol, tf, bar.ts,
         );
       }
     });
@@ -459,6 +511,33 @@ function getContractBarsAt(
   return result;
 }
 
+/**
+ * Get current HMA(fast)/HMA(slow) direction for an option contract at `atTs`.
+ * Returns 'bullish' if hmaFast >= hmaSlow on the most recent bar, 'bearish' otherwise.
+ * Returns null if either HMA is unavailable (e.g. contract loaded in price-only mode).
+ */
+function getOptionHmaDirection(
+  cache: BarCache, symbol: string, atTs: number, config: import('../config/types').Config,
+): 'bullish' | 'bearish' | null {
+  const bars = cache.contractBars.get(symbol);
+  if (!bars || bars.length === 0) return null;
+  // Binary search for last bar with ts <= atTs
+  let left = 0, right = bars.length - 1;
+  while (left <= right) {
+    const mid = (left + right) >>> 1;
+    if (bars[mid].ts <= atTs) left = mid + 1;
+    else right = mid - 1;
+  }
+  if (right < 0) return null;
+  const last = bars[right];
+  const fastKey = `hma${config.signals.hmaCrossFast ?? 5}`;
+  const slowKey = `hma${config.signals.hmaCrossSlow ?? 19}`;
+  const fast = last.indicators[fastKey];
+  const slow = last.indicators[slowKey];
+  if (fast == null || slow == null) return null;
+  return fast >= slow ? 'bullish' : 'bearish';
+}
+
 function getPosPriceAt(
   cache: BarCache, side: string, strike: number, symbolFilter: string, atTs: number,
 ): number | null {
@@ -484,7 +563,7 @@ function getPosPriceAt(
 /** Get full bar (OHLC) for a position's contract at a given timestamp. */
 function getPosBarAt(
   cache: BarCache, side: string, strike: number, symbolFilter: string, atTs: number,
-): { close: number; high: number; low: number } | null {
+): { close: number; high: number; low: number; open?: number; spread?: number } | null {
   const cpPattern = side === 'call' ? /C\d/ : /P\d/;
   for (const [symbol, bars] of cache.contractBars) {
     const s = cache.contractStrikes.get(symbol)!;
@@ -500,7 +579,7 @@ function getPosBarAt(
     }
     if (right >= 0) {
       const b = bars[right];
-      return { close: b.close, high: b.high, low: b.low };
+      return { close: b.close, high: b.high, low: b.low, open: b.open, spread: (b as any).spread };
     }
   }
   return null;
@@ -747,13 +826,23 @@ function runDeterministicReplay(
   const trades: Trade[] = [];
   const signalState: SignalState = createInitialSignalState();
   const positions = new Map<string, CorePosition>();  // simulated position tracker
+  // Sidecar: TP re-entry chain metadata per position id
+  const reentryMeta = new Map<string, { depth: number; rootId: string }>();
   let lastEntryTs = 0;
   let dailyPnl = 0;
   let tradesCompleted = 0;
+  // TP re-entry counters
+  let reentriesToday = 0;
+  let reentriesThisChain = 0;
+  let lastReentryTs = 0;
+  let sessionSignalCount = 0;  // HMA cross signals this session (circuit breaker)
+  /** Pending TP re-entry queued for this bar (at most one per side). */
+  const pendingTpReentries: { side: 'call' | 'put'; rootId: string; depth: number }[] = [];
   // Account value tracking for percentage-based sizing
   let accountValue = config.sizing.startingAccountValue ?? 10000;
 
   const strikeRange = config.strikeSelector.strikeSearchRange;
+  const spreadModel = resolveSpreadModel(config);
 
   // Resolve timeframes from config
   const dirTf = config.signals.directionTimeframe || '1m';
@@ -788,12 +877,17 @@ function runDeterministicReplay(
     signalState.prevExitHmaSlow = signal.exitState.prevSlow;
     signalState.lastExitBarTs = signal.exitState.lastBarTs;
 
+    // Track fresh crosses for circuit breaker
+    if (signal.directionState.freshCross) sessionSignalCount++;
+
     // ── Step 2: Check exits for all open positions ──
     const exits: ExitDecision[] = [];
     for (const [, pos] of positions) {
       const bar = getPosBarAt(cache1m, pos.side, pos.strike, symbolFilter, ts);
       const currentPrice = bar?.close ?? null;
-      const barHighLow = bar ? { high: bar.high, low: bar.low } : undefined;
+      const barHighLow = bar
+        ? { high: bar.high, low: bar.low, open: bar.open, spread: bar.spread }
+        : undefined;
 
       const exitDecision = evaluateExit(
         pos, currentPrice, signal.exitState.cross, signal.exitState.freshCross,
@@ -807,12 +901,15 @@ function runDeterministicReplay(
       const pos = positions.get(exit.positionId);
       if (!pos) continue;
 
+      const meta = reentryMeta.get(exit.positionId);
       trades.push({
         symbol: pos.symbol, side: pos.side, strike: pos.strike, qty: pos.qty,
         entryTs: pos.entryTs, entryET: etLabel(pos.entryTs), entryPrice: pos.entryPrice,
         exitTs: ts, exitET: etLabel(ts), exitPrice: exit.decisionPrice,
         reason: exit.reason, pnlPct: exit.pnl.pnlPct, pnl$: exit.pnl['pnl$'],
         signalType: '',
+        reentryDepth: meta?.depth,
+        reentryOf: meta?.rootId,
       });
 
       if (verbose) {
@@ -820,10 +917,132 @@ function runDeterministicReplay(
         console.log(`  CLOSE [${etLabel(ts)}] ${pos.symbol} ${exit.reason}: ${emoji}${exit.pnl.pnlPct.toFixed(0)}%`);
       }
 
+      // ── TP re-entry: queue same-side re-entry ──
+      if (exit.reason === 'take_profit' && config.exit?.reentryOnTakeProfit?.enabled) {
+        const closedSide: Direction = pos.side === 'call' ? 'bullish' : 'bearish';
+        const decision = evaluateReentry(
+          {
+            reentriesToday,
+            reentriesThisChain,
+            lastReentryTs,
+            closedExitReason: 'take_profit',
+            closedSide,
+            optionHmaDirection: getOptionHmaDirection(cache1m, pos.symbol, ts, config),
+          },
+          config,
+          ts,
+          {
+            // Position is already removed from the map via the exits list above,
+            // but the delete happens at line ~891 — subtract the count of pending
+            // exits to match the "after-exits" snapshot the gate expects.
+            openPositions: Math.max(0, positions.size - exits.length),
+            tradesCompleted,
+            dailyPnl,
+            closeCutoffTs,
+            lastEntryTs,
+            sessionSignalCount,
+          },
+        );
+        if (decision.allowed) {
+          const rootId = meta?.rootId ?? exit.positionId;
+          const nextDepth = (meta?.depth ?? 0) + 1;
+          pendingTpReentries.push({ side: pos.side, rootId, depth: nextDepth });
+          if (verbose) console.log(`  TP-REENTRY queued: ${pos.side.toUpperCase()} (chain ${rootId} depth ${nextDepth})`);
+        } else if (verbose) {
+          console.log(`  TP-REENTRY skipped: ${decision.reason}`);
+        }
+      }
+
       positions.delete(exit.positionId);
+      reentryMeta.delete(exit.positionId);
       dailyPnl += exit.pnl['pnl$'];
       accountValue += exit.pnl['pnl$'];
       tradesCompleted++;
+    }
+
+    // ── Open queued TP re-entries (after all exits processed for this bar) ──
+    if (pendingTpReentries.length > 0) {
+      const reentryCfg = config.exit?.reentryOnTakeProfit;
+      const sizeMult = reentryCfg?.sizeMultiplier ?? 1.0;
+      const seen = new Set<string>();
+      // Get fresh SPX price for strike re-selection
+      const spx1mEarly = getSpxBarsAt(cache1m, ts);
+      const spxPriceForRe = spx1mEarly.length > 0 ? spx1mEarly[spx1mEarly.length - 1].close : null;
+
+      for (const pending of pendingTpReentries) {
+        if (seen.has(pending.side)) continue;
+        seen.add(pending.side);
+        if (spxPriceForRe == null) break;
+
+        const reCandidates: StrikeCandidate[] = [];
+        const reContracts = getContractBarsAt(cache1m, spxPriceForRe, strikeRange, ts);
+        for (const [sym, bars] of reContracts) {
+          if (bars.length === 0) continue;
+          const strike = cache1m.contractStrikes.get(sym);
+          if (strike == null) continue;
+          const parsed = parseOptionSymbol(sym);
+          if (!parsed) continue;
+          reCandidates.push({
+            symbol: sym,
+            side: parsed.isCall ? 'call' : 'put',
+            strike,
+            price: bars[bars.length - 1].close,
+            volume: bars[bars.length - 1].volume,
+          });
+        }
+
+        const reDirection: Direction = pending.side === 'call' ? 'bullish' : 'bearish';
+        const reStrike = selectStrike(reCandidates, reDirection, spxPriceForRe, config);
+        if (!reStrike) {
+          if (verbose) console.log(`  TP-REENTRY skipped: no eligible strike`);
+          continue;
+        }
+
+        const bestPriceRaw = reStrike.candidate.price;
+        // Size qty off pre-slippage price to avoid feedback loop
+        const unslippedEffEntry = frictionEntry(bestPriceRaw, spreadModel);
+        const baseQty = computeQty(unslippedEffEntry, config, accountValue);
+        let qty = Math.max(1, Math.round(baseQty * sizeMult));
+
+        // Phase 4: participation-rate liquidity gate (same as in evaluateEntry)
+        const reParticipationRate = config.fill?.participationRate;
+        if (reParticipationRate != null && reParticipationRate > 0 && reStrike.candidate.volume > 0) {
+          const maxFill = Math.floor(reStrike.candidate.volume * reParticipationRate);
+          qty = Math.min(qty, Math.max(1, maxFill));
+        }
+
+        // Apply entry slippage (Phase 3)
+        const slip = resolveSlippage(config);
+        const bestPrice = slipBuyPrice(bestPriceRaw, qty, slip);
+        const effEntry = frictionEntry(bestPrice, spreadModel);
+        const stopLoss = config.position.stopLossPercent > 0
+          ? roundToOptionTick(effEntry * (1 - config.position.stopLossPercent / 100))
+          : 0;
+        const takeProfit = roundToOptionTick(effEntry * config.position.takeProfitMultiplier);
+
+        const newId = `${reStrike.candidate.symbol}_re${pending.depth}_${ts}`;
+        const corePos: CorePosition = {
+          id: newId,
+          symbol: reStrike.candidate.symbol,
+          side: pending.side,
+          strike: reStrike.candidate.strike,
+          qty,
+          entryPrice: bestPrice,
+          stopLoss,
+          takeProfit,
+          entryTs: ts,
+          highWaterPrice: bestPrice,
+        };
+        positions.set(newId, corePos);
+        reentryMeta.set(newId, { depth: pending.depth, rootId: pending.rootId });
+        reentriesToday++;
+        reentriesThisChain++;
+        lastReentryTs = ts;
+        if (verbose) {
+          console.log(`  TP-REENTRY → ${pending.side.toUpperCase()} ${reStrike.candidate.symbol} x${qty} @ $${bestPrice.toFixed(2)} (depth ${pending.depth})`);
+        }
+      }
+      pendingTpReentries.length = 0;
     }
 
     // ── Step 3: Check entry ──
@@ -875,10 +1094,11 @@ function runDeterministicReplay(
       closeCutoffTs,
       mtfDirection,
       accountValue,
+      sessionSignalCount,
     });
 
     if (entry) {
-      const effEntry = frictionEntry(entry.price);
+      const effEntry = frictionEntry(entry.price, spreadModel);
       const corePos: CorePosition = {
         id: entry.symbol,
         symbol: entry.symbol,
@@ -893,6 +1113,7 @@ function runDeterministicReplay(
       };
       positions.set(corePos.id, corePos);
       lastEntryTs = ts;
+      reentriesThisChain = 0;  // Fresh entry resets the TP re-entry chain
 
       if (verbose) {
         console.log(`  ENTER ${entry.symbol} x${entry.qty} @ $${entry.price.toFixed(2)} (eff $${effEntry.toFixed(2)}) | stop=$${entry.stopLoss.toFixed(2)} tp=$${entry.takeProfit.toFixed(2)} | ${entry.reason}`);
@@ -901,15 +1122,25 @@ function runDeterministicReplay(
   }
 
   // ── EOD: force-close any remaining positions ──
+  // NOTE: In normal operation this loop should be empty — positions are
+  // force-closed at closeCutoffTs via the exit check in core/position-manager.
+  // If any position reaches here, it indicates a cutoff-enforcement bug.
   const finalTs = timestamps[timestamps.length - 1];
+  if (positions.size > 0) {
+    console.warn(`[replay] EOD safety-net closed ${positions.size} position(s) — cutoff exit did not fire as expected`);
+  }
   for (const [, pos] of positions) {
     const curPrice = getPosPriceAt(cache1m, pos.side, pos.strike, symbolFilter, finalTs) ?? pos.entryPrice;
-    const { pnlPct, 'pnl$': pnl$ } = computeRealisticPnl(pos.entryPrice, curPrice, pos.qty);
+    // EOD forced close → market exit (not TP/SL)
+    const { pnlPct, 'pnl$': pnl$ } = computeRealisticPnl(pos.entryPrice, curPrice, pos.qty, 'market', spreadModel);
+    const meta = reentryMeta.get(pos.id);
     trades.push({
       symbol: pos.symbol, side: pos.side, strike: pos.strike, qty: pos.qty,
       entryTs: pos.entryTs, entryET: etLabel(pos.entryTs), entryPrice: pos.entryPrice,
       exitTs: finalTs, exitET: etLabel(finalTs), exitPrice: curPrice,
       reason: 'time_exit', pnlPct, pnl$, signalType: '',
+      reentryDepth: meta?.depth,
+      reentryOf: meta?.rootId,
     });
     if (verbose) console.log(`  EOD CLOSE ${pos.symbol} @ $${curPrice.toFixed(2)} -> ${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(0)}%`);
   }
@@ -938,13 +1169,28 @@ export async function runReplay(
   opts: ReplayOptions = {},
 ): Promise<ReplayResult> {
   const verbose = opts.verbose ?? true;
+  // Validate config signal periods before any work. Registers HMA periods with
+  // the indicator engine (idempotent) and fast-fails on misconfig like
+  // hmaCrossFast >= hmaCrossSlow. NOTE: replay reads hma${period} from the
+  // replay_bars SQL columns, so periods outside [3,5,15,17,19,25] will still
+  // not fire signals here until those columns are backfilled — tracked
+  // separately. This call is defensive and documents intent.
+  validateSignalConfig(config);
   const dataDb = new Database(opts.dataDbPath || DATA_DB_PATH, { readonly: true });
   const store = new ReplayStore(opts.storeDbPath);
   const runId = store.createRun(config.id, targetDate);
 
   try {
-    const { start: SESSION_START, end: SESSION_END, closeCutoff: CLOSE_CUTOFF } = buildSessionTimestamps(targetDate);
-    const SYMBOL_RANGE = buildSymbolRange(targetDate);
+    const { start: SESSION_START, end: SESSION_END } = buildSessionTimestamps(targetDate);
+    // EOD cutoff is now config-driven (config.risk.cutoffTimeET) via the shared
+    // core helper. Previously hardcoded to 16:45 here, silently ignoring the
+    // config value that live-agent callers honored — causing replay/live drift.
+    const CLOSE_CUTOFF = computeCloseCutoffTs(config, new Date(SESSION_START * 1000));
+    // ── Instrument-aware routing (SPX default; NDX/SPY/QQQ via config.execution) ──
+    const UNDERLYING_SYMBOL = config.execution?.symbol || 'SPX';
+    const CONTRACT_PREFIX = config.execution?.optionPrefix || 'SPXW';
+    const STRIKE_INTERVAL = config.execution?.strikeInterval ?? 5;
+    const SYMBOL_RANGE = buildSymbolRange(targetDate, CONTRACT_PREFIX);
     // Legacy LIKE filter still needed for getPosPrice fallback
     const SYMBOL_FILTER = buildSymbolFilter(targetDate);
 
@@ -955,8 +1201,8 @@ export async function runReplay(
     // Pre-load bars into memory — multiple timeframes from DB
     // In deterministic mode, skip contract indicator columns (only need OHLCV for price lookups)
     const cacheOpts = isDeterministic
-      ? { skipContractIndicators: true, date: targetDate }
-      : { date: targetDate };
+      ? { skipContractIndicators: true, date: targetDate, underlyingSymbol: UNDERLYING_SYMBOL }
+      : { date: targetDate, underlyingSymbol: UNDERLYING_SYMBOL };
     const cache1m = loadBarCache(dataDb, SESSION_START, SESSION_END, SYMBOL_RANGE, '1m', cacheOpts);
 
     // ── MTF cache loader — deduplicates so each TF is loaded at most once ──
@@ -994,17 +1240,17 @@ export async function runReplay(
     neededHmaPeriods.add(config.signals.hmaCrossSlow ?? 19);
     const hmaPeriods = [...neededHmaPeriods];
     for (const tf of allTfs) {
-      ensureHmaPeriods(getTfCache(tf), hmaPeriods, tf, verbose);
+      ensureHmaPeriods(getTfCache(tf), hmaPeriods, tf, verbose, UNDERLYING_SYMBOL);
     }
     // Also ensure 1m cache has them (used for price lookups / position management)
-    ensureHmaPeriods(cache1m, hmaPeriods, '1m', verbose);
+    ensureHmaPeriods(cache1m, hmaPeriods, '1m', verbose, UNDERLYING_SYMBOL);
 
     const signalCache = getTfCache(signalTf);
     const directionCache = getTfCache(directionTf);
     const exitCache = getTfCache(exitTf);
 
     // Ensure KC indicators are computed for the direction timeframe (used by KC trend gate)
-    ensureKcFields(directionCache, directionTf, config, verbose);
+    ensureKcFields(directionCache, directionTf, config, verbose, UNDERLYING_SYMBOL);
 
     // Per-signal-type caches for MTF signal detection
     const hmaCrossCache = getTfCache(hmaCrossTf);
@@ -1088,7 +1334,15 @@ export async function runReplay(
     const openPositions = new Map<string, SimPosition>();
     let lastEscalationTs = 0;
     let lastScannerTs = 0;
+    let sessionSignalCount = 0;  // HMA cross signals this session (circuit breaker)
+    // ── TP re-entry counters (only used when config.exit.reentryOnTakeProfit.enabled) ──
+    let reentriesToday = 0;
+    let reentriesThisChain = 0;
+    let lastReentryTs = 0;
+    // Pending TP re-entries collected during the position-monitor pass; opened after the loop
+    const pendingTpReentries: { side: 'call' | 'put'; ts: number; rootId: string; depth: number }[] = [];
     const strikeRange = config.strikeSelector.strikeSearchRange;
+    const spreadModel = resolveSpreadModel(config);
     let accountValue = config.sizing.startingAccountValue ?? 10000;
     let prevSpxHmaFast: number | null = null;
     let prevSpxHmaSlow: number | null = null;
@@ -1139,7 +1393,8 @@ export async function runReplay(
       // ── Position monitoring ────────────────────────────────────────────
       const reversalFlips: { side: 'call' | 'put'; ts: number }[] = [];
       for (const [posId, openPos] of openPositions.entries()) {
-        const curPrice = getPosPriceAt(cache, openPos.side, openPos.strike, SYMBOL_FILTER, ts);
+        const curBar = getPosBarAt(cache, openPos.side, openPos.strike, SYMBOL_FILTER, ts);
+        const curPrice = curBar?.close ?? null;
         if (curPrice === null) continue;
 
         // Track high-water mark for trailing stop
@@ -1150,17 +1405,29 @@ export async function runReplay(
         const exitCtx: ExitContext = {
           ts, closeCutoffTs: CLOSE_CUTOFF, hmaCrossDirection: spxExitCross,
           highWaterPrice: openPos.highWaterPrice,
+          barHigh: curBar?.high,
+          barLow: curBar?.low,
+          barOpen: curBar?.open,
+          barSpread: curBar?.spread,
         };
         const exitResult = checkExit(openPos, curPrice, config, exitCtx);
         const closeReason = exitResult.reason;
 
         if (exitResult.shouldExit && closeReason) {
-          const { pnlPct, 'pnl$': pnl$ } = computeRealisticPnl(openPos.entryPrice, curPrice, openPos.qty);
+          // Use the clamped fill price from checkExit (TP=limit, SL=stop level).
+          // Falls back to current bar close for non-TP/SL exits (time_exit, signal_reversal).
+          const fillPrice = exitResult.exitPrice ?? curPrice;
+          const exitKind: 'tp' | 'sl' | 'market' =
+            closeReason === 'take_profit' ? 'tp' :
+            closeReason === 'stop_loss' ? 'sl' : 'market';
+          const { pnlPct, 'pnl$': pnl$ } = computeRealisticPnl(openPos.entryPrice, fillPrice, openPos.qty, exitKind, spreadModel);
           trades.push({
             symbol: openPos.symbol, side: openPos.side, strike: openPos.strike, qty: openPos.qty,
             entryTs: openPos.entryTs, entryET: openPos.entryET, entryPrice: openPos.entryPrice,
-            exitTs: ts, exitET: etLabel(ts), exitPrice: curPrice,
+            exitTs: ts, exitET: etLabel(ts), exitPrice: fillPrice,
             reason: closeReason, pnlPct, pnl$, signalType: '',
+            reentryDepth: openPos.reentryDepth,
+            reentryOf: openPos.reentryOf,
           });
           if (verbose) {
             const emoji = pnlPct >= 0 ? '+' : '';
@@ -1174,6 +1441,47 @@ export async function runReplay(
             reversalFlips.push({ side: flipSide, ts });
           }
 
+          // ── TP re-entry: queue a same-side re-entry for after this loop ──
+          if (closeReason === 'take_profit' && config.exit?.reentryOnTakeProfit?.enabled) {
+            const decision = evaluateReentry(
+              {
+                reentriesToday,
+                reentriesThisChain,
+                lastReentryTs,
+                closedExitReason: 'take_profit',
+                closedSide: openPos.side === 'call' ? 'bullish' : 'bearish',
+                // option HMA confirm: only checked if requireOptionHmaConfirm or fresh_signal_required;
+                // we look up the option contract HMA direction from the signal cache below.
+                optionHmaDirection: getOptionHmaDirection(signalCache, openPos.symbol, ts, config),
+              },
+              config,
+              ts,
+              {
+                // This position is closing this iteration → subtract 1 for the
+                // post-exit snapshot the gate expects.
+                openPositions: Math.max(0, openPositions.size - 1),
+                tradesCompleted: trades.length,
+                dailyPnl: trades.reduce((sum, t) => sum + t.pnl$, 0),
+                closeCutoffTs: CLOSE_CUTOFF,
+                lastEntryTs: lastEscalationTs,
+                sessionSignalCount,
+              },
+            );
+            if (decision.allowed) {
+              const rootId = openPos.reentryOf ?? openPos.id;
+              const nextDepth = (openPos.reentryDepth ?? 0) + 1;
+              pendingTpReentries.push({ side: openPos.side, ts, rootId, depth: nextDepth });
+              if (verbose) {
+                console.log(`  TP-REENTRY queued: ${openPos.side.toUpperCase()} (chain ${rootId} depth ${nextDepth})`);
+              }
+            } else if (verbose) {
+              console.log(`  TP-REENTRY skipped: ${decision.reason}`);
+            }
+          }
+
+          // Start cooldown clock on exit — prevents flip-on-reversal from
+          // immediately opening in the same bar when cooldown is short.
+          lastEscalationTs = ts;
           openPositions.delete(posId);
         }
       }
@@ -1186,16 +1494,22 @@ export async function runReplay(
 
       if (uniqueFlips.size > 0 && config.exit?.strategy === 'scannerReverse') {
         for (const [, flip] of uniqueFlips) {
-          // Check risk limits before flipping (cooldown bypassed — flip is a new signal)
-          const flipRiskState: RiskState = {
-            openPositions: openPositions.size,
+          // Shared entry gate (risk + time-window + close-cutoff + cooldown).
+          // Flips respect cooldown (post-2026-04-21 fix — bypassing caused 18+ positions).
+          const gate = checkEntryGates({
+            ts,
+            kind: 'flip_on_reversal',
+            openPositionsAfterExits: openPositions.size,
             tradesCompleted: trades.length,
             dailyPnl: trades.reduce((sum, t) => sum + t.pnl$, 0),
-            currentTs: ts,
             closeCutoffTs: CLOSE_CUTOFF,
-            lastEscalationTs,
-          };
-          if (isRiskBlocked(flipRiskState, config).blocked) continue;
+            lastEntryTs: lastEscalationTs,
+            sessionSignalCount,
+          }, config);
+          if (!gate.allowed) {
+            if (verbose) console.log(`  FLIP skipped: ${gate.reason}`);
+            continue;
+          }
 
           // Use selectStrike() for parity with live agent and runStrategy()
           const flipContracts = getContractBarsAt(cache1m, spx.close, strikeRange, ts);
@@ -1219,11 +1533,11 @@ export async function runReplay(
           const flipStrike = selectStrike(flipCandidates, flipDirection, spx.close, config);
           if (flipStrike) {
             const bestPrice = flipStrike.candidate.price;
-            const effEntry = frictionEntry(bestPrice);
+            const effEntry = frictionEntry(bestPrice, spreadModel);
             const stopLoss = config.position.stopLossPercent > 0
-              ? effEntry * (1 - config.position.stopLossPercent / 100)
+              ? roundToOptionTick(effEntry * (1 - config.position.stopLossPercent / 100))
               : 0;
-            const takeProfit = effEntry * config.position.takeProfitMultiplier;
+            const takeProfit = roundToOptionTick(effEntry * config.position.takeProfitMultiplier);
             const qty = computeQty(effEntry, config, accountValue);
 
             openPositions.set(`${flipStrike.candidate.symbol}_${ts}`, {
@@ -1235,12 +1549,99 @@ export async function runReplay(
               entryTs: ts, entryET: etLabel(ts),
               highWaterPrice: bestPrice,
             });
+            reentriesThisChain = 0;  // Reversal flip is a fresh chain
             lastEscalationTs = ts; // Update for cooldown tracking
             if (verbose) {
               console.log(`  FLIP → ${flip.side.toUpperCase()} ${flipStrike.candidate.symbol} x${qty} @ $${bestPrice.toFixed(2)} (eff $${effEntry.toFixed(2)}) | stop=$${stopLoss.toFixed(2)} tp=$${takeProfit.toFixed(2)} | ${flipStrike.reason}`);
             }
           }
         }
+      }
+
+      // ── TP re-entry execution: open queued same-side re-entries ──
+      // Pending entries were collected during the position-monitor pass; open them here
+      // so they don't iterate inside the openPositions loop.
+      if (pendingTpReentries.length > 0) {
+        const reentryCfg = config.exit?.reentryOnTakeProfit;
+        const sizeMult = reentryCfg?.sizeMultiplier ?? 1.0;
+        // Dedupe by side — at most one re-entry per side per bar
+        const seen = new Set<string>();
+        for (const pending of pendingTpReentries) {
+          if (seen.has(pending.side)) continue;
+          seen.add(pending.side);
+
+          // Shared entry gate (risk + time-window + close-cutoff). This is a
+          // second-barrier check in addition to the gate already applied by
+          // evaluateReentry() during the queueing phase — state may have
+          // changed between queue and execution (e.g. additional trades
+          // pushing us past maxTradesPerDay).
+          const gate = checkEntryGates({
+            ts,
+            kind: 'tp_reentry',
+            openPositionsAfterExits: openPositions.size,
+            tradesCompleted: trades.length,
+            dailyPnl: trades.reduce((sum, t) => sum + t.pnl$, 0),
+            closeCutoffTs: CLOSE_CUTOFF,
+            lastEntryTs: lastEscalationTs,
+            sessionSignalCount,
+          }, config);
+          if (!gate.allowed) {
+            if (verbose) console.log(`  TP-REENTRY blocked: ${gate.reason}`);
+            continue;
+          }
+
+          // Re-run strike selection at current SPX (old contract is now ITM/expensive)
+          const reContracts = getContractBarsAt(cache1m, spx.close, strikeRange, ts);
+          const reDirection: Direction = pending.side === 'call' ? 'bullish' : 'bearish';
+          const reCandidates: StrikeCandidate[] = [];
+          for (const [sym, bars] of reContracts) {
+            if (bars.length === 0) continue;
+            const parsed = parseOptionSymbol(sym);
+            if (!parsed) continue;
+            reCandidates.push({
+              symbol: sym,
+              side: parsed.isCall ? 'call' : 'put',
+              strike: parsed.strike,
+              price: bars[bars.length - 1].close,
+              volume: bars[bars.length - 1].volume,
+            });
+          }
+
+          const reStrike = selectStrike(reCandidates, reDirection, spx.close, config);
+          if (!reStrike) {
+            if (verbose) console.log(`  TP-REENTRY skipped: no eligible strike`);
+            continue;
+          }
+
+          const bestPrice = reStrike.candidate.price;
+          const effEntry = frictionEntry(bestPrice, spreadModel);
+          const stopLoss = config.position.stopLossPercent > 0
+            ? roundToOptionTick(effEntry * (1 - config.position.stopLossPercent / 100))
+            : 0;
+          const takeProfit = roundToOptionTick(effEntry * config.position.takeProfitMultiplier);
+          const baseQty = computeQty(effEntry, config, accountValue);
+          const qty = Math.max(1, Math.round(baseQty * sizeMult));
+
+          const newPosId = `${reStrike.candidate.symbol}_${ts}_re${pending.depth}`;
+          openPositions.set(newPosId, {
+            id: newPosId,
+            symbol: reStrike.candidate.symbol,
+            side: pending.side,
+            strike: reStrike.candidate.strike,
+            qty, entryPrice: bestPrice, stopLoss, takeProfit,
+            entryTs: ts, entryET: etLabel(ts),
+            highWaterPrice: bestPrice,
+            reentryDepth: pending.depth,
+            reentryOf: pending.rootId,
+          });
+          reentriesToday++;
+          reentriesThisChain++;
+          lastReentryTs = ts;
+          if (verbose) {
+            console.log(`  TP-REENTRY → ${pending.side.toUpperCase()} ${reStrike.candidate.symbol} x${qty} @ $${bestPrice.toFixed(2)} (depth ${pending.depth}, chain ${pending.rootId})`);
+          }
+        }
+        pendingTpReentries.length = 0;
       }
 
       // ── Signal detection — MTF-aware ──────────────────────────────────
@@ -1303,13 +1704,13 @@ export async function runReplay(
       // When set, only keep signals on the strike closest to the target OTM distance
       if (config.signals.targetOtmDistance != null && optionSignals.length > 0) {
         const targetDist = config.signals.targetOtmDistance;
-        const spxRounded = Math.round(spx.close / 5) * 5; // SPX rounds to $5 strikes
+        const spxRounded = Math.round(spx.close / STRIKE_INTERVAL) * STRIKE_INTERVAL;
         const targetCallStrike = spxRounded + targetDist;
         const targetPutStrike = spxRounded - targetDist;
 
         optionSignals = optionSignals.filter(sig => {
-          if (sig.side === 'call') return Math.abs(sig.strike - targetCallStrike) <= 5;
-          if (sig.side === 'put') return Math.abs(sig.strike - targetPutStrike) <= 5;
+          if (sig.side === 'call') return Math.abs(sig.strike - targetCallStrike) <= STRIKE_INTERVAL;
+          if (sig.side === 'put') return Math.abs(sig.strike - targetPutStrike) <= STRIKE_INTERVAL;
           return false;
         });
       }
@@ -1370,28 +1771,28 @@ export async function runReplay(
         }
       }
 
+      // Track option signals for circuit breaker
+      sessionSignalCount += optionSignals.length;
+
       // ── Regime classification ──────────────────────────────────────────
       const regimeState = classify({ close: spx.close, high: spx.high, low: spx.low, ts }, config.regime);
       const regimeContext = formatRegimeContext(regimeState, config.regime);
 
-      // ── Risk guard (core module — max positions, trades, loss, cutoff, cooldown) ──
-      const riskState: RiskState = {
-        openPositions: openPositions.size,
+      // ── Shared entry gate (scanner/judge pipeline uses kind='judge_buy') ──
+      // Covers risk, time-window, close-cutoff, and cooldown in one place.
+      // The judge-entry site downstream re-checks via the same gate to handle
+      // state changes between scanner cycle and judge verdict.
+      const entryGate = checkEntryGates({
+        ts,
+        kind: 'judge_buy',
+        openPositionsAfterExits: openPositions.size,
         tradesCompleted: trades.length,
         dailyPnl: trades.reduce((sum, t) => sum + t.pnl$, 0),
-        currentTs: ts,
         closeCutoffTs: CLOSE_CUTOFF,
-        lastEscalationTs,
-      };
-      const riskCheck = isRiskBlocked(riskState, config);
-      if (riskCheck.blocked) continue;
-
-      // ── Time window gate ──────────────────────────────────────────────
-      if (config.timeWindows?.activeStart || config.timeWindows?.activeEnd) {
-        const etHHMM = etLabel(ts).slice(0, 5); // 'HH:MM'
-        if (config.timeWindows.activeStart && etHHMM < config.timeWindows.activeStart) continue;
-        if (config.timeWindows.activeEnd && etHHMM >= config.timeWindows.activeEnd) continue;
-      }
+        lastEntryTs: lastEscalationTs,
+        sessionSignalCount,
+      }, config);
+      if (!entryGate.allowed) continue;
 
       // ── SPX RSI gate — skip if RSI is in the neutral zone (skipped when regime disabled) ──
       if (config.regime.enabled) {
@@ -1526,13 +1927,18 @@ export async function runReplay(
         });
       }
 
+      // Capture previous escalation ts for cooldown gate, then mark this cycle
+      const prevEscalationTs = lastEscalationTs;
       lastEscalationTs = ts;
+
+      // Reverse signals (chop mode): flip side so we fade the cross direction
+      const reverseOn = !!config.signals.reverseSignals;
 
       // ── Regime gate (core module — skipped when regime disabled) ──────
       if (judgeAction === 'buy' && judgeTarget) {
         const isCall = /C\d/.test(judgeTarget);
-        const side: 'call' | 'put' = isCall ? 'call' : 'put';
-        const direction = isCall ? 'bullish' as const : 'bearish' as const;
+        const side: 'call' | 'put' = (isCall !== reverseOn) ? 'call' : 'put';
+        const direction = (side === 'call' ? 'bullish' : 'bearish') as Direction;
         const spxRsi = spx.indicators.rsi14 ?? null;
 
         if (isRegimeBlocked(regimeState.regime, direction, side, spxRsi, config)) {
@@ -1544,31 +1950,60 @@ export async function runReplay(
       // ── Open position ──────────────────────────────────────────────────
       // Use symbol as key (not symbol+ts) so we don't double-enter the same contract
       const posKey = judgeTarget ?? '';
-      if (judgeAction === 'buy' && judgeTarget && !openPositions.has(posKey) && openPositions.size < (config.position.maxPositionsOpen ?? 100)) {
+      // Second-barrier entry gate: even after judges say buy, enforce cutoff/time-window/cooldown/risk
+      const judgeEntryGate = judgeAction === 'buy' && judgeTarget
+        ? checkEntryGates({
+            ts,
+            kind: 'judge_buy',
+            openPositionsAfterExits: openPositions.size,
+            tradesCompleted: trades.length,
+            dailyPnl: trades.reduce((sum, t) => sum + t.pnl$, 0),
+            closeCutoffTs: CLOSE_CUTOFF,
+            lastEntryTs: prevEscalationTs,
+            sessionSignalCount,
+          }, config)
+        : { allowed: false, reason: 'no judge buy' } as const;
+      if (judgeAction === 'buy' && judgeTarget && !judgeEntryGate.allowed && verbose) {
+        console.log(`  JUDGE ENTRY BLOCKED: ${judgeEntryGate.reason}`);
+      }
+      if (judgeAction === 'buy' && judgeTarget && judgeEntryGate.allowed && !openPositions.has(posKey) && openPositions.size < (config.position.maxPositionsOpen ?? 100)) {
         const parsed = parseOptionSymbol(judgeTarget);
         if (parsed) {
-          const bars = contractBars.get(judgeTarget);
+          // Reverse signals: swap the target symbol to the opposite side (call↔put) at the same strike
+          let entrySymbol = judgeTarget;
+          let entrySide: 'call' | 'put' = parsed.isCall ? 'call' : 'put';
+          if (reverseOn) {
+            entrySide = parsed.isCall ? 'put' : 'call';
+            const cpChar = entrySide === 'call' ? 'C' : 'P';
+            entrySymbol = judgeTarget.replace(/[CP](\d{8})$/, cpChar + '$1');
+          }
+          const bars = contractBars.get(entrySymbol);
           const entryPrice = bars?.[bars.length - 1]?.close ?? null;
 
           if (entryPrice && entryPrice > 0) {
-            const effEntry = frictionEntry(entryPrice);
-            const stopLoss = judgeStop && judgeStop > 0 && judgeStop < effEntry
-              ? judgeStop
-              : effEntry * (1 - config.position.stopLossPercent / 100);
-            const takeProfit = judgeTp && judgeTp > effEntry
-              ? judgeTp
-              : effEntry * config.position.takeProfitMultiplier;
+            const effEntry = frictionEntry(entryPrice, spreadModel);
+            const stopLoss = roundToOptionTick(
+              judgeStop && judgeStop > 0 && judgeStop < effEntry
+                ? judgeStop
+                : effEntry * (1 - config.position.stopLossPercent / 100)
+            );
+            const takeProfit = roundToOptionTick(
+              judgeTp && judgeTp > effEntry
+                ? judgeTp
+                : effEntry * config.position.takeProfitMultiplier
+            );
             const qty = computeQty(effEntry, config, accountValue);
 
-            openPositions.set(posKey, {
-              id: posKey,
-              symbol: judgeTarget,
-              side: parsed.isCall ? 'call' : 'put',
+            openPositions.set(entrySymbol, {
+              id: entrySymbol,
+              symbol: entrySymbol,
+              side: entrySide,
               strike: parsed.strike,
               qty, entryPrice, stopLoss, takeProfit,
               entryTs: ts, entryET: etLabel(ts),
               highWaterPrice: entryPrice,
             });
+            reentriesThisChain = 0;  // Fresh entry resets the TP re-entry chain
             if (verbose) {
               console.log(`  ENTER ${judgeTarget} x${qty} @ $${entryPrice.toFixed(2)} (eff $${effEntry.toFixed(2)}) | stop=$${stopLoss.toFixed(2)} tp=$${takeProfit.toFixed(2)}`);
             }
@@ -1578,10 +2013,14 @@ export async function runReplay(
     }
 
     // ── EOD close remaining ──────────────────────────────────────────────
+    // Should be empty in normal operation; see note in runDeterministicReplay.
     const finalTs = timestamps[timestamps.length - 1];
+    if (openPositions.size > 0) {
+      console.warn(`[replay:scanner] EOD safety-net closed ${openPositions.size} position(s) — cutoff exit did not fire as expected`);
+    }
     for (const [, openPos] of openPositions.entries()) {
       const curPrice = getPosPriceAt(cache, openPos.side, openPos.strike, SYMBOL_FILTER, finalTs) ?? openPos.entryPrice;
-      const { pnlPct, 'pnl$': pnl$ } = computeRealisticPnl(openPos.entryPrice, curPrice, openPos.qty);
+      const { pnlPct, 'pnl$': pnl$ } = computeRealisticPnl(openPos.entryPrice, curPrice, openPos.qty, 'market', spreadModel);
       trades.push({
         symbol: openPos.symbol, side: openPos.side, strike: openPos.strike, qty: openPos.qty,
         entryTs: openPos.entryTs, entryET: openPos.entryET, entryPrice: openPos.entryPrice,

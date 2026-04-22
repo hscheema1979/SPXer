@@ -473,7 +473,8 @@ describe('tick — Position Exits', () => {
     const state = createInitialState();
     state.positions.set(pos.id, pos);
 
-    // Price dropped below SL (0.765)
+    // Price dropped below SL (0.765) — bar closed at $0.50 (big gap through stop).
+    // Fill clamps to stopLoss level (0.765); Phase 2 slippage model will adjust downward.
     const positionPrices = new Map([[pos.symbol, 0.50]]);
 
     const result = tick(state, makeInput({
@@ -484,7 +485,7 @@ describe('tick — Position Exits', () => {
 
     expect(result.exits).toHaveLength(1);
     expect(result.exits[0].reason).toBe('stop_loss');
-    expect(result.exits[0].decisionPrice).toBe(0.50);
+    expect(result.exits[0].decisionPrice).toBeCloseTo(0.765, 3); // clamped to SL, not bar close
     expect(result.exits[0].positionId).toBe(pos.id);
     expect(result.exits[0].flipTo).toBeNull(); // SL doesn't flip
   });
@@ -1420,7 +1421,7 @@ describe('Intrabar exit pricing', () => {
     expect(result.exits).toHaveLength(0);
   });
 
-  it('uses close price when positionBars not provided (live agent path)', () => {
+  it('clamps TP to takeProfit even without positionBars (live agent path)', () => {
     const entryPrice = 2.00;
     const tp = entryPrice * 1.4; // 2.80
     const sl = entryPrice * 0.30; // 0.60
@@ -1430,8 +1431,9 @@ describe('Intrabar exit pricing', () => {
     });
     const state = stateWithPosition(entryPrice, sl, tp);
 
-    // positionBars not provided — should fall through to close-based exit
-    // close (3.50) > TP (2.80), so should exit at close price
+    // positionBars not provided — falls through to close-based exit.
+    // close (3.50) > TP (2.80). TP is a limit order; fill clamps to TP (2.80), not bar close.
+    // This prevents phantom TPs where a large up-move inflates exit prices beyond the limit.
     const bars = [makeBar(BASE_TS - 60, 5810, 5810, 5805), makeBar(BASE_TS, 5815, 5812, 5806)];
     const result = tick(state, makeInput({
       ts: BASE_TS,
@@ -1444,6 +1446,6 @@ describe('Intrabar exit pricing', () => {
 
     expect(result.exits).toHaveLength(1);
     expect(result.exits[0].reason).toBe('take_profit');
-    expect(result.exits[0].decisionPrice).toBeCloseTo(3.50, 2); // close price, not TP
+    expect(result.exits[0].decisionPrice).toBeCloseTo(2.80, 2); // clamped to TP, not bar close
   });
 });

@@ -29,7 +29,7 @@ export function parseIndicators(raw: string): Record<string, number | null> {
 
 export function computeMetrics(trades: Trade[]): Pick<
   ReplayResult,
-  'trades' | 'wins' | 'winRate' | 'totalPnl' | 'avgPnlPerTrade' | 'maxWin' | 'maxLoss' | 'maxConsecutiveWins' | 'maxConsecutiveLosses'
+  'trades' | 'wins' | 'winRate' | 'totalPnl' | 'avgPnlPerTrade' | 'maxWin' | 'maxLoss' | 'maxConsecutiveWins' | 'maxConsecutiveLosses' | 'sumWinPct' | 'cntWins' | 'sumLossPct' | 'cntLosses'
 > {
   let totalPnl = 0;
   let wins = 0;
@@ -39,6 +39,10 @@ export function computeMetrics(trades: Trade[]): Pick<
   let maxConsecutiveLosses = 0;
   let currentConsecutiveWins = 0;
   let currentConsecutiveLosses = 0;
+  let sumWinPct = 0;
+  let cntWins = 0;
+  let sumLossPct = 0;
+  let cntLosses = 0;
 
   for (const trade of trades) {
     totalPnl += trade.pnl$;
@@ -47,10 +51,17 @@ export function computeMetrics(trades: Trade[]): Pick<
       currentConsecutiveWins++;
       currentConsecutiveLosses = 0;
       maxWin = Math.max(maxWin, trade.pnl$);
-    } else {
+      sumWinPct += trade.pnlPct;
+      cntWins++;
+    } else if (trade.pnlPct < 0) {
       currentConsecutiveLosses++;
       currentConsecutiveWins = 0;
       maxLoss = Math.min(maxLoss, trade.pnl$);
+      sumLossPct += trade.pnlPct;
+      cntLosses++;
+    } else {
+      currentConsecutiveWins = 0;
+      currentConsecutiveLosses = 0;
     }
     maxConsecutiveWins = Math.max(maxConsecutiveWins, currentConsecutiveWins);
     maxConsecutiveLosses = Math.max(maxConsecutiveLosses, currentConsecutiveLosses);
@@ -66,6 +77,10 @@ export function computeMetrics(trades: Trade[]): Pick<
     maxLoss: maxLoss || 0,
     maxConsecutiveWins,
     maxConsecutiveLosses,
+    sumWinPct,
+    cntWins,
+    sumLossPct,
+    cntLosses,
   };
 }
 
@@ -81,14 +96,17 @@ export function buildSymbolFilter(date: string): string {
  * Build a symbol range for efficient index-based contract queries.
  * e.g. '2026-03-20' → { prefix: 'SPXW260320', lo: 'SPXW260320', hi: 'SPXW260321' }
  * Use: WHERE symbol >= lo AND symbol < hi (uses index, ~100x faster than LIKE)
+ *
+ * `contractPrefix` defaults to 'SPXW' (SPX 0DTE). Pass 'NDXP' for NDX 0DTE,
+ * 'SPY'/'QQQ' for 1DTE ETFs.
  */
-export function buildSymbolRange(date: string): { prefix: string; lo: string; hi: string } {
+export function buildSymbolRange(date: string, contractPrefix: string = 'SPXW'): { prefix: string; lo: string; hi: string } {
   const dateCode = date.slice(2, 4) + date.slice(5, 7) + date.slice(8, 10);
-  const prefix = `SPXW${dateCode}`;
+  const prefix = `${contractPrefix}${dateCode}`;
   // Increment the last digit of dateCode for upper bound
   const dayNum = parseInt(date.slice(8, 10), 10);
   const hiDateCode = date.slice(2, 4) + date.slice(5, 7) + String(dayNum + 1).padStart(2, '0');
-  return { prefix, lo: prefix, hi: `SPXW${hiDateCode}` };
+  return { prefix, lo: prefix, hi: `${contractPrefix}${hiDateCode}` };
 }
 
 /**
@@ -110,10 +128,16 @@ export function etToUnix(date: string, timeET: string): number {
  * Build session timestamps from a date string.
  * Returns real UTC Unix timestamps for session start (08:00 ET) and end (17:00 ET).
  * Handles EDT/EST correctly via etToUnix.
+ *
+ * Note: the EOD close cutoff is NOT part of session timestamps — it is a
+ * config-driven value derived via computeCloseCutoffTs(config) from
+ * src/core/entry-gate.ts. Previously this function returned a hardcoded
+ * closeCutoff (end - 15min = 16:45 ET) that silently overrode
+ * config.risk.cutoffTimeET in the replay engine. That coupling has been
+ * removed so replay and live agent honor the same config knob.
  */
-export function buildSessionTimestamps(date: string): { start: number; end: number; closeCutoff: number } {
+export function buildSessionTimestamps(date: string): { start: number; end: number } {
   const start = etToUnix(date, '08:00');
   const end = start + 540 * 60;      // 9 hours (8:00 AM - 5:00 PM)
-  const closeCutoff = end - 15 * 60;  // 15 min before close
-  return { start, end, closeCutoff };
+  return { start, end };
 }

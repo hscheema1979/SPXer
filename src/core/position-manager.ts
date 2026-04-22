@@ -10,6 +10,7 @@
 
 import type { Position, ExitCheck, ExitReason, Direction } from './types';
 import type { Config } from '../config/types';
+import { resolveSlippage, slipSellPrice } from './fill-model';
 
 export interface ExitContext {
   ts: number;
@@ -24,6 +25,10 @@ export interface ExitContext {
   barHigh?: number;
   /** Bar low — used for intrabar SL detection. */
   barLow?: number;
+  /** Bar open — used for 'by_open' intrabar tie-breaker. Optional. */
+  barOpen?: number;
+  /** Bar-level bid-ask spread (option) — used by spread-scaled SL slippage. */
+  barSpread?: number;
 }
 
 /**
@@ -47,43 +52,72 @@ export function checkExit(
   const exitCfg = config.exit;
   const intrabar = exitCfg?.exitPricing === 'intrabar';
 
+  // Resolve fill-model slippage (Phase 2). When config.fill.slippage is undefined
+  // or all zero, slFillPrice(SL) === SL, so Phase 1 clamping behavior is preserved.
+  const slip = resolveSlippage(config);
+  const minutesToClose = Math.max(0, (context.closeCutoffTs - context.ts) / 60);
+  const slFillCtx = { spread: context.barSpread, minutesToClose };
+  const slFillPrice = (): number =>
+    slipSellPrice(position.stopLoss, position.qty, slip, slFillCtx);
+
   // For intrabar pricing, use bar high/low to detect TP/SL breach within the candle.
-  // When both TP and SL are breached in the same bar, SL takes priority (conservative).
+  // When both TP and SL are breached in the same bar, use the configured tie-breaker.
   // Exit price is clamped to the exact TP/SL level, not the bar close.
   if (intrabar && context.barHigh != null && context.barLow != null) {
     const slHit = config.position.stopLossPercent > 0 && context.barLow <= position.stopLoss;
     const tpHit = context.barHigh >= position.takeProfit;
 
     if (slHit && tpHit) {
-      // Both breached in same bar — assume SL hit first (conservative)
-      return { shouldExit: true, reason: 'stop_loss', exitPrice: position.stopLoss };
+      // Both breached — resolve tie per config.position.intrabarTieBreaker.
+      const mode = config.position.intrabarTieBreaker ?? 'sl_wins';
+      if (mode === 'tp_wins') {
+        return { shouldExit: true, reason: 'take_profit', exitPrice: position.takeProfit };
+      }
+      if (mode === 'by_open' && context.barOpen != null) {
+        // Whichever target the open price is closer to, that one wins.
+        const distToTp = Math.abs(context.barOpen - position.takeProfit);
+        const distToSl = Math.abs(context.barOpen - position.stopLoss);
+        if (distToTp < distToSl) {
+          return { shouldExit: true, reason: 'take_profit', exitPrice: position.takeProfit };
+        }
+        return { shouldExit: true, reason: 'stop_loss', exitPrice: slFillPrice() };
+      }
+      // Default 'sl_wins' — conservative.
+      return { shouldExit: true, reason: 'stop_loss', exitPrice: slFillPrice() };
     }
     if (slHit) {
-      return { shouldExit: true, reason: 'stop_loss', exitPrice: position.stopLoss };
+      return { shouldExit: true, reason: 'stop_loss', exitPrice: slFillPrice() };
     }
     if (tpHit) {
       return { shouldExit: true, reason: 'take_profit', exitPrice: position.takeProfit };
     }
   }
 
-  // Fallback: close-based checks (legacy behavior, also used for non-TP/SL exits)
+  // Fallback: close-based checks (legacy behavior, also used for non-TP/SL exits).
+  // TP is a limit order — fills AT takeProfit, never above (we conservatively assume
+  // no price improvement). SL is a stop-market — fills BELOW stopLoss with
+  // size-proportional slippage (Phase 2 fill-model). The existing friction.ts
+  // half-spread is applied separately by computeRealisticPnl.
 
   // 1. Stop loss (disabled when stopLossPercent is 0)
   if (config.position.stopLossPercent > 0 && currentPrice <= position.stopLoss) {
-    return { shouldExit: true, reason: 'stop_loss' };
+    return { shouldExit: true, reason: 'stop_loss', exitPrice: slFillPrice() };
   }
 
   // 2. Take profit
   if (currentPrice >= position.takeProfit) {
-    return { shouldExit: true, reason: 'take_profit' };
+    return { shouldExit: true, reason: 'take_profit', exitPrice: position.takeProfit };
   }
 
-  // 3. Trailing stop (if enabled)
+  // 3. Trailing stop (if enabled) — also a stop-market order, fills with slippage
+  //    below the trail level. Phase 2: model the same size-based slippage as a hard SL,
+  //    but anchored to the trail level rather than position.stopLoss.
   if (exitCfg?.trailingStopEnabled && context.highWaterPrice != null) {
     const trailPct = (exitCfg.trailingStopPercent ?? 20) / 100;
     const trailStop = context.highWaterPrice * (1 - trailPct);
     if (currentPrice <= trailStop && currentPrice > position.stopLoss) {
-      return { shouldExit: true, reason: 'stop_loss' };
+      const trailFillPrice = slipSellPrice(trailStop, position.qty, slip, slFillCtx);
+      return { shouldExit: true, reason: 'stop_loss', exitPrice: trailFillPrice };
     }
   }
 

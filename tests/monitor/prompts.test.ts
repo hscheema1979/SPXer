@@ -3,15 +3,14 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { SYSTEM_PROMPT, buildCyclePrompt } from '../../src/monitor/prompts';
+import { SYSTEM_PROMPT, buildSystemPrompt, buildCyclePrompt } from '../../src/monitor/prompts';
 
-describe('SYSTEM_PROMPT', () => {
-  it('mentions both accounts', () => {
+describe('SYSTEM_PROMPT (legacy default 3×17)', () => {
+  it('mentions the SPX account', () => {
     expect(SYSTEM_PROMPT).toContain('6YA51425');
-    expect(SYSTEM_PROMPT).toContain('6YA58635');
   });
 
-  it('mentions HMA strategy', () => {
+  it('mentions default HMA strategy', () => {
     expect(SYSTEM_PROMPT).toContain('HMA(3)');
     expect(SYSTEM_PROMPT).toContain('HMA(17)');
   });
@@ -29,6 +28,25 @@ describe('SYSTEM_PROMPT', () => {
 
   it('instructs not to repeat observations', () => {
     expect(SYSTEM_PROMPT).toContain('NEVER repeat');
+  });
+});
+
+describe('buildSystemPrompt(fast, slow)', () => {
+  it('interpolates the active HMA pair (e.g. 3×12)', () => {
+    const prompt = buildSystemPrompt(3, 12);
+    expect(prompt).toContain('HMA(3)');
+    expect(prompt).toContain('HMA(12)');
+    expect(prompt).not.toContain('HMA(17)');
+  });
+
+  it('still mentions the account and response format', () => {
+    const prompt = buildSystemPrompt(5, 19);
+    expect(prompt).toContain('6YA51425');
+    expect(prompt).toContain('"severity"');
+  });
+
+  it('reflects whatever pair is passed', () => {
+    expect(buildSystemPrompt(9, 21)).toContain('HMA(9)×HMA(21)');
   });
 });
 

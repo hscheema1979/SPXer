@@ -11,11 +11,45 @@ import http from 'http';
 import { randomUUID } from 'crypto';
 import { spawn } from 'child_process';
 import { runReplay } from '../replay/machine';
+import { runBasketReplay, deriveMemberConfig } from '../replay/basket-runner';
 import { DEFAULT_CONFIG, mergeConfig } from '../config/defaults';
-import type { Config } from '../config/types';
+import type { Config, BasketMember } from '../config/types';
+import { listProfiles, loadProfile, saveProfile, deleteProfile } from '../instruments/profile-store';
+import type { StoredInstrumentProfile } from '../instruments/profile-store';
+import { discoverProfile, DiscoveryError } from '../instruments/discovery';
+import { findMissingDates, hasWorkPending } from '../backfill/missing-dates';
+import {
+  createBackfillJob, attachPid, getJob, listJobs, markCancelled,
+} from '../backfill/job-store';
+import type { ListJobsFilters } from '../backfill/job-store';
+
+import { REPLAY_DB_DEFAULT, REPLAY_META_DB } from '../storage/replay-db';
+import { listParquetDates, symbolToProfileId, anySymbolToProfileId, hasParquetDate } from '../storage/parquet-reader';
+import { execFileSync } from 'child_process';
 
 const REPLAY_DATA_SOURCE = process.env.REPLAY_DATA_SOURCE || 'replay_bars';
-const DB_PATH = path.resolve(process.cwd(), process.env.DB_PATH || 'data/spxer.db');
+/** All replay data — bars, configs, results, runs (spxer.db) */
+const DB_PATH = REPLAY_DB_DEFAULT;
+/** Alias for DB_PATH — same spxer.db */
+const META_DB_PATH = REPLAY_META_DB;
+const PARQUET_ROOT = path.resolve(process.cwd(), process.env.PARQUET_ROOT || 'data/parquet/bars');
+
+
+/** Run a DuckDB CLI query synchronously, return parsed JSON rows. */
+function duckQuery(sql: string): any[] {
+  try {
+    const result = execFileSync('duckdb', ['-json', '-c', sql], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      timeout: 30000,
+      maxBuffer: 256 * 1024 * 1024,
+    });
+    const text = result.toString().trim();
+    if (!text || text === '[]') return [];
+    return JSON.parse(text);
+  } catch {
+    return [];
+  }
+}
 
 // ── Job tracking in SQLite (survives process restarts) ─────────────────────
 const MAX_CONCURRENT_JOBS = 3;
@@ -40,28 +74,102 @@ function ensureJobsTable(db: Database.Database) {
   `);
 }
 
-/** Mark any jobs whose worker process has died as failed */
+/** Mark any jobs whose worker process has died as failed.
+ *  The `db` arg is used only for the initial SELECT (may be readonly).
+ *  UPDATE runs through a short-lived writable handle so callers can pass
+ *  either a readonly or writable handle without crashing on SQLITE_READONLY. */
 function reapDeadJobs(db: Database.Database) {
   const running = db.prepare("SELECT id, pid FROM replay_jobs WHERE status = 'running'").all() as { id: string; pid: number }[];
+  const dead: { id: string; pid: number }[] = [];
   for (const job of running) {
     if (!job.pid) continue;
     try {
       // Signal 0 checks if process exists without killing it
       process.kill(job.pid, 0);
     } catch {
-      // Process is dead — mark job as failed
-      db.prepare("UPDATE replay_jobs SET status = 'failed', error = 'Worker process died (PID ' || pid || ')', completedAt = ? WHERE id = ?")
-        .run(Date.now(), job.id);
+      dead.push(job);
     }
+  }
+  if (dead.length === 0) return;
+  const writeDb = new Database(META_DB_PATH);
+  try {
+    const stmt = writeDb.prepare("UPDATE replay_jobs SET status = 'failed', error = 'Worker process died (PID ' || pid || ')', completedAt = ? WHERE id = ?");
+    const now = Date.now();
+    for (const job of dead) stmt.run(now, job.id);
+  } finally {
+    writeDb.close();
   }
 }
 
+/** Metadata DB (configs, results, runs, jobs, leaderboard) — readonly */
 function getDb(): Database.Database {
+  return new Database(META_DB_PATH, { readonly: true });
+}
+
+/** Metadata DB — writable */
+function getWriteDb(): Database.Database {
+  return new Database(META_DB_PATH);
+}
+
+/** Bar data DB (replay_bars) — readonly */
+function getDataDb(): Database.Database {
   return new Database(DB_PATH, { readonly: true });
 }
 
-function getWriteDb(): Database.Database {
-  return new Database(DB_PATH);
+/**
+ * Normalize config JSON for comparison — strip fields that differ between
+ * saves but don't represent actual config changes (id, name, timestamps).
+ */
+function configFingerprint(config: Config): string {
+  const { id, name, description, createdAt, ...rest } = config as any;
+  return JSON.stringify(rest);
+}
+
+/**
+ * Save a config with automatic versioning. If a config with the same ID
+ * already exists and has DIFFERENT settings, auto-create a new version
+ * (base-v2, base-v3, etc.) instead of overwriting the original.
+ *
+ * Returns the actual ID used (may differ from input if versioned).
+ */
+function saveConfigVersioned(db: Database.Database, config: Config, id: string, name: string): string {
+  // Check if this ID already exists with different content
+  const existing = db.prepare('SELECT config_json FROM replay_configs WHERE id = ?')
+    .get(id) as { config_json: string } | undefined;
+
+  if (existing) {
+    const existingConfig = JSON.parse(existing.config_json) as Config;
+    const existingFp = configFingerprint(existingConfig);
+
+    // Build fingerprint for the new config (temporarily set id/name to compare fairly)
+    const newConfig = { ...config, id, name };
+    const newFp = configFingerprint(newConfig);
+
+    if (existingFp !== newFp) {
+      // Config changed — find next available version
+      const base = id.replace(/-v\d+$/, '');
+      let v = 2;
+      while (db.prepare('SELECT 1 FROM replay_configs WHERE id = ?').get(`${base}-v${v}`)) {
+        v++;
+      }
+      id = `${base}-v${v}`;
+      name = name.replace(/ v\d+$/, '') + ` v${v}`;
+      console.log(`[replay] Config changed, auto-versioned to: ${id}`);
+    }
+    // If fingerprints match, reuse the same ID (just update timestamp)
+  }
+
+  config.id = id;
+  config.name = name;
+
+  db.prepare(`
+    INSERT INTO replay_configs (id, name, description, config_json, createdAt, updatedAt)
+    VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      name=excluded.name, config_json=excluded.config_json, updatedAt=excluded.updatedAt
+  `).run(id, name, config.description || '', JSON.stringify(config), Date.now(), Date.now());
+
+  return id;
 }
 
 export function createReplayRoutes(): Router {
@@ -95,21 +203,28 @@ export function createReplayRoutes(): Router {
     }
   });
 
-  // ── GET /replay/api/dates — available replay dates ───────────────────────
-  router.get('/api/dates', (_req, res) => {
-    const db = getDb();
+  // ── GET /replay/api/dates?instrument=SPX|NDX — available replay dates ───
+  router.get('/api/dates', (req, res) => {
+    const instrument = ((req.query.instrument as string) || 'SPX').toUpperCase();
+    const profileId = symbolToProfileId(instrument);
+
+    // Try parquet first (preferred — no 42GB SQLite scan)
+    const parquetDates = listParquetDates(profileId);
+    if (parquetDates.length > 0) {
+      return res.json(parquetDates);
+    }
+
+    // Fallback to SQLite (bar data DB)
+    const dataDb = getDataDb();
     try {
-      // replay_bars stores real UTC timestamps. SPX RTH (9:30-16:00 ET) maps to
-      // 13:30-20:00 UTC (EDT) or 14:30-21:00 UTC (EST) — all within the same
-      // calendar day, so date(ts, 'unixepoch') groups correctly.
-      const rows = db.prepare(`
+      const rows = dataDb.prepare(`
         SELECT DISTINCT date(ts, 'unixepoch') as d
-        FROM ${REPLAY_DATA_SOURCE} WHERE symbol='SPX' AND timeframe='1m'
+        FROM ${REPLAY_DATA_SOURCE} WHERE symbol=? AND timeframe='1m'
         ORDER BY d
-      `).all() as { d: string }[];
+      `).all(instrument) as { d: string }[];
       res.json(rows.map(r => r.d));
     } finally {
-      db.close();
+      dataDb.close();
     }
   });
 
@@ -117,28 +232,32 @@ export function createReplayRoutes(): Router {
   // Only returns configs with ≥200 days of results (use ?all=1 to bypass)
   router.get('/api/configs', (req, res) => {
     const db = getDb();
-    const showAll = req.query.all === '1';
     try {
-      const rows = showAll
-        ? db.prepare(`
-            SELECT c.id, c.name, c.description,
-                   json_extract(c.config_json, '$.timeWindows.activeStart') as activeStart,
-                   COUNT(DISTINCT r.date) as dayCount
-            FROM replay_configs c
-            LEFT JOIN replay_results r ON c.id = r.configId
-            GROUP BY c.id
-            ORDER BY c.createdAt DESC
-          `).all()
-        : db.prepare(`
-            SELECT c.id, c.name, c.description,
-                   json_extract(c.config_json, '$.timeWindows.activeStart') as activeStart,
-                   COUNT(DISTINCT r.date) as dayCount
-            FROM replay_configs c
-            LEFT JOIN replay_results r ON c.id = r.configId
-            GROUP BY c.id
-            HAVING COUNT(DISTINCT r.date) >= 200
-            ORDER BY c.createdAt DESC
-          `).all();
+      // CTE pre-computes day counts from replay_results without reading blob columns.
+      // Direct LEFT JOIN was scanning 82K trades_json blobs (~480MB I/O) → 5-6s.
+      // CTE approach: 0.15s.
+      const showAll = req.query.all === '1';
+      const sql = `
+        WITH dc AS (SELECT configId, COUNT(*) as cnt FROM replay_results GROUP BY configId)
+        SELECT c.id, c.name, c.description,
+               json_extract(c.config_json, '$.timeWindows.activeStart') as activeStart,
+               COALESCE(
+                 json_extract(c.config_json, '$.execution.symbol'),
+                 CASE
+                   WHEN LOWER(c.id) LIKE 'ndx%' OR LOWER(c.id) LIKE '%-ndx-%' OR LOWER(c.id) LIKE '%-ndx' THEN 'NDX'
+                   WHEN LOWER(c.id) LIKE 'spx%' OR LOWER(c.id) LIKE '%-spx-%' OR LOWER(c.id) LIKE '%-spx' THEN 'SPX'
+                   ELSE 'SPX'
+                 END
+               ) as symbol,
+               COALESCE(dc.cnt, 0) as dayCount
+        FROM replay_configs c
+        LEFT JOIN dc ON c.id = dc.configId
+        ${showAll ? '' : `WHERE COALESCE(dc.cnt, 0) >= 200
+              OR c.id LIKE '%-default'
+              OR c.id LIKE '%-default-v%'`}
+        ORDER BY c.createdAt DESC
+      `;
+      const rows = db.prepare(sql).all();
       res.json(rows);
     } finally {
       db.close();
@@ -193,17 +312,54 @@ export function createReplayRoutes(): Router {
     }
     const timeframe = tf || '1m';
     const warmupBars = parseInt(warmup || '0');
+    const dayStart = Math.floor(new Date(date + 'T00:00:00Z').getTime() / 1000);
+    const dayEnd = dayStart + 86400 + 3600;
 
-    const db = getDb();
+    // ── Try parquet first ──
+    const profileId = anySymbolToProfileId(symbol);
+    if (hasParquetDate(profileId, date)) {
+      const pqFile = path.join(PARQUET_ROOT, profileId, `${date}.parquet`);
+      let sql: string;
+      if (warmupBars > 0) {
+        // Warmup: grab last N bars before dayStart + all bars in range
+        sql = `SELECT * FROM (
+          (SELECT ts, open, high, low, close, volume, indicators
+           FROM read_parquet('${pqFile}')
+           WHERE symbol = '${symbol}' AND timeframe = '${timeframe}' AND ts < ${dayStart}
+           ORDER BY ts DESC LIMIT ${warmupBars})
+          UNION ALL
+          (SELECT ts, open, high, low, close, volume, indicators
+           FROM read_parquet('${pqFile}')
+           WHERE symbol = '${symbol}' AND timeframe = '${timeframe}' AND ts >= ${dayStart} AND ts <= ${dayEnd})
+        ) ORDER BY ts ASC`;
+      } else {
+        sql = `SELECT ts, open, high, low, close, volume, indicators
+               FROM read_parquet('${pqFile}')
+               WHERE symbol = '${symbol}' AND timeframe = '${timeframe}' AND ts >= ${dayStart} AND ts <= ${dayEnd}
+               ORDER BY ts ASC`;
+      }
+      const rows = duckQuery(sql);
+      if (rows.length > 0) {
+        return res.json(rows.map((r: any) => ({
+          ts: r.ts,
+          o: r.open,
+          h: r.high,
+          l: r.low,
+          c: r.close,
+          v: r.volume,
+          ind: typeof r.indicators === 'string' ? JSON.parse(r.indicators || '{}') : (r.indicators || {}),
+        })));
+      }
+      // Fall through to SQLite if parquet returned empty
+    }
+
+    // ── Fallback to SQLite (bar data DB) ──
+    const dataDb = getDataDb();
     try {
-      const dayStart = Math.floor(new Date(date + 'T00:00:00Z').getTime() / 1000);
-      const dayEnd = dayStart + 86400 + 3600;
-
       let rows: any[];
 
-      if (warmupBars > 0 && symbol === 'SPX') {
-        // Include last N bars from the prior trading day for HMA warmup
-        rows = db.prepare(`
+      if (warmupBars > 0) {
+        rows = dataDb.prepare(`
           SELECT ts, open, high, low, close, volume, indicators FROM (
             SELECT ts, open, high, low, close, volume, indicators
             FROM ${REPLAY_DATA_SOURCE}
@@ -217,7 +373,7 @@ export function createReplayRoutes(): Router {
           ORDER BY ts ASC
         `).all(symbol, timeframe, dayStart, warmupBars, symbol, timeframe, dayStart, dayEnd) as any[];
       } else {
-        rows = db.prepare(`
+        rows = dataDb.prepare(`
           SELECT ts, open, high, low, close, volume, indicators
           FROM ${REPLAY_DATA_SOURCE}
           WHERE symbol = ? AND timeframe = ? AND ts >= ? AND ts <= ?
@@ -235,23 +391,46 @@ export function createReplayRoutes(): Router {
         ind: JSON.parse(r.indicators || '{}'),
       })));
     } finally {
-      db.close();
+      dataDb.close();
     }
   });
 
-  // ── GET /replay/api/contracts?date= — all contracts for a date ──────────
+  // ── GET /replay/api/contracts?date=&instrument=SPX|NDX — contracts ──────
   router.get('/api/contracts', (req, res) => {
     const { date } = req.query as { date?: string };
+    const instrument = ((req.query.instrument as string) || 'SPX').toUpperCase();
     if (!date) {
       return res.status(400).json({ error: 'date required' });
     }
+    const contractPrefix = instrument === 'NDX' ? 'NDXP' : 'SPXW';
+    const dayStart = Math.floor(new Date(date + 'T00:00:00Z').getTime() / 1000);
+    const dayEnd = dayStart + 86400 + 3600;
 
-    const db = getDb();
+    // ── Try parquet first ──
+    const profileId = symbolToProfileId(instrument);
+    if (hasParquetDate(profileId, date)) {
+      const pqFile = path.join(PARQUET_ROOT, profileId, `${date}.parquet`);
+      const sql = `SELECT symbol,
+               CASE WHEN symbol LIKE '%C0%' OR symbol LIKE '%C1%' THEN 'call' ELSE 'put' END as type,
+               CAST(substr(symbol, -8) AS INTEGER) / 1000.0 as strike,
+               COUNT(*) as "barCount",
+               MIN(close) as "minPrice",
+               MAX(close) as "maxPrice",
+               AVG(volume) as "avgVolume"
+        FROM read_parquet('${pqFile}')
+        WHERE timeframe='1m' AND ts >= ${dayStart} AND ts <= ${dayEnd} AND symbol LIKE '${contractPrefix}%'
+        GROUP BY symbol
+        ORDER BY strike ASC, type ASC`;
+      const rows = duckQuery(sql);
+      if (rows.length > 0) {
+        return res.json(rows);
+      }
+    }
+
+    // ── Fallback to SQLite (bar data DB) ──
+    const dataDb = getDataDb();
     try {
-      const dayStart = Math.floor(new Date(date + 'T00:00:00Z').getTime() / 1000);
-      const dayEnd = dayStart + 86400 + 3600;
-
-      const rows = db.prepare(`
+      const rows = dataDb.prepare(`
         SELECT DISTINCT symbol,
                CASE WHEN symbol GLOB '*C[0-9]*' THEN 'call' ELSE 'put' END as type,
                CAST(substr(symbol, -8) AS INTEGER) / 1000.0 as strike,
@@ -260,14 +439,14 @@ export function createReplayRoutes(): Router {
                MAX(close) as maxPrice,
                AVG(volume) as avgVolume
         FROM ${REPLAY_DATA_SOURCE}
-        WHERE timeframe='1m' AND ts >= ? AND ts <= ? AND symbol LIKE 'SPXW%'
+        WHERE timeframe='1m' AND ts >= ? AND ts <= ? AND symbol LIKE ?
         GROUP BY symbol
         ORDER BY strike ASC, type ASC
-      `).all(dayStart, dayEnd) as any[];
+      `).all(dayStart, dayEnd, `${contractPrefix}%`) as any[];
 
       res.json(rows);
     } finally {
-      db.close();
+      dataDb.close();
     }
   });
 
@@ -284,9 +463,341 @@ export function createReplayRoutes(): Router {
     }
   });
 
-  // ── GET /replay/api/defaults — return DEFAULT_CONFIG ──────────────────────
-  router.get('/api/defaults', (_req, res) => {
-    res.json(DEFAULT_CONFIG);
+  // ── PUT /replay/api/config/:id — update config in-place (no versioning) ──
+  router.put('/api/config/:id', (req, res) => {
+    const id = req.params.id;
+    const config = req.body as Partial<Config>;
+    if (!config) return res.status(400).json({ error: 'Config body required' });
+
+    const db = getWriteDb();
+    try {
+      const existing = db.prepare('SELECT config_json FROM replay_configs WHERE id = ?')
+        .get(id) as { config_json: string } | undefined;
+      if (!existing) return res.status(404).json({ error: `Config '${id}' not found` });
+
+      // Merge with existing config to preserve fields not sent by client
+      const existingConfig = JSON.parse(existing.config_json) as Config;
+      const merged = mergeConfig(existingConfig, config);
+      merged.id = id;
+      merged.name = config.name || existingConfig.name;
+
+      db.prepare(`
+        UPDATE replay_configs SET config_json = ?, name = ?, updatedAt = ? WHERE id = ?
+      `).run(JSON.stringify(merged), merged.name, Date.now(), id);
+
+      res.json({ ok: true, id, name: merged.name });
+    } finally {
+      db.close();
+    }
+  });
+
+  // ── POST /replay/api/set-live-config — update AGENT_CONFIG_ID in ecosystem.config.js
+  router.post('/api/set-live-config', (req, res) => {
+    const { configId } = req.body as { configId?: string };
+    if (!configId) return res.status(400).json({ error: 'configId required' });
+
+    // Verify config exists in DB
+    const db = getDb();
+    try {
+      const row = db.prepare('SELECT 1 FROM replay_configs WHERE id = ?').get(configId);
+      if (!row) return res.status(404).json({ error: `Config '${configId}' not found in DB` });
+    } finally {
+      db.close();
+    }
+
+    // Update ecosystem.config.js — replace all AGENT_CONFIG_ID values
+    const ecoPath = path.resolve(process.cwd(), 'ecosystem.config.js');
+    try {
+      let content = fs.readFileSync(ecoPath, 'utf-8');
+      const regex = /AGENT_CONFIG_ID:\s*'[^']*'/g;
+      const matches = content.match(regex);
+      if (!matches || matches.length === 0) {
+        return res.status(500).json({ error: 'AGENT_CONFIG_ID not found in ecosystem.config.js' });
+      }
+      content = content.replace(regex, `AGENT_CONFIG_ID: '${configId}'`);
+      fs.writeFileSync(ecoPath, content, 'utf-8');
+
+      // Also update the current process env so /agent/config reflects it immediately
+      process.env.AGENT_CONFIG_ID = configId;
+
+      console.log(`[set-live-config] Updated AGENT_CONFIG_ID to '${configId}' (${matches.length} occurrences)`);
+      res.json({ ok: true, configId, updated: matches.length });
+    } catch (err: any) {
+      console.error('[set-live-config] Error:', err.message);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ── Basket deploy (multi-agent live) ─────────────────────────────────────
+  // Unlike set-live-config (single config → single spxer-agent), this fans
+  // out a basket config into N PM2 agent apps — one per member — each with
+  // its own derived AGENT_CONFIG_ID. Agents are written LIVE (AGENT_PAPER=
+  // 'false'); "paused" means the block is present in ecosystem.config.js
+  // but not pm2-started. Operator brings them up with the returned pm2
+  // start command when ready. There is no paper mode in this system.
+  //
+  // The basket agent block in ecosystem.config.js is wrapped in markers:
+  //   // ── SPXER BASKET AGENTS START (managed by /api/set-live-basket) ──
+  //   ...app entries...
+  //   // ── SPXER BASKET AGENTS END ──
+  // so subsequent deploys are idempotent: the region is deleted and rewritten.
+
+  const BASKET_MARK_START = '// ── SPXER BASKET AGENTS START (managed by /api/set-live-basket) ──';
+  const BASKET_MARK_END = '// ── SPXER BASKET AGENTS END ──';
+
+  function renderBasketAppBlock(args: {
+    basketConfigId: string;
+    memberConfigId: string;
+    memberId: string;
+    strikeOffset: number;
+  }): string {
+    const { basketConfigId, memberConfigId, memberId, strikeOffset } = args;
+    const offsetLabel = strikeOffset === 0 ? 'ATM' : strikeOffset > 0 ? `OTM${strikeOffset}` : `ITM${-strikeOffset}`;
+    const nameSafe = `spxer-agent-${basketConfigId}-${memberId}`.replace(/[^A-Za-z0-9_-]/g, '-');
+    return `    {
+      name: '${nameSafe}',
+      script: 'npx',
+      args: 'tsx spx_agent.ts',
+      cwd: '/home/ubuntu/SPXer',
+      watch: false,
+      autorestart: false,
+      max_restarts: 0,
+      min_uptime: '10s',
+      restart_delay: 30000,
+      kill_timeout: 5000,
+      max_memory_restart: '512M',
+      env: {
+        NODE_ENV: 'production',
+        AGENT_PAPER: 'false',
+        AGENT_CONFIG_ID: '${memberConfigId}', // ${offsetLabel}, strikeOffset=${strikeOffset}
+      },
+      log_date_format: 'YYYY-MM-DD HH:mm:ss',
+      error_file: '/home/ubuntu/.pm2/logs/${nameSafe}-error.log',
+      out_file: '/home/ubuntu/.pm2/logs/${nameSafe}-out.log',
+      merge_logs: true,
+    },`;
+  }
+
+  function splitEcosystem(content: string): { before: string; after: string; middle: string } {
+    const startIdx = content.indexOf(BASKET_MARK_START);
+    const endIdx = content.indexOf(BASKET_MARK_END);
+    if (startIdx >= 0 && endIdx > startIdx) {
+      return {
+        before: content.slice(0, startIdx),
+        middle: content.slice(startIdx, endIdx + BASKET_MARK_END.length + 1),
+        after: content.slice(endIdx + BASKET_MARK_END.length + 1),
+      };
+    }
+    // Inject before final `  ],` that closes the apps array.
+    // Match the LAST occurrence of `\n  ],` so we insert inside apps[].
+    const lastClose = content.lastIndexOf('\n  ],');
+    if (lastClose < 0) {
+      return { before: content, middle: '', after: '' };
+    }
+    return {
+      before: content.slice(0, lastClose + 1), // include the \n
+      middle: '',
+      after: content.slice(lastClose + 1),     // starts with `  ],`
+    };
+  }
+
+  // ── POST /replay/api/set-live-basket ─────────────────────────────────────
+  // Derives N single-strike member configs from a basket config, persists
+  // them in replay_configs, and inserts N PM2 app definitions into
+  // ecosystem.config.js (between markers, idempotent across deploys).
+  //
+  // All agents are written LIVE (AGENT_PAPER='false'). There is no paper
+  // mode in this system. "Paused" = deployed in ecosystem.config.js but
+  // not pm2-started. Operator runs the returned pm2StartCmd to activate.
+  //
+  // Body: { configId: string }
+  // Returns: {
+  //   ok, basketConfigId, memberCount, members: [{ configId, strikeOffset, agentName }],
+  //   pm2StartCmd, pm2StopCmd, pm2StatusCmd,
+  // }
+  //
+  // This endpoint does NOT invoke pm2 itself — it mirrors set-live-config's
+  // pattern of editing the file and leaving restart to the operator.
+  router.post('/api/set-live-basket', (req, res) => {
+    const { configId } = req.body as { configId?: string };
+    if (!configId) return res.status(400).json({ error: 'configId required' });
+
+    const db = getWriteDb();
+    try {
+      // Load basket config.
+      const row = db.prepare('SELECT config_json FROM replay_configs WHERE id = ?')
+        .get(configId) as { config_json: string } | undefined;
+      if (!row) {
+        return res.status(404).json({ error: `Config '${configId}' not found in DB` });
+      }
+      const basketCfg = JSON.parse(row.config_json) as Config;
+      if (!basketCfg.basket?.enabled || !basketCfg.basket.members?.length) {
+        return res.status(400).json({
+          error: `Config '${configId}' is not a basket. Use /api/set-live-config for single-strike configs.`,
+        });
+      }
+
+      // Derive and persist per-member configs. deriveMemberConfig sets
+      // strikeMode='atm-offset', disables basket, and applies overrides.
+      const members: BasketMember[] = basketCfg.basket.members;
+      const deployedMembers: { configId: string; strikeOffset: number; agentName: string; memberId: string }[] = [];
+
+      for (const m of members) {
+        const derived = deriveMemberConfig(basketCfg, m);
+        const existing = db.prepare('SELECT id FROM replay_configs WHERE id = ?').get(derived.id);
+        const now = Date.now();
+        if (existing) {
+          db.prepare(`UPDATE replay_configs SET config_json = ?, name = ?, description = ?, updatedAt = ? WHERE id = ?`)
+            .run(JSON.stringify(derived), derived.name, derived.description ?? '', now, derived.id);
+        } else {
+          db.prepare(`INSERT INTO replay_configs (id, name, description, config_json, createdAt, updatedAt)
+                      VALUES (?, ?, ?, ?, ?, ?)`)
+            .run(derived.id, derived.name, derived.description ?? '', JSON.stringify(derived), now, now);
+        }
+        const nameSafe = `spxer-agent-${configId}-${m.id}`.replace(/[^A-Za-z0-9_-]/g, '-');
+        deployedMembers.push({
+          configId: derived.id,
+          strikeOffset: m.strikeOffset,
+          agentName: nameSafe,
+          memberId: m.id,
+        });
+      }
+
+      // Mutate ecosystem.config.js — replace the marker region with the new basket app block.
+      const ecoPath = path.resolve(process.cwd(), 'ecosystem.config.js');
+      let content = fs.readFileSync(ecoPath, 'utf-8');
+
+      const appBlocks = members.map(m => renderBasketAppBlock({
+        basketConfigId: configId,
+        memberConfigId: `${configId}:${m.id}`,
+        memberId: m.id,
+        strikeOffset: m.strikeOffset,
+      })).join('\n');
+
+      const newRegion = `${BASKET_MARK_START}\n${appBlocks}\n    ${BASKET_MARK_END}\n`;
+      const parts = splitEcosystem(content);
+      if (parts.after === '') {
+        return res.status(500).json({ error: 'Could not locate apps array in ecosystem.config.js' });
+      }
+      content = parts.before + newRegion + parts.after;
+      fs.writeFileSync(ecoPath, content, 'utf-8');
+
+      const agentNames = deployedMembers.map(m => m.agentName);
+      const onlyArg = agentNames.join(',');
+
+      res.json({
+        ok: true,
+        basketConfigId: configId,
+        memberCount: members.length,
+        members: deployedMembers,
+        pm2StartCmd: `pm2 start ecosystem.config.js --only ${onlyArg}`,
+        pm2StopCmd: `pm2 delete ${onlyArg}`,
+        pm2StatusCmd: `pm2 list | grep ${configId}`,
+        note: 'Agents written LIVE (AGENT_PAPER=false). Deployed paused — run pm2StartCmd to activate.',
+      });
+      console.log(`[set-live-basket] Wrote ${members.length} LIVE agents for basket '${configId}' (paused — pm2 start to activate)`);
+    } catch (err: any) {
+      console.error('[set-live-basket] Error:', err.message);
+      res.status(500).json({ error: err.message });
+    } finally {
+      db.close();
+    }
+  });
+
+  // ── POST /replay/api/stop-live-basket ────────────────────────────────────
+  // Removes the basket agent block from ecosystem.config.js (idempotent).
+  // Does not invoke pm2 — returns the stop command for the operator to run.
+  router.post('/api/stop-live-basket', (_req, res) => {
+    try {
+      const ecoPath = path.resolve(process.cwd(), 'ecosystem.config.js');
+      let content = fs.readFileSync(ecoPath, 'utf-8');
+
+      const startIdx = content.indexOf(BASKET_MARK_START);
+      const endIdx = content.indexOf(BASKET_MARK_END);
+      if (startIdx < 0 || endIdx <= startIdx) {
+        return res.json({ ok: true, removed: 0, message: 'No basket agents deployed.' });
+      }
+
+      // Collect names before deletion, so the UI can show a stop command.
+      const middle = content.slice(startIdx, endIdx + BASKET_MARK_END.length);
+      const names = Array.from(middle.matchAll(/name:\s*'([^']+)'/g)).map(m => m[1]);
+
+      content = content.slice(0, startIdx) + content.slice(endIdx + BASKET_MARK_END.length + 1);
+      fs.writeFileSync(ecoPath, content, 'utf-8');
+
+      res.json({
+        ok: true,
+        removed: names.length,
+        removedAgents: names,
+        pm2StopCmd: names.length ? `pm2 delete ${names.join(',')}` : null,
+      });
+      console.log(`[stop-live-basket] Removed ${names.length} agent entries from ecosystem.config.js`);
+    } catch (err: any) {
+      console.error('[stop-live-basket] Error:', err.message);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ── GET /replay/api/live/basket ──────────────────────────────────────────
+  // Returns the currently deployed basket (parsed from ecosystem.config.js
+  // markers). Used by the UI to badge baskets as LIVE.
+  router.get('/api/live/basket', (_req, res) => {
+    try {
+      const ecoPath = path.resolve(process.cwd(), 'ecosystem.config.js');
+      const content = fs.readFileSync(ecoPath, 'utf-8');
+      const startIdx = content.indexOf(BASKET_MARK_START);
+      const endIdx = content.indexOf(BASKET_MARK_END);
+      if (startIdx < 0 || endIdx <= startIdx) {
+        return res.json({ deployed: false });
+      }
+      const region = content.slice(startIdx, endIdx);
+      const agentNames = Array.from(region.matchAll(/name:\s*'([^']+)'/g)).map(m => m[1]);
+      const configIds = Array.from(region.matchAll(/AGENT_CONFIG_ID:\s*'([^']+)'/g)).map(m => m[1]);
+      const paperFlags = Array.from(region.matchAll(/AGENT_PAPER:\s*'([^']+)'/g)).map(m => m[1]);
+      // Basket ID = the prefix shared by all member configIds ("basketId:memberId")
+      const basketId = configIds[0]?.split(':')[0] ?? null;
+      // There is no paper mode. If any stale AGENT_PAPER='true' shows up, surface a warning.
+      const stalePaperCount = paperFlags.filter(p => p === 'true').length;
+      res.json({
+        deployed: true,
+        basketConfigId: basketId,
+        memberCount: agentNames.length,
+        agentNames,
+        memberConfigIds: configIds,
+        ...(stalePaperCount > 0 ? { warning: `${stalePaperCount} agent(s) have stale AGENT_PAPER='true' — re-deploy to fix.` } : {}),
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ── GET /replay/api/defaults — return DEFAULT_CONFIG (instrument-aware) ──
+  // Accepts ?instrument=SPX|NDX. When a seed `<symbol>-default` config exists
+  // in the DB, that's returned directly (so NDX pulls its NDXP/$10-interval
+  // routing and any tuned fields). Otherwise DEFAULT_CONFIG is returned with
+  // the execution block overridden for the requested instrument.
+  router.get('/api/defaults', (req, res) => {
+    const instrument = ((req.query.instrument as string) || 'SPX').toUpperCase();
+    const seedId = `${instrument.toLowerCase()}-default`;
+    const db = getDb();
+    try {
+      const row = db.prepare('SELECT config_json FROM replay_configs WHERE id = ?').get(seedId) as { config_json?: string } | undefined;
+      if (row?.config_json) {
+        try {
+          const cfg = JSON.parse(row.config_json);
+          return res.json(cfg);
+        } catch { /* fall through to synthesized default */ }
+      }
+    } finally {
+      db.close();
+    }
+    // Synthesize: DEFAULT_CONFIG + execution block for the requested instrument
+    const execByInstrument: Record<string, any> = {
+      SPX: { symbol: 'SPX', optionPrefix: 'SPXW', strikeDivisor: 1, strikeInterval: 5 },
+      NDX: { symbol: 'NDX', optionPrefix: 'NDXP', strikeDivisor: 1, strikeInterval: 10 },
+    };
+    const exec = execByInstrument[instrument] || execByInstrument.SPX;
+    res.json({ ...DEFAULT_CONFIG, execution: { ...(DEFAULT_CONFIG as any).execution, ...exec } });
   });
 
   // ── POST /replay/api/run — run replay with config, store results ─────────
@@ -325,22 +836,61 @@ export function createReplayRoutes(): Router {
       }
 
       // Generate or use provided ID/name
-      const id = configId || `custom-${Date.now()}`;
-      const name = configName || fullConfig.name || 'Custom Config';
-      fullConfig.id = id;
-      fullConfig.name = name;
+      let id = configId || `custom-${Date.now()}`;
+      let name = configName || fullConfig.name || 'Custom Config';
 
-      // Save the config to the DB
-      const wdb = getWriteDb();
-      try {
-        wdb.prepare(`
-          INSERT INTO replay_configs (id, name, description, config_json, createdAt, updatedAt)
-          VALUES (?, ?, ?, ?, ?, ?)
-          ON CONFLICT(id) DO UPDATE SET
-            name=excluded.name, config_json=excluded.config_json, updatedAt=excluded.updatedAt
-        `).run(id, name, fullConfig.description || '', JSON.stringify(fullConfig), Date.now(), Date.now());
-      } finally {
-        wdb.close();
+      // Save config with auto-versioning: if the config body differs from
+      // what's stored under this ID, create a new version (base-v2, -v3, etc.)
+      // Plain re-runs (configId only, no config body) skip saving entirely.
+      if (config || !configId) {
+        const wdb = getWriteDb();
+        try {
+          id = saveConfigVersioned(wdb, fullConfig, id, name);
+          name = fullConfig.name; // may have been updated by versioning
+        } finally {
+          wdb.close();
+        }
+      } else {
+        fullConfig.id = id;
+        fullConfig.name = name;
+      }
+
+      // Basket fan-out: run N isolated per-member replays, aggregate in storage.
+      if (fullConfig.basket?.enabled && fullConfig.basket.members?.length) {
+        const basketRun = await runBasketReplay(fullConfig, date, {
+          dataDbPath: DB_PATH,
+          storeDbPath: META_DB_PATH,
+          verbose: false,
+          noJudge: true,
+        });
+        const agg = basketRun.aggregate;
+        return res.json({
+          configId: id,
+          configName: name,
+          date,
+          basket: true,
+          memberCount: basketRun.memberResults.length,
+          summary: {
+            trades: agg.trades,
+            wins: agg.wins,
+            winRate: agg.winRate,
+            totalPnl: agg.totalPnl,
+            avgPnlPerTrade: agg.avgPnlPerTrade,
+            maxWin: agg.maxWin,
+            maxLoss: agg.maxLoss,
+          },
+          members: basketRun.memberResults.map(m => ({
+            memberId: m.member.id,
+            strikeOffset: m.member.strikeOffset,
+            configId: m.result.configId,
+            trades: m.result.trades,
+            wins: m.result.wins,
+            winRate: m.result.winRate,
+            totalPnl: m.result.totalPnl,
+            maxWin: m.result.maxWin,
+            maxLoss: m.result.maxLoss,
+          })),
+        });
       }
 
       // Run the replay (no judge by default — deterministic, fast)
@@ -414,18 +964,17 @@ export function createReplayRoutes(): Router {
         fullConfig = { ...DEFAULT_CONFIG };
       }
 
-      const id = configId || `custom-${Date.now()}`;
-      const name = configName || fullConfig.name || 'Custom Config';
-      fullConfig.id = id;
-      fullConfig.name = name;
+      let id = configId || `custom-${Date.now()}`;
+      let name = configName || fullConfig.name || 'Custom Config';
 
-      // Save config to DB
-      db.prepare(`
-        INSERT INTO replay_configs (id, name, description, config_json, createdAt, updatedAt)
-        VALUES (?, ?, ?, ?, ?, ?)
-        ON CONFLICT(id) DO UPDATE SET
-          name=excluded.name, config_json=excluded.config_json, updatedAt=excluded.updatedAt
-      `).run(id, name, fullConfig.description || '', JSON.stringify(fullConfig), Date.now(), Date.now());
+      // Save config with auto-versioning (same as /api/run)
+      if (config || !configId) {
+        id = saveConfigVersioned(db, fullConfig, id, name);
+        name = fullConfig.name;
+      } else {
+        fullConfig.id = id;
+        fullConfig.name = name;
+      }
 
       // Create the job record in SQLite
       const jobId = randomUUID();
@@ -440,7 +989,7 @@ export function createReplayRoutes(): Router {
       const jobFile = path.join(jobDir, `${jobId}.json`);
       fs.writeFileSync(jobFile, JSON.stringify({
         jobId, configId: id, configName: name, dates, config: fullConfig,
-        dbPath: DB_PATH, noJudge: true,
+        dbPath: DB_PATH, metaDbPath: META_DB_PATH, noJudge: true,
       }));
 
       // Spawn detached worker process
@@ -527,8 +1076,8 @@ export function createReplayRoutes(): Router {
   // Supports ?maxEntryPrice=N to recompute metrics using only trades with entry ≤ $N
   router.get('/api/sweep', (req, res) => {
     const { sort, limit, dir, minDays, maxEntryPrice, maxConcurrent, maxTradesPerDay } = req.query as Record<string, string | undefined>;
-    const allowedSorts = ['compositeScore', 'totalPnl', 'sharpe', 'winRate', 'worstDay', 'profitDays', 'trades', 'avgDailyPnl', 'bestDay', 'days', 'avgEntryPrice'];
-    const sortCol = allowedSorts.includes(sort || '') ? sort : 'compositeScore';
+    const allowedSorts = ['edge', 'rMultiple', 'ev', 'winRate', 'totalPnl', 'worstDay', 'profitDays', 'trades', 'avgDailyPnl', 'bestDay', 'days', 'avgEntryPrice', 'avgPnlPerTrade', 'breakEvenWR'];
+    const sortCol = allowedSorts.includes(sort || '') ? sort : 'edge';
     const sortDir = dir === 'ASC' ? 'ASC' : 'DESC';
     const maxRows = Math.min(parseInt(limit || '2500'), 5000);
     const entryPriceCap = maxEntryPrice ? parseFloat(maxEntryPrice) : 0;  // 0 = no filter
@@ -555,7 +1104,11 @@ export function createReplayRoutes(): Router {
             SUM(r.totalPnl) as totalPnl,
             MIN(r.totalPnl) as worstDay,
             MAX(r.totalPnl) as bestDay,
-            GROUP_CONCAT(r.totalPnl) as pnlList
+            GROUP_CONCAT(r.totalPnl) as pnlList,
+            SUM(r.sumWinPct) as totalSumWinPct,
+            SUM(r.cntWins) as totalCntWins,
+            SUM(r.sumLossPct) as totalSumLossPct,
+            SUM(r.cntLosses) as totalCntLosses
           FROM replay_results r
           JOIN replay_configs c ON c.id = r.configId
           GROUP BY r.configId
@@ -574,18 +1127,15 @@ export function createReplayRoutes(): Router {
           const bestDay = row.bestDay;
           const profitDays = dailyPnls.filter((p: number) => p > 0).length;
 
-          let sharpe = 0;
-          if (dailyPnls.length > 1) {
-            const mean = dailyPnls.reduce((s: number, v: number) => s + v, 0) / dailyPnls.length;
-            const variance = dailyPnls.reduce((s: number, v: number) => s + (v - mean) ** 2, 0) / (dailyPnls.length - 1);
-            sharpe = variance > 0 ? mean / Math.sqrt(variance) : 0;
-          }
-
-          const compositeScore =
-            (winRate * 40) +
-            (Math.max(0, Math.min(sharpe, 1)) * 30) +
-            (avgDailyPnl > 0 ? 20 : 0) +
-            (worstDay > -500 ? 10 : 0);
+          // ── Statistical edge metrics (R-multiple, EV, breakeven WR, edge) ──
+          const avgWinPct = row.totalCntWins > 0 ? row.totalSumWinPct / row.totalCntWins : 0;
+          const avgLossPct = row.totalCntLosses > 0 ? row.totalSumLossPct / row.totalCntLosses : 0; // negative
+          const rMultiple = avgLossPct !== 0 ? avgWinPct / Math.abs(avgLossPct) : 0;
+          const ev = (winRate * avgWinPct) + ((1 - winRate) * avgLossPct);  // expected value per trade in %
+          const breakEvenWR = (avgWinPct + Math.abs(avgLossPct)) > 0
+            ? Math.abs(avgLossPct) / (avgWinPct + Math.abs(avgLossPct))
+            : 0.5;
+          const edge = winRate - breakEvenWR;  // positive = profitable strategy
 
           let params: any = {};
           try {
@@ -615,14 +1165,33 @@ export function createReplayRoutes(): Router {
               sizingMode: cfg.sizing?.sizingMode ?? 'fixed_dollars',
               sizingValue: cfg.sizing?.sizingValue ?? cfg.sizing?.baseDollarsPerTrade ?? 250,
               startingAccountValue: cfg.sizing?.startingAccountValue ?? 10000,
+              isBasket: !!(cfg.basket?.enabled && cfg.basket?.members?.length),
+              isBasketMember: row.configId.includes(':'),
+              memberCount: cfg.basket?.members?.length ?? 0,
+              symbol: (cfg.execution?.symbol ?? (row.configId.startsWith('ndx-') ? 'NDX' : 'SPX')),
+              reverseSignals: cfg.signals?.reverseSignals ? true : false,
+              strikeOffset: (() => {
+                const d = cfg.signals?.targetOtmDistance;
+                if (d === undefined || d === null) return 'OTM';
+                if (d === 0) return 'ATM';
+                if (d > 0) return `OTM${d}`;
+                return `ITM${Math.abs(d)}`;
+              })(),
             };
           } catch {}
+
+          const avgPnlPerTrade = totalTrades > 0 ? totalPnl / totalTrades : 0;
 
           enriched.push({
             configId: row.configId, name: row.name, params,
             days, trades: totalTrades, wins: totalWins, winRate,
             totalPnl, avgDailyPnl, worstDay, bestDay,
-            sharpe, profitDays, compositeScore, avgEntryPrice: 0,
+            profitDays, avgEntryPrice: 0,
+            avgPnlPerTrade,
+            avgWinPct, avgLossPct, rMultiple, ev, breakEvenWR, edge,
+            isBasket: params.isBasket ?? false,
+            isBasketMember: params.isBasketMember ?? false,
+            memberCount: params.memberCount ?? 0,
           });
         }
       } else {
@@ -659,6 +1228,7 @@ export function createReplayRoutes(): Router {
           const dailyPnls: number[] = [];
           let totalTrades = 0, totalWins = 0, totalPnl = 0;
           let entryPriceSum = 0, entryPriceCount = 0;
+          let totalSumWinPct = 0, totalCntWins = 0, totalSumLossPct = 0, totalCntLosses = 0;
 
           for (const day of data.dailyResults) {
             let filtered = entryPriceCap > 0
@@ -683,9 +1253,12 @@ export function createReplayRoutes(): Router {
             let dayPnl = 0;
             for (const t of filtered) {
               const pnl = t['pnl$'] ?? t.pnl$ ?? 0;
+              const pnlPct = t.pnlPct ?? 0;
               dayPnl += pnl;
               totalTrades++;
               if (pnl > 0) totalWins++;
+              if (pnlPct > 0) { totalSumWinPct += pnlPct; totalCntWins++; }
+              else if (pnlPct < 0) { totalSumLossPct += pnlPct; totalCntLosses++; }
               entryPriceSum += t.entryPrice || 0;
               entryPriceCount++;
             }
@@ -701,18 +1274,15 @@ export function createReplayRoutes(): Router {
           const profitDays = dailyPnls.filter(p => p > 0).length;
           const avgEntryPrice = entryPriceCount > 0 ? entryPriceSum / entryPriceCount : 0;
 
-          let sharpe = 0;
-          if (dailyPnls.length > 1) {
-            const mean = dailyPnls.reduce((s, v) => s + v, 0) / dailyPnls.length;
-            const variance = dailyPnls.reduce((s, v) => s + (v - mean) ** 2, 0) / (dailyPnls.length - 1);
-            sharpe = variance > 0 ? mean / Math.sqrt(variance) : 0;
-          }
-
-          const compositeScore =
-            (winRate * 40) +
-            (Math.max(0, Math.min(sharpe, 1)) * 30) +
-            (avgDailyPnl > 0 ? 20 : 0) +
-            (worstDay > -500 ? 10 : 0);
+          // ── Statistical edge metrics ──
+          const avgWinPct = totalCntWins > 0 ? totalSumWinPct / totalCntWins : 0;
+          const avgLossPct = totalCntLosses > 0 ? totalSumLossPct / totalCntLosses : 0;
+          const rMultiple = avgLossPct !== 0 ? avgWinPct / Math.abs(avgLossPct) : 0;
+          const ev = (winRate * avgWinPct) + ((1 - winRate) * avgLossPct);
+          const breakEvenWR = (avgWinPct + Math.abs(avgLossPct)) > 0
+            ? Math.abs(avgLossPct) / (avgWinPct + Math.abs(avgLossPct))
+            : 0.5;
+          const edge = winRate - breakEvenWR;
 
           let params: any = {};
           try {
@@ -737,20 +1307,39 @@ export function createReplayRoutes(): Router {
               strikeRange: cfg.strikeSelector?.strikeSearchRange ?? 80,
               contractPriceMax: cfg.strikeSelector?.contractPriceMax ?? 8,
               activeStart: cfg.timeWindows?.activeStart ?? '09:30',
+              isBasket: !!(cfg.basket?.enabled && cfg.basket?.members?.length),
+              isBasketMember: configId.includes(':'),
+              memberCount: cfg.basket?.members?.length ?? 0,
+              symbol: (cfg.execution?.symbol ?? (configId.startsWith('ndx-') ? 'NDX' : 'SPX')),
+              reverseSignals: cfg.signals?.reverseSignals ? true : false,
+              strikeOffset: (() => {
+                const d = cfg.signals?.targetOtmDistance;
+                if (d === undefined || d === null) return 'OTM';
+                if (d === 0) return 'ATM';
+                if (d > 0) return `OTM${d}`;
+                return `ITM${Math.abs(d)}`;
+              })(),
             };
         } catch {}
+
+          const avgPnlPerTrade = totalTrades > 0 ? totalPnl / totalTrades : 0;
 
           enriched.push({
             configId, name: data.name, params,
             days, trades: totalTrades, wins: totalWins, winRate,
             totalPnl, avgDailyPnl, worstDay, bestDay,
-            sharpe, profitDays, compositeScore, avgEntryPrice,
+            profitDays, avgEntryPrice,
+            avgPnlPerTrade,
+            avgWinPct, avgLossPct, rMultiple, ev, breakEvenWR, edge,
+            isBasket: params.isBasket ?? false,
+            isBasketMember: params.isBasketMember ?? false,
+            memberCount: params.memberCount ?? 0,
           });
         }
       } // end needsTradeFilter else
 
       // Sort
-      const validSort = allowedSorts.includes(sortCol!) ? sortCol! : 'compositeScore';
+      const validSort = allowedSorts.includes(sortCol!) ? sortCol! : 'edge';
       enriched.sort((a: any, b: any) => {
         const av = a[validSort] ?? 0, bv = b[validSort] ?? 0;
         return sortDir === 'DESC' ? bv - av : av - bv;
@@ -984,6 +1573,204 @@ export function createReplayRoutes(): Router {
   });
 
   // ── Live View API proxy ─────────────────────────────────────────────────
+  // ── GET /replay/api/live/agent/config — serve live config directly from DB
+  // Reads AGENT_CONFIG_ID from ecosystem.config.js (not process.env) so
+  // set-live-config changes are reflected immediately without restarting.
+  router.get('/api/live/agent/config', (_req, res) => {
+    try {
+      // Parse the live config ID from ecosystem.config.js
+      const ecoPath = path.resolve(process.cwd(), 'ecosystem.config.js');
+      const ecoContent = fs.readFileSync(ecoPath, 'utf-8');
+      const match = ecoContent.match(/AGENT_CONFIG_ID:\s*'([^']+)'/);
+      if (!match) return res.json({ error: 'AGENT_CONFIG_ID not found in ecosystem.config.js' });
+
+      const configId = match[1];
+      const db = getDb();
+      try {
+        const row = db.prepare('SELECT config_json FROM replay_configs WHERE id = ?')
+          .get(configId) as { config_json: string } | undefined;
+        if (!row) return res.json({ error: `Config '${configId}' not found in DB` });
+        const cfg = JSON.parse(row.config_json);
+        res.json({
+          id: cfg.id,
+          name: cfg.name,
+          signals: cfg.signals,
+          position: cfg.position,
+          strikeSelector: cfg.strikeSelector,
+          risk: cfg.risk,
+          exit: cfg.exit,
+          sizing: cfg.sizing,
+          timeWindows: cfg.timeWindows,
+        });
+      } finally {
+        db.close();
+      }
+    } catch (err: any) {
+      res.json({ error: err.message });
+    }
+  });
+
+  // ── GET /replay/api/live/trades — today's trades from Tradier orders API ──
+  // Fetches OTOCO bracket orders + standalone sells directly from broker.
+  // Complete round-trip data: entry fills, exit fills, P&L, exit reason.
+  router.get('/api/live/trades', async (_req, res) => {
+    try {
+      const token = process.env.TRADIER_TOKEN;
+      const accountId = process.env.TRADIER_ACCOUNT_ID || '6YA51425';
+      if (!token) return res.json({ error: 'TRADIER_TOKEN not configured' });
+
+      const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+
+      // Fetch orders from Tradier
+      const resp = await fetch(`https://api.tradier.com/v1/accounts/${accountId}/orders`, {
+        headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
+      });
+      if (!resp.ok) return res.status(502).json({ error: `Tradier ${resp.status}` });
+      const data = await resp.json() as any;
+      const raw = data?.orders?.order;
+      const allOrders: any[] = raw ? (Array.isArray(raw) ? raw : [raw]) : [];
+
+      // Filter to today only
+      const orders = allOrders.filter((o: any) => o.create_date?.startsWith(today));
+
+      interface RoundTrip {
+        orderId: number;
+        symbol: string;
+        side: string;
+        strike: number;
+        qty: number;
+        entryTime: string;
+        entryTs: number;
+        entryFill: number | null;
+        exitFill: number | null;
+        exitReason: string;
+        exitTime: string | null;
+        exitTs: number;
+        tpTarget: number | null;
+        slTarget: number | null;
+        status: string;
+      }
+
+      const roundTrips: RoundTrip[] = [];
+
+      // Normalize: Tradier uses 'class' field, not 'type'
+      const orderType = (o: any) => o.type || o.class || '';
+
+      // Collect standalone sells (scannerReverse exits) for matching
+      const standaloneSells = orders.filter((o: any) => {
+        const t = orderType(o);
+        return (t === 'option' || t === 'market' || t === 'equity') &&
+          o.side === 'sell_to_close' &&
+          o.status === 'filled' &&
+          (o.avg_fill_price ?? 0) > 0;
+      });
+      const usedSellIds = new Set<number>();
+
+      for (const order of orders) {
+        // Only process OTOCO/OTO orders (bracket trades)
+        const ot = orderType(order);
+        if (ot !== 'otoco' && ot !== 'oto') continue;
+        const legs: any[] = order.leg ? (Array.isArray(order.leg) ? order.leg : [order.leg]) : [];
+        if (legs.length === 0) continue;
+
+        // Find entry leg (buy_to_open), TP leg (limit), SL leg (stop)
+        const entryLeg = legs.find((l: any) => l.side === 'buy_to_open');
+        const tpLeg = legs.find((l: any) => l.side === 'sell_to_close' && l.price != null && l.stop_price == null);
+        const slLeg = legs.find((l: any) => l.side === 'sell_to_close' && l.stop_price != null);
+
+        if (!entryLeg) continue;
+
+        const symbol = entryLeg.option_symbol || '';
+        if (!symbol) continue;
+        const match = symbol.match(/^([A-Z]+)(\d{6})([CP])(\d{8})$/);
+        const side = match ? (match[3] === 'C' ? 'call' : 'put') : 'unknown';
+        const strike = match ? parseInt(match[4]) / 1000 : 0;
+
+        const entryFill = entryLeg.avg_fill_price ?? null;
+        const tpTarget = tpLeg?.price ?? null;
+        const slTarget = slLeg?.stop_price ?? null;
+
+        // Determine exit
+        let exitFill: number | null = null;
+        let exitReason = 'OPEN';
+        let exitTime: string | null = null;
+
+        if (tpLeg?.status === 'filled' && (tpLeg.avg_fill_price ?? 0) > 0) {
+          exitFill = tpLeg.avg_fill_price;
+          exitReason = 'TP';
+          exitTime = tpLeg.create_date || tpLeg.transaction_date;
+        } else if (slLeg?.status === 'filled' && (slLeg.avg_fill_price ?? 0) > 0) {
+          exitFill = slLeg.avg_fill_price;
+          exitReason = 'SL';
+          exitTime = slLeg.create_date || slLeg.transaction_date;
+        }
+
+        // If OCO legs were canceled, look for a standalone sell_to_close (scannerReverse)
+        if (exitReason === 'OPEN' && entryLeg.status === 'filled') {
+          const entryTs = entryLeg.create_date ? new Date(entryLeg.create_date).getTime() : 0;
+          const entryOptionSym = entryLeg.option_symbol || '';
+          const matchingSell = standaloneSells.find((s: any) => {
+            if (usedSellIds.has(s.id)) return false;
+            const sellSym = s.option_symbol || '';
+            if (sellSym !== entryOptionSym) return false;
+            const sellTs = s.create_date ? new Date(s.create_date).getTime() : 0;
+            return sellTs >= entryTs;
+          });
+          if (matchingSell) {
+            usedSellIds.add(matchingSell.id);
+            exitFill = matchingSell.avg_fill_price;
+            exitReason = 'REV';
+            exitTime = matchingSell.create_date;
+          }
+        }
+
+        const qty = entryLeg.quantity || 1;
+
+        const status = exitReason === 'OPEN'
+          ? (entryLeg.status === 'filled' ? 'OPEN' : entryLeg.status?.toUpperCase() || 'PENDING')
+          : 'CLOSED';
+
+        const entryTimeStr = entryLeg.create_date || order.create_date || '';
+
+        roundTrips.push({
+          orderId: order.id,
+          symbol,
+          side,
+          strike,
+          qty,
+          entryTime: entryTimeStr,
+          entryTs: entryTimeStr ? new Date(entryTimeStr).getTime() : 0,
+          entryFill,
+          exitFill,
+          exitReason,
+          exitTime,
+          exitTs: exitTime ? new Date(exitTime).getTime() : 0,
+          tpTarget,
+          slTarget,
+          status,
+        });
+      }
+
+      // Sort by entry time
+      roundTrips.sort((a, b) => a.entryTs - b.entryTs);
+
+      // Summary stats — NO internal P&L. Broker is sole source of truth.
+      // Use balance.close_pl for today's P&L, /gainloss for historical.
+      const closed = roundTrips.filter(t => t.status === 'CLOSED');
+
+      res.json({
+        trades: roundTrips,
+        summary: {
+          total: roundTrips.length,
+          closed: closed.length,
+          open: roundTrips.length - closed.length,
+        },
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   // Forwards requests to the data service (port 3600) so the live view
   // can access live market data through the /replay/ prefix.
   // Read-only — does not affect the data service or trading agent.
@@ -1011,15 +1798,28 @@ export function createReplayRoutes(): Router {
       if (proxyRes.headers['content-type']) {
         res.setHeader('Content-Type', proxyRes.headers['content-type']);
       }
+      // If upstream aborts mid-stream, headers are already sent — can't JSON.
+      // Just destroy the response so the client sees a broken connection.
+      proxyRes.on('error', () => {
+        try { res.destroy(); } catch { /* ignore */ }
+      });
       proxyRes.pipe(res);
     });
 
     proxyReq.on('error', (err) => {
+      if (res.headersSent) {
+        try { res.destroy(); } catch { /* ignore */ }
+        return;
+      }
       res.status(502).json({ error: 'Data service unavailable', detail: err.message });
     });
 
     proxyReq.on('timeout', () => {
       proxyReq.destroy();
+      if (res.headersSent) {
+        try { res.destroy(); } catch { /* ignore */ }
+        return;
+      }
       res.status(504).json({ error: 'Data service timeout' });
     });
 
@@ -1051,90 +1851,88 @@ export function createReplayRoutes(): Router {
     }
   });
 
-  // ── GET /replay/api/surface?date= — 3D option surface data ────────────
-  // Returns SPX + all option contract prices at every minute for a date,
-  // organized for 3D visualization (time × strike × price).
-  router.get('/api/surface', (req, res) => {
-    const { date } = req.query as { date?: string };
-    if (!date) return res.status(400).json({ error: 'date required' });
+  // ── POST /replay/api/backfill — backfill a date from Polygon ─────────────
+  // Spawns a detached worker to fetch underlying + options data into replay_bars.
+  // body: { date, profileId?: 'spx-0dte'|'ndx-0dte' }
+  router.post('/api/backfill', (req, res) => {
+    const { date, profileId } = req.body as { date?: string; profileId?: string };
 
-    const db = getDb();
+    if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return res.status(400).json({ error: 'Valid date (YYYY-MM-DD) required' });
+    }
+
+    // Check if POLYGON_API_KEY is configured
+    if (!process.env.POLYGON_API_KEY) {
+      return res.status(500).json({ error: 'POLYGON_API_KEY not configured on server' });
+    }
+
+    const resolvedProfileId = profileId || 'spx-0dte';
+
+    const jobId = randomUUID();
+    const jobDir = path.resolve(process.cwd(), 'data', 'jobs');
+    if (!fs.existsSync(jobDir)) fs.mkdirSync(jobDir, { recursive: true });
+
+    const jobFile = path.join(jobDir, `backfill-${jobId}.json`);
+    const statusFile = path.join(jobDir, `backfill-${jobId}-status.json`);
+
+    // Write initial status
+    fs.writeFileSync(statusFile, JSON.stringify({
+      jobId, date, profileId: resolvedProfileId, status: 'pending', phase: 'starting',
+      spxBars: 0, optionContracts: 0, optionBars: 0, errors: [],
+      startedAt: Date.now(),
+    }));
+
+    // Write job spec — includes profileId so worker routes correct underlying+option source
+    fs.writeFileSync(jobFile, JSON.stringify({
+      jobId, date, dbPath: DB_PATH, statusFile, profileId: resolvedProfileId,
+    }));
+
+    // Spawn detached worker
+    const workerScript = path.resolve(process.cwd(), 'scripts', 'backfill', 'backfill-worker.ts');
+    const logFile = fs.openSync(path.join(jobDir, `backfill-${jobId}.log`), 'a');
+
+    const child = spawn('npx', ['tsx', workerScript, jobFile], {
+      cwd: process.cwd(),
+      detached: true,
+      stdio: ['ignore', logFile, logFile],
+      env: { ...process.env },
+    });
+
+    child.unref();
+    console.log(`[backfill] Spawned worker PID ${child.pid} for ${date} (job ${jobId})`);
+
+    res.json({ jobId, date, statusFile: path.basename(statusFile) });
+  });
+
+  // ── GET /replay/api/backfill/:jobId — poll backfill status ────────────────
+  router.get('/api/backfill/:jobId', (req, res) => {
+    const statusFile = path.resolve(process.cwd(), 'data', 'jobs', `backfill-${req.params.jobId}-status.json`);
+    if (!fs.existsSync(statusFile)) {
+      return res.status(404).json({ error: 'Backfill job not found' });
+    }
     try {
-      const dayStart = Math.floor(new Date(date + 'T00:00:00Z').getTime() / 1000);
-      const dayEnd = dayStart + 86400 + 3600;
-
-      // SPX bars
-      const spxBars = db.prepare(`
-        SELECT ts, close FROM ${REPLAY_DATA_SOURCE}
-        WHERE symbol='SPX' AND timeframe='1m' AND ts >= ? AND ts <= ?
-        ORDER BY ts
-      `).all(dayStart, dayEnd) as { ts: number; close: number }[];
-
-      if (spxBars.length === 0) return res.json({ error: 'No SPX data for this date' });
-
-      const midSpx = spxBars[Math.floor(spxBars.length / 2)].close;
-
-      // All option bars for this date
-      const optBars = db.prepare(`
-        SELECT symbol, ts, close FROM ${REPLAY_DATA_SOURCE}
-        WHERE timeframe='1m' AND ts >= ? AND ts <= ? AND symbol LIKE 'SPXW%'
-        ORDER BY symbol, ts
-      `).all(dayStart, dayEnd) as { symbol: string; ts: number; close: number }[];
-
-      // Parse into structured data
-      // Group by symbol, extract strike and side
-      const contracts: Record<string, {
-        symbol: string; strike: number; side: 'call' | 'put';
-        distance: number; bars: { ts: number; close: number }[];
-      }> = {};
-
-      for (const bar of optBars) {
-        if (!contracts[bar.symbol]) {
-          const side = bar.symbol.includes('C') ? 'call' as const : 'put' as const;
-          const strike = parseInt(bar.symbol.slice(-8)) / 1000;
-          contracts[bar.symbol] = {
-            symbol: bar.symbol, strike, side,
-            distance: Math.round(strike - midSpx),
-            bars: [],
-          };
-        }
-        contracts[bar.symbol].bars.push({ ts: bar.ts, close: bar.close });
-      }
-
-      // Filter to contracts within ±30 of ATM with enough bars
-      const filtered = Object.values(contracts)
-        .filter(c => Math.abs(c.distance) <= 30 && c.bars.length >= 20);
-
-      res.json({
-        date,
-        midSpx: Math.round(midSpx),
-        spx: spxBars.map(b => ({ ts: b.ts, c: b.close })),
-        contracts: filtered.map(c => ({
-          symbol: c.symbol,
-          strike: c.strike,
-          side: c.side,
-          distance: c.distance,
-          bars: c.bars.map(b => ({ ts: b.ts, c: b.close })),
-        })),
-      });
-    } finally {
-      db.close();
+      const status = JSON.parse(fs.readFileSync(statusFile, 'utf-8'));
+      res.json(status);
+    } catch {
+      res.status(500).json({ error: 'Failed to read status file' });
     }
   });
 
-  // ── Serve the option surface 3D viewer ──────────────────────────────────
-  router.get('/surface', (req, res) => {
-    const htmlPath = path.resolve(__dirname, 'surface-viewer.html');
+  // ── Serve the analytics viewer HTML ──────────────────────────────────────
+  router.get('/analytics', (req, res) => {
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    const htmlPath = path.resolve(__dirname, 'analytics-viewer.html');
     if (fs.existsSync(htmlPath)) {
       serveWithBasePath(htmlPath, req, res);
     } else {
-      const altPath = path.resolve(process.cwd(), 'src/server/surface-viewer.html');
+      const altPath = path.resolve(process.cwd(), 'src/server/analytics-viewer.html');
       serveWithBasePath(altPath, req, res);
     }
   });
 
   // ── Serve the sweep leaderboard HTML ─────────────────────────────────────
   router.get('/sweep', (req, res) => {
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
     const htmlPath = path.resolve(__dirname, 'sweep-viewer.html');
     if (fs.existsSync(htmlPath)) {
       serveWithBasePath(htmlPath, req, res);
@@ -1142,6 +1940,556 @@ export function createReplayRoutes(): Router {
       const altPath = path.resolve(process.cwd(), 'src/server/sweep-viewer.html');
       serveWithBasePath(altPath, req, res);
     }
+  });
+
+  // ── Serve the analytics HTML ──────────────────────────────────────────
+  router.get('/analytics', (req, res) => {
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    const htmlPath = path.resolve(__dirname, 'analytics-viewer.html');
+    if (fs.existsSync(htmlPath)) {
+      serveWithBasePath(htmlPath, req, res);
+    } else {
+      const altPath = path.resolve(process.cwd(), 'src/server/analytics-viewer.html');
+      serveWithBasePath(altPath, req, res);
+    }
+  });
+
+  // ── Serve the edge framework paper HTML ─────────────────────────────────
+  router.get('/paper', (req, res) => {
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    const htmlPath = path.resolve(process.cwd(), 'docs/edge-framework-paper.html');
+    if (fs.existsSync(htmlPath)) {
+      serveWithBasePath(htmlPath, req, res);
+    } else {
+      res.status(404).send('Paper not found');
+    }
+  });
+
+  // ── Serve the backfill management HTML ──────────────────────────────────
+  router.get('/backfill', (req, res) => {
+    const htmlPath = path.resolve(__dirname, 'backfill-viewer.html');
+    if (fs.existsSync(htmlPath)) {
+      serveWithBasePath(htmlPath, req, res);
+    } else {
+      const altPath = path.resolve(process.cwd(), 'src/server/backfill-viewer.html');
+      serveWithBasePath(altPath, req, res);
+    }
+  });
+
+  // ════════════════════════════════════════════════════════════════════════════
+  // ██  UNIVERSAL BACKFILL — Symbols & Orchestration endpoints (Phase 3)   ██
+  // ════════════════════════════════════════════════════════════════════════════
+
+  // ── GET /api/symbols — list all instrument profiles ────────────────────────
+  router.get('/api/symbols', (_req, res) => {
+    const db = getDb();
+    try {
+      const profiles = listProfiles(db);
+      res.json({ profiles });
+    } finally {
+      db.close();
+    }
+  });
+
+  // ── GET /api/symbols/:id — single profile detail ───────────────────────────
+  router.get('/api/symbols/:id', (req, res) => {
+    const db = getDb();
+    try {
+      const profile = loadProfile(db, req.params.id);
+      if (!profile) return res.status(404).json({ error: 'Profile not found' });
+      res.json({ profile });
+    } finally {
+      db.close();
+    }
+  });
+
+  // ── POST /api/symbols/discover — preview auto-discovered profile ───────────
+  router.post('/api/symbols/discover', async (req, res) => {
+    const { ticker } = req.body as { ticker?: string };
+    if (!ticker || typeof ticker !== 'string') {
+      return res.status(400).json({ error: 'ticker (string) required' });
+    }
+    try {
+      const discovered = await discoverProfile(ticker);
+      res.json({ profile: discovered });
+    } catch (e) {
+      if (e instanceof DiscoveryError) {
+        const status = e.code === 'NOT_FOUND' ? 404 : e.code === 'NO_API_KEY' ? 500 : 502;
+        return res.status(status).json({ error: e.message, code: e.code });
+      }
+      console.error('[symbols/discover] unexpected error:', e);
+      res.status(500).json({ error: 'Discovery failed' });
+    }
+  });
+
+  // ── POST /api/symbols — save confirmed profile ─────────────────────────────
+  router.post('/api/symbols', (req, res) => {
+    const body = req.body as Partial<StoredInstrumentProfile>;
+    if (!body.id || !body.underlyingSymbol || !body.optionPrefix) {
+      return res.status(400).json({ error: 'id, underlyingSymbol, optionPrefix required' });
+    }
+    const db = getWriteDb();
+    try {
+      const now = Math.floor(Date.now() / 1000);
+      const profile: StoredInstrumentProfile = {
+        id: body.id,
+        displayName: body.displayName || body.underlyingSymbol,
+        underlyingSymbol: body.underlyingSymbol,
+        assetClass: body.assetClass || 'equity',
+        optionPrefix: body.optionPrefix,
+        strikeDivisor: body.strikeDivisor ?? 1,
+        strikeInterval: body.strikeInterval ?? 1,
+        bandHalfWidthDollars: body.bandHalfWidthDollars ?? 10,
+        avgDailyRange: body.avgDailyRange ?? null,
+        expiryCadences: body.expiryCadences ?? ['weekly'],
+        session: body.session ?? { preMarket: '08:00', rthStart: '09:30', rthEnd: '16:00', postMarket: '17:00' },
+        vendorRouting: body.vendorRouting ?? { underlying: { vendor: 'polygon', ticker: body.underlyingSymbol }, options: { vendor: 'polygon' } },
+        tier: body.tier ?? 1,
+        canGoLive: false,
+        executionAccountId: null,
+        source: 'ui-discovered',
+        createdAt: now,
+        updatedAt: now,
+      };
+      saveProfile(db, profile);
+      res.json({ profile });
+    } finally {
+      db.close();
+    }
+  });
+
+  // ── DELETE /api/symbols/:id — remove profile (reject if canGoLive) ─────────
+  router.delete('/api/symbols/:id', (req, res) => {
+    const db = getWriteDb();
+    try {
+      const existing = loadProfile(db, req.params.id);
+      if (!existing) return res.status(404).json({ error: 'Profile not found' });
+      if (existing.canGoLive) {
+        return res.status(409).json({ error: 'Cannot delete a live-enabled profile — disable canGoLive first' });
+      }
+      deleteProfile(db, req.params.id);
+      res.json({ ok: true });
+    } finally {
+      db.close();
+    }
+  });
+
+  // ── GET /api/symbols/:id/coverage — coverage gaps for heatmap UI ───────────
+  router.get('/api/symbols/:id/coverage', (req, res) => {
+    const db = getDb();
+    try {
+      const profile = loadProfile(db, req.params.id);
+      if (!profile) return res.status(404).json({ error: 'Profile not found' });
+
+      const start = req.query.start as string | undefined;
+      const end = req.query.end as string | undefined;
+      const gaps = findMissingDates(db, profile.underlyingSymbol, { start, end });
+      const pending = gaps.filter(hasWorkPending);
+      res.json({
+        symbol: profile.underlyingSymbol,
+        totalDates: gaps.length,
+        pendingDates: pending.length,
+        gaps,
+      });
+    } finally {
+      db.close();
+    }
+  });
+
+  // ── POST /api/backfill/orchestrate — spawn orchestrator worker ─────────────
+  router.post('/api/backfill/orchestrate', (req, res) => {
+    const { profileId, start, end, onlyMtf } = req.body as {
+      profileId?: string; start?: string; end?: string; onlyMtf?: boolean;
+    };
+
+    if (!profileId) {
+      return res.status(400).json({ error: 'profileId required' });
+    }
+
+    const db = getWriteDb();
+    try {
+      const profile = loadProfile(db, profileId);
+      if (!profile) return res.status(404).json({ error: 'Profile not found' });
+
+      // Count total trading dates in the range (best effort)
+      const gaps = findMissingDates(db, profile.underlyingSymbol, { start, end });
+      const pendingGaps = gaps.filter(hasWorkPending);
+      const totalDates = pendingGaps.length || gaps.length || 1;
+
+      // Create the job row
+      const jobId = createBackfillJob(db, {
+        profileId,
+        totalDates,
+        initialProgress: {
+          phase: 'spawning',
+          rawMissingCount: pendingGaps.filter(g => g.missingRaw).length,
+          mtfMissingCount: pendingGaps.filter(g => g.missingMtfs.length > 0).length,
+        },
+      });
+
+      // Prepare spec for the orchestrator worker
+      const jobDir = path.resolve(process.cwd(), 'data', 'jobs');
+      if (!fs.existsSync(jobDir)) fs.mkdirSync(jobDir, { recursive: true });
+      const specFile = path.join(jobDir, `orchestrate-${jobId}.json`);
+      fs.writeFileSync(specFile, JSON.stringify({
+        jobId,
+        profileId,
+        start: start || null,
+        end: end || null,
+        onlyMtf: !!onlyMtf,
+        dbPath: DB_PATH,
+      }));
+
+      // Spawn detached orchestrator worker
+      const workerScript = path.resolve(process.cwd(), 'scripts', 'backfill', 'backfill-orchestrator-worker.ts');
+      const logFile = fs.openSync(path.join(jobDir, `orchestrate-${jobId}.log`), 'a');
+
+      const child = spawn('npx', ['tsx', workerScript, specFile], {
+        cwd: process.cwd(),
+        detached: true,
+        stdio: ['ignore', logFile, logFile],
+        env: { ...process.env },
+      });
+      child.unref();
+
+      if (child.pid) {
+        attachPid(db, jobId, child.pid);
+      }
+
+      console.log(`[backfill/orchestrate] Spawned worker PID ${child.pid} for profile '${profileId}' (job ${jobId})`);
+      res.json({ jobId, profileId, totalDates, pid: child.pid });
+    } finally {
+      db.close();
+    }
+  });
+
+  // ── GET /api/jobs/:jobId — fetch job (works for both replay & backfill) ────
+  // This overrides the inline status-file approach for backfill jobs that use
+  // the DB-based progress tracking.
+  router.get('/api/jobs/:jobId', (req, res) => {
+    const db = getDb();
+    try {
+      const job = getJob(db, req.params.jobId);
+      if (!job) return res.status(404).json({ error: 'Job not found' });
+      res.json({ job });
+    } finally {
+      db.close();
+    }
+  });
+
+  // ── POST /api/jobs/:jobId/cancel — cancel a running job ────────────────────
+  router.post('/api/jobs/:jobId/cancel', (req, res) => {
+    const db = getWriteDb();
+    try {
+      const job = getJob(db, req.params.jobId);
+      if (!job) return res.status(404).json({ error: 'Job not found' });
+      if (job.status !== 'running' && job.status !== 'pending') {
+        return res.status(409).json({ error: `Job already ${job.status}` });
+      }
+
+      markCancelled(db, req.params.jobId, 'cancelled by user');
+
+      // Best-effort SIGTERM to worker process
+      if (job.pid) {
+        try { process.kill(job.pid, 'SIGTERM'); } catch { /* already dead */ }
+      }
+
+      res.json({ ok: true, jobId: req.params.jobId });
+    } finally {
+      db.close();
+    }
+  });
+
+  // ── GET /api/jobs — list jobs with optional filters ────────────────────────
+  router.get('/api/jobs', (req, res) => {
+    const db = getDb();
+    try {
+      const filters: ListJobsFilters = {};
+      if (req.query.kind) filters.kind = req.query.kind as 'replay' | 'backfill';
+      if (req.query.profile_id) filters.profileId = req.query.profile_id as string;
+      if (req.query.status) filters.status = req.query.status as ListJobsFilters['status'];
+      if (req.query.limit) filters.limit = Math.min(200, Number(req.query.limit) || 50);
+
+      const jobs = listJobs(db, filters);
+      res.json({ jobs });
+    } finally {
+      db.close();
+    }
+  });
+
+  // ════════════════════════════════════════════════════════════════════════════
+  // ██  PINNED REPORTS — Research notes pinned to the leaderboard            ██
+  // ════════════════════════════════════════════════════════════════════════════
+
+  function ensureReportsTable(db: Database.Database) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS leaderboard_reports (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        content TEXT NOT NULL,
+        pinned INTEGER NOT NULL DEFAULT 1,
+        createdAt INTEGER NOT NULL,
+        updatedAt INTEGER NOT NULL
+      )
+    `);
+  }
+
+  // GET /api/reports — list all reports (pinned first)
+  router.get('/api/reports', (_req, res) => {
+    const db = getDb();
+    try {
+      ensureReportsTable(db);
+      const rows = db.prepare('SELECT * FROM leaderboard_reports ORDER BY pinned DESC, updatedAt DESC').all();
+      res.json({ reports: rows });
+    } finally {
+      db.close();
+    }
+  });
+
+  // GET /api/reports/pinned — only pinned reports
+  router.get('/api/reports/pinned', (_req, res) => {
+    const db = getDb();
+    try {
+      ensureReportsTable(db);
+      const rows = db.prepare('SELECT * FROM leaderboard_reports WHERE pinned = 1 ORDER BY updatedAt DESC').all();
+      res.json({ reports: rows });
+    } finally {
+      db.close();
+    }
+  });
+
+  // POST /api/reports — create a report
+  router.post('/api/reports', (req, res) => {
+    const { id, title, content, pinned } = req.body;
+    if (!title || !content) return res.status(400).json({ error: 'title and content required' });
+    const db = getWriteDb();
+    try {
+      ensureReportsTable(db);
+      const now = Date.now();
+      const reportId = id || `report-${now}`;
+      db.prepare('INSERT OR REPLACE INTO leaderboard_reports (id, title, content, pinned, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?)').run(
+        reportId, title, content, pinned ? 1 : 0, now, now
+      );
+      res.json({ id: reportId, status: 'created' });
+    } finally {
+      db.close();
+    }
+  });
+
+  // PATCH /api/reports/:id — toggle pin / update content
+  router.patch('/api/reports/:id', (req, res) => {
+    const { pinned, title, content } = req.body;
+    const db = getWriteDb();
+    try {
+      ensureReportsTable(db);
+      const existing = db.prepare('SELECT * FROM leaderboard_reports WHERE id = ?').get(req.params.id);
+      if (!existing) return res.status(404).json({ error: 'Report not found' });
+      const now = Date.now();
+      if (pinned !== undefined) db.prepare('UPDATE leaderboard_reports SET pinned = ?, updatedAt = ? WHERE id = ?').run(pinned ? 1 : 0, now, req.params.id);
+      if (title) db.prepare('UPDATE leaderboard_reports SET title = ?, updatedAt = ? WHERE id = ?').run(title, now, req.params.id);
+      if (content) db.prepare('UPDATE leaderboard_reports SET content = ?, updatedAt = ? WHERE id = ?').run(content, now, req.params.id);
+      res.json({ id: req.params.id, status: 'updated' });
+    } finally {
+      db.close();
+    }
+  });
+
+  // DELETE /api/reports/:id — delete a report
+  router.delete('/api/reports/:id', (req, res) => {
+    const db = getWriteDb();
+    try {
+      ensureReportsTable(db);
+      db.prepare('DELETE FROM leaderboard_reports WHERE id = ?').run(req.params.id);
+      res.json({ status: 'deleted' });
+    } finally {
+      db.close();
+    }
+  });
+
+  // ── Journal API ───────────────────────────────────────────────────────────
+
+  const JOURNAL_DIR = path.resolve(process.cwd(), 'logs', 'journals');
+
+  // GET /api/journal/dates — list available journal dates
+  router.get('/api/journal/dates', (_req, res) => {
+    try {
+      if (!fs.existsSync(JOURNAL_DIR)) return res.json([]);
+      const dates = fs.readdirSync(JOURNAL_DIR)
+        .filter(f => f.endsWith('.json'))
+        .map(f => f.replace('.json', ''))
+        .sort()
+        .reverse();
+      res.json(dates);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // GET /api/journal/:date — get journal for a specific date (JSON)
+  router.get('/api/journal/:date', (req, res) => {
+    const date = req.params.date;
+    const jsonPath = path.join(JOURNAL_DIR, `${date}.json`);
+    if (fs.existsSync(jsonPath)) {
+      try {
+        const data = JSON.parse(fs.readFileSync(jsonPath, 'utf-8'));
+        return res.json(data);
+      } catch { /* fall through to markdown */ }
+    }
+    // Try markdown
+    const mdPath = path.join(JOURNAL_DIR, `${date}.md`);
+    if (fs.existsSync(mdPath)) {
+      return res.json({ date, markdown: fs.readFileSync(mdPath, 'utf-8') });
+    }
+    res.status(404).json({ error: `No journal for ${date}` });
+  });
+
+  // GET /api/journal/:date/md — get journal markdown
+  router.get('/api/journal/:date/md', (req, res) => {
+    const mdPath = path.join(JOURNAL_DIR, `${req.params.date}.md`);
+    if (!fs.existsSync(mdPath)) return res.status(404).send('Not found');
+    res.type('text/markdown').send(fs.readFileSync(mdPath, 'utf-8'));
+  });
+
+  // POST /api/journal/:date/generate — trigger journal generation for a date
+  router.post('/api/journal/:date/generate', async (_req, res) => {
+    const date = _req.params.date;
+    try {
+      const { spawn } = require('child_process');
+      const proc = spawn('npx', ['tsx', 'scripts/daily-journal.ts', date], {
+        cwd: process.cwd(),
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let out = '';
+      proc.stdout.on('data', (d: Buffer) => { out += d.toString(); });
+      proc.stderr.on('data', (d: Buffer) => { out += d.toString(); });
+      proc.on('close', (code: number) => {
+        if (code === 0) {
+          // Read the generated journal
+          const jsonPath = path.join(JOURNAL_DIR, `${date}.json`);
+          if (fs.existsSync(jsonPath)) {
+            return res.json(JSON.parse(fs.readFileSync(jsonPath, 'utf-8')));
+          }
+          const mdPath = path.join(JOURNAL_DIR, `${date}.md`);
+          if (fs.existsSync(mdPath)) {
+            return res.json({ date, markdown: fs.readFileSync(mdPath, 'utf-8') });
+          }
+          return res.json({ status: 'generated', output: out });
+        }
+        res.status(500).json({ error: `Process exited ${code}`, output: out });
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // GET /journal — serve journal viewer HTML
+  router.get('/journal', (_req, res) => {
+    const htmlPath = path.join(__dirname, 'journal-viewer.html');
+    if (fs.existsSync(htmlPath)) {
+      return res.sendFile(htmlPath);
+    }
+    res.status(404).send('Journal viewer not found');
+  });
+
+  // ── Account API (proxies to Tradier) ────────────────────────────────────────
+
+  const TRADIER_TOKEN = process.env.TRADIER_TOKEN;
+  const TRADIER_ACCOUNT = process.env.TRADIER_ACCOUNT_ID || '6YA51425';
+  const TRADIER_API = 'https://api.tradier.com/v1';
+
+  function tradierHeaders() {
+    return { Authorization: `Bearer ${TRADIER_TOKEN}`, Accept: 'application/json' };
+  }
+
+  // GET /api/account/balance
+  router.get('/api/account/balance', async (_req, res) => {
+    if (!TRADIER_TOKEN) return res.status(500).json({ error: 'No TRADIER_TOKEN' });
+    try {
+      const resp = await fetch(`${TRADIER_API}/accounts/${TRADIER_ACCOUNT}/balances`, { headers: tradierHeaders() });
+      const data: any = await resp.json();
+      res.json(data?.balances || data);
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // GET /api/account/positions
+  router.get('/api/account/positions', async (_req, res) => {
+    if (!TRADIER_TOKEN) return res.status(500).json({ error: 'No TRADIER_TOKEN' });
+    try {
+      const resp = await fetch(`${TRADIER_API}/accounts/${TRADIER_ACCOUNT}/positions`, { headers: tradierHeaders() });
+      const data: any = await resp.json();
+      const raw = data?.positions?.position;
+      if (!raw || raw === 'null') return res.json([]);
+      res.json(Array.isArray(raw) ? raw : [raw]);
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // GET /api/account/orders
+  router.get('/api/account/orders', async (_req, res) => {
+    if (!TRADIER_TOKEN) return res.status(500).json({ error: 'No TRADIER_TOKEN' });
+    try {
+      const resp = await fetch(`${TRADIER_API}/accounts/${TRADIER_ACCOUNT}/orders`, { headers: tradierHeaders() });
+      const data: any = await resp.json();
+      const raw = data?.orders?.order;
+      if (!raw || raw === 'null') return res.json([]);
+      res.json(Array.isArray(raw) ? raw : [raw]);
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // GET /api/account/history?start=YYYY-MM-DD&end=YYYY-MM-DD
+  router.get('/api/account/history', async (req, res) => {
+    if (!TRADIER_TOKEN) return res.status(500).json({ error: 'No TRADIER_TOKEN' });
+    try {
+      const params = new URLSearchParams({ type: 'trade', limit: '200' });
+      if (req.query.start) params.set('start', req.query.start as string);
+      if (req.query.end) params.set('end', req.query.end as string);
+      const resp = await fetch(`${TRADIER_API}/accounts/${TRADIER_ACCOUNT}/history?${params}`, { headers: tradierHeaders() });
+      const data: any = await resp.json();
+      const raw = data?.history?.event;
+      if (!raw || raw === 'null') return res.json([]);
+      res.json(Array.isArray(raw) ? raw : [raw]);
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // GET /api/account/gainloss?start=YYYY-MM-DD&end=YYYY-MM-DD&page=N
+  // Returns closed positions with broker-computed P&L (source of truth).
+  // Tradier paginates at 100 per page. We fetch all pages and return the full list.
+  router.get('/api/account/gainloss', async (req, res) => {
+    if (!TRADIER_TOKEN) return res.status(500).json({ error: 'No TRADIER_TOKEN' });
+    try {
+      const allPositions: any[] = [];
+      let page = 1;
+      const maxPages = 20; // safety cap
+      while (page <= maxPages) {
+        const params = new URLSearchParams({ page: String(page), limit: '100', sortBy: 'closeDate', sort: 'desc' });
+        if (req.query.start) params.set('start', req.query.start as string);
+        if (req.query.end) params.set('end', req.query.end as string);
+        const resp = await fetch(`${TRADIER_API}/accounts/${TRADIER_ACCOUNT}/gainloss?${params}`, { headers: tradierHeaders() });
+        const data: any = await resp.json();
+        const raw = data?.gainloss?.closed_position;
+        if (!raw || raw === 'null') break;
+        const items = Array.isArray(raw) ? raw : [raw];
+        allPositions.push(...items);
+        if (items.length < 100) break; // last page
+        page++;
+      }
+      res.json(allPositions);
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // GET /api/account/agent-status — read agent status file
+  router.get('/api/account/agent-status', (_req, res) => {
+    const statusPath = path.resolve(process.cwd(), 'logs', 'agent-status.json');
+    if (!fs.existsSync(statusPath)) return res.json(null);
+    try {
+      res.json(JSON.parse(fs.readFileSync(statusPath, 'utf-8')));
+    } catch { res.json(null); }
+  });
+
+  // GET /account — serve account dashboard HTML
+  router.get('/account', (_req, res) => {
+    const htmlPath = path.join(__dirname, 'account-viewer.html');
+    if (fs.existsSync(htmlPath)) return res.sendFile(htmlPath);
+    res.status(404).send('Account viewer not found');
   });
 
   return router;

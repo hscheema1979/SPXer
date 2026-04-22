@@ -6,8 +6,9 @@ import { computeIndicators } from '../../src/pipeline/indicator-engine';
 import { aggregate } from '../../src/pipeline/aggregator';
 import type { Bar, Timeframe } from '../../src/types';
 
+const LIVE_DB_PATH = path.resolve(__dirname, '../../data/spxer.db');
 const DB_PATH = path.resolve(__dirname, '../../data/spxer.db');
-initDb(DB_PATH);
+initDb(LIVE_DB_PATH);
 const db = new Database(DB_PATH);
 
 const HIGHER_TIMEFRAMES: [Timeframe, number][] = [['3m', 180], ['5m', 300], ['10m', 600], ['15m', 900], ['1h', 3600]];

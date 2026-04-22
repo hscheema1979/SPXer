@@ -16,6 +16,13 @@ export interface Bar {
   synthetic: boolean;
   gapType: GapType;
   indicators: Record<string, number | null>;
+  /**
+   * Optional representative bid-ask spread (in dollars) observed while the bar was forming.
+   * Populated for option contracts from Tradier quote snapshots when available.
+   * Used by the friction model (e.g. spread-scaled SL slippage in `slipSellPrice`).
+   * Absent/undefined for historical bars, synthetic bars, and the SPX underlying.
+   */
+  spread?: number;
 }
 
 export interface Contract {

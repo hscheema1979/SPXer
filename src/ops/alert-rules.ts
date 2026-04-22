@@ -23,7 +23,6 @@ export interface AlertContext {
   health: any;                    // GET /health response
   pipeline: any;                  // GET /pipeline/health response
   agentSpx: any | null;           // logs/agent-status-spx.json
-  agentXsp: any | null;           // logs/agent-status-xsp.json
   maintenance: { active: boolean };
   processes: any[];               // pm2 jlist output
   diskFreeGb: number;
@@ -137,7 +136,6 @@ async function buildContext(): Promise<AlertContext> {
   ]);
 
   const agentSpx = readJsonFile(path.join(LOGS_DIR, 'agent-status-spx.json'));
-  const agentXsp = readJsonFile(path.join(LOGS_DIR, 'agent-status-xsp.json'));
   const maintenance = readJsonFile(path.join(LOGS_DIR, 'agent-maintenance.json')) ?? { active: false };
   const processes = getPm2Processes();
   const diskFreeGb = getDiskFreeGb();
@@ -146,7 +144,6 @@ async function buildContext(): Promise<AlertContext> {
     health,
     pipeline,
     agentSpx,
-    agentXsp,
     maintenance,
     processes,
     diskFreeGb,

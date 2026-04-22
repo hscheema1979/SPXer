@@ -339,11 +339,11 @@ export class SessionCycleManager {
  * making it testable with mocks.
  */
 export interface MonitorTools {
-  getPositions(account: 'spx' | 'xsp' | 'both'): Promise<string>;
-  getOrders(account: 'spx' | 'xsp' | 'both', statusFilter: string): Promise<string>;
-  getBalance(account: 'spx' | 'xsp' | 'both'): Promise<string>;
+  getPositions(account: 'spx'): Promise<string>;
+  getOrders(account: 'spx', statusFilter: string): Promise<string>;
+  getBalance(account: 'spx'): Promise<string>;
   getMarketSnapshot(): Promise<string>;
-  getAgentStatus(agent: 'spx' | 'xsp' | 'both'): Promise<string>;
+  getAgentStatus(agent: 'spx'): Promise<string>;
   checkSystemHealth(): Promise<string>;
 }
 
@@ -391,9 +391,9 @@ export async function collectPreLLMData(
     } else if (mode === 'pre-market') {
       // Light checks — balance, system, agent readiness
       const [balance, health, status] = await Promise.all([
-        tools.getBalance('both'),
+        tools.getBalance('spx'),
         tools.checkSystemHealth(),
-        tools.getAgentStatus('both'),
+        tools.getAgentStatus('spx'),
       ]);
       sections.push('## Account Balances', balance, '');
       sections.push('## System Health', health, '');
@@ -401,10 +401,10 @@ export async function collectPreLLMData(
     } else if (mode === 'post-close') {
       // Wind-down — positions should be closed, check final state
       const [positions, balance, orders, status, health] = await Promise.all([
-        tools.getPositions('both'),
-        tools.getBalance('both'),
-        tools.getOrders('both', 'all'),
-        tools.getAgentStatus('both'),
+        tools.getPositions('spx'),
+        tools.getBalance('spx'),
+        tools.getOrders('spx', 'all'),
+        tools.getAgentStatus('spx'),
         tools.checkSystemHealth(),
       ]);
       sections.push('## Open Positions (should be none post-close)', positions, '');
@@ -415,12 +415,12 @@ export async function collectPreLLMData(
     } else if (mode === 'rth') {
       // Full RTH check — everything
       const [positions, orders, rejectedOrders, balance, snapshot, status, health] = await Promise.all([
-        tools.getPositions('both'),
-        tools.getOrders('both', 'open'),
-        tools.getOrders('both', 'rejected'),
-        tools.getBalance('both'),
+        tools.getPositions('spx'),
+        tools.getOrders('spx', 'open'),
+        tools.getOrders('spx', 'rejected'),
+        tools.getBalance('spx'),
         tools.getMarketSnapshot(),
-        tools.getAgentStatus('both'),
+        tools.getAgentStatus('spx'),
         tools.checkSystemHealth(),
       ]);
       sections.push('## Open Positions', positions, '');

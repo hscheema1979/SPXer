@@ -15,10 +15,7 @@
 #   - Skips weekends and holidays
 #   - Never restarts a running agent (only starts stopped ones)
 #
-# The account-monitor can observe and log during RTH but CANNOT take
-# remediation actions (stop_agent, close_position, cancel_order) while
-# maintenance mode is active. This prevents the monitor from interfering
-# with the trading agents' operation.
+# Account-monitor removed — was interfering with successful trades.
 #
 
 set -euo pipefail
@@ -112,8 +109,8 @@ if [ "$ET_MINS" -ge "$MARKET_START" ] && [ "$ET_MINS" -lt "$MARKET_STOP" ]; then
   # ── Market hours: ensure agents are running, monitor is muzzled ──────────
   
   # Always keep maintenance mode active during RTH
-  # This prevents the account-monitor from stopping agents or closing positions
-  write_maintenance "RTH active — monitor observe only (watchdog)"
+  # Legacy maintenance flag (watchdog + account-monitor both removed)
+  write_maintenance "RTH active — watchdog observe only"
   
   if ! is_agent_online "spxer-agent"; then
     log "WATCHDOG: spxer-agent is stopped during market hours — starting"

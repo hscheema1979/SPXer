@@ -106,6 +106,10 @@ export interface Config {
      *  'puts' = short only (bearish signals only). */
     allowedSides: 'both' | 'calls' | 'puts';
 
+    /** Reverse all signal directions — bullish becomes bearish, bearish becomes bullish.
+     *  Useful for trading chop: fade every cross instead of following it. */
+    reverseSignals: boolean;
+
     targetOtmDistance: number | null;
     targetContractPrice: number | null;
     maxEntryPrice: number | null;        // Filter: skip trades above this price
@@ -145,6 +149,13 @@ export interface Config {
     maxPositionsOpen: number;
     defaultQuantity: number;
     positionSizeMultiplier: number;
+    /** Intrabar tie-breaker when bar.low <= SL AND bar.high >= TP in the same bar.
+     *  'sl_wins'  — conservative default (current behavior); assume SL hit first.
+     *  'tp_wins'  — assume TP hit first (aggressive).
+     *  'by_open'  — if bar.open is closer to TP than SL, TP wins; else SL wins.
+     *               Best live-realism: mirrors most common fill order.
+     *  Defaults to 'sl_wins' when unset to preserve existing replay behavior. */
+    intrabarTieBreaker?: 'sl_wins' | 'tp_wins' | 'by_open';
   };
 
   risk: {
@@ -153,18 +164,33 @@ export interface Config {
     maxRiskPerTrade: number;
     cutoffTimeET: string;            // 'HH:MM'
     minMinutesToClose: number;
+    /** Circuit breaker: max HMA cross signals per session before halting entries.
+     *  Normal sessions produce ~5-15 signals. If noisy/corrupted bar data causes
+     *  HMA to oscillate wildly, signal count can spike to 50-100+, racking up
+     *  losses. When sessionSignalCount >= this threshold, all new entries are blocked.
+     *  Default: 30. Set to 0 to disable. */
+    maxSignalsPerSession?: number;
   };
 
   strikeSelector: {
     strikeSearchRange: number;
     contractPriceMin: number;        // min option premium to consider ($)
     contractPriceMax: number;        // max option premium to consider ($)
-    /** Strike moneyness mode: 'otm' (default), 'atm', 'itm', 'any'.
+    /** Strike moneyness mode: 'otm' (default), 'atm', 'itm', 'any', 'atm-offset'.
      *  - 'otm': only OTM strikes (calls > SPX, puts < SPX)
      *  - 'atm': prefer strikes nearest to SPX price
      *  - 'itm': prefer ITM strikes (calls < SPX, puts > SPX)
-     *  - 'any': no moneyness filter — score purely on price band + volume */
-    strikeMode?: 'otm' | 'atm' | 'itm' | 'any';
+     *  - 'any': no moneyness filter — score purely on price band + volume
+     *  - 'atm-offset': target exact $ offset from ATM (used by basket members).
+     *                   Requires `atmOffset` field. Bypasses price band. */
+    strikeMode?: 'otm' | 'atm' | 'itm' | 'any' | 'atm-offset';
+    /** For strikeMode='atm-offset': signed $ offset from ATM.
+     *    0  = ATM
+     *   +5  = OTM5  (call strike > SPX, put strike < SPX)
+     *   -5  = ITM5  (call strike < SPX, put strike > SPX)
+     *   +10 = OTM10, -10 = ITM10, etc.
+     *  Aligns with basket member conventions. */
+    atmOffset?: number;
   };
 
   timeWindows: {
@@ -197,6 +223,93 @@ export interface Config {
      *  Live agents with bracket orders always fill at exact TP/SL regardless.
      *  Default: 'close' for backward compat. */
     exitPricing?: 'close' | 'intrabar';
+
+    /** Re-entry on take-profit: when a position closes via TP, optionally
+     *  open a follow-on position in the same direction to ride continuing momentum.
+     *  Disabled by default — must be opted into per-config. */
+    reentryOnTakeProfit?: {
+      enabled: boolean;
+      /** 'same_direction'         — re-enter same side at a fresh OTM strike, no signal re-confirm
+       *  'fresh_signal_required'  — re-enter only if the option contract HMA still confirms the side */
+      strategy: 'same_direction' | 'fresh_signal_required';
+      /** Hard cap on TP re-entries per session. */
+      maxReentriesPerDay: number;
+      /** Max chained re-entries from a single original entry (1 = one re-entry only). */
+      maxReentriesPerSignal: number;
+      /** Cooldown in seconds between TP exit and re-entry. Independent of judges.entryCooldownSec. */
+      cooldownSec: number;
+      /** Multiplier on computeQty() for re-entry size. 1.0 = same size, 0.5 = half. */
+      sizeMultiplier: number;
+      /** If true, require option contract HMA direction to still match the re-entered side. */
+      requireOptionHmaConfirm: boolean;
+    };
+  };
+
+  /** Fill-model parameters — realistic execution simulation.
+   *
+   *  Phase 2 adds stop-market slippage on top of the existing half-spread in
+   *  friction.ts. TPs are limit orders and fill at the limit price (no extra
+   *  slippage beyond friction). SLs are stop-market orders and walk the book
+   *  for large sizes.
+   *
+   *  All fields optional for backward compat. When undefined, behaves exactly
+   *  like Phase 1 (clamp to TP/SL level, then apply friction).
+   */
+  fill?: {
+    slippage?: {
+      /** Additional $ per contract knocked off SL fills (on top of friction
+       *  half-spread). Models book depth consumed by a market order. Default 0.
+       *  Conservative starting value: 0.002 ($0.02/contract for a 10-lot). */
+      slSlipPerContract?: number;
+      /** Absolute cap on total SL slippage dollars. Prevents a 1000-contract
+       *  backtest from subtracting $20/option. Default 0.50. */
+      slSlipMax?: number;
+      /** Additional $ per contract added to entry fills (on top of friction
+       *  half-spread). Models the ask side walking up when a market buy sweeps
+       *  the book. Default 0. Conservative: 0.002 ($0.02/contract for a 10-lot). */
+      entrySlipPerContract?: number;
+      /** Absolute cap on total entry slippage dollars. Default 0.50. */
+      entrySlipMax?: number;
+      /** Multiplier applied to the bar's observed bid-ask spread when pricing
+       *  SL fills. Models wider spreads meaning worse stop-out prices.
+       *  Effective extra slip = spread * slSpreadFactor (per contract-agnostic,
+       *  dollar-per-option). Default 0 (disabled). Recommended: 0.5. */
+      slSpreadFactor?: number;
+      /** Additional $ penalty applied to SL fills during the last
+       *  `slEodWindowMin` minutes before `risk.cutoffTimeET`. Models the
+       *  terminal-hour liquidity drought on 0DTE SPX options. Default 0. */
+      slEodPenalty?: number;
+      /** Window in minutes before cutoff during which `slEodPenalty` applies.
+       *  Default 15. Only relevant when slEodPenalty > 0. */
+      slEodWindowMin?: number;
+    };
+    /** Participation-rate liquidity gate (Phase 4).
+     *  Caps fills to barVolume × participationRate. Trades where the capped qty
+     *  would fall below minContracts are skipped entirely.
+     *  undefined = no cap (old behavior). */
+    participationRate?: number;
+    /** Minimum contracts required to enter a trade after the liquidity cap.
+     *  If capped qty < minContracts, the trade is skipped. Default 1. */
+    minContracts?: number;
+    /** Bid-ask spread model for friction cost estimation.
+     *
+     *  'flat'   — constant $0.05 half-spread for all contracts (legacy default).
+     *  'scaled' — half-spread scales with option price:
+     *             halfSpread = max(spreadFloor, optionPrice × spreadPct)
+     *             Models the real-world observation that ITM/expensive options
+     *             have wider spreads while cheap OTM options stay at the minimum.
+     *
+     *  Default: 'flat' (backward compatible). New configs should use 'scaled'. */
+    spreadModel?: {
+      /** 'flat' = constant half-spread, 'scaled' = price-proportional. Default 'flat'. */
+      mode: 'flat' | 'scaled';
+      /** Minimum half-spread in dollars. Default $0.05. */
+      spreadFloor?: number;
+      /** Fraction of option price used as half-spread in 'scaled' mode.
+       *  Default 0.01 (1%). A $15 ITM option gets $0.15 half-spread;
+       *  a $2 OTM option gets $0.05 (floor). */
+      spreadPct?: number;
+    };
   };
 
   narrative: {
@@ -258,13 +371,13 @@ export interface Config {
   /** Execution target — controls which symbol/account orders are placed against.
    *  If omitted, defaults to SPX options on the primary TRADIER_ACCOUNT_ID. */
   execution?: {
-    /** Root symbol for order placement: 'SPX' (default), 'XSP', 'SPY' */
+    /** Root symbol for order placement: 'SPX' (default) */
     symbol: string;
-    /** Option symbol prefix: 'SPXW' (default), 'XSP', 'SPY' */
+    /** Option symbol prefix: 'SPXW' (default) */
     optionPrefix: string;
-    /** Strike divisor relative to SPX: 1 for SPX, 10 for XSP, ~10 for SPY */
+    /** Strike divisor relative to SPX: 1 for SPX */
     strikeDivisor: number;
-    /** Strike interval in the target product: 5 for SPX, 1 for XSP/SPY */
+    /** Strike interval in the target product: 5 for SPX */
     strikeInterval: number;
     /** Tradier account ID override (for multi-account setups) */
     accountId?: string;
@@ -275,6 +388,33 @@ export interface Config {
     /** Skip OTOCO bracket orders — use simple market entry, agent monitors exits */
     disableBracketOrders?: boolean;
   };
+
+  /** Basket mode — when enabled, this config describes a multi-strike strategy.
+   *  Each member runs as an isolated single-strike replay; results aggregate
+   *  under a composite configId `${id}:_basket`. Derive live single-strike
+   *  configs via `scripts/derive-live-from-basket.ts`. */
+  basket?: {
+    enabled: boolean;
+    members: BasketMember[];
+  };
+}
+
+// ── Basket Member (replay-time fan-out unit) ─────────────────────────────────
+
+export interface BasketMember {
+  /** Short identifier for this member — used in derived configIds and labels.
+   *  Examples: 'itm10', 'itm5', 'atm', 'otm5', 'otm10'. */
+  id: string;
+  /** Strike offset from ATM in $.
+   *    0  = ATM
+   *   +5  = OTM5  (call strike > SPX, put strike < SPX)
+   *   -5  = ITM5  (call strike < SPX, put strike > SPX)
+   *   +10 = OTM10, -10 = ITM10, etc. */
+  strikeOffset: number;
+  /** Optional per-member overrides — deep-merged onto the base config before
+   *  the replay runs. Typical use: tighten `sizing.sizingValue` for illiquid
+   *  wings (e.g., OTM10 at 8% instead of the shared 11%). */
+  overrides?: Partial<Config>;
 }
 
 // ── Model Registry (models table) ──────────────────────────────────────────

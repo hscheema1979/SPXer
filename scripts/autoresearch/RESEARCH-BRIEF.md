@@ -7,7 +7,7 @@ Increase 22-day backtest profitability (win rate, Sharpe ratio, total P&L) by fi
 - **Config**: DEFAULT_CONFIG (src/replay/config.ts)
 - **22-day backtest**: ~40% win rate, negative P&L
 - **Live data (3 days)**: 100% win rate, +$23,887 — proves the logic works when data is rich
-- **Gap**: Polygon historical data has thinner options coverage than live Tradier
+- **Gap**: Historical data quality — Polygon was the former options source (thin volume/trade detail). As of 2026-04-20, options historical is sourced from ThetaData OPRA aggregation (see `scripts/backfill/README.md`), which matches what the live ThetaData WS stream collects. Replay parity with live is materially improved. Replays still use deterministic 1m bars regardless of source.
 
 ## System Context
 

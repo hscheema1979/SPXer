@@ -2,50 +2,387 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#0a0a0f">
 <title>SPXer Config Leaderboard</title>
 <style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { background: #0a0a0f; color: #e0e0e0; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 13px; }
+  /* ───────── shadcn-style design tokens (dark) ───────── */
+  :root {
+    --background: #0a0a0f;
+    --foreground: #e0e0e0;
+    --muted: #888;
+    --muted-foreground: #555;
+    --card: #111118;
+    --card-elevated: #0d0d14;
+    --border: #1a1a24;
+    --border-strong: #222;
+    --input: #1a1a24;
+    --primary: #8b8bff;
+    --primary-soft: #a78bfa;
+    --success: #10b981;
+    --destructive: #f43f5e;
+    --info: #3b82f6;
+    --warning: #f59e0b;
+    --radius: 8px;
+    --radius-sm: 6px;
+    --font-sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", "Fira Code", Consolas, monospace;
+  }
 
-  .header { display: flex; align-items: center; gap: 16px; padding: 12px 16px; background: #111118; border-bottom: 1px solid #222; }
-  .header h1 { font-size: 15px; color: #8b8bff; font-weight: 600; }
-  .header a { color: #666; text-decoration: none; font-size: 12px; }
-  .header a:hover { color: #8b8bff; }
-  .stats { margin-left: auto; display: flex; gap: 16px; font-size: 12px; color: #888; }
-  .stats .num { color: #a78bfa; font-weight: 600; }
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    background: var(--background);
+    color: var(--foreground);
+    font-family: var(--font-sans);
+    font-size: 13px;
+    line-height: 1.45;
+    min-height: 100dvh;
+    -webkit-font-smoothing: antialiased;
+  }
 
-  /* ── Filter bar ── */
-  .filters { display: flex; gap: 6px; padding: 10px 16px; background: #0d0d14; border-bottom: 1px solid #1a1a24; align-items: center; flex-wrap: wrap; }
-  .filter-group { display: flex; align-items: center; gap: 4px; }
-  .filter-group label { font-size: 10px; color: #555; text-transform: uppercase; letter-spacing: 0.5px; white-space: nowrap; }
-  .filter-group select { background: #1a1a24; color: #e0e0e0; border: 1px solid #333; padding: 3px 6px; border-radius: 3px; font-family: inherit; font-size: 11px; cursor: pointer; }
-  .filter-group select:focus { border-color: #8b8bff; outline: none; }
-  .filter-group select.active { border-color: #8b8bff; color: #8b8bff; }
-  .filter-sep { width: 1px; height: 20px; background: #222; margin: 0 4px; }
-  .filter-reset { background: none; border: 1px solid #333; color: #666; padding: 3px 10px; border-radius: 3px; font-family: inherit; font-size: 10px; cursor: pointer; }
-  .filter-reset:hover { color: #f43f5e; border-color: #f43f5e; }
-  .refresh-btn { background: none; border: 1px solid #333; color: #666; padding: 3px 10px; border-radius: 3px; font-family: inherit; font-size: 10px; cursor: pointer; display: flex; align-items: center; gap: 4px; }
-  .refresh-btn:hover { color: #10b981; border-color: #10b981; }
-  .refresh-btn.refreshing { color: #8b8bff; border-color: #8b8bff; }
-  .refresh-btn.refreshing .refresh-icon { animation: spin 0.6s linear infinite; }
-  .refresh-badge { background: #10b981; color: #0a0a0f; font-size: 9px; font-weight: 700; padding: 0 4px; border-radius: 6px; min-width: 14px; text-align: center; }
-  .filter-count { font-size: 11px; color: #555; margin-left: auto; }
+  /* ───────── Nav bar ───────── */
+  .nav-bar {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    padding: 0 12px;
+    background: var(--card-elevated);
+    border-bottom: 1px solid var(--border);
+    font-size: 12px;
+    overflow-x: auto;
+    white-space: nowrap;
+    -webkit-overflow-scrolling: touch;
+  }
+  .nav-bar::-webkit-scrollbar { height: 0; display: none; }
+  .nav-bar a {
+    color: var(--muted-foreground);
+    text-decoration: none;
+    padding: 10px 14px;
+    transition: color 0.15s, border-color 0.15s;
+    border-bottom: 2px solid transparent;
+    flex-shrink: 0;
+  }
+  .nav-bar a:hover { color: var(--primary-soft); }
+  .nav-bar a.active { color: var(--primary); border-bottom-color: var(--primary); }
+  .nav-brand {
+    color: var(--primary) !important;
+    font-weight: 700;
+    font-size: 13px;
+    padding-right: 16px !important;
+    border: none !important;
+    cursor: default;
+    letter-spacing: -0.01em;
+  }
+  @media (min-width: 640px) {
+    .nav-bar { padding: 0 16px; }
+    .nav-brand { padding-right: 20px !important; }
+  }
 
-  /* ── Sort controls ── */
-  .sort-bar { display: flex; gap: 8px; padding: 6px 16px; background: #0a0a0f; border-bottom: 1px solid #1a1a24; align-items: center; }
-  .sort-bar label { font-size: 10px; color: #555; }
-  .sort-btn { background: #1a1a24; color: #888; border: 1px solid #222; padding: 3px 10px; border-radius: 3px; font-size: 11px; cursor: pointer; font-family: inherit; }
-  .sort-btn:hover { border-color: #444; color: #e0e0e0; }
-  .sort-btn.active { border-color: #8b8bff; color: #8b8bff; }
+  /* ───────── Header (stats + refresh) ───────── */
+  .header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    background: var(--card);
+    border-bottom: 1px solid var(--border-strong);
+  }
+  .header h1 { display: none; }
+  .stats {
+    margin-left: auto;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 16px;
+    font-size: 11px;
+    color: var(--muted);
+  }
+  .stats .num { color: var(--primary-soft); font-weight: 600; font-family: var(--font-mono); }
+  @media (min-width: 640px) {
+    .header { padding: 12px 16px; gap: 16px; }
+    .stats { font-size: 12px; }
+  }
 
-  /* ── Table ── */
-  .table-wrap { overflow-x: auto; max-height: calc(100vh - 170px); overflow-y: auto; position: relative; }
+  /* ───────── Filter bar ───────── */
+  .filters {
+    display: flex;
+    gap: 8px;
+    padding: 10px 12px;
+    background: var(--card-elevated);
+    border-bottom: 1px solid var(--border);
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  .filter-group { display: flex; align-items: center; gap: 6px; }
+  .filter-group label {
+    font-size: 10px;
+    color: var(--muted-foreground);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    white-space: nowrap;
+  }
+  .filter-group select,
+  .sort-bar select {
+    background: var(--input);
+    color: var(--foreground);
+    border: 1px solid var(--border-strong);
+    padding: 6px 8px;
+    border-radius: var(--radius-sm);
+    font-family: inherit;
+    font-size: 12px;
+    cursor: pointer;
+    min-height: 32px;
+    touch-action: manipulation;
+  }
+  .filter-group select:focus,
+  .sort-bar select:focus { border-color: var(--primary); outline: none; box-shadow: 0 0 0 2px rgba(139,139,255,.18); }
+  .filter-group select.active { border-color: var(--primary); color: var(--primary); }
 
-  /* ── Loading overlay ── */
+  /* ───────── Multi-select dropdown ───────── */
+  .multi-select {
+    position: relative;
+    display: inline-block;
+  }
+  .multi-select-btn {
+    background: var(--input);
+    color: var(--foreground);
+    border: 1px solid var(--border-strong);
+    padding: 6px 24px 6px 8px;
+    border-radius: var(--radius-sm);
+    font-family: inherit;
+    font-size: 12px;
+    cursor: pointer;
+    min-height: 32px;
+    white-space: nowrap;
+    position: relative;
+    touch-action: manipulation;
+    transition: border-color 0.15s;
+  }
+  .multi-select-btn::after {
+    content: '▾';
+    position: absolute;
+    right: 6px;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 10px;
+    color: var(--muted);
+  }
+  .multi-select-btn:hover { border-color: var(--muted); }
+  .multi-select-btn.active { border-color: var(--primary); color: var(--primary); }
+  .multi-select-btn .ms-count {
+    background: var(--primary);
+    color: var(--background);
+    font-size: 9px;
+    font-weight: 700;
+    padding: 0 5px;
+    border-radius: 999px;
+    margin-left: 4px;
+  }
+  .multi-select-dropdown {
+    display: none;
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    z-index: 100;
+    background: var(--card);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    padding: 4px 0;
+    min-width: 140px;
+    max-height: 260px;
+    overflow-y: auto;
+    box-shadow: 0 8px 24px rgba(0,0,0,.5);
+  }
+  .multi-select-dropdown.open { display: block; }
+  .multi-select-dropdown label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 10px;
+    cursor: pointer;
+    font-size: 12px;
+    color: var(--foreground);
+    transition: background 0.1s;
+    text-transform: none;
+    letter-spacing: 0;
+    white-space: nowrap;
+  }
+  .multi-select-dropdown label:hover { background: rgba(139,139,255,.08); }
+  .multi-select-dropdown input[type="checkbox"] {
+    accent-color: var(--primary);
+    width: 14px;
+    height: 14px;
+    cursor: pointer;
+  }
+  .multi-select-dropdown .ms-divider {
+    height: 1px;
+    background: var(--border);
+    margin: 4px 0;
+  }
+  .multi-select-dropdown .ms-actions {
+    display: flex;
+    gap: 4px;
+    padding: 4px 8px;
+  }
+  .multi-select-dropdown .ms-actions button {
+    background: transparent;
+    border: none;
+    color: var(--primary);
+    font-size: 10px;
+    cursor: pointer;
+    padding: 2px 6px;
+    border-radius: 3px;
+  }
+  .multi-select-dropdown .ms-actions button:hover { background: rgba(139,139,255,.12); }
+
+  .filter-sep { width: 1px; height: 20px; background: var(--border-strong); margin: 0 4px; }
+  .filter-reset,
+  .refresh-btn {
+    background: transparent;
+    border: 1px solid var(--border-strong);
+    color: var(--muted);
+    padding: 6px 12px;
+    border-radius: var(--radius-sm);
+    font-family: inherit;
+    font-size: 11px;
+    font-weight: 500;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 32px;
+    transition: color 0.15s, border-color 0.15s, background-color 0.15s;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .filter-reset:hover { color: var(--destructive); border-color: var(--destructive); }
+  .refresh-btn:hover { color: var(--success); border-color: var(--success); }
+  .refresh-btn.refreshing { color: var(--primary); border-color: var(--primary); }
+  .refresh-btn.refreshing .refresh-icon { animation: spin 0.6s linear infinite; display: inline-block; }
+  .refresh-badge { background: var(--success); color: var(--background); font-size: 9px; font-weight: 700; padding: 0 5px; border-radius: 999px; min-width: 14px; text-align: center; }
+  .filter-count { font-size: 11px; color: var(--muted-foreground); margin-left: auto; }
+
+  /* ───────── Symbol quick-filter pills (prominent row above generic filters) ───────── */
+  .sym-filter-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    background: var(--background);
+    border-bottom: 1px solid var(--border);
+  }
+  .sym-filter-bar > label {
+    font-size: 11px;
+    color: var(--muted-foreground);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-right: 4px;
+  }
+  .sym-pill {
+    font-family: var(--font-mono, monospace);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    padding: 5px 12px;
+    border-radius: 999px;
+    border: 1px solid var(--border-strong);
+    background: transparent;
+    color: var(--muted-foreground);
+    cursor: pointer;
+    transition: color 0.15s, border-color 0.15s, background-color 0.15s;
+  }
+  .sym-pill:hover { color: var(--foreground); border-color: var(--foreground); }
+  .sym-pill.active.all {
+    background: rgba(255,255,255,0.08);
+    color: var(--foreground);
+    border-color: var(--foreground);
+  }
+  .sym-pill.active.spx {
+    background: rgba(139,139,255,0.18);
+    color: #8b8bff;
+    border-color: #8b8bff;
+  }
+  .sym-pill.active.ndx {
+    background: rgba(251,146,60,0.18);
+    color: #fb923c;
+    border-color: #fb923c;
+  }
+  .sym-pill.active.baskets {
+    background: rgba(139,92,246,0.18);
+    color: #8b5cf6;
+    border-color: #8b5cf6;
+  }
+  .sym-pill.active.singles {
+    background: rgba(34,197,94,0.18);
+    color: #22c55e;
+    border-color: #22c55e;
+  }
+  .sym-pill-count {
+    font-size: 9px;
+    font-weight: 600;
+    color: var(--muted-foreground);
+    margin-left: 6px;
+    opacity: 0.7;
+  }
+  .sym-pill.active .sym-pill-count { opacity: 1; }
+
+  /* ───────── Sort controls ───────── */
+  .sort-bar {
+    display: flex;
+    gap: 8px;
+    padding: 8px 12px;
+    background: var(--background);
+    border-bottom: 1px solid var(--border);
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  .sort-bar > label {
+    font-size: 10px;
+    color: var(--muted-foreground);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+  .sort-btn {
+    background: var(--input);
+    color: var(--muted);
+    border: 1px solid var(--border);
+    padding: 6px 12px;
+    border-radius: var(--radius-sm);
+    font-size: 11px;
+    font-weight: 500;
+    cursor: pointer;
+    font-family: inherit;
+    min-height: 32px;
+    transition: color 0.15s, border-color 0.15s, background-color 0.15s;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .sort-btn:hover { border-color: #444; color: var(--foreground); }
+  .sort-btn.active {
+    border-color: var(--primary);
+    color: var(--primary);
+    background: rgba(139,139,255,0.08);
+  }
+
+  /* ───────── Table ───────── */
+  .table-wrap {
+    overflow-x: auto;
+    overflow-y: auto;
+    max-height: calc(100dvh - 220px);
+    position: relative;
+    -webkit-overflow-scrolling: touch;
+  }
+  @media (min-width: 768px) {
+    .table-wrap { max-height: calc(100dvh - 180px); }
+  }
+
+  /* ───────── Loading overlay ───────── */
   .loading-overlay {
     position: absolute; inset: 0; z-index: 10;
     background: rgba(10, 10, 15, 0.75);
+    backdrop-filter: blur(2px);
     display: flex; align-items: center; justify-content: center;
     opacity: 0; pointer-events: none;
     transition: opacity 0.15s ease;
@@ -53,74 +390,285 @@
   .loading-overlay.active { opacity: 1; pointer-events: auto; }
   .spinner {
     width: 28px; height: 28px;
-    border: 3px solid #222;
-    border-top-color: #8b8bff;
+    border: 3px solid var(--border-strong);
+    border-top-color: var(--primary);
     border-radius: 50%;
     animation: spin 0.6s linear infinite;
   }
-  .loading-label { color: #8b8bff; font-size: 12px; margin-left: 10px; }
+  .loading-label { color: var(--primary); font-size: 12px; margin-left: 10px; }
   @keyframes spin { to { transform: rotate(360deg); } }
-  table { width: 100%; border-collapse: collapse; min-width: 1100px; }
-  th { position: sticky; top: 0; z-index: 2; background: #111118; text-align: left; padding: 7px 8px; color: #555; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 2px solid #222; cursor: pointer; white-space: nowrap; user-select: none; }
-  th:hover { color: #8b8bff; }
-  th.sorted { color: #8b8bff; }
-  th .arrow { font-size: 8px; margin-left: 2px; }
-  td { padding: 5px 8px; border-bottom: 1px solid #111118; font-size: 12px; white-space: nowrap; }
-  tr:hover td { background: #1a1a28; }
 
-  .rank { width: 32px; text-align: center; }
+  /* All 15 columns stay visible at every width; the .table-wrap scrolls
+     horizontally on phones/tablets so users can see best/worst/avg day,
+     green days, sharpe, etc. without losing them. */
+  table { width: 100%; border-collapse: collapse; min-width: 1100px; font-family: var(--font-mono); }
+  th {
+    position: sticky; top: 0; z-index: 2;
+    background: var(--card);
+    text-align: left;
+    padding: 10px 8px;
+    color: var(--muted-foreground);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    border-bottom: 1px solid var(--border-strong);
+    cursor: pointer;
+    white-space: nowrap;
+    user-select: none;
+    font-family: var(--font-sans);
+    font-weight: 600;
+  }
+  th:hover { color: var(--primary); }
+  th.sorted { color: var(--primary); }
+  th .arrow { font-size: 8px; margin-left: 2px; }
+  td {
+    padding: 8px;
+    border-bottom: 1px solid var(--border);
+    font-size: 12px;
+    white-space: nowrap;
+  }
+  tr:hover td { background: rgba(26,26,40,0.8); }
+
+  .rank { width: 36px; text-align: center; }
   .medal { font-size: 13px; }
-  .pnl-pos { color: #10b981; }
-  .pnl-neg { color: #f43f5e; }
-  .pnl-zero { color: #666; }
-  .bar { display: inline-block; height: 10px; border-radius: 1px; min-width: 1px; vertical-align: middle; margin-right: 4px; }
-  .bar-g { background: #10b981; }
-  .bar-r { background: #f43f5e; }
-  .cfg-link { color: #8b8bff; text-decoration: none; font-size: 11px; }
+  .pnl-pos { color: var(--success); }
+  .pnl-neg { color: var(--destructive); }
+  .pnl-zero { color: var(--muted-foreground); }
+  .bar { display: inline-block; height: 10px; border-radius: 2px; min-width: 1px; vertical-align: middle; margin-right: 4px; }
+  .bar-g { background: var(--success); }
+  .bar-r { background: var(--destructive); }
+  .cfg-link { color: var(--primary); text-decoration: none; font-size: 12px; font-weight: 500; }
   .cfg-link:hover { text-decoration: underline; }
-  .param { color: #666; font-size: 10px; }
+  .param { color: var(--muted-foreground); font-size: 10px; }
   .param b { color: #aaa; }
 
-  /* ── Daily expand ── */
-  .daily-row td { background: #0d0d14 !important; padding: 0 !important; }
-  .daily-wrap { padding: 8px 16px 12px 40px; }
-  .daily-wrap h3 { font-size: 11px; color: #8b8bff; margin-bottom: 6px; }
-  .daily-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 3px; }
-  .daily-card { background: #111118; border: 1px solid #1a1a24; border-radius: 3px; padding: 4px 8px; font-size: 10px; display: flex; justify-content: space-between; gap: 6px; cursor: pointer; }
+  /* ───────── Daily expand ───────── */
+  .daily-row td {
+    background: var(--card-elevated) !important;
+    padding: 0 !important;
+  }
+  .daily-wrap { padding: 12px 14px 14px; }
+  @media (min-width: 640px) { .daily-wrap { padding: 12px 20px 16px 40px; } }
+  .daily-wrap h3 {
+    font-size: 11px;
+    color: var(--primary);
+    margin-bottom: 8px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-weight: 600;
+  }
+  .daily-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    gap: 6px;
+  }
+  .daily-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 6px 10px;
+    font-size: 10px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    transition: border-color 0.15s;
+  }
   .daily-card:hover { border-color: #444; }
-  .hl td { background: #1a1a2f !important; }
+  .hl td { background: rgba(26,26,47,0.9) !important; }
 
-  .footer { padding: 8px 16px; text-align: center; color: #333; font-size: 10px; border-top: 1px solid #1a1a24; }
+  .footer {
+    padding: 10px 16px;
+    text-align: center;
+    color: var(--muted-foreground);
+    font-size: 10px;
+    border-top: 1px solid var(--border);
+  }
 
-  /* ── Delete button ── */
-  .del-btn { background: none; border: none; color: #333; cursor: pointer; font-size: 12px; padding: 2px 4px; border-radius: 3px; opacity: 0; transition: opacity 0.1s; }
-  tr:hover .del-btn { opacity: 0.6; }
-  .del-btn:hover { opacity: 1 !important; color: #f43f5e; background: #f43f5e18; }
+  /* ───────── Delete button ───────── */
+  .del-btn {
+    background: none;
+    border: none;
+    color: var(--muted-foreground);
+    cursor: pointer;
+    font-size: 14px;
+    padding: 6px 8px;
+    border-radius: var(--radius-sm);
+    opacity: 0.35;
+    transition: opacity 0.1s, color 0.1s, background-color 0.1s;
+    touch-action: manipulation;
+  }
+  tr:hover .del-btn { opacity: 0.7; }
+  .del-btn:hover { opacity: 1 !important; color: var(--destructive); background: rgba(244,63,94,0.1); }
+  @media (max-width: 767px) { .del-btn { opacity: 0.6; } }
 
-  /* ── Delete confirmation modal ── */
-  .del-modal-overlay { display: none; position: fixed; inset: 0; z-index: 100; background: rgba(0,0,0,0.6); justify-content: center; align-items: center; }
+  /* ───────── Dialog (shadcn-style) ───────── */
+  .del-modal-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 100;
+    background: rgba(0,0,0,0.65);
+    backdrop-filter: blur(4px);
+    justify-content: center;
+    align-items: center;
+    padding: 16px;
+  }
   .del-modal-overlay.active { display: flex; }
-  .del-modal { background: #111118; border: 1px solid #333; border-radius: 8px; padding: 20px 24px; min-width: 360px; max-width: 480px; }
-  .del-modal h3 { font-size: 14px; color: #f43f5e; margin-bottom: 12px; }
-  .del-modal p { font-size: 12px; color: #aaa; margin-bottom: 8px; line-height: 1.5; }
-  .del-modal .cfg-name { color: #e0e0e0; font-weight: 600; }
-  .del-modal .del-stats { color: #888; font-size: 11px; margin-bottom: 16px; }
-  .del-modal-actions { display: flex; gap: 10px; justify-content: flex-end; }
-  .del-modal-actions button { padding: 6px 16px; border-radius: 4px; font-family: inherit; font-size: 12px; cursor: pointer; }
-  .del-cancel { background: #1a1a24; color: #888; border: 1px solid #333; }
-  .del-cancel:hover { color: #e0e0e0; border-color: #555; }
-  .del-confirm { background: #f43f5e20; color: #f43f5e; border: 1px solid #f43f5e55; }
-  .del-confirm:hover { background: #f43f5e33; }
+  .del-modal {
+    background: var(--card);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius);
+    padding: 20px 22px;
+    width: 100%;
+    max-width: 480px;
+    max-height: 90dvh;
+    overflow-y: auto;
+    box-shadow: 0 20px 50px rgba(0,0,0,0.5);
+  }
+  .del-modal h3 {
+    font-size: 15px;
+    color: var(--destructive);
+    margin-bottom: 12px;
+    font-weight: 600;
+  }
+  .del-modal p {
+    font-size: 13px;
+    color: #aaa;
+    margin-bottom: 8px;
+    line-height: 1.5;
+    word-break: break-word;
+  }
+  .del-modal .cfg-name { color: var(--foreground); font-weight: 600; }
+  .del-modal .del-stats { color: var(--muted); font-size: 12px; margin-bottom: 18px; }
+  .del-modal-actions {
+    display: flex;
+    gap: 10px;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+  }
+  .del-modal-actions button {
+    padding: 8px 16px;
+    min-height: 36px;
+    border-radius: var(--radius-sm);
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    touch-action: manipulation;
+    transition: background-color 0.15s, border-color 0.15s, color 0.15s;
+  }
+  .del-cancel { background: var(--input); color: var(--muted); border: 1px solid var(--border-strong); }
+  .del-cancel:hover { color: var(--foreground); border-color: #555; }
+  .del-confirm {
+    background: rgba(244,63,94,0.12);
+    color: var(--destructive);
+    border: 1px solid rgba(244,63,94,0.4);
+  }
+  .del-confirm:hover { background: rgba(244,63,94,0.2); }
+
+  /* ───────── Set Live button ───────── */
+  .live-btn {
+    background: transparent;
+    border: 1px solid transparent;
+    color: var(--muted-foreground);
+    cursor: pointer;
+    font-size: 10px;
+    padding: 4px 8px;
+    border-radius: var(--radius-sm);
+    opacity: 0.45;
+    transition: opacity 0.1s, color 0.1s, background-color 0.1s, border-color 0.1s;
+    white-space: nowrap;
+    font-weight: 500;
+    touch-action: manipulation;
+  }
+  tr:hover .live-btn { opacity: 0.8; }
+  .live-btn:hover {
+    opacity: 1 !important;
+    color: var(--info);
+    background: rgba(59,130,246,0.1);
+    border-color: rgba(59,130,246,0.35);
+  }
+  @media (max-width: 767px) { .live-btn { opacity: 0.7; } }
+  .live-badge {
+    display: inline-block;
+    background: rgba(59,130,246,0.14);
+    color: var(--info);
+    font-size: 9px;
+    font-weight: 700;
+    padding: 2px 6px;
+    border-radius: 999px;
+    border: 1px solid rgba(59,130,246,0.3);
+    margin-left: 4px;
+    vertical-align: middle;
+    letter-spacing: 0.04em;
+  }
+  tr.is-live td { border-left: 2px solid var(--info); }
+  tr.is-live td:first-child { border-left: 2px solid var(--info); }
+
+  /* ───────── Symbol badge (SPX / NDX) ───────── */
+  .sym-badge {
+    display: inline-block;
+    font-size: 9px;
+    font-weight: 800;
+    padding: 2px 6px;
+    border-radius: 4px;
+    margin-right: 6px;
+    vertical-align: middle;
+    letter-spacing: 0.05em;
+    font-family: var(--font-mono, monospace);
+  }
+  .sym-badge.spx { background: rgba(139,139,255,0.14); color: #8b8bff; border: 1px solid rgba(139,139,255,0.35); }
+  .sym-badge.ndx { background: rgba(251,146,60,0.14); color: #fb923c; border: 1px solid rgba(251,146,60,0.35); }
+
+  /* ───────── Live indicator in header ───────── */
+  .live-indicator {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: rgba(59,130,246,0.08);
+    border: 1px solid rgba(59,130,246,0.25);
+    padding: 4px 10px;
+    border-radius: 999px;
+    font-size: 11px;
+    color: var(--info);
+  }
+  .live-indicator .dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--info);
+    box-shadow: 0 0 0 3px rgba(59,130,246,0.15);
+  }
+  .live-indicator .cfg-id { color: var(--primary); font-weight: 600; font-family: var(--font-mono); }
+
+  /* ───────── Scrollbar polish ───────── */
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 10px; }
+  ::-webkit-scrollbar-thumb:hover { background: #3a3a4a; }
 </style>
 </head>
 <body>
 
+<div class="nav-bar">
+  <span class="nav-brand">SPXer</span>
+  <a href="/replay/" data-path="/replay/">Replay</a>
+  <a href="/replay/#live" data-path="/replay/#live">Live</a>
+  <a href="/replay/sweep" data-path="/replay/sweep" class="active">🏆 Leaderboard</a>
+  <a href="/replay/backfill" data-path="/replay/backfill">Backfill</a>
+  <a href="/replay/journal" data-path="/replay/journal">📓 Journal</a>
+  <a href="/replay/account" data-path="/replay/account">💰 Account</a>
+</div>
+
 <div class="header">
-  <h1>🏆 Config Leaderboard</h1>
-  <a href="/replay/">← Replay Viewer</a>
   <button class="refresh-btn" id="refresh-btn" onclick="refreshData()" title="Refresh leaderboard (preserves filters)">
     <span class="refresh-icon">↻</span> Refresh
   </button>
+  <span class="live-indicator" id="live-indicator" style="display:none">
+    <span class="dot"></span> Live: <span class="cfg-id" id="live-cfg-id">—</span>
+  </span>
   <div class="stats">
     <span>Configs: <span class="num" id="total-count">-</span></span>
     <span>Showing: <span class="num" id="showing-count">-</span></span>
@@ -128,21 +676,34 @@
   </div>
 </div>
 
+<div class="sym-filter-bar" id="sym-filter-bar">
+  <label>Instrument</label>
+  <button class="sym-pill all active" data-sym="" onclick="setSymbolFilter('')">All<span class="sym-pill-count" id="sym-count-all"></span></button>
+  <button class="sym-pill spx"        data-sym="SPX" onclick="setSymbolFilter('SPX')">SPX<span class="sym-pill-count" id="sym-count-spx"></span></button>
+  <button class="sym-pill ndx"        data-sym="NDX" onclick="setSymbolFilter('NDX')">NDX<span class="sym-pill-count" id="sym-count-ndx"></span></button>
+  <span style="margin-left:12px;border-left:1px solid var(--border-strong);height:20px"></span>
+  <label>Type</label>
+  <button class="sym-pill all active" data-basket="" onclick="setBasketFilter('')">All<span class="sym-pill-count" id="basket-count-all"></span></button>
+  <button class="sym-pill baskets"    data-basket="baskets" onclick="setBasketFilter('baskets')">Baskets<span class="sym-pill-count" id="basket-count-baskets"></span></button>
+  <button class="sym-pill singles"    data-basket="singles" onclick="setBasketFilter('singles')">Singles<span class="sym-pill-count" id="basket-count-singles"></span></button>
+</div>
+
 <div class="filters" id="filters"></div>
 
 <div class="sort-bar">
   <label>Sort</label>
-  <button class="sort-btn active" data-sort="compositeScore">Score</button>
-  <button class="sort-btn" data-sort="totalPnl">P&L</button>
-  <button class="sort-btn" data-sort="sharpe">Sharpe</button>
+  <button class="sort-btn active" data-sort="edge">Edge</button>
+  <button class="sort-btn" data-sort="rMultiple">R-Mult</button>
+  <button class="sort-btn" data-sort="ev">EV%</button>
   <button class="sort-btn" data-sort="winRate">WR%</button>
+  <button class="sort-btn" data-sort="totalPnl">P&L</button>
   <button class="sort-btn" data-sort="avgDailyPnl">Avg/Day</button>
   <button class="sort-btn" data-sort="worstDay">Worst ↑</button>
   <button class="sort-btn" data-sort="profitDays">Green Days</button>
   <button class="sort-btn" data-sort="trades">Trades</button>
   <span style="margin-left:auto"></span>
   <label>Max Entry $</label>
-  <select id="max-entry-price" onchange="loadData()" style="background:#1a1a24;color:#e0e0e0;border:1px solid #333;padding:3px 6px;border-radius:3px;font-family:inherit;font-size:11px">
+  <select id="max-entry-price" onchange="loadData()">
     <option value="0" selected>No limit</option>
     <option value="5">≤ $5</option>
     <option value="8">≤ $8</option>
@@ -153,7 +714,7 @@
     <option value="50">≤ $50</option>
   </select>
   <label>Max Concurrent</label>
-  <select id="max-concurrent" onchange="loadData()" style="background:#1a1a24;color:#e0e0e0;border:1px solid #333;padding:3px 6px;border-radius:3px;font-family:inherit;font-size:11px">
+  <select id="max-concurrent" onchange="loadData()">
     <option value="0" selected>No limit</option>
     <option value="1">1</option>
     <option value="2">2</option>
@@ -162,7 +723,7 @@
     <option value="10">10</option>
   </select>
   <label>Max Trades/Day</label>
-  <select id="max-trades-day" onchange="loadData()" style="background:#1a1a24;color:#e0e0e0;border:1px solid #333;padding:3px 6px;border-radius:3px;font-family:inherit;font-size:11px">
+  <select id="max-trades-day" onchange="loadData()">
     <option value="0" selected>No limit</option>
     <option value="3">3</option>
     <option value="5">5</option>
@@ -172,7 +733,7 @@
     <option value="30">30</option>
   </select>
   <label>Min Days</label>
-  <select id="min-days" onchange="loadData()" style="background:#1a1a24;color:#e0e0e0;border:1px solid #333;padding:3px 6px;border-radius:3px;font-family:inherit;font-size:11px">
+  <select id="min-days" onchange="loadData()">
     <option value="2">2+</option>
     <option value="10">10+</option>
     <option value="20">20+</option>
@@ -201,19 +762,19 @@
   <thead><tr>
     <th class="rank">#</th>
     <th>Config</th>
-    <th data-col="compositeScore" class="sorted">Score<span class="arrow">▼</span></th>
-    <th data-col="trades">Trades</th>
+    <th data-col="edge" class="sorted" title="Edge = WinRate − Breakeven WR">Edge<span class="arrow">▼</span></th>
+    <th data-col="rMultiple" title="R-Multiple = Avg Win% / |Avg Loss%|">R-Mult</th>
+    <th data-col="ev" title="Expected Value per trade (%)">EV%</th>
     <th data-col="winRate">WR%</th>
+    <th data-col="breakEvenWR" title="Win rate needed to break even">BE WR%</th>
+    <th data-col="trades">Trades</th>
     <th data-col="totalPnl">P&L</th>
     <th data-col="avgDailyPnl">Avg/Day</th>
     <th data-col="worstDay">Worst</th>
-    <th data-col="bestDay">Best</th>
-    <th data-col="sharpe">Sharpe</th>
     <th data-col="profitDays">Green</th>
-    <th data-col="avgEntryPrice">Avg Entry$</th>
     <th data-col="days">Days</th>
     <th>P&L</th>
-    <th style="width:30px"></th>
+    <th style="width:90px"></th>
   </tr></thead>
   <tbody id="tbody"><tr><td colspan="15" style="text-align:center;padding:40px;color:#444">Loading...</td></tr></tbody>
 </table>
@@ -234,15 +795,41 @@
 </div>
 
 <script>
-const API = (document.querySelector('meta[name="base-path"]')?.content || '') + '/replay/api';
+const _BASE = (document.querySelector('meta[name="base-path"]')?.content || '');
+const API = _BASE + '/replay/api';
+
+// Fix nav links for reverse proxy base path
+if (_BASE) {
+  document.querySelectorAll('.nav-bar a[data-path]').forEach(a => {
+    a.href = _BASE + a.dataset.path;
+  });
+}
+
 let allRows = [];
 let filteredRows = [];
-let currentSort = 'compositeScore';
+let currentSort = 'edge';
 let currentDir = 'DESC';
 let filters = {};
+let liveConfigId = null; // currently active live config (single-strike)
+let liveBasketId = null; // currently deployed live basket (if any)
+
+// Compact currency formatter: abbreviates large amounts (>= $10K) as $K/M/B;
+// smaller amounts get thousands separators. Handles negatives.
+function fmtMoney(n) {
+  if (n == null || isNaN(n)) return '$0';
+  const sign = n < 0 ? '-' : '';
+  const abs = Math.abs(n);
+  if (abs >= 1e9) return sign + '$' + (abs / 1e9).toFixed(2) + 'B';
+  if (abs >= 1e6) return sign + '$' + (abs / 1e6).toFixed(2) + 'M';
+  if (abs >= 1e4) return sign + '$' + (abs / 1e3).toFixed(1) + 'K';
+  return sign + '$' + Math.round(abs).toLocaleString();
+}
 
 // ── Filter definitions — extracted from data ──
 const FILTER_KEYS = [
+  { key: 'symbol',       label: 'Symbol' },
+  { key: 'strikeOffset', label: 'Strike', multi: true },
+  { key: 'maxContracts', label: 'Max Contracts', multi: true },
   { key: 'hmaFast',      label: 'HMA Fast' },
   { key: 'hmaSlow',      label: 'HMA Slow' },
   { key: 'dirTf',        label: 'Dir TF' },
@@ -259,6 +846,7 @@ const FILTER_KEYS = [
   { key: 'regimeEnabled',label: 'Regime' },
   { key: 'scannersEnabled',label:'Scanners' },
 ];
+let multiFilters = {}; // key → Set of selected values
 
 function buildFilters() {
   // Collect unique values per param
@@ -277,6 +865,11 @@ function buildFilters() {
 
   for (const f of FILTER_KEYS) {
     const vals = [...valuesMap[f.key]].sort((a, b) => {
+      // Sort strike offsets: ATM first, then OTM1, OTM2..., then ITM
+      if (f.key === 'strikeOffset') {
+        const order = v => v === 'ATM' ? 0 : v === 'OTM' ? 1 : v.startsWith('OTM') ? 1 + parseInt(v.slice(3)||'0') * 0.01 : 100;
+        return order(a) - order(b);
+      }
       const na = Number(a), nb = Number(b);
       if (!isNaN(na) && !isNaN(nb)) return na - nb;
       return a.localeCompare(b);
@@ -284,22 +877,54 @@ function buildFilters() {
     // Skip filters with only 1 unique value (not useful)
     if (vals.length <= 1) continue;
 
-    html += `<div class="filter-group">
-      <label>${f.label}</label>
-      <select data-filter="${f.key}" onchange="onFilter()">
-        <option value="">All</option>
-        ${vals.map(v => {
-          const display = v === 'true' ? '✓' : v === 'false' ? '✗' : v;
-          return `<option value="${v}">${display}</option>`;
-        }).join('')}
-      </select>
-    </div>`;
+    if (f.multi) {
+      const selected = multiFilters[f.key] || new Set();
+      const count = selected.size;
+      const btnLabel = count === 0 ? 'All' : count === 1 ? [...selected][0] : `${count} selected`;
+      html += `<div class="filter-group">
+        <label>${f.label}</label>
+        <div class="multi-select" data-ms-key="${f.key}">
+          <button type="button" class="multi-select-btn${count > 0 ? ' active' : ''}" onclick="toggleMultiDropdown('${f.key}')">
+            ${btnLabel}${count > 0 ? `<span class="ms-count">${count}</span>` : ''}
+          </button>
+          <div class="multi-select-dropdown" id="ms-dd-${f.key}">
+            <div class="ms-actions">
+              <button onclick="msSelectAll('${f.key}')">All</button>
+              <button onclick="msClearAll('${f.key}')">Clear</button>
+            </div>
+            <div class="ms-divider"></div>
+            ${vals.map(v => {
+              const display = v === 'true' ? '✓' : v === 'false' ? '✗' : v;
+              const checked = selected.has(v) ? 'checked' : '';
+              return `<label><input type="checkbox" value="${v}" ${checked} onchange="onMultiFilter('${f.key}', this)">${display}</label>`;
+            }).join('')}
+          </div>
+        </div>
+      </div>`;
+    } else {
+      html += `<div class="filter-group">
+        <label>${f.label}</label>
+        <select data-filter="${f.key}" onchange="onFilter()">
+          <option value="">All</option>
+          ${vals.map(v => {
+            const display = v === 'true' ? '✓' : v === 'false' ? '✗' : v;
+            return `<option value="${v}">${display}</option>`;
+          }).join('')}
+        </select>
+      </div>`;
+    }
   }
 
   html += `<div class="filter-sep"></div>`;
   html += `<button class="filter-reset" onclick="resetFilters()">Reset</button>`;
   html += `<span class="filter-count" id="filter-count"></span>`;
   container.innerHTML = html;
+
+  // Restore single-select filter values
+  for (const [key, val] of Object.entries(filters)) {
+    const sel = document.querySelector(`[data-filter="${key}"]`);
+    if (sel) { sel.value = val; sel.classList.toggle('active', !!val); }
+  }
 }
 
 function onFilter() {
@@ -310,30 +935,185 @@ function onFilter() {
     if (val) filters[key] = val;
     sel.classList.toggle('active', !!val);
   });
+  syncSymbolPillsFromFilters();
   applyFilters();
 }
+
+// ── Multi-select filter helpers ──
+function toggleMultiDropdown(key) {
+  // Close all other dropdowns first
+  document.querySelectorAll('.multi-select-dropdown.open').forEach(dd => {
+    if (dd.id !== `ms-dd-${key}`) dd.classList.remove('open');
+  });
+  const dd = document.getElementById(`ms-dd-${key}`);
+  dd.classList.toggle('open');
+}
+
+function onMultiFilter(key, checkbox) {
+  if (!multiFilters[key]) multiFilters[key] = new Set();
+  if (checkbox.checked) {
+    multiFilters[key].add(checkbox.value);
+  } else {
+    multiFilters[key].delete(checkbox.value);
+  }
+  if (multiFilters[key].size === 0) delete multiFilters[key];
+  updateMultiSelectBtn(key);
+  applyFilters();
+}
+
+function msSelectAll(key) {
+  const dd = document.getElementById(`ms-dd-${key}`);
+  dd.querySelectorAll('input[type="checkbox"]').forEach(cb => { cb.checked = false; });
+  delete multiFilters[key];
+  updateMultiSelectBtn(key);
+  applyFilters();
+}
+
+function msClearAll(key) {
+  const dd = document.getElementById(`ms-dd-${key}`);
+  dd.querySelectorAll('input[type="checkbox"]').forEach(cb => { cb.checked = false; });
+  delete multiFilters[key];
+  updateMultiSelectBtn(key);
+  applyFilters();
+}
+
+function updateMultiSelectBtn(key) {
+  const container = document.querySelector(`[data-ms-key="${key}"]`);
+  if (!container) return;
+  const btn = container.querySelector('.multi-select-btn');
+  const selected = multiFilters[key];
+  const count = selected ? selected.size : 0;
+  if (count === 0) {
+    btn.innerHTML = 'All';
+    btn.classList.remove('active');
+  } else if (count === 1) {
+    const val = [...selected][0];
+    btn.innerHTML = `${val}<span class="ms-count">1</span>`;
+    btn.classList.add('active');
+  } else {
+    btn.innerHTML = `${count} selected<span class="ms-count">${count}</span>`;
+    btn.classList.add('active');
+  }
+}
+
+// Close multi-select dropdowns when clicking outside
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('.multi-select')) {
+    document.querySelectorAll('.multi-select-dropdown.open').forEach(dd => dd.classList.remove('open'));
+  }
+});
 
 function resetFilters() {
   document.querySelectorAll('[data-filter]').forEach(sel => {
     sel.value = '';
     sel.classList.remove('active');
   });
+  // Reset multi-select checkboxes and buttons
+  document.querySelectorAll('.multi-select-dropdown input[type="checkbox"]').forEach(cb => { cb.checked = false; });
+  for (const key of Object.keys(multiFilters)) updateMultiSelectBtn(key);
   filters = {};
+  multiFilters = {};
+  // Update all multi-select buttons to show "All"
+  document.querySelectorAll('[data-ms-key]').forEach(ms => {
+    const btn = ms.querySelector('.multi-select-btn');
+    if (btn) { btn.innerHTML = 'All'; btn.classList.remove('active'); }
+  });
+  basketFilter = '';
+  syncSymbolPillsFromFilters();
+  document.querySelectorAll('#sym-filter-bar [data-basket]').forEach(btn => {
+    btn.classList.toggle('active', !btn.dataset.basket);
+  });
   applyFilters();
+}
+
+// ── Symbol quick-filter pills (SPX / NDX / All) ──
+// These are the prominent primary filter — mirror state into the generic
+// sidebar's `symbol` dropdown so both stay in sync.
+function setSymbolFilter(sym) {
+  if (sym) filters.symbol = sym;
+  else delete filters.symbol;
+  // Sync sidebar select if it's rendered
+  const sel = document.querySelector('[data-filter="symbol"]');
+  if (sel) {
+    sel.value = sym || '';
+    sel.classList.toggle('active', !!sym);
+  }
+  syncSymbolPillsFromFilters();
+  applyFilters();
+}
+
+function syncSymbolPillsFromFilters() {
+  const active = filters.symbol || '';
+  document.querySelectorAll('#sym-filter-bar [data-sym]').forEach(btn => {
+    btn.classList.toggle('active', (btn.dataset.sym || '') === active);
+  });
+}
+
+// ── Basket quick-filter pills (All / Baskets / Singles) ──
+let basketFilter = '';
+
+function setBasketFilter(val) {
+  basketFilter = val;
+  document.querySelectorAll('#sym-filter-bar [data-basket]').forEach(btn => {
+    btn.classList.toggle('active', (btn.dataset.basket || '') === val);
+  });
+  applyFilters();
+}
+
+function updateBasketPillCounts() {
+  if (!Array.isArray(allRows)) return;
+  let baskets = 0, singles = 0, members = 0;
+  for (const r of allRows) {
+    if (r.isBasketMember) members++;
+    else if (r.isBasket) baskets++;
+    else singles++;
+  }
+  const nonMembers = baskets + singles;
+  const el = (id) => document.getElementById(id);
+  if (el('basket-count-all')) el('basket-count-all').textContent = ` (${nonMembers})`;
+  if (el('basket-count-baskets')) el('basket-count-baskets').textContent = ` (${baskets})`;
+  if (el('basket-count-singles')) el('basket-count-singles').textContent = ` (${singles})`;
+}
+
+function updateSymbolPillCounts() {
+  if (!Array.isArray(allRows)) return;
+  const counts = { '': allRows.length, SPX: 0, NDX: 0 };
+  for (const r of allRows) {
+    const s = (r.params?.symbol || (r.configId?.startsWith('ndx-') ? 'NDX' : 'SPX')).toUpperCase();
+    if (counts[s] !== undefined) counts[s]++;
+  }
+  const all = document.getElementById('sym-count-all');
+  const spx = document.getElementById('sym-count-spx');
+  const ndx = document.getElementById('sym-count-ndx');
+  if (all) all.textContent = ` (${counts['']})`;
+  if (spx) spx.textContent = ` (${counts.SPX})`;
+  if (ndx) ndx.textContent = ` (${counts.NDX})`;
 }
 
 function applyFilters() {
   filteredRows = allRows.filter(row => {
+    // Always hide basket members (individual legs) unless viewing members explicitly
+    if (basketFilter !== 'members' && row.isBasketMember) return false;
+    if (basketFilter === 'baskets' && !row.isBasket) return false;
+    if (basketFilter === 'singles' && (row.isBasket || row.isBasketMember)) return false;
+    if (basketFilter === 'members' && !row.isBasketMember) return false;
     if (!row.params) return true;
+    // Single-select filters
     for (const [key, val] of Object.entries(filters)) {
       if (String(row.params[key]) !== val) return false;
+    }
+    // Multi-select filters
+    for (const [key, selectedSet] of Object.entries(multiFilters)) {
+      if (selectedSet.size === 0) continue;
+      if (!selectedSet.has(String(row.params[key]))) return false;
     }
     return true;
   });
   sortRows();
   renderTable();
+  const hasFilters = Object.keys(filters).length > 0 || Object.keys(multiFilters).length > 0;
   document.getElementById('filter-count').textContent =
-    Object.keys(filters).length > 0
+    hasFilters
       ? `${filteredRows.length} of ${allRows.length} configs match`
       : '';
 }
@@ -379,28 +1159,45 @@ function renderTable() {
       (p.requireDir ? ' 🎯' : '') +
       `</span>`;
 
-    return `<tr data-cid="${r.configId}" onclick="toggleDaily('${r.configId}', this)">
+    const isBasket = !!r.isBasket;
+    const isLive = isBasket
+      ? r.configId === liveBasketId
+      : r.configId === liveConfigId;
+    const liveBadge = isLive
+      ? `<span class="live-badge">${isBasket ? 'LIVE BASKET' : 'LIVE'}</span>`
+      : (isBasket ? `<span class="live-badge" style="background:#8b5cf622;color:#8b5cf6;border-color:#8b5cf644">BASKET ${r.memberCount}</span>` : '');
+    const liveClass = isLive ? ' is-live' : '';
+    const setLiveBtn = isLive
+      ? `<span style="color:#3b82f6;font-size:10px">● ${isBasket ? 'basket deployed' : 'active'}</span>`
+      : isBasket
+        ? `<button class="live-btn" style="background:#8b5cf622;color:#8b5cf6;border-color:#8b5cf644" onclick="event.stopPropagation();deployBasket('${r.configId}','${(r.name||r.configId).replace(/'/g,"\\'")}',${r.memberCount})" title="Deploy basket as ${r.memberCount} live agents">🎯 Deploy Basket (${r.memberCount})</button>`
+        : `<button class="live-btn" onclick="event.stopPropagation();setLiveConfig('${r.configId}','${(r.name||r.configId).replace(/'/g,"\\'")}',${((r.edge||0)*100).toFixed(1)})" title="Set as live config">▶ Set Live</button>`;
+
+    const sym = (r.params?.symbol || (r.configId.startsWith('ndx-') ? 'NDX' : 'SPX')).toUpperCase();
+    const symBadge = `<span class="sym-badge ${sym.toLowerCase()}" title="Underlying: ${sym}">${sym}</span>`;
+
+    return `<tr data-cid="${r.configId}" class="${liveClass}" onclick="toggleDaily('${r.configId}', this)">
       <td class="rank">${medal}</td>
-      <td><a class="cfg-link" href="#" target="_blank" onclick="event.stopPropagation();event.preventDefault();window.open(replayUrl('${r.configId}'),'_blank')">${sweepConfigLabel(r)}</a><br>${pills}</td>
-      <td><b>${r.compositeScore.toFixed(1)}</b></td>
-      <td>${r.trades}</td>
+      <td>${symBadge}<a class="cfg-link" href="#" target="_blank" onclick="event.stopPropagation();event.preventDefault();window.open(replayUrl('${r.configId}'),'_blank')">${sweepConfigLabel(r)}</a>${liveBadge}<br>${pills}</td>
+      <td class="${r.edge > 0 ? 'pnl-pos' : 'pnl-neg'}"><b>${(r.edge * 100).toFixed(1)}%</b></td>
+      <td>${(r.rMultiple || 0).toFixed(2)}</td>
+      <td class="${r.ev > 0 ? 'pnl-pos' : 'pnl-neg'}">${(r.ev || 0).toFixed(2)}%</td>
       <td>${(r.winRate * 100).toFixed(1)}%</td>
-      <td class="${pc}"><b>$${r.totalPnl.toFixed(0)}</b></td>
-      <td class="${pc}">$${r.avgDailyPnl.toFixed(0)}</td>
-      <td class="${wc}">$${r.worstDay.toFixed(0)}</td>
-      <td class="pnl-pos">$${r.bestDay.toFixed(0)}</td>
-      <td>${r.sharpe.toFixed(3)}</td>
+      <td style="color:#888">${((r.breakEvenWR || 0) * 100).toFixed(1)}%</td>
+      <td>${r.trades}</td>
+      <td class="${pc}"><b>${fmtMoney(r.totalPnl)}</b></td>
+      <td class="${pc}">${fmtMoney(r.avgDailyPnl)}</td>
+      <td class="${wc}">${fmtMoney(r.worstDay)}</td>
       <td>${r.profitDays}/${r.days}</td>
-      <td>${r.avgEntryPrice ? '$' + r.avgEntryPrice.toFixed(1) : '-'}</td>
       <td>${r.days}</td>
       <td><span class="bar ${bc}" style="width:${bw}px"></span></td>
-      <td><button class="del-btn" onclick="event.stopPropagation();openDeleteModal('${r.configId}','${(r.name||r.configId).replace(/'/g,"\\'")}',${r.days},${r.trades})" title="Delete config">🗑</button></td>
+      <td style="white-space:nowrap">${setLiveBtn} <button class="del-btn" onclick="event.stopPropagation();openDeleteModal('${r.configId}','${(r.name||r.configId).replace(/'/g,"\\'")}',${r.days},${r.trades})" title="Delete config">🗑</button></td>
     </tr>`;
   }).join('');
 
   document.getElementById('footer').textContent =
     rows.length > 0
-      ? `${rows.length} configs | Best P&L: $${Math.max(...rows.map(r=>r.totalPnl)).toFixed(0)} | Best Sharpe: ${Math.max(...rows.map(r=>r.sharpe)).toFixed(3)} | Best Score: ${Math.max(...rows.map(r=>r.compositeScore)).toFixed(1)}`
+      ? `${rows.length} configs | Best Edge: ${(Math.max(...rows.map(r=>r.edge||0)) * 100).toFixed(1)}% | Best R-Mult: ${Math.max(...rows.map(r=>r.rMultiple||0)).toFixed(2)} | Best EV: ${Math.max(...rows.map(r=>r.ev||0)).toFixed(2)}% | Best P&L: ${fmtMoney(Math.max(...rows.map(r=>r.totalPnl)))}`
       : '';
 }
 
@@ -578,7 +1375,7 @@ function sweepConfigLabel(r) {
 // ── Replay URL builder (carries filter state) ──
 
 function replayUrl(configId, date) {
-  let url = `/replay/?config=${configId}`;
+  let url = `${_BASE}/replay/?config=${configId}`;
   if (date) url += `&date=${date}`;
   const maxEntry = document.getElementById('max-entry-price').value;
   const maxConcurrent = document.getElementById('max-concurrent').value;
@@ -644,6 +1441,8 @@ async function refreshData() {
 
   // Snapshot current filter selections
   const savedFilters = { ...filters };
+  const savedMultiFilters = {};
+  for (const [k, v] of Object.entries(multiFilters)) savedMultiFilters[k] = new Set(v);
   const savedSort = currentSort;
   const savedDir = currentDir;
 
@@ -671,6 +1470,9 @@ async function refreshData() {
 
     // Rebuild filter dropdowns
     buildFilters();
+    updateSymbolPillCounts();
+    updateBasketPillCounts();
+    syncSymbolPillsFromFilters();
 
     // Restore filter selections
     for (const [key, val] of Object.entries(savedFilters)) {
@@ -684,6 +1486,18 @@ async function refreshData() {
           filters[key] = val;
         }
       }
+    }
+
+    // Restore multi-select filter selections
+    for (const [key, savedSet] of Object.entries(savedMultiFilters)) {
+      if (savedSet.size === 0) continue;
+      const dd = document.getElementById(`ms-dd-${key}`);
+      if (!dd) continue;
+      const validSet = new Set();
+      dd.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+        if (savedSet.has(cb.value)) { cb.checked = true; validSet.add(cb.value); }
+      });
+      if (validSet.size > 0) { multiFilters[key] = validSet; updateMultiSelectBtn(key); }
     }
 
     // Restore sort
@@ -730,6 +1544,176 @@ async function refreshData() {
   }
 }
 
+// ── Live config ──
+
+async function fetchLiveConfigId() {
+  try {
+    const cfg = await fetch(`${API}/live/agent/config`).then(r => r.json());
+    if (cfg && !cfg.error && cfg.id) {
+      liveConfigId = cfg.id;
+    }
+  } catch {}
+  try {
+    const basket = await fetch(`${API}/live/basket`).then(r => r.json());
+    if (basket && basket.deployed && basket.basketConfigId) {
+      liveBasketId = basket.basketConfigId;
+    }
+  } catch {}
+  // Refresh the LIVE indicator in the header.
+  const el = document.getElementById('live-indicator');
+  const idEl = document.getElementById('live-cfg-id');
+  if (liveBasketId) {
+    el.style.display = 'inline-flex';
+    idEl.textContent = `BASKET ${liveBasketId}`;
+  } else if (liveConfigId) {
+    el.style.display = 'inline-flex';
+    idEl.textContent = liveConfigId;
+  }
+}
+
+// ── Basket deploy ──────────────────────────────────────────────────────
+// Fans out a basket config into N LIVE agents — one per member — each with
+// its own derived AGENT_CONFIG_ID. There is no paper mode. Agents are
+// written to ecosystem.config.js in a PAUSED state (AGENT_PAPER='false',
+// pm2 entry present but not started). The backend returns the pm2 start
+// command; nothing places real orders until the operator runs it.
+async function deployBasket(configId, name, memberCount) {
+  const ok = confirm(
+    `Deploy basket "${name}" as ${memberCount} LIVE agents?\n\n` +
+    `Each member runs its own spx_agent with a derived AGENT_CONFIG_ID.\n` +
+    `All agents are AGENT_PAPER='false' — real orders against live broker.\n\n` +
+    `Deploy is PAUSED: agents are written to ecosystem.config.js but NOT started.\n` +
+    `You must run the returned pm2 start command to activate them.\n\n` +
+    `[OK] = write agents (paused, live config)\n` +
+    `[Cancel] = abort`
+  );
+  if (!ok) return;
+
+  try {
+    const res = await fetch(`${API}/set-live-basket`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ configId }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed');
+
+    liveBasketId = configId;
+    renderTable();
+    showBasketDeployModal(data);
+  } catch (err) {
+    alert('Failed to deploy basket: ' + err.message);
+  }
+}
+
+function showBasketDeployModal(data) {
+  // Remove any existing modal.
+  const old = document.getElementById('basket-deploy-modal');
+  if (old) old.remove();
+
+  const memberRows = (data.members || []).map(m => {
+    const offsetLabel = m.strikeOffset === 0 ? 'ATM' : m.strikeOffset > 0 ? `OTM${m.strikeOffset}` : `ITM${-m.strikeOffset}`;
+    return `<tr>
+      <td style="padding:4px 10px;color:#8b5cf6;font-family:var(--font-mono);font-size:11px">${m.memberId}</td>
+      <td style="padding:4px 10px;color:#ddd">${offsetLabel} (offset ${m.strikeOffset > 0 ? '+' : ''}${m.strikeOffset})</td>
+      <td style="padding:4px 10px;color:#888;font-family:var(--font-mono);font-size:10px">${m.configId}</td>
+      <td style="padding:4px 10px;color:#888;font-family:var(--font-mono);font-size:10px">${m.agentName}</td>
+    </tr>`;
+  }).join('');
+
+  const modal = document.createElement('div');
+  modal.id = 'basket-deploy-modal';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.8);z-index:10000;display:flex;align-items:center;justify-content:center;padding:20px;overflow-y:auto';
+  modal.innerHTML = `
+    <div style="background:#0d0d15;border:1px solid #333;border-radius:8px;max-width:900px;width:100%;max-height:90vh;overflow-y:auto">
+      <div style="padding:16px 20px;border-bottom:1px solid #222;display:flex;justify-content:space-between;align-items:center">
+        <h2 style="margin:0;color:#8b5cf6;font-size:16px">🎯 Basket Deployed — ${data.memberCount} LIVE agents written (PAUSED)</h2>
+        <button onclick="document.getElementById('basket-deploy-modal').remove()" style="background:transparent;color:#888;border:1px solid #333;padding:4px 10px;border-radius:4px;cursor:pointer;font-size:16px">×</button>
+      </div>
+      <div style="padding:16px 20px">
+        <p style="color:#aaa;margin:0 0 10px 0;font-size:12px">
+          ${data.note}
+        </p>
+        <p style="color:#aaa;margin:0 0 14px 0;font-size:12px">
+          <b>Basket ID:</b> <span style="color:#8b5cf6;font-family:var(--font-mono)">${data.basketConfigId}</span>
+        </p>
+
+        <h3 style="color:#ccc;font-size:13px;margin:14px 0 6px 0">Members</h3>
+        <table style="width:100%;border-collapse:collapse;border:1px solid #222;font-size:11px">
+          <thead>
+            <tr style="background:#14141f;color:#888">
+              <th style="padding:6px 10px;text-align:left">Member</th>
+              <th style="padding:6px 10px;text-align:left">Strike</th>
+              <th style="padding:6px 10px;text-align:left">Config ID</th>
+              <th style="padding:6px 10px;text-align:left">PM2 App</th>
+            </tr>
+          </thead>
+          <tbody>${memberRows}</tbody>
+        </table>
+
+        <h3 style="color:#ccc;font-size:13px;margin:18px 0 6px 0">Next — Start the agents</h3>
+        <p style="color:#888;margin:0 0 8px 0;font-size:11px">Run this on the SPXer host to unpause. Agents are <b style="color:#ef4444">LIVE</b> (AGENT_PAPER=false) — real orders begin immediately on start.</p>
+        <div style="background:#000;border:1px solid #333;border-radius:6px;padding:10px 12px;font-family:var(--font-mono);font-size:12px;color:#10b981;display:flex;justify-content:space-between;align-items:center;gap:10px">
+          <code style="flex:1;white-space:pre-wrap;word-break:break-all">${data.pm2StartCmd}</code>
+          <button onclick="navigator.clipboard.writeText('${data.pm2StartCmd.replace(/'/g, "\\'")}').then(()=>{this.textContent='✓ copied';setTimeout(()=>this.textContent='📋 copy',1500)})" style="background:#1a1a2e;color:#8b8bff;border:1px solid #333;padding:4px 10px;border-radius:4px;cursor:pointer;font-size:11px;white-space:nowrap">📋 copy</button>
+        </div>
+
+        <h3 style="color:#ccc;font-size:13px;margin:18px 0 6px 0">Stop / remove the basket agents</h3>
+        <div style="background:#000;border:1px solid #333;border-radius:6px;padding:10px 12px;font-family:var(--font-mono);font-size:12px;color:#ef4444;display:flex;justify-content:space-between;align-items:center;gap:10px">
+          <code style="flex:1;white-space:pre-wrap;word-break:break-all">${data.pm2StopCmd}</code>
+          <button onclick="navigator.clipboard.writeText('${data.pm2StopCmd.replace(/'/g, "\\'")}').then(()=>{this.textContent='✓ copied';setTimeout(()=>this.textContent='📋 copy',1500)})" style="background:#1a1a2e;color:#8b8bff;border:1px solid #333;padding:4px 10px;border-radius:4px;cursor:pointer;font-size:11px;white-space:nowrap">📋 copy</button>
+        </div>
+        <p style="color:#888;margin:8px 0 0 0;font-size:11px">Or remove from ecosystem.config.js entirely: <button onclick="removeBasketFromEcosystem()" style="background:#ef444422;color:#ef4444;border:1px solid #ef444444;padding:3px 10px;border-radius:4px;cursor:pointer;font-size:11px;margin-left:6px">Clear basket block</button></p>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+}
+
+async function removeBasketFromEcosystem() {
+  if (!confirm('Remove the basket agent block from ecosystem.config.js?\n\nThis does NOT stop already-running PM2 agents — run the pm2 delete command for that.')) return;
+  try {
+    const res = await fetch(`${API}/stop-live-basket`, { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed');
+    liveBasketId = null;
+    const modal = document.getElementById('basket-deploy-modal');
+    if (modal) modal.remove();
+    renderTable();
+    alert(`Removed ${data.removed} basket agents from ecosystem.config.js.` + (data.pm2StopCmd ? `\n\nIf they're still running, stop them:\n${data.pm2StopCmd}` : ''));
+  } catch (err) {
+    alert('Failed to clear basket block: ' + err.message);
+  }
+}
+
+async function setLiveConfig(configId, name, score) {
+  if (!confirm(`Set "${name}" (score: ${score}) as the live trading config?\n\nThis updates AGENT_CONFIG_ID in ecosystem.config.js.\nThe agent will use it on next restart.`)) {
+    return;
+  }
+
+  try {
+    const res = await fetch(`${API}/set-live-config`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ configId }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed');
+
+    liveConfigId = configId;
+    document.getElementById('live-indicator').style.display = 'inline-flex';
+    document.getElementById('live-cfg-id').textContent = configId;
+    renderTable(); // re-render to update badges
+
+    const statusEl = document.getElementById('refresh-status');
+    statusEl.textContent = `✓ Live config set to ${configId}`;
+    statusEl.style.color = '#3b82f6';
+    setTimeout(() => { statusEl.textContent = ''; }, 5000);
+  } catch (err) {
+    alert('Failed to set live config: ' + err.message);
+  }
+}
+
 // ── Load ──
 
 async function loadData() {
@@ -752,6 +1736,8 @@ async function loadData() {
   overlay.classList.remove('active');
 
   buildFilters();
+  updateSymbolPillCounts();
+  syncSymbolPillsFromFilters();
 
   // Apply URL params as initial filters
   const urlParams = new URLSearchParams(window.location.search);
@@ -763,7 +1749,7 @@ async function loadData() {
   applyFilters();
 }
 
-loadData();
+fetchLiveConfigId().then(() => loadData());
 </script>
 </body>
 </html>

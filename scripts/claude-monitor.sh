@@ -25,7 +25,7 @@ separator() {
 
 check_pm2() {
   log "── PM2 Process Status ──"
-  local procs=("spxer" "spxer-agent" "spxer-xsp" "account-monitor" "spxer-watchdog" "replay-viewer" "spxer-dashboard")
+  local procs=("spxer" "spxer-agent" "replay-viewer" "spxer-dashboard")
   for p in "${procs[@]}"; do
     local status=$(pm2 show "$p" 2>/dev/null | grep "status" | head -1 | awk '{print $4}')
     local uptime=$(pm2 show "$p" 2>/dev/null | grep "uptime" | head -1 | awk '{print $4}')
@@ -41,15 +41,6 @@ check_pm2() {
       spxer)
         if [ "$status" != "online" ]; then
           log "  ⚠️  ALERT: Data service is DOWN!"
-        fi
-        ;;
-      spxer-xsp)
-        # Check if during market hours (9:30-16:00 ET)
-        local hour=$(TZ=America/New_York date +%-H)
-        local min=$(TZ=America/New_York date +%-M)
-        local et_mins=$((hour * 60 + min))
-        if [ "$et_mins" -ge 570 ] && [ "$et_mins" -lt 960 ] && [ "$status" != "online" ]; then
-          log "  ⚠️  ALERT: XSP agent is DOWN during market hours!"
         fi
         ;;
     esac
@@ -127,10 +118,9 @@ check_agent_status() {
 
 check_broker_positions() {
   log "── Broker Positions ──"
-  # Check both accounts for open positions
-  for account in 6YA51425 6YA58635; do
+  # Check SPX account for open positions
+  for account in 6YA51425; do
     local label="SPX"
-    [ "$account" = "6YA58635" ] && label="XSP"
 
     local token=$(grep TRADIER_TOKEN /home/ubuntu/SPXer/.env 2>/dev/null | head -1 | cut -d= -f2)
     if [ -z "$token" ]; then
@@ -242,12 +232,11 @@ check_recent_errors() {
   log "── Recent Errors (last 5 min) ──"
   local since=$(date -d '5 minutes ago' '+%Y-%m-%d %H:%M:%S' 2>/dev/null || date '+%Y-%m-%d %H:%M:%S')
 
-  # Check XSP error log
-  local xsp_errors=$(tail -20 /home/ubuntu/.pm2/logs/spxer-xsp-error.log 2>/dev/null | grep -c "❌\|Error\|FATAL" 2>/dev/null || echo "0")
+  local agent_errors=$(tail -20 /home/ubuntu/.pm2/logs/spxer-agent-error.log 2>/dev/null | grep -c "❌\|Error\|FATAL" 2>/dev/null || echo "0")
   local spxer_errors=$(tail -20 /home/ubuntu/.pm2/logs/spxer-error.log 2>/dev/null | grep -c "Error\|FATAL" 2>/dev/null || echo "0")
   local watchdog_errors=$(tail -20 /home/ubuntu/.pm2/logs/watchdog-error.log 2>/dev/null | grep -c "UNHEALTHY\|Killed" 2>/dev/null || echo "0")
 
-  log "  XSP agent errors (recent): $xsp_errors"
+  log "  SPX agent errors (recent): $agent_errors"
   log "  Data service errors (recent): $spxer_errors"
   log "  Watchdog alerts (recent): $watchdog_errors"
 }

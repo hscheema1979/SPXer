@@ -1,5 +1,11 @@
 # Backtest Scorecard
 
+> **Latest study**: [HMA Speed Study (2026-04-21)](HMA-SPEED-STUDY.md) — 32 configs, 267 days, 4 HMA speeds x 2 strikes x 2 TPs x 2 timeframes. OTM5 + 3x12 3m is #1.
+
+---
+
+## Legacy Scorecard (Feb-Mar 2026)
+
 **Date range**: 2026-02-20 → 2026-03-20
 **Days tested**: 21 (6 with trades)
 **Friction model**: $0.05/side spread + $0.35/contract/side commission (always on)

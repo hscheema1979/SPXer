@@ -16,13 +16,14 @@ export function resetPreparedStatements(): void {
 function getUpsertBarStmt(): Statement {
   if (!_upsertBarStmt) {
     _upsertBarStmt = getDb().prepare(`
-      INSERT INTO bars (symbol, timeframe, ts, open, high, low, close, volume, synthetic, gap_type, indicators)
-      VALUES (@symbol, @timeframe, @ts, @open, @high, @low, @close, @volume, @synthetic, @gapType, @indicators)
+      INSERT INTO bars (symbol, timeframe, ts, open, high, low, close, volume, synthetic, gap_type, indicators, spread)
+      VALUES (@symbol, @timeframe, @ts, @open, @high, @low, @close, @volume, @synthetic, @gapType, @indicators, @spread)
       ON CONFLICT(symbol, timeframe, ts) DO UPDATE SET
         open=excluded.open, high=excluded.high, low=excluded.low,
         close=excluded.close, volume=excluded.volume,
         synthetic=excluded.synthetic, gap_type=excluded.gap_type,
-        indicators=excluded.indicators
+        indicators=excluded.indicators,
+        spread=COALESCE(excluded.spread, bars.spread)
     `);
   }
   return _upsertBarStmt;
@@ -38,6 +39,7 @@ export function upsertBar(bar: Bar): boolean {
       synthetic: bar.synthetic ? 1 : 0,
       gapType: bar.gapType,
       indicators: JSON.stringify(bar.indicators),
+      spread: bar.spread ?? null,
     });
     return true;
   } catch (err) {
@@ -167,12 +169,14 @@ function rowToBar(row: any): Bar {
   } catch {
     console.warn(`[db] rowToBar: corrupt indicators JSON for ${row.symbol} ts=${row.ts} — using empty`);
   }
-  return {
+  const bar: Bar = {
     symbol: row.symbol, timeframe: row.timeframe, ts: row.ts,
     open: row.open, high: row.high, low: row.low, close: row.close,
     volume: row.volume, synthetic: row.synthetic === 1,
     gapType: row.gap_type, indicators,
   };
+  if (row.spread != null) bar.spread = row.spread;
+  return bar;
 }
 
 function rowToContract(row: any): Contract {
@@ -180,5 +184,26 @@ function rowToContract(row: any): Contract {
     symbol: row.symbol, type: row.type, underlying: row.underlying,
     strike: row.strike, expiry: row.expiry, state: row.state,
     firstSeen: row.first_seen, lastBarTs: row.last_bar_ts, createdAt: row.created_at,
+  };
+}
+
+export function getOptionBarHealth(sinceTs: number): { total: number; synthetic: number; stale: number; contracts: number } {
+  const db = getDb();
+  const row = db.prepare(`
+    SELECT
+      COUNT(*) as total,
+      SUM(CASE WHEN synthetic = 1 THEN 1 ELSE 0 END) as synthetic,
+      SUM(CASE WHEN gap_type = 'stale' THEN 1 ELSE 0 END) as stale,
+      COUNT(DISTINCT symbol) as contracts
+    FROM bars
+    WHERE timeframe = '1m'
+      AND ts >= ?
+      AND symbol LIKE 'SPXW%'
+  `).get(sinceTs) as any;
+  return {
+    total: row?.total ?? 0,
+    synthetic: row?.synthetic ?? 0,
+    stale: row?.stale ?? 0,
+    contracts: row?.contracts ?? 0,
   };
 }

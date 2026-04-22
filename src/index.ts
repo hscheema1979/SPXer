@@ -1,18 +1,22 @@
-import { initDb, getDb, closeDb } from './storage/db';
+import { initDb, getDb, closeDb, dayDbPath, previousTradingDay, copyWarmupBars } from './storage/db';
 import { getAllActiveContracts, upsertBar, upsertBars, upsertContract, getDbSizeMb, getBars, getLatestBar, expireContractsBefore, expireContractsOnDate } from './storage/queries';
 import { fetchSpxQuote, fetchOptionsChain, fetchExpirations, fetchSpxTimesales, fetchBatchQuotes, fetchTimesales } from './providers/tradier';
 import { fetchScreenerSnapshot } from './providers/tv-screener';
 import { buildBars, fillGaps, rawToBar } from './pipeline/bar-builder';
 import { aggregate } from './pipeline/aggregator';
 import { computeIndicators, seedState, resetVWAP } from './pipeline/indicator-engine';
-import { ContractTracker } from './pipeline/contract-tracker';
-import { getMarketMode, getActiveExpirations } from './pipeline/scheduler';
+import { registerHmaPeriod, getActiveHmaPeriods } from './core/indicator-engine';
+import { validateSignalConfig } from './core/signal-detector';
+import { createStore } from './replay/store';
+import { ContractTracker } from './pipeline/spx/contract-tracker';
+import { getMarketMode, getActiveExpirations } from './pipeline/spx/scheduler';
 import { startHttpServer, setLastSpxPrice, setTrackerCountFn, setOptionStreamStatusFn } from './server/http';
 import { startWsServer, broadcast } from './server/ws';
-import { config, STRIKE_BAND, STRIKE_INTERVAL, POLL_UNDERLYING_MS, POLL_OPTIONS_RTH_MS, POLL_OPTIONS_OVERNIGHT_MS, POLL_SCREENER_MS, OPTION_STREAM_WAKE_ET, OPTION_STREAM_LOCK_ET, OPTION_STREAM_CLOSE_ET } from './config';
+import { config, STRIKE_BAND, STRIKE_INTERVAL, POLL_UNDERLYING_MS, POLL_OPTIONS_RTH_MS, POLL_OPTIONS_OVERNIGHT_MS, POLL_SCREENER_MS, OPTION_STREAM_WAKE_ET, OPTION_STREAM_CLOSE_ET, OPTION_STREAM_THETA_STALE_MS } from './config';
 import { healthTracker } from './utils/health';
-import { OptionStream } from './pipeline/option-stream';
+import { OptionStream } from './pipeline/spx/option-stream';
 import { OptionCandleBuilder } from './pipeline/option-candle-builder';
+import { ThetaDataStream } from './providers/thetadata-stream';
 import { todayET, nowET } from './utils/et-time';
 import type { Bar, Timeframe } from './types';
 import { pipelineHealth, recordModeTransition } from './ops/pipeline-health';
@@ -26,7 +30,7 @@ let lastSpxPrice: number | null = null;
 let prevMode: string | null = null; // tracks mode transitions for VWAP reset
 
 // Per-symbol 1m candle state for options — built incrementally from quote snapshots
-const optionBarState = new Map<string, { minuteTs: number; open: number; high: number; low: number; volume: number }>();
+// optionBarState removed — batch-quote bar building permanently disabled (corrupted HMA signals)
 
 // ── SPX Tick Stream → 1m Candle Builder ─────────────────────────────────────
 // Streams SPX trades from Tradier for tick-accurate 1m candles.
@@ -116,10 +120,36 @@ function stopSpxStream(): void {
 // Falls back to pollOptions() if the stream disconnects.
 
 const optionStream = new OptionStream();
+const thetaStream = new ThetaDataStream();
 let optionCandleBuilder: OptionCandleBuilder | null = null;
 let optionCandleTimer: ReturnType<typeof setInterval> | null = null;
 let optionStreamActive = false;       // true when stream is live — suppresses pollOptions()
 let optionStreamScheduleTimer: ReturnType<typeof setInterval> | null = null;
+
+/**
+ * Prefer ThetaData ticks (true tick-level OPRA feed) whenever the WS is
+ * connected AND is actually delivering market data. Tradier WS is cold-
+ * standby — fires whenever ThetaData is unavailable.
+ *
+ * Two-part gate:
+ *   1. `isConnected()` — WebSocket is open (catches crashes, network drops
+ *      to 127.0.0.1:25520, and explicit disconnects).
+ *   2. `lastActivity` freshness — last TRADE or QUOTE frame arrived within
+ *      `OPTION_STREAM_THETA_STALE_MS`. STATUS keepalives don't reset this
+ *      counter, so a feed that goes silent while the socket stays up (e.g.
+ *      an internal ThetaTerminal stall, or subscriptions silently dropped)
+ *      will flip us over to Tradier instead of blinding the agent.
+ *
+ * `lastActivity === 0` means we've never seen market data on this session —
+ * treated as stale, so Tradier handles ticks until ThetaData proves itself.
+ * No hysteresis beyond the staleness window: each call re-evaluates.
+ */
+function thetaIsPrimary(): boolean {
+  if (!thetaStream.isConnected()) return false;
+  const last = thetaStream.lastActivity;
+  if (last <= 0) return false;
+  return Date.now() - last < OPTION_STREAM_THETA_STALE_MS;
+}
 
 /** ES→SPX fair value offset: ES trades ~46 pts above SPX (simple fixed estimate) */
 // ES_SPX_OFFSET removed — no longer polling ES futures overnight
@@ -145,11 +175,10 @@ function getPoolExpiries(): string[] {
  *   4. Wire optionStream.onTick → candleBuilder
  *   5. Start the stream — REST polling (pollOptions) is suppressed once connected
  *
- * Called twice daily:
- *   Phase 1 (8:00 ET): Preliminary band — uses last known price or Tradier quote.
- *     Starts building tick-level option bars 90 min before market open for indicator warmup.
- *   Phase 2 (9:30 ET): Band lock — recenterOptionStream() stops this, then re-calls
- *     initOptionStream() with the firm SPX opening price.
+ * Called once daily at OPTION_STREAM_WAKE_ET (09:22 ET). Pre-market SPX is firm
+ * by this time, so the band is built once on an accurate center — no preliminary
+ * band, no 9:30 re-lock. Subscriptions settle before market open and OPRA prints
+ * flow immediately at 9:30.
  */
 async function initOptionStream(): Promise<void> {
   // Step 1: Get a price to center the pool on
@@ -197,6 +226,9 @@ async function initOptionStream(): Promise<void> {
       close: candle.close,
       volume: candle.volume,
     });
+    // Attach observed bid-ask spread (if any quote ticks arrived) — used by friction model
+    const avgSpread = OptionCandleBuilder.averageSpread(candle);
+    if (avgSpread !== undefined) (bar as any).spread = avgSpread;
     const enriched = { ...bar, indicators: computeIndicators(bar, 2) };
     upsertBars([enriched]);
 
@@ -211,8 +243,22 @@ async function initOptionStream(): Promise<void> {
     broadcast({ type: 'contract_bar', symbol, data: enriched });
   });
 
-  // Step 4: Wire stream ticks to candle builder
+  // Step 4a: Wire Tradier ticks — ignored when ThetaData is primary
   optionStream.onTick((tick) => {
+    if (!optionCandleBuilder) return;
+    if (thetaIsPrimary()) return; // drop Tradier ticks — theta is delivering
+
+    if (tick.type === 'trade' && tick.price && tick.price > 0) {
+      optionCandleBuilder.processTick(tick.symbol, tick.price, tick.size ?? 0, tick.ts);
+    } else if (tick.type === 'quote' && tick.bid && tick.ask) {
+      optionCandleBuilder.processQuote(tick.symbol, tick.bid, tick.ask, tick.ts);
+    }
+
+    healthTracker.recordSuccess('option-stream');
+  });
+
+  // Step 4b: Wire ThetaData ticks — always pass through, this is the primary feed
+  thetaStream.onTick((tick) => {
     if (!optionCandleBuilder) return;
 
     if (tick.type === 'trade' && tick.price && tick.price > 0) {
@@ -221,19 +267,28 @@ async function initOptionStream(): Promise<void> {
       optionCandleBuilder.processQuote(tick.symbol, tick.bid, tick.ask, tick.ts);
     }
 
-    // Health tracking on every tick
-    healthTracker.recordSuccess('option-stream');
+    healthTracker.recordSuccess('thetadata-stream');
   });
 
-  // Step 5: Start the stream
+  // Step 5a: Start Tradier WS (fallback)
   try {
     await optionStream.start(pool);
     optionStreamActive = true;
-    console.log(`[option-stream] Stream started — ${pool.length} symbols, polling suppressed`);
+    console.log(`[option-stream] Tradier WS started — ${pool.length} symbols, polling suppressed`);
   } catch (e) {
-    console.error('[option-stream] Failed to start:', e);
+    console.error('[option-stream] Tradier WS failed to start:', e);
     optionStreamActive = false;
     healthTracker.recordFailure('option-stream');
+  }
+
+  // Step 5b: Start ThetaData WS (primary during RTH — see thetaIsPrimary()).
+  // Runs in parallel with Tradier WS; Tradier ticks are dropped when theta delivers.
+  try {
+    await thetaStream.start(pool);
+    console.log(`[thetadata-stream] Started — ${pool.length} symbols (preferred source)`);
+  } catch (e) {
+    console.error('[thetadata-stream] Failed to start (continuing on Tradier WS):', e);
+    healthTracker.recordFailure('thetadata-stream');
   }
 
   // Step 6: Minute-boundary timer to flush forming candles (safety net)
@@ -273,6 +328,7 @@ async function initOptionStream(): Promise<void> {
 /** Stop the option stream and flush remaining candles */
 function stopOptionStream(): void {
   optionStream.stop();
+  thetaStream.stop();
   optionStreamActive = false;
 
   if (optionCandleBuilder) {
@@ -285,56 +341,7 @@ function stopOptionStream(): void {
     optionCandleTimer = null;
   }
 
-  console.log('[option-stream] Stopped and flushed');
-}
-
-/**
- * Re-center the option stream's strike band on the current SPX price.
- * Called at 9:30 AM ET when SPX has a firm opening price ("band lock").
- * Adds any new contracts that entered the band; existing contracts stay
- * (sticky band model — never drop a contract early).
- */
-async function recenterOptionStream(): Promise<void> {
-  let centerPrice = lastSpxPrice;
-  if (!centerPrice) {
-    try {
-      const quote = await fetchSpxQuote();
-      if (quote && quote.last > 0) centerPrice = quote.last;
-    } catch (e) {
-      console.error('[option-stream] Failed to fetch SPX quote for band lock:', e);
-    }
-  }
-  if (!centerPrice) {
-    console.warn('[option-stream] No price available for band lock — keeping preliminary band');
-    return;
-  }
-
-  const expiries = getPoolExpiries();
-  const newPool = OptionStream.buildContractPool(centerPrice, STRIKE_BAND, STRIKE_INTERVAL, expiries);
-  if (newPool.length === 0) {
-    console.warn('[option-stream] Empty contract pool on recenter — keeping current pool');
-    return;
-  }
-
-  // Register all contracts in the new pool with the tracker + DB
-  for (const sym of newPool) {
-    const match = sym.match(/^(SPXW?)(\d{6})([CP])(\d{8})$/);
-    if (match) {
-      const [, , expiryCode, type, strikeCode] = match;
-      const strike = parseInt(strikeCode) / 1000;
-      const expiry = `20${expiryCode.slice(0, 2)}-${expiryCode.slice(2, 4)}-${expiryCode.slice(4, 6)}`;
-      const added = tracker.updateBand(centerPrice, [{
-        symbol: sym, strike, expiry, type: type === 'C' ? 'call' : 'put',
-      }]);
-      for (const c of added) upsertContract(c);
-    }
-  }
-
-  // OptionStream doesn't support incremental symbol add — stop and restart with the
-  // full locked pool. Existing indicator state is preserved (in-memory IndicatorState map).
-  console.log(`[option-stream] Band lock: SPX≈${centerPrice.toFixed(0)}, rebuilding pool (${newPool.length} symbols, ±${STRIKE_BAND})`);
-  stopOptionStream();
-  await initOptionStream();
+  console.log('[option-stream] Stopped and flushed (Tradier + ThetaData)');
 }
 
 /**
@@ -370,23 +377,21 @@ function parseETTime(timeStr: string): number {
 }
 
 /**
- * Schedule option stream lifecycle (two-phase):
- *   Phase 1 — OPTION_STREAM_WAKE_ET (8:00 ET): init stream with preliminary band
- *             Uses last known SPX price or Tradier quote. Starts building option
- *             bars and warming up indicators 90 minutes before market open.
- *   Phase 2 — OPTION_STREAM_LOCK_ET (9:30 ET): "lock" the band on firm SPX price
- *             Market open gives a definitive SPX price. Re-center the strike band,
- *             add any new contracts that entered the ±$100 range.
- *   Close  — OPTION_STREAM_CLOSE_ET (17:00 ET): stop stream, expire 0DTE contracts.
+ * Schedule option stream lifecycle (single-phase):
+ *   Wake  — OPTION_STREAM_WAKE_ET (09:22 ET): init stream with band centered on
+ *           pre-market SPX price (firm by 9:22). One subscribe event — ~200
+ *           contracts subscribed to Theta WS + Tradier WS, fully settled before
+ *           9:30 open so OPRA prints flow instantly. No separate re-lock phase.
+ *   Close — OPTION_STREAM_CLOSE_ET (17:00 ET): stop stream, expire 0DTE contracts.
  *
  * Also checks for fallback/reconnection every 30s.
+ * SPX underlying indicator warm-up is independent of this schedule — it runs
+ * from 8:00 ET via the Tradier timesales poll.
  */
 function scheduleOptionStream(): void {
   const wakeMinutes = parseETTime(OPTION_STREAM_WAKE_ET);
-  const lockMinutes = parseETTime(OPTION_STREAM_LOCK_ET);
   const closeMinutes = parseETTime(OPTION_STREAM_CLOSE_ET);
   let streamInitialized = false;
-  let bandLocked = false;
   let streamStopped = false;
 
   optionStreamScheduleTimer = setInterval(async () => {
@@ -395,28 +400,16 @@ function scheduleOptionStream(): void {
 
     // Check if we're in the streaming window
     if (nowMinutes >= wakeMinutes && nowMinutes < closeMinutes) {
-      // Phase 1: Init stream with preliminary band
+      // Single-phase wake: init stream with pre-market-derived band
       if (!streamInitialized && !optionStreamActive) {
         streamInitialized = true;
         streamStopped = false;
-        bandLocked = false;
-        console.log(`[option-stream] Phase 1: Wake time reached (${OPTION_STREAM_WAKE_ET} ET) — initializing with preliminary band`);
+        console.log(`[option-stream] Wake time reached (${OPTION_STREAM_WAKE_ET} ET) — initializing with pre-market SPX band`);
         try {
           await initOptionStream();
         } catch (e) {
           console.error('[option-stream] Init failed:', e);
           streamInitialized = false;
-        }
-      }
-
-      // Phase 2: Lock band at market open
-      if (streamInitialized && !bandLocked && nowMinutes >= lockMinutes) {
-        bandLocked = true;
-        console.log(`[option-stream] Phase 2: Lock time reached (${OPTION_STREAM_LOCK_ET} ET) — re-centering band on firm SPX price`);
-        try {
-          await recenterOptionStream();
-        } catch (e) {
-          console.error('[option-stream] Band lock failed:', e);
         }
       }
 
@@ -430,35 +423,78 @@ function scheduleOptionStream(): void {
       }
       streamStopped = true;
       streamInitialized = false;
-      bandLocked = false;
     } else if (nowMinutes < wakeMinutes) {
       // Before wake time — reset flags for new day
       streamInitialized = false;
-      bandLocked = false;
       streamStopped = false;
     }
   }, 30_000); // check every 30s
 }
 
 // ── HMA Cross Signal Detection ──────────────────────────────────────────────
-// Detects HMA(3)×HMA(17) crossovers at the data pipeline level.
-// Fires exactly once per candle close — agents subscribe via WebSocket
+// Detects HMA(fast)×HMA(slow) crossovers at the data pipeline level.
+// Fast/slow periods come from the active agent config (AGENT_CONFIG_ID) — same
+// pair the trading agent actually trades on. Falls back to 3/17 if no config.
+// Fires exactly once per candle close — consumers subscribe via WebSocket
 // instead of polling. The signal IS the trigger, not something to check for.
-let prevHma3: number | null = null;
-let prevHma17: number | null = null;
-let lastHmaSignal: { type: string; direction: string; ts: number; price: number; hmaFast: number; hmaSlow: number } | null = null;
+let prevHmaFast: number | null = null;
+let prevHmaSlow: number | null = null;
+let activeHmaFastPeriod = 3;
+let activeHmaSlowPeriod = 17;
+let activeHmaSignalEnabled = true;
+let lastHmaSignal:
+  | { type: string; direction: string; ts: number; price: number; hmaFast: number; hmaSlow: number; hmaFastPeriod: number; hmaSlowPeriod: number }
+  | null = null;
 
 /** Get the last HMA cross signal (for REST API) */
 export function getLastHmaSignal() { return lastHmaSignal; }
 
-function detectHmaCrossSignal(bar: Bar): void {
-  const hma3 = bar.indicators?.hma3;
-  const hma17 = bar.indicators?.hma17;
-  if (hma3 == null || hma17 == null) return;
+/**
+ * Load the active agent config's HMA pair so the pipeline's broadcast signal
+ * matches the strategy the live agent actually trades. Called once at startup
+ * after config registration. Safe to call without AGENT_CONFIG_ID set.
+ */
+function loadAgentHmaPair(): void {
+  const configId = process.env.AGENT_CONFIG_ID;
+  if (!configId) {
+    console.log(`[signal] No AGENT_CONFIG_ID set — using default HMA(${activeHmaFastPeriod})×HMA(${activeHmaSlowPeriod})`);
+    return;
+  }
+  try {
+    const store = createStore();
+    const cfg = store.getConfig(configId);
+    store.close();
+    if (!cfg) {
+      console.warn(`[signal] AGENT_CONFIG_ID=${configId} not found in DB — using default HMA(${activeHmaFastPeriod})×HMA(${activeHmaSlowPeriod})`);
+      return;
+    }
+    const sig = cfg.signals;
+    const fast = sig?.hmaCrossFast ?? 3;
+    const slow = sig?.hmaCrossSlow ?? 17;
+    const enabled = sig?.enableHmaCrosses !== false;
+    activeHmaFastPeriod = fast;
+    activeHmaSlowPeriod = slow;
+    activeHmaSignalEnabled = enabled;
+    // Ensure indicator engine computes both periods on every bar.
+    registerHmaPeriod(fast);
+    registerHmaPeriod(slow);
+    console.log(`[signal] Using HMA(${fast})×HMA(${slow}) from config ${configId} (enabled=${enabled})`);
+  } catch (e: any) {
+    console.warn(`[signal] Failed to load agent config for HMA pair: ${e.message} — using default HMA(${activeHmaFastPeriod})×HMA(${activeHmaSlowPeriod})`);
+  }
+}
 
-  if (prevHma3 != null && prevHma17 != null) {
-    const wasFastAbove = prevHma3 > prevHma17;
-    const isFastAbove = hma3 > hma17;
+function detectHmaCrossSignal(bar: Bar): void {
+  if (!activeHmaSignalEnabled) return;
+  const fastKey = `hma${activeHmaFastPeriod}`;
+  const slowKey = `hma${activeHmaSlowPeriod}`;
+  const hmaFast = (bar.indicators as any)?.[fastKey];
+  const hmaSlow = (bar.indicators as any)?.[slowKey];
+  if (hmaFast == null || hmaSlow == null) return;
+
+  if (prevHmaFast != null && prevHmaSlow != null) {
+    const wasFastAbove = prevHmaFast > prevHmaSlow;
+    const isFastAbove = hmaFast > hmaSlow;
 
     if (!wasFastAbove && isFastAbove) {
       const signal = {
@@ -466,10 +502,12 @@ function detectHmaCrossSignal(bar: Bar): void {
         direction: 'bullish' as const,
         ts: bar.ts,
         price: bar.close,
-        hmaFast: hma3,
-        hmaSlow: hma17,
+        hmaFast,
+        hmaSlow,
+        hmaFastPeriod: activeHmaFastPeriod,
+        hmaSlowPeriod: activeHmaSlowPeriod,
       };
-      console.log(`[signal] 🔼 BULLISH HMA(3)×HMA(17) cross @ ${bar.close.toFixed(2)} (candle ts=${bar.ts})`);
+      console.log(`[signal] 🔼 BULLISH HMA(${activeHmaFastPeriod})×HMA(${activeHmaSlowPeriod}) cross @ ${bar.close.toFixed(2)} (candle ts=${bar.ts})`);
       lastHmaSignal = signal;
       broadcast(signal);
     } else if (wasFastAbove && !isFastAbove) {
@@ -478,17 +516,19 @@ function detectHmaCrossSignal(bar: Bar): void {
         direction: 'bearish' as const,
         ts: bar.ts,
         price: bar.close,
-        hmaFast: hma3,
-        hmaSlow: hma17,
+        hmaFast,
+        hmaSlow,
+        hmaFastPeriod: activeHmaFastPeriod,
+        hmaSlowPeriod: activeHmaSlowPeriod,
       };
-      console.log(`[signal] 🔽 BEARISH HMA(3)×HMA(17) cross @ ${bar.close.toFixed(2)} (candle ts=${bar.ts})`);
+      console.log(`[signal] 🔽 BEARISH HMA(${activeHmaFastPeriod})×HMA(${activeHmaSlowPeriod}) cross @ ${bar.close.toFixed(2)} (candle ts=${bar.ts})`);
       lastHmaSignal = signal;
       broadcast(signal);
     }
   }
 
-  prevHma3 = hma3;
-  prevHma17 = hma17;
+  prevHmaFast = hmaFast;
+  prevHmaSlow = hmaSlow;
 }
 
 /** Aggregate 1m bars to all higher timeframes (3m, 5m, 15m, 1h) with indicator computation */
@@ -616,8 +656,15 @@ async function pollUnderlying(): Promise<void> {
 
 async function pollOptions(): Promise<void> {
   if (!lastSpxPrice) return;
-  // Skip REST polling when option stream is active — stream provides tick-level data
-  if (optionStreamActive && optionStream.isConnected()) return;
+  // Skip REST polling when option stream is active — stream provides tick-level data.
+  // Flag tradier-options as cold-standby so the health aggregator doesn't vote it
+  // "unhealthy" on staleness (we're deliberately not polling it).
+  if (optionStreamActive && optionStream.isConnected()) {
+    healthTracker.markStandby('tradier-options', true);
+    return;
+  }
+  // Primary stream isn't carrying the load — Tradier REST is active again.
+  healthTracker.markStandby('tradier-options', false);
   try {
     const expirations = await fetchExpirations('SPX');
     const today = new Date().toISOString().split('T')[0];
@@ -634,58 +681,23 @@ async function pollOptions(): Promise<void> {
       broadcast({ type: 'chain_update', expiry, data: chain });
     }
 
-    // Batch-quote update for already-tracked contracts → build bars + persist
-    // We build 1m candles incrementally from quote snapshots (last/bid/ask).
-    // Tradier's q.open/high/low are SESSION-level, not candle-level — don't use them.
+    // Batch-quote update for already-tracked contracts.
+    // NEVER build bars from batch quotes.  Tradier quotes are snapshot-level
+    // (single price per poll, session-cumulative volume) and produce flat
+    // O=H=L=C candles that corrupt HMA signal detection.  ThetaTerminal
+    // disconnects ~200×/day (code 1006) so the old thetaIsPrimary() guard
+    // let corrupted bars slip through every few minutes — permanently removed.
+    //
+    // Bar construction is handled EXCLUSIVELY by OptionCandleBuilder from
+    // ThetaData WS trade ticks (primary) or Tradier WS ticks (fallback).
+    // This path only fetches quotes for dashboard/UI display and contract
+    // tracking (bid/ask/last).
     const tracked = tracker.getActive().concat(tracker.getSticky());
     if (tracked.length > 0) {
       const quotes = await fetchBatchQuotes(tracked.map(c => c.symbol));
-      const ts = Math.floor(Date.now() / 1000);
-      const minuteTs = ts - (ts % 60); // align to minute boundary
-      const newBars: ReturnType<typeof rawToBar>[] = [];
       quotes.forEach((q, sym) => {
-        const price = q.last ?? q.bid ?? q.ask;
-        if (price === null || price <= 0) return;
-
-        // Build proper 1m candle from quote snapshot:
-        // Track open/high/low per minute in optionBarState
-        let state = optionBarState.get(sym);
-        if (!state || state.minuteTs !== minuteTs) {
-          // New minute — start fresh candle with current price as open
-          state = { minuteTs, open: price, high: price, low: price, volume: 0 };
-          optionBarState.set(sym, state);
-        }
-        // Update high/low within the minute
-        if (price > state.high) state.high = price;
-        if (price < state.low) state.low = price;
-        state.volume += (q.volume ?? 0) - state.volume; // session volume delta approximation
-
-        const bar = rawToBar(sym, '1m', {
-          ts: minuteTs,
-          open: state.open,
-          high: state.high,
-          low: state.low,
-          close: price,
-          volume: state.volume,
-        });
-        const enriched = { ...bar, indicators: computeIndicators(bar, 2) };
-        newBars.push(enriched);
         broadcast({ type: 'contract_bar', symbol: sym, data: q });
       });
-      if (newBars.length > 0) {
-        upsertBars(newBars);
-
-        // Aggregate option bars to higher timeframes per symbol
-        const bySymbol = new Map<string, Bar[]>();
-        for (const b of newBars) {
-          if (!bySymbol.has(b.symbol)) bySymbol.set(b.symbol, []);
-          bySymbol.get(b.symbol)!.push(b as Bar);
-        }
-        for (const [sym] of bySymbol) {
-          const recent1m = getBars(sym, '1m', 60);
-          if (recent1m.length > 0) aggregateAndStore(recent1m, 2);
-        }
-      }
     }
 
     // Expire contracts in memory AND persist to DB
@@ -805,10 +817,16 @@ async function main(): Promise<void> {
     console.warn('[SPXer] TRADIER_TOKEN not set — running in degraded mode (no live data)');
   }
 
-  // ── initDb — retry up to 3 times with 2s delay (no DB = no service) ──
+  // ── initDb — day-scoped live DB for isolation ──
+  // Each trading day gets a fresh SQLite DB at data/live/YYYY-MM-DD.db.
+  // If DB_PATH is set explicitly, honor it (escape hatch / backwards compat).
+  const today = todayET();
+  const liveDbPath = process.env.DB_PATH || dayDbPath(today);
+  console.log(`[startup] Live DB: ${liveDbPath}`);
+
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
-      initDb(config.dbPath);
+      initDb(liveDbPath);
       break;
     } catch (e) {
       console.error(`[startup] initDb failed (attempt ${attempt}/3):`, e);
@@ -820,12 +838,53 @@ async function main(): Promise<void> {
     }
   }
 
+  // Copy warmup bars from previous trading day (indicator seed)
+  if (!process.env.DB_PATH) {
+    try {
+      const prevDay = previousTradingDay(today);
+      const prevPath = dayDbPath(prevDay);
+      copyWarmupBars(prevPath);
+      console.log(`[startup] Warmup bars seeded from ${prevDay}`);
+    } catch (e) {
+      console.warn('[startup] Warmup copy failed, indicators will warm naturally:', e);
+    }
+  }
+
   // ── loadContractsFromDb — non-fatal, start with empty contracts ──
   try {
     loadContractsFromDb();
   } catch (e) {
     console.warn('[startup] DB read failed, starting with empty contracts:', e);
   }
+
+  // ── Register HMA periods from every stored replay_config ──
+  // The data service computes indicators for every bar it serves; if any config
+  // (live or research) references hmaCrossFast/Slow outside the default set,
+  // we must teach the engine about those periods BEFORE any bar flows.
+  // Otherwise the engine silently emits `hma${period}: undefined` and the
+  // signal detector never fires — the exact failure mode from 2026-04-20.
+  try {
+    const _configStore = createStore();
+    const configs = _configStore.listConfigs();
+    _configStore.close();
+    let registered = 0;
+    for (const cfg of configs) {
+      try {
+        validateSignalConfig(cfg);
+        registered++;
+      } catch (e: any) {
+        console.warn(`[startup] config ${cfg.id} failed validateSignalConfig: ${e.message}`);
+      }
+    }
+    console.log(`[startup] Registered HMA periods from ${registered}/${configs.length} configs → active periods: [${getActiveHmaPeriods().join(', ')}]`);
+  } catch (e) {
+    console.warn('[startup] HMA period registration failed, falling back to defaults:', e);
+  }
+
+  // ── Align pipeline HMA cross signal with the active agent config ──
+  // Guarantees the broadcast `hma_cross_signal` fires on the same pair the
+  // live agent trades (AGENT_CONFIG_ID). No-op if env var is unset.
+  loadAgentHmaPair();
 
   if (config.tradierToken) {
     // ── warmup — non-fatal, continue without history ──
@@ -885,6 +944,14 @@ async function main(): Promise<void> {
     connected: optionStream.isConnected(),
     symbolCount: optionStream.symbolCount,
     lastActivity: optionStream.lastActivity,
+    theta: {
+      connected: thetaStream.isConnected(),
+      symbolCount: thetaStream.symbolCount,
+      lastActivity: thetaStream.lastActivity,
+      staleMs: thetaStream.lastActivity > 0 ? Date.now() - thetaStream.lastActivity : null,
+      staleThresholdMs: OPTION_STREAM_THETA_STALE_MS,
+      primary: thetaIsPrimary(),
+    },
   }));
 
   intervals.push(setInterval(pollUnderlying, POLL_UNDERLYING_MS));
@@ -892,10 +959,9 @@ async function main(): Promise<void> {
   intervals.push(setInterval(pollOptions, optionsInterval));
   intervals.push(setInterval(pollScreener, POLL_SCREENER_MS));
 
-  // Schedule option stream lifecycle (two-phase):
-  //   8:00 ET — Phase 1: Connect WebSocket with preliminary strike band, start building option bars
-  //   9:30 ET — Phase 2: "Lock" band on firm SPX opening price, add new contracts if needed
-  //  17:00 ET — Stop stream, expire 0DTE contracts
+  // Schedule option stream lifecycle (single-phase):
+  //  09:22 ET — Wake: init stream with pre-market SPX strike band (one subscribe event)
+  //  17:00 ET — Close: stop stream, expire 0DTE contracts
   // REST polling (pollOptions) auto-suppresses once WebSocket is connected.
   if (config.tradierToken) {
     scheduleOptionStream();

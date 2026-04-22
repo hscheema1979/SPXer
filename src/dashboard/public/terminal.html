@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#0a0e17">
+<title>SPXer Terminal</title>
+<script src="https://unpkg.com/lightweight-charts@5.0.5/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+  :root {
+    --bg: #0a0e17; --fg: #e2e8f0; --muted: #94a3b8; --dim: #64748b;
+    --card: #111827; --card2: #0f172a; --border: #1e293b; --border2: rgba(30,41,59,0.6);
+    --input: #1e293b; --primary: #60a5fa;
+    --green: #4ade80; --green-bg: rgba(22,163,74,0.15); --green-border: rgba(22,163,74,0.4);
+    --red: #f87171; --red-bg: rgba(220,38,38,0.15); --red-border: rgba(220,38,38,0.4);
+    --amber: #fbbf24; --cyan: #22d3ee; --purple: #a78bfa;
+    --mono: ui-monospace,"SF Mono","JetBrains Mono","Fira Code",Consolas,monospace;
+    --sans: ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+  }
+  *,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+  body{font-family:var(--sans);background:var(--bg);color:var(--fg);font-size:13px;line-height:1.4;-webkit-font-smoothing:antialiased}
+  .mono{font-family:var(--mono)}
+
+  /* ── Header ── */
+  .hdr{display:flex;align-items:center;gap:16px;padding:10px 16px;background:var(--card);border-bottom:1px solid var(--border);flex-wrap:wrap}
+  .hdr-title{font-size:15px;font-weight:600;white-space:nowrap}
+  .hdr-nav{display:flex;gap:10px;font-size:12px}
+  .hdr-nav a{color:var(--dim);text-decoration:none} .hdr-nav a:hover{color:var(--fg)} .hdr-nav a.active{color:var(--primary);font-weight:600}
+  .hdr-stats{display:flex;gap:14px;margin-left:auto;font-family:var(--mono);font-size:12px;flex-wrap:wrap;align-items:center}
+  .hdr-stats .stat{display:flex;align-items:center;gap:4px}
+  .hdr-stats .label{color:var(--dim)}
+  .pnl-pos{color:var(--green);font-weight:600} .pnl-neg{color:var(--red);font-weight:600}
+  .badge{padding:2px 8px;border-radius:999px;font-size:10px;font-weight:700;letter-spacing:0.05em}
+  .badge-bull{background:var(--green-bg);color:var(--green);border:1px solid var(--green-border)}
+  .badge-bear{background:var(--red-bg);color:var(--red);border:1px solid var(--red-border)}
+  .badge-cfg{background:rgba(96,165,250,0.12);color:var(--primary);border:1px solid rgba(96,165,250,0.3)}
+  .dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:4px}
+  .dot-g{background:var(--green)} .dot-r{background:var(--red)} .dot-y{background:var(--amber)}
+
+  /* ── Layout ── */
+  .main{display:grid;grid-template-columns:1fr;gap:0}
+  @media(min-width:1024px){
+    .chain-row{display:grid !important;grid-template-columns:1fr 1fr;gap:0}
+  }
+
+  /* ── SPX Chart ── */
+  .chart-panel{background:var(--card);border-bottom:1px solid var(--border);position:relative}
+  .chart-bar{display:flex;align-items:center;gap:8px;padding:8px 16px;border-bottom:1px solid var(--border2)}
+  .chart-bar .title{font-weight:600;font-size:13px;margin-right:8px}
+  .tf-btn{padding:3px 10px;border:1px solid var(--border);border-radius:4px;background:var(--card2);color:var(--dim);cursor:pointer;font-family:var(--mono);font-size:11px;font-weight:600}
+  .tf-btn:hover{border-color:var(--primary);color:var(--fg)} .tf-btn.on{border-color:var(--primary);color:var(--primary);background:rgba(96,165,250,0.1)}
+  #spxChartBox{width:100%;height:420px}
+  .chart-legend{display:flex;gap:10px;padding:4px 16px 8px;font-size:10px;font-family:var(--mono);color:var(--dim);flex-wrap:wrap}
+  .legend-line{width:14px;height:3px;border-radius:2px;display:inline-block;vertical-align:middle;margin-right:3px}
+
+  /* ── Chain ── */
+  .chain-panel{background:var(--card);border-bottom:1px solid var(--border);overflow:auto;max-height:500px}
+  .chain-hdr{display:flex;align-items:center;gap:10px;padding:8px 12px;border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--card);z-index:2}
+  .chain-hdr .title{font-size:11px;font-weight:600;text-transform:uppercase;color:var(--dim);letter-spacing:0.08em}
+  .chain-hdr select{background:var(--input);color:var(--fg);border:1px solid var(--border);border-radius:4px;padding:3px 8px;font-family:var(--mono);font-size:11px}
+  .chain-hdr .zone{font-size:10px;color:var(--dim);margin-left:auto}
+
+  table.chain{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:11px}
+  table.chain th{position:sticky;top:36px;background:var(--card);color:var(--dim);font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.06em;padding:6px 6px;border-bottom:1px solid var(--border);text-align:right;z-index:1}
+  table.chain th.strike-col{text-align:center;background:var(--card2)}
+  table.chain th.call-side{color:var(--green)} table.chain th.put-side{color:var(--red)}
+  table.chain td{padding:4px 6px;border-bottom:1px solid var(--border2);text-align:right;white-space:nowrap}
+  table.chain td.strike{text-align:center;font-weight:700;color:var(--fg);background:var(--card2);border-left:1px solid var(--border);border-right:1px solid var(--border)}
+  table.chain tr.atm td.strike{color:var(--amber);background:rgba(251,191,36,0.08)}
+  table.chain tr.in-zone td.strike{color:var(--primary)}
+  table.chain tr:hover td{background:rgba(96,165,250,0.06)}
+  table.chain td.call-cell{cursor:pointer} table.chain td.put-cell{cursor:pointer}
+  table.chain td.call-cell:hover{background:var(--green-bg)} table.chain td.put-cell:hover{background:var(--red-bg)}
+  table.chain td.itm{color:var(--dim);opacity:0.6}
+  .chain-empty{padding:30px;text-align:center;color:var(--dim)}
+
+  /* ── Contract Detail ── */
+  .detail-panel{background:var(--card);border-left:1px solid var(--border);display:flex;flex-direction:column}
+  .detail-hdr{display:flex;align-items:center;gap:10px;padding:8px 12px;border-bottom:1px solid var(--border)}
+  .detail-hdr .sym{font-family:var(--mono);font-weight:700;font-size:13px}
+  .detail-hdr .side-badge{font-size:10px;font-weight:700;padding:2px 8px;border-radius:999px;letter-spacing:0.05em}
+  .detail-hdr .side-badge.call{background:var(--green-bg);color:var(--green);border:1px solid var(--green-border)}
+  .detail-hdr .side-badge.put{background:var(--red-bg);color:var(--red);border:1px solid var(--red-border)}
+  .detail-hdr .price{font-family:var(--mono);margin-left:auto;font-size:13px;font-weight:600}
+  .detail-info{display:flex;gap:12px;padding:6px 12px;font-size:11px;font-family:var(--mono);color:var(--dim);border-bottom:1px solid var(--border2);flex-wrap:wrap}
+  .detail-info span strong{color:var(--fg)}
+  #contractChartBox{width:100%;height:340px;flex:1;min-height:280px}
+  .detail-legend{display:flex;gap:10px;padding:4px 12px 8px;font-size:10px;font-family:var(--mono);color:var(--dim);flex-wrap:wrap}
+  .detail-empty{display:flex;align-items:center;justify-content:center;height:100%;min-height:340px;color:var(--dim);font-size:13px}
+
+  /* ── Bottom bar ── */
+  .bottom-bar{display:flex;align-items:center;gap:16px;padding:8px 16px;background:var(--card);border-top:1px solid var(--border);font-family:var(--mono);font-size:11px;color:var(--dim);flex-wrap:wrap}
+  .bottom-bar .val{color:var(--fg)}
+
+  ::-webkit-scrollbar{width:8px;height:8px} ::-webkit-scrollbar-track{background:transparent} ::-webkit-scrollbar-thumb{background:var(--border);border-radius:8px}
+</style>
+</head>
+<body>
+
+<!-- Header -->
+<header class="hdr">
+  <span class="hdr-title">SPXer</span>
+  <nav class="hdr-nav">
+    <a href="/spxer/dashboard/" class="active">Terminal</a>
+    <a href="/replay/">Replay</a>
+    <a href="/replay/sweep">Sweep</a>
+  </nav>
+  <div class="hdr-stats">
+    <span class="stat"><span class="label">SPX</span> <span id="hdrSpx" class="mono">—</span></span>
+    <span class="stat" id="hdrSignal"></span>
+    <span class="stat"><span class="label">P&L</span> <span id="hdrPnl">—</span></span>
+    <span class="stat"><span class="label">Trades</span> <span id="hdrTrades">—</span></span>
+    <span class="stat" id="hdrAgent"></span>
+    <span class="stat" id="hdrConfig"></span>
+    <span class="stat mono" id="hdrTime" style="color:var(--dim)">—</span>
+  </div>
+</header>
+
+<!-- SPX Chart -->
+<section class="chart-panel">
+  <div class="chart-bar">
+    <span class="title">SPX</span>
+    <button class="tf-btn on" data-tf="1m" onclick="setSpxTf('1m')">1m</button>
+    <button class="tf-btn" data-tf="5m" onclick="setSpxTf('5m')">5m</button>
+    <button class="tf-btn" data-tf="15m" onclick="setSpxTf('15m')">15m</button>
+  </div>
+  <div id="spxChartBox"></div>
+  <div class="chart-legend" id="spxLegend"></div>
+</section>
+
+<!-- Chain + Contract Detail -->
+<div class="chain-row">
+  <!-- Chain -->
+  <section class="chain-panel" id="chainPanel">
+    <div class="chain-hdr">
+      <span class="title">Options Chain</span>
+      <select id="expirySelect" onchange="loadChain()"></select>
+      <span class="zone" id="chainZone"></span>
+    </div>
+    <div id="chainBody"><div class="chain-empty">Loading chain...</div></div>
+  </section>
+  <!-- Contract Detail -->
+  <section class="detail-panel" id="detailPanel">
+    <div class="detail-empty" id="detailEmpty">Click a contract in the chain</div>
+    <div id="detailContent" style="display:none">
+      <div class="detail-hdr">
+        <span class="sym" id="detailSym"></span>
+        <span class="side-badge" id="detailSide"></span>
+        <span id="detailStrike" style="font-family:var(--mono);font-size:12px;color:var(--dim)"></span>
+        <span class="price" id="detailPrice">—</span>
+      </div>
+      <div class="detail-info" id="detailInfo"></div>
+      <div id="contractChartBox"></div>
+      <div class="detail-legend" id="contractLegend"></div>
+    </div>
+  </section>
+</div>
+
+<!-- Bottom bar -->
+<footer class="bottom-bar">
+  <span><span class="label">Config:</span> <span class="val" id="footCfg">—</span></span>
+  <span><span class="label">Signal TF:</span> <span class="val" id="footTf">—</span></span>
+  <span><span class="label">HMA:</span> <span class="val" id="footHma">—</span></span>
+  <span><span class="label">SL:</span> <span class="val" id="footSl">—</span></span>
+  <span><span class="label">TP:</span> <span class="val" id="footTp">—</span></span>
+  <span><span class="label">Window:</span> <span class="val" id="footWin">—</span></span>
+  <span><span class="label">Strike:</span> <span class="val" id="footStrike">—</span></span>
+  <span><span class="label">Price:</span> <span class="val" id="footPrice">—</span></span>
+</footer>
+
+<script src="/terminal.js"></script>
+</body>
+</html>

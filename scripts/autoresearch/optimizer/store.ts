@@ -1,6 +1,6 @@
 /**
  * Optimizer results store — tracks every parameter variant tested.
- * Lives in the same spxer.db as market data and replay results.
+ * Lives in spxer.db alongside replay results and configs.
  */
 
 import Database from 'better-sqlite3';

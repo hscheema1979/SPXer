@@ -144,7 +144,7 @@ describe('E2E: Full stack integration', () => {
       expect(wide.type).toBe('blocked');
     });
 
-    it('blocks the exact XSP trade from today ($2.97 spread)', () => {
+    it('blocks a trade with a $2.97 spread', () => {
       const result = chooseOrderType(1.93, 4.90);
       expect(result.type).toBe('blocked');
     });
@@ -190,7 +190,6 @@ describe('E2E: Full stack integration', () => {
         'SPXW260407P06610000',
         'SPXW260407C06590000',
         'SPXW260407P06580000',
-        'XSP260407P00661000',
       ];
 
       for (const sym of symbols) {

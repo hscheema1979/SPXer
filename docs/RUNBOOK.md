@@ -28,9 +28,6 @@ bash /home/ubuntu/SPXer/scripts/agent-ctl.sh restart spx
 # Restart data pipeline (agents depend on it -- restart agents after)
 pm2 restart spxer
 
-# Restart account monitor
-pm2 restart account-monitor
-
 # Restart dashboard / replay viewer
 pm2 restart spxer-dashboard
 pm2 restart replay-viewer
@@ -58,7 +55,7 @@ pm2 restart replay-viewer
 ./scripts/spxer-ctl db
 
 # Tail logs for a specific process
-./scripts/spxer-ctl logs agent    # spxer|agent|xsp|monitor|dashboard|viewer|all
+./scripts/spxer-ctl logs agent    # spxer|agent|monitor|dashboard|viewer|all
 
 # Check data service directly
 curl -s http://localhost:3600/health | python3 -m json.tool
@@ -107,12 +104,25 @@ bash /home/ubuntu/SPXer/scripts/ops.sh resume
     |
     +----> SQLite (data/spxer.db, WAL mode, 39GB)
     |
-    +----> Tradier API (market data + order execution)
+    +----> ThetaData local terminal (OPRA options WS, primary)
+    |          ws://127.0.0.1:25520/v1/events
     |
-    +----> Yahoo Finance (ES=F overnight)
+    +----> Tradier API (SPX timesales + options WS standby + order execution)
     |
     +----> TradingView screener (context: ES, NQ, VX, sectors)
 ```
+
+### Live Data Sources (roles + failure modes)
+
+| Source | Role | Failure mode |
+|--------|------|--------------|
+| ThetaData WS | Options live (primary) | Tradier WS takes over instantly — no agent impact |
+| Tradier WS | Options live (cold standby) | Theta keeps flowing — no impact |
+| Tradier REST timesales | SPX underlying (only source) | Health-gate halts agent entries — safe stop |
+| Tradier orders | Execution (only source) | Agent halts on submission failure |
+| Polygon | SPX historical backfill only | Zero live impact; can't seed new replay dates |
+
+Theta/Tradier switch is pure connection-state (`thetaIsPrimary()` in `src/index.ts` returns `thetaStream.isConnected()`). No hysteresis. Option stream wakes once at 09:22 ET with the ±100 band centered on pre-market SPX price — single subscribe event, no 9:30 re-lock.
 
 ### PM2 Processes
 
@@ -120,13 +130,11 @@ bash /home/ubuntu/SPXer/scripts/ops.sh resume
 |---------|------|-------------|------|
 | `spxer` | 3600 | true | Data pipeline, REST API, WebSocket |
 | `spxer-agent` | -- | **false** | SPX 0DTE trading (margin account 6YA51425) |
-| `spxer-xsp` | -- | **false** | XSP 1DTE trading (cash account 6YA58635) -- ARCHIVED |
-| `account-monitor` | -- | true | LLM oversight of both accounts |
 | `spxer-dashboard` | 3602 | true | Live dashboard UI |
 | `replay-viewer` | 3601 | true | Replay/backtest viewer UI |
 | `schwaber` | -- | false | Schwab ETF agent (separate system) |
 
-**Current state (2026-04-17)**: SPX agent is active. XSP agent is archived (commented out of ecosystem.config.js).
+**Current state**: SPX agent is active.
 
 ### Process Dependencies
 
@@ -134,8 +142,6 @@ bash /home/ubuntu/SPXer/scripts/ops.sh resume
 spxer (data pipeline) <-- MUST be running first
   |
   +-- spxer-agent (polls data service each cycle)
-  +-- spxer-xsp  (polls data service each cycle)
-  +-- account-monitor (queries data service for snapshots)
   +-- spxer-dashboard (proxies to data service)
 ```
 
@@ -144,10 +150,11 @@ If `spxer` goes down, agents cannot get market data. They will log errors but ex
 ### Data Flow
 
 ```
-Tradier/Yahoo/TV --> spxer pipeline --> SQLite bars table
-                                    --> REST API --> agents poll each cycle
-                                    --> WebSocket --> dashboard/monitors
-                                    
+ThetaData WS (primary) ┐
+Tradier WS (standby)   ├─> spxer pipeline --> SQLite bars table
+Tradier REST (SPX)     │                  --> REST API --> agents poll each cycle
+TradingView screener   ┘                  --> WebSocket --> dashboard/monitors
+
 Agent cycle: poll snapshot --> detectSignals() --> evaluateEntry/Exit --> Tradier orders
 ```
 
@@ -236,10 +243,7 @@ sqlite3 /home/ubuntu/SPXer/data/spxer.db "PRAGMA wal_checkpoint(TRUNCATE);"
 # 3. Review PM2 restart counts -- high counts indicate instability
 pm2 list
 
-# 4. Review monitor logs for patterns
-tail -200 /home/ubuntu/SPXer/logs/account-monitor.log | grep -i "alert\|warn"
-
-# 5. Run any pending code deploys (see section 5)
+# 4. Run any pending code deploys (see section 5)
 ```
 
 ---
@@ -250,7 +254,7 @@ tail -200 /home/ubuntu/SPXer/logs/account-monitor.log | grep -i "alert\|warn"
 
 ### 4.1 Agent Crash Mid-Position
 
-**Detection**: PM2 shows agent as `stopped` or `errored`. Account monitor may alert. NTFY notification.
+**Detection**: PM2 shows agent as `stopped` or `errored`. NTFY notification.
 
 **Assessment**:
 ```bash
@@ -445,7 +449,7 @@ bash /home/ubuntu/SPXer/scripts/agent-ctl.sh stop both
 
 ### 4.7 Position Without Bracket Protection
 
-**Detection**: Account monitor alerts about a position missing OCO orders. Or manual inspection reveals it.
+**Detection**: Manual inspection reveals a position missing OCO orders.
 
 **Assessment**:
 ```bash
@@ -484,7 +488,6 @@ du -sh /home/ubuntu/SPXer/logs/*
 pm2 flush
 
 # 2. Truncate old application logs
-> /home/ubuntu/SPXer/logs/account-monitor.log
 > /home/ubuntu/SPXer/logs/claude-monitor.log
 
 # 3. If DB is the problem, archive old data
@@ -521,13 +524,9 @@ pm2 restart spxer
 bash /home/ubuntu/SPXer/scripts/agent-ctl.sh restart spx
 # Agent reconciles from broker on restart
 
-# For account monitor (max 512MB):
-pm2 restart account-monitor
-# Monitor has session reset every 20 cycles to prevent context bloat
 ```
 
 **Known causes**: 
-- Account monitor LLM context window growth (fixed with 20-cycle session reset)
 - Replay processes loading too many bars into memory (use the in-memory cache, never SQL-per-tick)
 - Data pipeline tracking too many contracts (sticky band model holds ~250-480 contracts)
 
@@ -690,7 +689,6 @@ npm run build   # optional, only if checking for compile errors
 
 # Restart everything
 pm2 restart spxer
-pm2 restart account-monitor
 pm2 restart spxer-dashboard
 pm2 restart replay-viewer
 
@@ -803,29 +801,9 @@ pm2 save
 
 ## 6. Monitoring & Alerts
 
-### Account Monitor
-
-The account monitor (`account-monitor`) uses Claude Haiku to assess both accounts every 30 seconds during RTH. It logs to `logs/account-monitor.log`.
-
-**Polling intervals by mode**:
-| Mode | Interval | When |
-|------|----------|------|
-| RTH | 30s | 9:30 AM - 4:00 PM ET |
-| Pre-market | 5min | 6:00 AM - 9:30 AM ET |
-| Post-close | 2min | 4:00 PM - 5:00 PM ET |
-| Overnight | 30min | 5:00 PM - 6:00 AM ET |
-| Weekend/Holiday | off | Sat-Sun, MARKET_HOLIDAYS |
-
-**Alert deduplication**: Identical alerts are suppressed within 5-minute windows.
-
-**Session reset**: Every 20 cycles to prevent OOM from LLM context growth.
-
 ### Checking Alert History
 
 ```bash
-# Recent monitor alerts
-tail -100 /home/ubuntu/SPXer/logs/account-monitor.log | grep -i "alert\|warn"
-
 # Agent activity log (trades, signals, exits)
 tail -50 /home/ubuntu/SPXer/logs/agent-activity.jsonl
 
@@ -964,9 +942,8 @@ If positions expired while the agent was down (0DTE options expire at 4:00 PM ET
 | `/home/ubuntu/SPXer/.env` | Environment variables (API keys) |
 | `/home/ubuntu/SPXer/src/config.ts` | Holidays, polling intervals, constants |
 | `/home/ubuntu/SPXer/src/config/defaults.ts` | Default trading config |
-| `/home/ubuntu/SPXer/agent.ts` | SPX agent entry point |
-| `/home/ubuntu/SPXer/agent-xsp.ts` | XSP agent entry point |
-| `/home/ubuntu/SPXer/account-monitor.ts` | Account monitor entry point |
+| `/home/ubuntu/SPXer/spx_agent.ts` | SPX agent entry point |
+| `/home/ubuntu/SPXer/account-monitor.ts` | Account monitor (DISABLED — kept for reference) |
 
 ### Data
 
@@ -982,20 +959,15 @@ If positions expired while the agent was down (0DTE options expire at 4:00 PM ET
 | Path | Description |
 |------|-------------|
 | `/home/ubuntu/SPXer/logs/agent-status-spx.json` | SPX agent current state |
-| `/home/ubuntu/SPXer/logs/agent-status-xsp.json` | XSP agent current state |
 | `/home/ubuntu/SPXer/logs/agent-status.json` | Legacy combined status file |
 | `/home/ubuntu/SPXer/logs/agent-activity.jsonl` | Agent trade/signal activity |
 | `/home/ubuntu/SPXer/logs/agent-audit.jsonl` | Full decision audit trail |
-| `/home/ubuntu/SPXer/logs/account-monitor.log` | Monitor observations and alerts |
 | `/home/ubuntu/SPXer/logs/agent-maintenance.json` | Maintenance mode flag file |
-| `/home/ubuntu/SPXer/logs/xsp-session.json` | XSP session state |
 | `/home/ubuntu/SPXer/logs/watchdog-status.json` | Watchdog state (DISABLED) |
 | `~/.pm2/logs/spxer-out.log` | Data pipeline stdout |
 | `~/.pm2/logs/spxer-error.log` | Data pipeline stderr |
 | `~/.pm2/logs/spxer-agent-out.log` | SPX agent stdout |
 | `~/.pm2/logs/spxer-agent-error.log` | SPX agent stderr |
-| `~/.pm2/logs/xsp-monitor-out.log` | Account monitor stdout |
-| `~/.pm2/logs/xsp-monitor-error.log` | Account monitor stderr |
 | `~/.pm2/logs/dashboard-out.log` | Dashboard stdout |
 | `~/.pm2/logs/dashboard-error.log` | Dashboard stderr |
 
@@ -1024,13 +996,12 @@ If positions expired while the agent was down (0DTE options expire at 4:00 PM ET
 | Account | ID | Type |
 |---------|----|------|
 | SPX (margin) | 6YA51425 | Options margin |
-| XSP (cash) | 6YA58635 | Cash |
 
 ---
 
 ## Appendix: Things That Will Bite You
 
-1. **DO NOT re-enable the watchdog.** It caused $12K in losses by cancelling OCO bracket orders. The account monitor provides observation without destructive actions.
+1. **DO NOT re-enable the watchdog or account-monitor.** Watchdog caused $12K in losses by cancelling OCO bracket orders. Account-monitor was interfering with successful trades. Both removed from PM2.
 
 2. **Agents have `autorestart: false`.** If an agent crashes at 10 AM, it stays down until you manually restart it. Positions are protected by broker-side OCO orders, but no new trades or flip exits will happen.
 

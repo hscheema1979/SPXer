@@ -5,10 +5,10 @@
 import * as fs from 'fs';
 
 /** Account identifier used across all monitor tools */
-export type AccountKey = 'spx' | 'xsp';
+export type AccountKey = 'spx';
 
 /** Agent process identifier */
-export type AgentKey = 'spx' | 'xsp';
+export type AgentKey = 'spx';
 
 /** Alert severity levels */
 export type Severity = 'info' | 'warn' | 'alert';
@@ -28,13 +28,6 @@ export const ACCOUNTS: Record<AccountKey, AccountConfig> = {
     accountId: '6YA51425',
     label: 'SPX Margin',
     agentProcess: 'spxer-agent',
-    statusFile: 'logs/agent-status.json',
-    activityFile: 'logs/agent-activity.jsonl',
-  },
-  xsp: {
-    accountId: '6YA58635',
-    label: 'XSP Cash',
-    agentProcess: 'spxer-xsp',
     statusFile: 'logs/agent-status.json',
     activityFile: 'logs/agent-activity.jsonl',
   },

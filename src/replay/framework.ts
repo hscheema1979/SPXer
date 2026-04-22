@@ -143,12 +143,24 @@ export function createReplayContext(db: Database.Database, date: string): Replay
   };
 }
 
-export function getAvailableDays(db: Database.Database): string[] {
+export function getAvailableDays(db: Database.Database, underlyingSymbol: string = 'SPX'): string[] {
+  // Try parquet first (preferred — most historical SPX data lives here)
+  try {
+    const { listParquetDates, symbolToProfileId } = require('../storage/parquet-reader');
+    const profileId = symbolToProfileId(underlyingSymbol);
+    if (profileId) {
+      const parquetDates = listParquetDates(profileId);
+      if (parquetDates.length > 0) return parquetDates;
+    }
+  } catch {
+    // Parquet reader not available — fall through to SQLite
+  }
+
   const rows = db.prepare(`
     SELECT DISTINCT date(ts, 'unixepoch', '-5 hours') as d
-    FROM ${REPLAY_DATA_SOURCE} WHERE symbol='SPX' AND timeframe='1m'
+    FROM ${REPLAY_DATA_SOURCE} WHERE symbol=? AND timeframe='1m'
     ORDER BY d
-  `).all() as { d: string }[];
+  `).all(underlyingSymbol) as { d: string }[];
   return rows.map(r => r.d);
 }
 

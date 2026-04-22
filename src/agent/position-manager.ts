@@ -11,6 +11,7 @@ import type { Config } from '../config/types';
 import { cancelOcoLegs } from './trade-executor';
 import { config as appConfig, TRADIER_BASE } from '../config';
 import { randomUUID } from 'crypto';
+import { roundToOptionTick } from '../core/option-tick';
 
 export interface PositionCloseEvent {
   position: OpenPosition;
@@ -58,7 +59,18 @@ export class PositionManager {
    * checks for existing OCO legs, and submits new ones if missing.
    * Returns count of reconciled positions.
    */
-  async reconcileFromBroker(execCfg?: Config['execution']): Promise<number> {
+  /**
+   * Reconcile open positions from broker on startup.
+   * Fetches actual positions from Tradier, reconstructs OpenPosition objects,
+   * checks for existing OCO legs, and submits new ones if missing.
+   *
+   * When agentTag is provided (basket mode), only adopts positions whose
+   * entry order was tagged with this agent's ID. This prevents multiple
+   * basket agents on the same account from adopting each other's positions.
+   *
+   * Returns count of reconciled positions.
+   */
+  async reconcileFromBroker(execCfg?: Config['execution'], agentTag?: string): Promise<number> {
     if (this.paper) {
       console.log('[reconcile] Paper mode — skipping broker reconciliation');
       return 0;
@@ -89,19 +101,63 @@ export class PositionManager {
       return 0;
     }
 
-    // 2. Fetch pending orders to find existing OCO legs
-    let pendingOrders: any[] = [];
+    // 2. Fetch ALL orders (pending + today's filled) to find OCO legs and ownership tags
+    let allOrders: any[] = [];
     try {
       const { data } = await axios.get(
         `${TRADIER_BASE}/accounts/${accountId}/orders`,
         { headers: hdrs, timeout: 10000 },
       );
       const rawOrders = data?.orders?.order;
-      const allOrders = Array.isArray(rawOrders) ? rawOrders : rawOrders ? [rawOrders] : [];
-      pendingOrders = allOrders.filter((o: any) => o.status === 'pending' || o.status === 'open');
+      allOrders = Array.isArray(rawOrders) ? rawOrders : rawOrders ? [rawOrders] : [];
     } catch (e: any) {
       console.warn(`[reconcile] Failed to fetch orders [${accountId}]: ${e.message}`);
       // Continue without order info — we'll submit new OCO legs
+    }
+
+    const pendingOrders = allOrders.filter((o: any) => o.status === 'pending' || o.status === 'open');
+
+    // 3. Build a set of option symbols owned by this agent from order tags.
+    //    An order "owns" a symbol if it's a buy_to_open with our tag.
+    //    Also check OTOCO legs — the tag is on the parent, buy_to_open is leg[0].
+    //
+    //    Transition handling: untagged orders are legacy (placed before tagging).
+    //    Non-basket agents (agentTag without ':') adopt untagged positions as their own.
+    //    Basket members (agentTag with ':') NEVER adopt untagged positions.
+    const ownedSymbols = new Set<string>();
+    // If ANY order on the account has a tag, we're in multi-agent mode.
+    // Untagged orders are only adopted when NO tagged orders exist (pre-tagging legacy).
+    const hasAnyTaggedOrders = allOrders.some((o: any) => o.tag);
+
+    for (const order of allOrders) {
+      const tag = order.tag as string | undefined;
+
+      // Determine if this order belongs to us
+      const isTaggedOurs = tag === agentTag;
+      // Legacy untagged orders: adopt only if no tagged orders exist on account.
+      // Basket members NEVER adopt untagged positions —
+      // they must only manage positions they explicitly opened.
+      // Detected by 'basket' prefix or ':'/'.'' in tag.
+      const isBasketMember = !!(agentTag && (agentTag.startsWith('basket') || agentTag.includes(':') || agentTag.includes('.')));
+      const isLegacyOurs = !tag && !hasAnyTaggedOrders && !isBasketMember;
+
+      if (!isTaggedOurs && !isLegacyOurs) continue;
+
+      // Simple order: buy_to_open on option_symbol
+      if (order.side === 'buy_to_open' && order.option_symbol) {
+        ownedSymbols.add(order.option_symbol);
+      }
+
+      // OTOCO/OCO: check legs for buy_to_open
+      const legs = Array.isArray(order.leg) ? order.leg : order.leg ? [order.leg] : [];
+      for (const leg of legs) {
+        if (leg.side === 'buy_to_open' && leg.option_symbol) {
+          ownedSymbols.add(leg.option_symbol);
+        }
+      }
+    }
+    if (agentTag) {
+      console.log(`[reconcile] Agent tag="${agentTag}" owns symbols: [${[...ownedSymbols].join(', ')}]`);
     }
 
     let reconciled = 0;
@@ -111,6 +167,19 @@ export class PositionManager {
       const quantity = Math.abs(pos.quantity);
       const costBasis = Math.abs(pos.cost_basis);
       const entryPrice = costBasis / (quantity * 100);
+
+      // Skip positions not owned by this agent (multi-agent mode).
+      // When agentTag is set, only adopt positions we tagged via orders.
+      // When no agentTag and no tagged orders exist, adopt everything (legacy/test mode).
+      if (agentTag && ownedSymbols.size > 0 && !ownedSymbols.has(symbol)) {
+        console.log(`[reconcile] Skipping ${symbol} — not tagged for "${agentTag}"`);
+        continue;
+      }
+      if (agentTag && hasAnyTaggedOrders && ownedSymbols.size === 0) {
+        // Multi-agent account but none of our orders match — skip all
+        console.log(`[reconcile] Skipping ${symbol} — agent "${agentTag}" has no orders on this account`);
+        continue;
+      }
 
       // Parse option symbol: PREFIX + YYMMDD + C/P + 8-digit strike
       const match = symbol.match(/^([A-Z]+)(\d{6})([CP])(\d{8})$/);
@@ -124,25 +193,44 @@ export class PositionManager {
       const strike = parseInt(strikeStr) / 1000;
       const expiry = `20${dateStr.slice(0, 2)}-${dateStr.slice(2, 4)}-${dateStr.slice(4, 6)}`;
 
-      // Compute TP/SL from config
-      const stopLoss = entryPrice * (1 - this.cfg.position.stopLossPercent / 100);
-      const takeProfit = entryPrice * this.cfg.position.takeProfitMultiplier;
-
-      // Look for existing OCO legs for this symbol
+      // Look for existing OCO legs for this symbol. Prefer broker-side TP/SL
+      // (these were what the agent actually submitted at entry time) over
+      // recomputing from config — config may have been tuned since then, and
+      // recomputing from current config would rewrite the protection levels
+      // in a way inconsistent with the broker's live orders.
       let tpLegId: number | undefined;
       let slLegId: number | undefined;
       let bracketOrderId: number | undefined;
+      let brokerTp: number | null = null;
+      let brokerSl: number | null = null;
 
       for (const order of pendingOrders) {
         if (order.option_symbol === symbol && order.side === 'sell_to_close') {
           if (order.type === 'limit') {
             tpLegId = order.id;
             bracketOrderId = order.id; // Use any leg to cancel the OCO group
+            const p = parseFloat(order.price);
+            if (Number.isFinite(p) && p > 0) brokerTp = p;
           } else if (order.type === 'stop') {
             slLegId = order.id;
             bracketOrderId = order.id;
+            const s = parseFloat(order.stop_price ?? order.stop);
+            if (Number.isFinite(s) && s > 0) brokerSl = s;
           }
         }
+      }
+
+      // Prefer broker-side TP/SL; fall back to config-derived values.
+      // Tick-round defensively — brokers can accept any price but our own
+      // downstream logic expects tick-aligned values.
+      const stopLoss = brokerSl != null
+        ? roundToOptionTick(brokerSl)
+        : roundToOptionTick(entryPrice * (1 - this.cfg.position.stopLossPercent / 100));
+      const takeProfit = brokerTp != null
+        ? roundToOptionTick(brokerTp)
+        : roundToOptionTick(entryPrice * this.cfg.position.takeProfitMultiplier);
+      if (brokerTp != null || brokerSl != null) {
+        console.log(`[reconcile] Using broker TP/SL for ${symbol}: TP=${brokerTp != null ? '$' + brokerTp.toFixed(2) : '(recomputed)'} SL=${brokerSl != null ? '$' + brokerSl.toFixed(2) : '(recomputed)'}`);
       }
 
       const openPos: OpenPosition = {
@@ -180,12 +268,17 @@ export class PositionManager {
   /**
    * Submit standalone OCO legs (TP limit + SL stop) for a position
    * that has no server-side protection. Uses Tradier class=oco order type.
+   *
+   * Retries with exponential backoff (500ms → 2000ms → 5000ms) to survive
+   * transient broker errors. After all attempts fail, logs a CRITICAL alert
+   * so the position is surfaced as unprotected — the agent's reconciliation
+   * loop will retry on the next pass.
    */
   private async submitStandaloneOco(
     pos: OpenPosition,
     accountId: string,
     execCfg?: Config['execution'],
-  ): Promise<void> {
+  ): Promise<boolean> {
     const rootSymbol = execCfg?.symbol || 'SPX';
     const hdrs = {
       Authorization: `Bearer ${appConfig.tradierToken}`,
@@ -195,38 +288,55 @@ export class PositionManager {
 
     const tp = pos.takeProfit ?? pos.entryPrice * this.cfg.position.takeProfitMultiplier;
     const sl = pos.stopLoss;
+    const tpRounded = roundToOptionTick(tp);
+    const slRounded = roundToOptionTick(sl);
 
     const body = [
       'class=oco',
       'duration=day',
       `symbol=${rootSymbol}`,
-      // Leg 0: TP limit
+      // Leg 0: TP limit — round to valid option tick (Tradier rejects off-tick)
       `type[0]=limit`,
       `option_symbol[0]=${pos.symbol}`,
       `side[0]=sell_to_close`,
       `quantity[0]=${pos.quantity}`,
-      `price[0]=${tp.toFixed(2)}`,
-      // Leg 1: SL stop
+      `price[0]=${tpRounded.toFixed(2)}`,
+      // Leg 1: SL stop — round to valid option tick
       `type[1]=stop`,
       `option_symbol[1]=${pos.symbol}`,
       `side[1]=sell_to_close`,
       `quantity[1]=${pos.quantity}`,
-      `stop[1]=${sl.toFixed(2)}`,
+      `stop[1]=${slRounded.toFixed(2)}`,
     ].join('&');
 
-    try {
-      const { data } = await axios.post(
-        `${TRADIER_BASE}/accounts/${accountId}/orders`,
-        body,
-        { headers: hdrs, timeout: 10000 },
-      );
-      const orderId = data?.order?.id;
-      pos.bracketOrderId = orderId;
-      console.log(`[reconcile] Submitted OCO protection for ${pos.symbol}: TP=$${tp.toFixed(2)} SL=$${sl.toFixed(2)} — order #${orderId}`);
-    } catch (e: any) {
-      const err = e?.response?.data?.errors?.error || e.message;
-      console.error(`[reconcile] Failed to submit OCO for ${pos.symbol}: ${err}`);
+    const backoffs = [500, 2000, 5000];
+    let lastErr: string | undefined;
+    for (let attempt = 0; attempt < backoffs.length; attempt++) {
+      try {
+        const { data } = await axios.post(
+          `${TRADIER_BASE}/accounts/${accountId}/orders`,
+          body,
+          { headers: hdrs, timeout: 10000 },
+        );
+        const orderId = data?.order?.id;
+        if (!orderId) {
+          throw new Error(`Tradier accepted OCO but returned no order id: ${JSON.stringify(data)}`);
+        }
+        pos.bracketOrderId = orderId;
+        const label = attempt === 0 ? '' : ` (attempt ${attempt + 1})`;
+        console.log(`[reconcile] Submitted OCO protection for ${pos.symbol}: TP=$${tpRounded.toFixed(2)} SL=$${slRounded.toFixed(2)} — order #${orderId}${label}`);
+        return true;
+      } catch (e: any) {
+        lastErr = e?.response?.data?.errors?.error || e.message;
+        console.warn(`[reconcile] OCO attempt ${attempt + 1}/${backoffs.length} failed for ${pos.symbol}: ${lastErr}`);
+        if (attempt < backoffs.length - 1) {
+          await new Promise(r => setTimeout(r, backoffs[attempt]));
+        }
+      }
     }
+
+    console.error(`[reconcile] 🚨 CRITICAL: Failed to submit OCO for ${pos.symbol} after ${backoffs.length} attempts: ${lastErr}. Position is UNPROTECTED at broker.`);
+    return false;
   }
 
   /**

@@ -63,7 +63,7 @@ function makeConfig(overrides?: Partial<Config>): Config {
     narrative: { buildOvernightContext: false, barHistoryDepth: 60, trackTrajectory: false },
     pipeline: { providers: { tradier: { enabled: true }, yahoo: { enabled: true }, tvScreener: { enabled: true } } },
     sizing: { baseDollarsPerTrade: 200 },
-    execution: { accountId: 'test-account', symbol: 'XSP', optionPrefix: 'XSP', strikeDivisor: 10, strikeInterval: 1 },
+    execution: { accountId: 'test-account', symbol: 'SPX', optionPrefix: 'SPXW', strikeDivisor: 1, strikeInterval: 5 },
     ...overrides,
   } as Config;
 }
@@ -71,9 +71,9 @@ function makeConfig(overrides?: Partial<Config>): Config {
 function makePosition(overrides?: Partial<OpenPosition>): OpenPosition {
   return {
     id: 'pos-1',
-    symbol: 'XSP260331P00643000',
+    symbol: 'SPXW260331P06430000',
     side: 'put',
-    strike: 643,
+    strike: 6430,
     expiry: '2026-03-31',
     entryPrice: 1.63,
     quantity: 1,
@@ -106,21 +106,21 @@ describe('PositionManager', () => {
       pm.add(pos);
       expect(pm.count()).toBe(1);
       expect(pm.getAll()).toHaveLength(1);
-      expect(pm.getAll()[0].symbol).toBe('XSP260331P00643000');
+      expect(pm.getAll()[0].symbol).toBe('SPXW260331P06430000');
 
       pm.remove(pos.id);
       expect(pm.count()).toBe(0);
     });
 
     it('tracks multiple positions', () => {
-      pm.add(makePosition({ id: 'p1', symbol: 'XSP260331C00650000' }));
-      pm.add(makePosition({ id: 'p2', symbol: 'XSP260331P00640000' }));
+      pm.add(makePosition({ id: 'p1', symbol: 'SPXW260331C06500000' }));
+      pm.add(makePosition({ id: 'p2', symbol: 'SPXW260331P06400000' }));
       expect(pm.count()).toBe(2);
       expect(pm.getAll()).toHaveLength(2);
 
       pm.remove('p1');
       expect(pm.count()).toBe(1);
-      expect(pm.getAll()[0].symbol).toBe('XSP260331P00640000');
+      expect(pm.getAll()[0].symbol).toBe('SPXW260331P06400000');
     });
 
     it('remove is a no-op for unknown IDs', () => {
@@ -156,7 +156,7 @@ describe('PositionManager', () => {
             data: {
               positions: {
                 position: {
-                  symbol: 'XSP260401C00650000',
+                  symbol: 'SPXW260401C06500000',
                   quantity: 2,
                   cost_basis: 326, // $1.63 per contract × 2 × 100
                   date_acquired: '2026-04-01T10:00:00Z',
@@ -181,9 +181,9 @@ describe('PositionManager', () => {
       expect(pm.count()).toBe(1);
 
       const adopted = pm.getAll()[0];
-      expect(adopted.symbol).toBe('XSP260401C00650000');
+      expect(adopted.symbol).toBe('SPXW260401C06500000');
       expect(adopted.side).toBe('call');
-      expect(adopted.strike).toBe(650);
+      expect(adopted.strike).toBe(6500);
       expect(adopted.quantity).toBe(2);
     });
 

@@ -316,9 +316,9 @@ describe('collectPreLLMData', () => {
     return {
       getPositions: async () => 'No positions.',
       getOrders: async (_a, filter) => `Orders (${filter}): none.`,
-      getBalance: async () => 'SPX: $10k | XSP: $1.2k',
+      getBalance: async () => 'SPX: $10k',
       getMarketSnapshot: async () => 'SPX 6335 RSI 52 HMA BULLISH',
-      getAgentStatus: async () => 'Both agents running.',
+      getAgentStatus: async () => 'SPX agent running.',
       checkSystemHealth: async () => 'Disk 76%, DB 13G, all processes up.',
       ...overrides,
     };

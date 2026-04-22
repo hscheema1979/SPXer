@@ -1,0 +1,544 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SPXer Account</title>
+<style>
+  :root {
+    --bg: #0a0a0f; --card: #111118; --card2: #0d0d14; --border: #1a1a24; --border2: #222;
+    --fg: #e0e0e0; --muted: #888; --dim: #555;
+    --green: #10b981; --red: #f43f5e; --blue: #3b82f6; --purple: #a78bfa; --orange: #f59e0b;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", Consolas, monospace;
+    --sans: ui-sans-serif, system-ui, -apple-system, sans-serif;
+    --r: 8px;
+  }
+  *, *::before, *::after { margin:0; padding:0; box-sizing:border-box; }
+  body { background:var(--bg); color:var(--fg); font-family:var(--sans); font-size:13px; line-height:1.45; -webkit-font-smoothing:antialiased; }
+
+  /* Nav */
+  .nav { display:flex; align-items:center; padding:0 12px; background:var(--card2); border-bottom:1px solid var(--border); font-size:12px; overflow-x:auto; }
+  .nav::-webkit-scrollbar { display:none; }
+  .nav a { color:var(--dim); text-decoration:none; padding:10px 14px; border-bottom:2px solid transparent; flex-shrink:0; }
+  .nav a:hover { color:var(--purple); }
+  .nav a.active { color:var(--purple); border-bottom-color:var(--purple); }
+  .nav .brand { color:var(--purple)!important; font-weight:700; font-size:13px; padding-right:16px!important; border:none!important; }
+
+  .container { max-width:1200px; margin:0 auto; padding:16px; }
+
+  /* Range picker */
+  .range-bar { display:flex; align-items:center; gap:4px; margin-bottom:16px; }
+  .range-btn { background:var(--card); color:var(--muted); border:1px solid var(--border); border-radius:6px; padding:5px 12px; font-size:11px; font-weight:600; cursor:pointer; font-family:var(--sans); transition:all .15s; }
+  .range-btn:hover { border-color:var(--purple); color:var(--purple); }
+  .range-btn.active { background:var(--purple); color:#fff; border-color:var(--purple); }
+
+  /* Cards */
+  .grid { display:grid; gap:12px; margin-bottom:16px; }
+  .grid-6 { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+  .grid-2 { grid-template-columns: 1fr 1fr; }
+  .grid-3 { grid-template-columns: 1fr 1fr 1fr; }
+  @media(max-width:768px) { .grid-2,.grid-3 { grid-template-columns:1fr; } }
+
+  .card { background:var(--card); border:1px solid var(--border); border-radius:var(--r); padding:16px; }
+  .card-title { font-size:10px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin-bottom:10px; font-weight:600; }
+
+  .stat { text-align:center; padding:12px; background:var(--card2); border:1px solid var(--border); border-radius:6px; }
+  .stat .label { font-size:10px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin-bottom:4px; }
+  .stat .val { font-size:22px; font-weight:700; font-family:var(--mono); }
+  .stat .sub { font-size:11px; color:var(--muted); margin-top:2px; }
+  .green { color:var(--green); } .red { color:var(--red); } .blue { color:var(--blue); }
+
+  /* Agent status */
+  .status-row { display:flex; gap:12px; flex-wrap:wrap; margin-bottom:16px; }
+  .status-pill { display:inline-flex; align-items:center; gap:6px; padding:6px 12px; border-radius:20px; font-size:12px; font-weight:600; }
+  .status-pill .dot { width:8px; height:8px; border-radius:50%; }
+  .status-online { background:rgba(16,185,129,.15); color:var(--green); }
+  .status-online .dot { background:var(--green); animation: pulse 2s infinite; }
+  .status-offline { background:rgba(244,63,94,.15); color:var(--red); }
+  .status-offline .dot { background:var(--red); }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.3} }
+
+  /* Tables */
+  .table-wrap { overflow-x:auto; }
+  table { width:100%; border-collapse:collapse; font-size:12px; font-family:var(--mono); }
+  th { text-align:left; padding:8px 10px; font-size:10px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); border-bottom:1px solid var(--border2); font-weight:600; white-space:nowrap; }
+  td { padding:6px 10px; border-bottom:1px solid var(--border); white-space:nowrap; }
+  tr:hover td { background:rgba(139,139,255,.04); }
+  .r { text-align:right; }
+  .pnl { font-weight:600; }
+  tr.day-separator td { border-top:2px solid var(--border2); }
+
+  /* P&L curve */
+  .curve-box { margin-bottom:16px; }
+  canvas { width:100%!important; height:200px!important; display:block; }
+
+  .loading { text-align:center; padding:40px; color:var(--muted); }
+  .empty { color:var(--dim); font-style:italic; }
+
+  .refresh-bar { display:flex; align-items:center; justify-content:space-between; margin-top:16px; }
+  .refresh-bar .ts { font-size:11px; color:var(--dim); }
+  .refresh-bar button { background:var(--card); color:var(--fg); border:1px solid var(--border2); border-radius:6px; padding:5px 14px; font-size:12px; cursor:pointer; }
+  .refresh-bar button:hover { border-color:var(--purple); }
+</style>
+</head>
+<body>
+
+<div class="nav">
+  <span class="brand">SPXer</span>
+  <a href="/replay/">Replay</a>
+  <a href="/replay/sweep">Sweep</a>
+  <a href="/replay/journal">Journal</a>
+  <a href="/replay/account" class="active">Account</a>
+</div>
+
+<div class="container">
+  <div class="range-bar" id="rangeBar">
+    <button class="range-btn active" data-range="1d">Today</button>
+    <button class="range-btn" data-range="1w">1 Week</button>
+    <button class="range-btn" data-range="2w">2 Weeks</button>
+    <button class="range-btn" data-range="1m">1 Month</button>
+    <button class="range-btn" data-range="3m">3 Months</button>
+    <button class="range-btn" data-range="6m">6 Months</button>
+    <button class="range-btn" data-range="1y">1 Year</button>
+  </div>
+  <div id="content"><div class="loading">Loading account data...</div></div>
+</div>
+
+<script>
+const API = '/replay/api';
+let currentRange = '1d';
+let refreshTimer = null;
+
+// ── Range helpers ──────────────────────────────────────────────────────
+
+function todayET() {
+  return new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+}
+
+function dateNDaysAgo(n) {
+  const d = new Date();
+  d.setDate(d.getDate() - n);
+  return d.toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+}
+
+const EARLIEST_DATE = '2026-04-12';
+
+function rangeToStartDate(range) {
+  const map = { '1d': 0, '1w': 7, '2w': 14, '1m': 30, '3m': 90, '6m': 180, '1y': 365 };
+  const computed = dateNDaysAgo(map[range] || 0);
+  return computed < EARLIEST_DATE ? EARLIEST_DATE : computed;
+}
+
+function rangeLabel(range) {
+  const map = { '1d': 'Today', '1w': 'This Week', '2w': '2 Weeks', '1m': 'This Month', '3m': '3 Months', '6m': '6 Months', '1y': '1 Year' };
+  return map[range] || range;
+}
+
+// ── Data fetching ──────────────────────────────────────────────────────
+
+async function fetchAccountData(range) {
+  const today = todayET();
+  const start = rangeToStartDate(range);
+
+  // Always fetch balance, positions, agent status
+  const [bal, pos, status] = await Promise.all([
+    fetch(`${API}/account/balance`).then(r => r.json()).catch(() => null),
+    fetch(`${API}/account/positions`).then(r => r.json()).catch(() => []),
+    fetch(`${API}/account/agent-status`).then(r => r.json()).catch(() => null),
+  ]);
+
+  // Fetch today's live trades (always needed for today section)
+  let todayTrades = [];
+  const liveTrades = await fetch(`${API}/live/trades`).then(r => r.ok ? r.json() : null).catch(() => null);
+  if (liveTrades?.trades?.length > 0) {
+    todayTrades = liveTrades.trades;
+  }
+
+  // For multi-day ranges, also fetch gainloss from broker
+  let gainloss = [];
+  if (range !== '1d') {
+    const raw = await fetch(`${API}/account/gainloss?start=${start}&end=${today}`).then(r => r.ok ? r.json() : []).catch(() => []);
+    gainloss = raw.filter(p => (p.close_date || '').slice(0, 10) >= EARLIEST_DATE);
+  }
+
+  return { bal, pos, status, todayTrades, gainloss, range };
+}
+
+// ── Rendering ──────────────────────────────────────────────────────────
+
+function fmt$(n, showSign) {
+  if (n == null || isNaN(n)) return 'N/A';
+  const s = n > 0 && showSign ? '+' : n < 0 ? '-' : '';
+  return s + '$' + Math.abs(n).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+}
+function pnlCls(n) { return n > 0 ? 'green' : n < 0 ? 'red' : ''; }
+function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function formatTime(dateStr) {
+  if (!dateStr) return '??';
+  try { return new Date(dateStr).toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: false }); }
+  catch { return dateStr; }
+}
+function formatDate(dateStr) {
+  if (!dateStr) return '??';
+  try {
+    const d = new Date(dateStr);
+    return d.toLocaleDateString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric' });
+  } catch { return dateStr; }
+}
+
+async function render() {
+  const data = await fetchAccountData(currentRange);
+  const { bal, pos, status, todayTrades, gainloss, range } = data;
+  const c = document.getElementById('content');
+  let h = '';
+
+  // Agent status row
+  const isOnline = status && status.cycle > 0;
+  h += `<div class="status-row">`;
+  h += `<div class="status-pill ${isOnline ? 'status-online' : 'status-offline'}"><span class="dot"></span>${isOnline ? 'Agent Online' : 'Agent Offline'}</div>`;
+  if (status) {
+    h += `<div class="status-pill" style="background:rgba(139,139,255,.1);color:var(--purple)">Cycle #${status.cycle} | SPX $${(status.spxPrice||0).toFixed(2)}</div>`;
+    if (status.lastReasoning) h += `<div class="status-pill" style="background:var(--card);color:var(--muted);border:1px solid var(--border)">${esc(status.lastReasoning)}</div>`;
+  }
+  h += `</div>`;
+
+  // Today P&L from broker balance (sole source of truth)
+  const todayPnl = bal?.close_pl ?? 0;
+  const closedTrades = todayTrades.filter(t => t.status === 'CLOSED');
+
+  if (range === '1d') {
+    // ── TODAY ONLY VIEW ──
+    // Balance cards — P&L from broker's close_pl, NOT computed from fills
+    if (bal) {
+      h += `<div class="grid grid-6">
+        <div class="stat"><div class="label">Total Equity</div><div class="val">${fmt$(bal.total_equity)}</div></div>
+        <div class="stat"><div class="label">Option Buying Power</div><div class="val">${fmt$(bal.pdt?.option_buying_power ?? bal.option_buying_power)}</div></div>
+        <div class="stat"><div class="label">Today P&L</div><div class="val ${pnlCls(todayPnl)}">${fmt$(todayPnl, true)}</div><div class="sub">${closedTrades.length} closed trades (from broker)</div></div>
+        <div class="stat"><div class="label">Open Trades</div><div class="val">${todayTrades.length - closedTrades.length}</div></div>
+        <div class="stat"><div class="label">Cash</div><div class="val">${fmt$(bal.total_cash)}</div></div>
+        <div class="stat"><div class="label">Pending Orders</div><div class="val">${bal.pending_orders_count ?? 0}</div></div>
+      </div>`;
+    }
+
+    // Positions
+    h += `<div class="grid grid-2">`;
+    h += renderPositions(pos);
+    h += `<div></div>`;
+    h += `</div>`;
+
+    // Trade log (no P&L column — broker doesn't settle same-day)
+    h += renderTradeLog(todayTrades);
+
+  } else {
+    // ── MULTI-DAY VIEW ──
+    // Aggregate gainloss by day
+    const dailyMap = {};
+    for (const p of gainloss) {
+      const day = (p.close_date || '').slice(0, 10);
+      if (!day) continue;
+      if (!dailyMap[day]) dailyMap[day] = { date: day, pnl: 0, trades: 0, wins: 0, losses: 0, positions: [] };
+      const pnl = p.gain_loss ?? ((p.proceed || 0) - (p.cost || 0));
+      dailyMap[day].pnl += pnl;
+      dailyMap[day].trades++;
+      if (pnl > 0) dailyMap[day].wins++;
+      else if (pnl < 0) dailyMap[day].losses++;
+      dailyMap[day].positions.push(p);
+    }
+    // Add today from broker balance close_pl (not computed from fills)
+    if (closedTrades.length > 0) {
+      const today = todayET();
+      dailyMap[today] = {
+        date: today,
+        pnl: todayPnl,  // from bal.close_pl
+        trades: closedTrades.length,
+        wins: 0,  // unknown — broker doesn't report per-trade same-day
+        losses: 0,
+        positions: todayTrades,
+        isLive: true,
+      };
+    }
+    const days = Object.values(dailyMap).sort((a, b) => b.date.localeCompare(a.date));
+    const totalPnl = days.reduce((s, d) => s + d.pnl, 0);
+    const totalTrades = days.reduce((s, d) => s + d.trades, 0);
+    const totalWins = days.reduce((s, d) => s + d.wins, 0);
+    const totalLosses = days.reduce((s, d) => s + d.losses, 0);
+    const tradingDays = days.filter(d => d.trades > 0).length;
+    const winningDays = days.filter(d => d.pnl > 0).length;
+    const losingDays = days.filter(d => d.pnl < 0).length;
+    const bestDay = days.length > 0 ? Math.max(...days.map(d => d.pnl)) : 0;
+    const worstDay = days.length > 0 ? Math.min(...days.map(d => d.pnl)) : 0;
+    const avgDaily = tradingDays > 0 ? totalPnl / tradingDays : 0;
+    const wr = totalTrades > 0 ? Math.round(totalWins / totalTrades * 1000) / 10 : 0;
+
+    // Balance + period summary
+    if (bal) {
+      h += `<div class="grid" style="grid-template-columns: repeat(auto-fit, minmax(130px, 1fr))">
+        <div class="stat"><div class="label">Total Equity</div><div class="val">${fmt$(bal.total_equity)}</div></div>
+        <div class="stat"><div class="label">${rangeLabel(range)} P&L</div><div class="val ${pnlCls(totalPnl)}">${fmt$(totalPnl, true)}</div><div class="sub">${totalTrades} trades</div></div>
+        <div class="stat"><div class="label">Win Rate</div><div class="val ${wr>=50?'green':wr<30?'red':''}">${wr}%</div><div class="sub">${totalWins}W / ${totalLosses}L</div></div>
+        <div class="stat"><div class="label">Trading Days</div><div class="val">${tradingDays}</div><div class="sub">${winningDays}W / ${losingDays}L</div></div>
+        <div class="stat"><div class="label">Avg Daily</div><div class="val ${pnlCls(avgDaily)}">${fmt$(avgDaily, true)}</div></div>
+        <div class="stat"><div class="label">Best Day</div><div class="val green">${fmt$(bestDay, true)}</div></div>
+        <div class="stat"><div class="label">Worst Day</div><div class="val red">${fmt$(worstDay, true)}</div></div>
+      </div>`;
+    }
+
+    // Cumulative P&L curve (by day)
+    if (days.length > 1) {
+      h += `<div class="card curve-box"><div class="card-title">Cumulative P&L — ${rangeLabel(range)}</div><canvas id="pnlCanvas"></canvas></div>`;
+    }
+
+    // Positions + daily breakdown side by side
+    h += `<div class="grid grid-2">`;
+    h += renderPositions(pos);
+
+    // Daily P&L table
+    h += `<div class="card"><div class="card-title">Daily P&L</div>`;
+    if (days.length > 0) {
+      h += `<div class="table-wrap"><table>
+        <tr><th>Date</th><th class="r">Trades</th><th class="r">W/L</th><th class="r">Win %</th><th class="r">P&L</th><th class="r">Cumulative</th></tr>`;
+      let cum = 0;
+      const sorted = [...days].sort((a, b) => a.date.localeCompare(b.date));
+      for (const d of sorted) {
+        cum += d.pnl;
+        const dwr = d.trades > 0 ? Math.round(d.wins / d.trades * 100) : 0;
+        h += `<tr>
+          <td>${d.date}${d.isLive ? ' <span style="color:var(--green);font-size:10px">LIVE</span>' : ''}</td>
+          <td class="r">${d.trades}</td>
+          <td class="r">${d.wins}/${d.losses}</td>
+          <td class="r">${dwr}%</td>
+          <td class="r pnl ${pnlCls(d.pnl)}">${fmt$(d.pnl, true)}</td>
+          <td class="r pnl ${pnlCls(cum)}">${fmt$(cum, true)}</td>
+        </tr>`;
+      }
+      h += `</table></div>`;
+    } else {
+      h += `<div class="empty">No trades in this period</div>`;
+    }
+    h += `</div></div>`;
+
+    // All trades (collapsed by day)
+    if (days.length > 0) {
+      h += `<div class="card"><div class="card-title">All Trades — ${rangeLabel(range)} (${totalTrades})</div><div class="table-wrap"><table>`;
+      h += `<tr><th>Date</th><th>Entry</th><th>Exit</th><th>Symbol</th><th>Side</th><th class="r">Qty</th><th class="r">Buy</th><th class="r">Sell</th><th class="r">P&L / Exit</th></tr>`;
+      const sorted = [...days].sort((a, b) => a.date.localeCompare(b.date));
+      for (const d of sorted) {
+        if (d.isLive) {
+          // Today's trades from live endpoint — no per-trade P&L (broker settles T+1)
+          for (const t of d.positions) {
+            const side = t.side || 'unknown';
+            const strike = t.strike || 0;
+            h += `<tr>
+              <td>${d.date}</td>
+              <td>${formatTime(t.entryTime)}</td>
+              <td>${formatTime(t.exitTime)}</td>
+              <td>${side.charAt(0).toUpperCase()} ${strike}</td>
+              <td style="color:${side==='call'?'var(--blue)':'var(--purple)'}">${side}</td>
+              <td class="r">${t.qty}</td>
+              <td class="r">$${(t.entryFill||0).toFixed(2)}</td>
+              <td class="r">${t.exitFill != null ? '$' + t.exitFill.toFixed(2) : '—'}</td>
+              <td class="r" style="color:var(--dim)">${t.exitReason || '—'}</td>
+            </tr>`;
+          }
+        } else {
+          // Historical trades from gainloss
+          for (const p of d.positions) {
+            const sym = p.symbol || '';
+            const side = sym.match(/C\d{8}$/) ? 'call' : 'put';
+            const strike = parseInt((sym).slice(-8)) / 1000 || 0;
+            const pnl = p.gain_loss ?? ((p.proceed || 0) - (p.cost || 0));
+            const qty = Math.abs(p.quantity || 0);
+            const buy = qty > 0 ? Math.abs(p.cost || 0) / qty / 100 : 0;
+            const sell = qty > 0 ? Math.abs(p.proceed || 0) / qty / 100 : 0;
+            h += `<tr>
+              <td>${d.date}</td>
+              <td>${formatTime(p.open_date)}</td>
+              <td>${formatTime(p.close_date)}</td>
+              <td>${side.charAt(0).toUpperCase()} ${strike}</td>
+              <td style="color:${side==='call'?'var(--blue)':'var(--purple)'}">${side}</td>
+              <td class="r">${qty}</td>
+              <td class="r">$${buy.toFixed(2)}</td>
+              <td class="r">$${sell.toFixed(2)}</td>
+              <td class="r pnl ${pnlCls(pnl)}">${fmt$(pnl, true)}</td>
+            </tr>`;
+          }
+        }
+      }
+      h += `</table></div></div>`;
+    }
+  }
+
+  // Refresh bar
+  h += `<div class="refresh-bar">
+    <span class="ts">Last updated: ${new Date().toLocaleTimeString()}</span>
+    <button onclick="render()">Refresh</button>
+  </div>`;
+
+  c.innerHTML = h;
+
+  // Draw chart — no intraday curve (would require agent P&L per trade)
+  // Daily cumulative uses broker gainloss + today's close_pl
+  if (range !== '1d') {
+    const dailyMap2 = {};
+    for (const p of gainloss) {
+      const day = (p.close_date || '').slice(0, 10);
+      if (!day) continue;
+      if (!dailyMap2[day]) dailyMap2[day] = 0;
+      dailyMap2[day] += p.gain_loss ?? ((p.proceed || 0) - (p.cost || 0));
+    }
+    if (closedTrades.length > 0) dailyMap2[todayET()] = todayPnl; // from bal.close_pl
+    const sortedDays = Object.entries(dailyMap2).sort((a, b) => a[0].localeCompare(b[0]));
+    if (sortedDays.length > 1) {
+      setTimeout(() => drawDailyCurve(sortedDays), 50);
+    }
+  }
+}
+
+function renderPositions(pos) {
+  let h = `<div class="card"><div class="card-title">Open Positions</div>`;
+  if (pos && pos.length > 0) {
+    h += `<div class="table-wrap"><table><tr><th>Symbol</th><th class="r">Qty</th><th class="r">Cost</th><th class="r">Value</th><th class="r">P&L</th></tr>`;
+    for (const p of pos) {
+      const pnl = ((p.last_price || 0) - p.cost_basis / (p.quantity * 100)) * p.quantity * 100;
+      h += `<tr><td>${p.symbol?.slice(-12) || p.symbol}</td><td class="r">${p.quantity}</td><td class="r">${fmt$(p.cost_basis)}</td><td class="r">${fmt$((p.last_price||0)*p.quantity*100)}</td><td class="r pnl ${pnlCls(pnl)}">${fmt$(pnl, true)}</td></tr>`;
+    }
+    h += `</table></div>`;
+  } else {
+    h += `<div class="empty">No open positions</div>`;
+  }
+  h += `</div>`;
+  return h;
+}
+
+// renderSymbolSummary removed — relied on agent-computed P&L.
+// Broker is the sole source of truth for P&L.
+
+function renderTradeLog(trades) {
+  if (!trades || trades.length === 0) return '';
+  let h = `<div class="card"><div class="card-title">Trade Log</div><div class="table-wrap"><table>`;
+  h += `<tr><th>#</th><th>Entry</th><th>Exit</th><th>Dur</th><th>Symbol</th><th>Side</th><th class="r">Qty</th><th class="r">Buy</th><th class="r">Sell</th><th>Exit Reason</th><th>Status</th></tr>`;
+  trades.forEach((t, i) => {
+    const side = t.side || 'unknown';
+    const strike = t.strike || 0;
+    const dur = t.entryTime && t.exitTime ? Math.round((new Date(t.exitTime) - new Date(t.entryTime)) / 60000) : '?';
+    const statusColor = t.status === 'OPEN' ? 'var(--orange)' : 'var(--muted)';
+    h += `<tr>
+      <td>${i + 1}</td>
+      <td>${formatTime(t.entryTime)}</td>
+      <td>${t.exitTime ? formatTime(t.exitTime) : '—'}</td>
+      <td style="${typeof dur==='number'&&dur<=3?'color:var(--orange)':''}">${t.exitTime ? dur + 'm' : '—'}</td>
+      <td>${side.charAt(0).toUpperCase()} ${strike}</td>
+      <td style="color:${side==='call'?'var(--blue)':'var(--purple)'}">${side}</td>
+      <td class="r">${t.qty}</td>
+      <td class="r">$${(t.entryFill||0).toFixed(2)}</td>
+      <td class="r">${t.exitFill != null ? '$' + t.exitFill.toFixed(2) : '—'}</td>
+      <td style="color:var(--dim)">${t.exitReason || '—'}</td>
+      <td style="color:${statusColor}">${t.status || '?'}</td>
+    </tr>`;
+  });
+  h += `</table></div></div>`;
+  return h;
+}
+
+// ── Charts ─────────────────────────────────────────────────────────────
+
+// drawIntradayCurve removed — relied on agent-computed per-trade P&L.
+
+function drawDailyCurve(sortedDays) {
+  const canvas = document.getElementById('pnlCanvas');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = rect.width * dpr;
+  canvas.height = rect.height * dpr;
+  ctx.scale(dpr, dpr);
+  const W = rect.width, H = rect.height;
+  const pad = { t:16, r:16, b:24, l:60 };
+
+  let cum = 0;
+  const pts = [0];
+  const labels = [];
+  for (const [day, pnl] of sortedDays) {
+    cum += pnl;
+    pts.push(cum);
+    labels.push(formatDate(day + 'T12:00:00'));
+  }
+  drawCurveCore(ctx, W, H, pad, pts, labels);
+}
+
+function drawCurveCore(ctx, W, H, pad, pts, labels) {
+  const minY = Math.min(0, ...pts), maxY = Math.max(0, ...pts);
+  const range = (maxY - minY) || 1;
+  const pw = W-pad.l-pad.r, ph = H-pad.t-pad.b;
+  const x = i => pad.l + (i/(pts.length-1))*pw;
+  const y = v => pad.t + ph - ((v-minY)/range)*ph;
+
+  // Zero line
+  ctx.strokeStyle = '#222'; ctx.lineWidth = 1;
+  ctx.setLineDash([3,3]); ctx.beginPath(); ctx.moveTo(pad.l, y(0)); ctx.lineTo(W-pad.r, y(0)); ctx.stroke(); ctx.setLineDash([]);
+
+  // Fill
+  ctx.beginPath(); ctx.moveTo(x(0), y(0));
+  for (let i=0;i<pts.length;i++) ctx.lineTo(x(i), y(pts[i]));
+  ctx.lineTo(x(pts.length-1), y(0)); ctx.closePath();
+  const last = pts[pts.length-1];
+  const grad = ctx.createLinearGradient(0, pad.t, 0, H-pad.b);
+  if (last>=0) { grad.addColorStop(0,'rgba(16,185,129,.25)'); grad.addColorStop(1,'rgba(16,185,129,0)'); }
+  else { grad.addColorStop(0,'rgba(244,63,94,0)'); grad.addColorStop(1,'rgba(244,63,94,.25)'); }
+  ctx.fillStyle = grad; ctx.fill();
+
+  // Line
+  ctx.beginPath();
+  for (let i=0;i<pts.length;i++) { if(i===0) ctx.moveTo(x(i),y(pts[i])); else ctx.lineTo(x(i),y(pts[i])); }
+  ctx.strokeStyle = last>=0?'#10b981':'#f43f5e'; ctx.lineWidth=2; ctx.stroke();
+
+  // Dots
+  for (let i=1;i<pts.length;i++) {
+    ctx.beginPath(); ctx.arc(x(i),y(pts[i]),2.5,0,Math.PI*2);
+    const pnl = pts[i] - pts[i-1];
+    ctx.fillStyle = pnl>0?'#10b981':pnl<0?'#f43f5e':'#555'; ctx.fill();
+  }
+
+  // Y axis
+  ctx.fillStyle='#888'; ctx.font='10px ui-monospace,monospace'; ctx.textAlign='right';
+  for (let i=0;i<=4;i++) { const v=minY+(range/4)*i; ctx.fillText(fmt$(Math.round(v),true), pad.l-6, y(v)+3); }
+
+  // X axis
+  ctx.textAlign='center';
+  const step = Math.max(1, Math.floor(labels.length/6));
+  for (let i=0;i<labels.length;i+=step) ctx.fillText(labels[i], x(i+1), H-6);
+}
+
+// ── Range button handlers ──────────────────────────────────────────────
+
+document.getElementById('rangeBar').addEventListener('click', (e) => {
+  const btn = e.target.closest('.range-btn');
+  if (!btn) return;
+  const range = btn.dataset.range;
+  if (range === currentRange) return;
+  currentRange = range;
+  location.hash = range;
+  document.querySelectorAll('.range-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  document.getElementById('content').innerHTML = '<div class="loading">Loading...</div>';
+  render();
+});
+
+// ── Init ───────────────────────────────────────────────────────────────
+
+// Support URL hash for range (e.g. #1w, #1m)
+const validRanges = ['1d','1w','2w','1m','3m','6m','1y'];
+const hashRange = location.hash.replace('#','');
+if (validRanges.includes(hashRange)) {
+  currentRange = hashRange;
+  document.querySelectorAll('.range-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.range === currentRange);
+  });
+}
+
+render();
+refreshTimer = setInterval(render, 60000);
+</script>
+</body>
+</html>

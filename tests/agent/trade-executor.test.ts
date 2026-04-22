@@ -66,12 +66,6 @@ describe('chooseOrderType — spread thresholds', () => {
     expect(result.reason).toContain('exceeds max');
   });
 
-  it('blocks trade at $2.00 spread (the XSP scenario from today)', () => {
-    const result = chooseOrderType(1.93, 4.90);
-    expect(result.type).toBe('blocked');
-    expect(result.spread).toBeCloseTo(2.97, 1);
-  });
-
   it('falls back to limit when no quote data', () => {
     const result = chooseOrderType(null, 5.00);
     expect(result.type).toBe('limit');
@@ -113,12 +107,6 @@ describe('chooseOrderType — spread thresholds', () => {
     const result = chooseOrderType(27, 27.90);
     expect(result.type).toBe('limit');
     expect(result.price).toBe(27.90);
-  });
-
-  it('handles the XSP scenario from audit log — spread $2.97 → blocked', () => {
-    // From audit: "bid": 1.93, "ask": 4.9, spread 2.97
-    const result = chooseOrderType(1.93, 4.90);
-    expect(result.type).toBe('blocked');
   });
 
   it('handles zero spread', () => {

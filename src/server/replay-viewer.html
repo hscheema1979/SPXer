@@ -2,207 +2,1089 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#0a0a0f">
 <title>SPXer Replay Viewer</title>
 <script src="https://unpkg.com/lightweight-charts@5.0.5/dist/lightweight-charts.standalone.production.js"></script>
 <style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { background: #0a0a0f; color: #e0e0e0; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 13px; }
+  /* ───────── shadcn-style design tokens (dark) ───────── */
+  :root {
+    --background: #0a0a0f;
+    --foreground: #e0e0e0;
+    --muted: #888;
+    --muted-foreground: #555;
+    --card: #111118;
+    --card-elevated: #0d0d14;
+    --border: #1a1a24;
+    --border-strong: #222;
+    --input: #1a1a24;
+    --primary: #8b8bff;
+    --primary-soft: #a78bfa;
+    --success: #10b981;
+    --destructive: #f43f5e;
+    --info: #3b82f6;
+    --warning: #f59e0b;
+    --radius: 8px;
+    --radius-sm: 6px;
+    --font-sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", "Fira Code", Consolas, monospace;
+  }
 
-  /* ── Header ── */
-  .header { display: flex; align-items: center; gap: 16px; padding: 10px 16px; background: #111118; border-bottom: 1px solid #222; }
-  .header h1 { font-size: 15px; color: #8b8bff; font-weight: 600; white-space: nowrap; }
-  .header select { background: #1a1a24; color: #e0e0e0; border: 1px solid #333; padding: 5px 10px; border-radius: 4px; font-family: inherit; font-size: 12px; cursor: pointer; }
-  .header select:hover { border-color: #555; }
-  .summary { margin-left: auto; display: flex; gap: 16px; font-size: 12px; color: #888; }
-  .summary .win { color: #10b981; }
-  .summary .loss { color: #f43f5e; }
-  .summary .neutral { color: #a78bfa; }
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    background: var(--background);
+    color: var(--foreground);
+    font-family: var(--font-sans);
+    font-size: 13px;
+    line-height: 1.45;
+    min-height: 100dvh;
+    -webkit-font-smoothing: antialiased;
+  }
 
-  /* ── SPX Chart ── */
-  #spx-chart { width: 100%; height: 380px; border-bottom: 1px solid #222; }
+  /* ───────── Nav bar ───────── */
+  .nav-bar {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    padding: 0 12px;
+    background: var(--card-elevated);
+    border-bottom: 1px solid var(--border);
+    font-size: 12px;
+    overflow-x: auto;
+    white-space: nowrap;
+    -webkit-overflow-scrolling: touch;
+  }
+  .nav-bar::-webkit-scrollbar { height: 0; display: none; }
+  .nav-bar a {
+    color: var(--muted-foreground);
+    text-decoration: none;
+    padding: 10px 14px;
+    transition: color 0.15s, border-color 0.15s;
+    border-bottom: 2px solid transparent;
+    flex-shrink: 0;
+  }
+  .nav-bar a:hover { color: var(--primary-soft); }
+  .nav-bar a.active { color: var(--primary); border-bottom-color: var(--primary); }
+  .nav-brand {
+    color: var(--primary) !important;
+    font-weight: 700;
+    font-size: 13px;
+    padding-right: 16px !important;
+    border: none !important;
+    cursor: default;
+    letter-spacing: -0.01em;
+  }
+  .nav-spacer { flex: 1; min-width: 0; }
+  @media (min-width: 640px) {
+    .nav-bar { padding: 0 16px; }
+    .nav-brand { padding-right: 20px !important; }
+  }
 
-  /* ── Trades Table ── */
-  .trades-section { border-bottom: 1px solid #222; }
-  .trades-section h2 { font-size: 12px; color: #666; padding: 8px 16px 4px; text-transform: uppercase; letter-spacing: 1px; }
-  .trades-table { width: 100%; border-collapse: collapse; }
-  .trades-table th { text-align: left; padding: 4px 12px; color: #555; font-size: 11px; text-transform: uppercase; border-bottom: 1px solid #1a1a24; }
-  .trades-table td { padding: 5px 12px; border-bottom: 1px solid #111118; cursor: pointer; font-size: 12px; }
-  .trades-table tr:hover td { background: #1a1a28; }
-  .trades-table tr.selected td { background: #1a1a38; border-left: 2px solid #8b8bff; }
-  .trades-table .call { color: #10b981; }
-  .trades-table .put { color: #f43f5e; }
-  .trades-table .pnl-pos { color: #10b981; }
-  .trades-table .pnl-neg { color: #f43f5e; }
-  .trades-table .pnl-zero { color: #666; }
-  .reason { font-size: 10px; padding: 2px 6px; border-radius: 3px; }
-  .reason-take_profit { background: #10b98120; color: #10b981; }
-  .reason-stop_loss { background: #f43f5e20; color: #f43f5e; }
-  .reason-signal_reversal { background: #f59e0b20; color: #f59e0b; }
-  .reason-time_exit { background: #64748b20; color: #64748b; }
+  /* ───────── Header ───────── */
+  .header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px;
+    background: var(--card);
+    border-bottom: 1px solid var(--border-strong);
+    /* Prevent child flex items (notably auto-sized <select>) from forcing the
+       row wider than the viewport. */
+    min-width: 0;
+  }
+  @media (min-width: 768px) {
+    .header { gap: 12px; padding: 10px 16px; }
+  }
+  .header h1 { font-size: 15px; color: var(--primary); font-weight: 600; white-space: nowrap; display: none; }
+  .header select {
+    background: var(--input);
+    color: var(--foreground);
+    border: 1px solid var(--border-strong);
+    padding: 7px 10px;
+    border-radius: var(--radius-sm);
+    font-family: inherit;
+    font-size: 12px;
+    cursor: pointer;
+    min-height: 34px;
+    touch-action: manipulation;
+    /* Critical: min-width:0 lets the select shrink below its intrinsic content
+       width (which otherwise expands to the longest option — config names are
+       ~115 chars long). max-width caps it so it can't push siblings offscreen.
+       overflow/text-overflow truncate the visible trigger text. */
+    min-width: 0;
+    max-width: 100%;
+    flex: 1 1 140px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .header select:hover { border-color: #444; }
+  .header select:focus { border-color: var(--primary); outline: none; box-shadow: 0 0 0 2px rgba(139,139,255,.18); }
+  #config-select {
+    /* Config names + descriptions are long (~115 chars). Give this select a
+       larger share on wide screens but never let it dominate the row. */
+    flex: 2 1 180px;
+    max-width: min(520px, 100%);
+  }
+  #date-select {
+    flex: 1 1 140px;
+    max-width: 180px;
+  }
+  @media (min-width: 768px) {
+    .header select { flex: 0 1 auto; min-width: 160px; }
+    #config-select { flex: 1 1 280px; max-width: 420px; min-width: 220px; }
+    #date-select { flex: 0 0 auto; min-width: 150px; max-width: 180px; }
+  }
 
-  /* ── Expanded Contract Chart ── */
-  #expanded-chart-wrap { display: none; border-bottom: 1px solid #222; position: relative; }
-  #expanded-chart-wrap .close-btn { position: absolute; top: 8px; right: 12px; color: #666; cursor: pointer; z-index: 10; font-size: 16px; }
-  #expanded-chart-wrap .close-btn:hover { color: #fff; }
-  #expanded-chart-label { padding: 8px 16px 0; font-size: 12px; color: #a78bfa; }
-  #expanded-chart { width: 100%; height: 300px; }
+  /* ── Calendar popup (replaces native date-select) ──────────────────────── */
+  #date-picker-wrap { position: relative; display: inline-flex; flex: 0 0 auto; }
+  #date-btn {
+    appearance: none;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 4px 8px;
+    border-radius: 6px;
+    font-size: 13px;
+    font-family: var(--font-mono, monospace);
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    line-height: 1;
+  }
+  #date-btn:hover { border-color: #444; }
+  #date-btn:focus { border-color: var(--primary); outline: none; box-shadow: 0 0 0 2px rgba(139,139,255,.18); }
+  #date-btn .cal-icon { opacity: 0.6; font-size: 14px; }
+  #date-btn .cal-caret { opacity: 0.5; font-size: 9px; }
 
-  /* ── Mini Charts Grid ── */
-  .mini-section { padding: 8px 12px; }
-  .mini-section h2 { font-size: 12px; color: #666; padding: 0 4px 8px; text-transform: uppercase; letter-spacing: 1px; }
-  .mini-tabs { display: flex; gap: 8px; margin-bottom: 10px; padding: 0 4px; }
-  .mini-tabs button { background: #1a1a24; color: #888; border: 1px solid #333; padding: 4px 14px; border-radius: 4px; cursor: pointer; font-size: 11px; font-family: inherit; }
-  .mini-tabs button.active { background: #2a2a3a; color: #e0e0e0; border-color: #8b8bff; }
-  .mini-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px; }
-  .mini-card { background: #111118; border: 1px solid #222; border-radius: 6px; cursor: pointer; overflow: hidden; transition: border-color 0.15s; }
+  #date-popup {
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 0;
+    z-index: 1000;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+    min-width: 260px;
+    display: none;
+  }
+  #date-popup.open { display: block; }
+  #date-popup .cal-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 8px;
+    gap: 6px;
+  }
+  #date-popup .cal-head button {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text);
+    width: 26px;
+    height: 26px;
+    border-radius: 5px;
+    cursor: pointer;
+    font-size: 12px;
+    line-height: 1;
+  }
+  #date-popup .cal-head button:hover { border-color: var(--primary); color: var(--primary); }
+  #date-popup .cal-head button:disabled { opacity: 0.3; cursor: not-allowed; }
+  #date-popup .cal-title {
+    font-size: 13px;
+    font-weight: 600;
+    flex: 1;
+    text-align: center;
+  }
+  #date-popup .cal-grid {
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+    gap: 2px;
+  }
+  #date-popup .cal-dow {
+    font-size: 10px;
+    color: var(--muted);
+    text-align: center;
+    padding: 4px 0;
+    font-family: var(--font-mono, monospace);
+  }
+  #date-popup .cal-day {
+    font-size: 12px;
+    text-align: center;
+    padding: 6px 0;
+    border-radius: 4px;
+    font-family: var(--font-mono, monospace);
+    color: #555;
+    cursor: default;
+    user-select: none;
+  }
+  #date-popup .cal-day.avail {
+    color: var(--text);
+    cursor: pointer;
+    background: rgba(139,139,255,0.08);
+  }
+  #date-popup .cal-day.avail:hover {
+    background: rgba(139,139,255,0.25);
+  }
+  #date-popup .cal-day.selected {
+    background: var(--primary);
+    color: #fff;
+    font-weight: 600;
+  }
+  #date-popup .cal-day.blank {
+    background: transparent;
+    cursor: default;
+  }
+  #date-popup .cal-foot {
+    margin-top: 8px;
+    display: flex;
+    justify-content: space-between;
+    font-size: 10px;
+    color: var(--muted);
+  }
+  #date-popup .cal-foot a {
+    color: var(--primary);
+    cursor: pointer;
+    text-decoration: none;
+  }
+  #date-popup .cal-foot a:hover { text-decoration: underline; }
+  .summary {
+    width: 100%;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 16px;
+    font-size: 11px;
+    color: var(--muted);
+    font-family: var(--font-mono);
+  }
+  @media (min-width: 1280px) {
+    .summary { margin-left: auto; width: auto; font-size: 12px; }
+  }
+  .summary .win { color: var(--success); }
+  .summary .loss { color: var(--destructive); }
+  .summary .neutral { color: var(--primary-soft); }
+
+  /* ───────── SPX Chart ───────── */
+  #spx-chart {
+    width: 100%;
+    height: clamp(240px, 40dvh, 380px);
+    border-bottom: 1px solid var(--border-strong);
+    position: relative;  /* anchor for .chart-legend overlay */
+  }
+  @media (min-width: 1024px) { #spx-chart { height: 380px; } }
+
+  /* ───────── Chart Legend (TradingView-style) ───────── */
+  /* Floats at top-left of each chart. Shows symbol + OHLC + Volume + each
+     enabled indicator's value. Updates on crosshair hover; falls back to
+     latest bar when not hovering. */
+  .chart-legend {
+    position: absolute;
+    top: 6px;
+    left: 10px;
+    z-index: 5;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 10px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    line-height: 1.3;
+    pointer-events: none;  /* don't block chart interaction */
+    color: var(--foreground);
+    max-width: calc(100% - 70px);  /* leave room for right price scale */
+    text-shadow: 0 0 3px rgba(0,0,0,0.85), 0 0 3px rgba(0,0,0,0.85);
+  }
+  .chart-legend .lg-symbol {
+    font-weight: 600;
+    color: var(--primary-soft);
+    letter-spacing: 0.02em;
+  }
+  .chart-legend .lg-ohlc { color: var(--muted-foreground); }
+  .chart-legend .lg-ohlc b { color: var(--foreground); font-weight: 500; margin-left: 2px; }
+  .chart-legend .lg-ohlc .up { color: #10b981; }
+  .chart-legend .lg-ohlc .dn { color: #f43f5e; }
+  .chart-legend .lg-ind {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .chart-legend .lg-ind-swatch {
+    width: 8px;
+    height: 8px;
+    border-radius: 2px;
+    flex-shrink: 0;
+  }
+  .chart-legend .lg-ind-label { color: var(--muted-foreground); }
+  .chart-legend .lg-ind-val { color: var(--foreground); font-weight: 500; }
+  .chart-legend .lg-ind-tf {
+    color: var(--muted);
+    font-size: 10px;
+    margin-left: 2px;
+  }
+
+  /* ───────── Trades Table ───────── */
+  .trades-section { border-bottom: 1px solid var(--border-strong); overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .trades-section h2 { font-size: 11px; color: var(--muted-foreground); padding: 10px 14px 4px; text-transform: uppercase; letter-spacing: 0.08em; font-family: var(--font-sans); font-weight: 600; }
+  .trades-table {
+    width: 100%;
+    min-width: 560px;
+    border-collapse: collapse;
+    font-family: var(--font-mono);
+  }
+  .trades-table th {
+    text-align: left;
+    padding: 8px 12px;
+    color: var(--muted-foreground);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    border-bottom: 1px solid var(--border);
+    font-family: var(--font-sans);
+    font-weight: 600;
+  }
+  .trades-table td {
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--card);
+    cursor: pointer;
+    font-size: 12px;
+    white-space: nowrap;
+  }
+  .trades-table tr:hover td { background: rgba(26,26,40,.8); }
+  .trades-table tr.selected td { background: rgba(26,26,56,.9); border-left: 2px solid var(--primary); }
+  .trades-table .call { color: var(--success); }
+  .trades-table .put { color: var(--destructive); }
+  .trades-table .pnl-pos { color: var(--success); }
+  .trades-table .pnl-neg { color: var(--destructive); }
+  .trades-table .pnl-zero { color: var(--muted-foreground); }
+  .reason {
+    font-size: 10px;
+    padding: 3px 8px;
+    border-radius: 999px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+  }
+  .reason-take_profit { background: rgba(16,185,129,.12); color: var(--success); border: 1px solid rgba(16,185,129,.3); }
+  .reason-stop_loss { background: rgba(244,63,94,.12); color: var(--destructive); border: 1px solid rgba(244,63,94,.3); }
+  .reason-signal_reversal { background: rgba(245,158,11,.12); color: var(--warning); border: 1px solid rgba(245,158,11,.3); }
+  .reason-time_exit { background: rgba(100,116,139,.18); color: #94a3b8; border: 1px solid rgba(100,116,139,.3); }
+
+  /* ───────── Expanded Contract Chart ───────── */
+  #expanded-chart-wrap { display: none; border-bottom: 1px solid var(--border-strong); position: relative; }
+  #expanded-chart-wrap .close-btn {
+    position: absolute;
+    top: 8px; right: 12px;
+    color: var(--muted-foreground);
+    cursor: pointer;
+    z-index: 10;
+    font-size: 18px;
+    padding: 6px 10px;
+    border-radius: var(--radius-sm);
+    -webkit-tap-highlight-color: transparent;
+  }
+  #expanded-chart-wrap .close-btn:hover { color: #fff; background: var(--card); }
+  #expanded-chart-label { padding: 10px 14px 0; font-size: 12px; color: var(--primary-soft); font-family: var(--font-mono); }
+  #expanded-chart {
+    position: relative;  /* anchor for .chart-legend overlay */
+    width: 100%;
+    height: clamp(220px, 35dvh, 300px);
+  }
+  @media (min-width: 1024px) { #expanded-chart { height: 300px; } }
+
+  /* ───────── Mini Charts Grid ───────── */
+  .mini-section { padding: 10px 12px; }
+  .mini-section h2 {
+    font-size: 11px;
+    color: var(--muted-foreground);
+    padding: 0 4px 8px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-family: var(--font-sans);
+    font-weight: 600;
+  }
+  .mini-tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 10px;
+    padding: 0 4px;
+  }
+  .mini-tabs button {
+    background: var(--input);
+    color: var(--muted);
+    border: 1px solid var(--border-strong);
+    padding: 6px 14px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    font-size: 11px;
+    font-weight: 500;
+    font-family: inherit;
+    min-height: 32px;
+    transition: border-color .15s, color .15s, background-color .15s;
+    touch-action: manipulation;
+  }
+  .mini-tabs button:hover { border-color: #444; color: var(--foreground); }
+  .mini-tabs button.active {
+    background: rgba(139,139,255,0.08);
+    color: var(--foreground);
+    border-color: var(--primary);
+  }
+  .mini-grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+  @media (min-width: 480px) {
+    .mini-grid { grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }
+  }
+  .mini-card {
+    background: var(--card);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    overflow: hidden;
+    transition: border-color 0.15s;
+  }
   .mini-card:hover { border-color: #444; }
-  .mini-card.traded { border-color: #8b8bff55; }
-  .mini-card-header { display: flex; justify-content: space-between; padding: 4px 8px; font-size: 11px; }
+  .mini-card.traded { border-color: rgba(139,139,255,0.35); }
+  .mini-card-header { display: flex; justify-content: space-between; padding: 6px 10px; font-size: 11px; font-family: var(--font-mono); }
   .mini-card-header .strike { color: #ccc; font-weight: 600; }
-  .mini-card-header .price { color: #888; }
-  .mini-card-header .traded-badge { color: #8b8bff; font-size: 10px; }
+  .mini-card-header .price { color: var(--muted); }
+  .mini-card-header .traded-badge { color: var(--primary); font-size: 10px; font-weight: 600; }
   .mini-card-chart { height: 100px; }
 
-  /* ── Strategy Analysis Panel ── */
-  .analysis-panel { background: #0d0d14; border-bottom: 1px solid #1a1a24; padding: 0; overflow: hidden; transition: max-height 0.25s ease; }
+  /* ───────── Strategy Analysis Panel ───────── */
+  .analysis-panel {
+    background: var(--card-elevated);
+    border-bottom: 1px solid var(--border);
+    padding: 0;
+    overflow: hidden;
+    transition: max-height 0.25s ease;
+  }
   .analysis-panel.collapsed { max-height: 0 !important; padding: 0; border: none; }
-  .analysis-toggle { display: flex; align-items: center; gap: 8px; padding: 6px 16px; cursor: pointer; user-select: none; border-bottom: 1px solid #1a1a24; background: #0d0d14; }
-  .analysis-toggle:hover { background: #111118; }
-  .analysis-toggle .label { font-size: 11px; color: #8b8bff; text-transform: uppercase; letter-spacing: 0.5px; }
-  .analysis-toggle .chevron { font-size: 10px; color: #555; transition: transform 0.2s; }
+  .analysis-toggle {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 14px;
+    cursor: pointer;
+    user-select: none;
+    border-bottom: 1px solid var(--border);
+    background: var(--card-elevated);
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .analysis-toggle:hover { background: var(--card); }
+  .analysis-toggle .label {
+    font-size: 11px;
+    color: var(--primary);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 600;
+  }
+  .analysis-toggle .chevron { font-size: 10px; color: var(--muted-foreground); transition: transform 0.2s; }
   .analysis-toggle.open .chevron { transform: rotate(90deg); }
-  .analysis-content { padding: 10px 16px 12px; }
-  .analysis-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
-  @media (max-width: 900px) { .analysis-grid { grid-template-columns: 1fr 1fr; } }
-  .analysis-card { background: #111118; border: 1px solid #1a1a24; border-radius: 4px; padding: 8px 10px; }
-  .analysis-card h4 { font-size: 10px; color: #555; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
-  .analysis-card .stat-row { display: flex; justify-content: space-between; padding: 2px 0; font-size: 11px; }
-  .analysis-card .stat-label { color: #888; }
-  .analysis-card .stat-value { color: #e0e0e0; font-weight: 600; }
-  .analysis-card .stat-value.pos { color: #10b981; }
-  .analysis-card .stat-value.neg { color: #f43f5e; }
-  .analysis-card .stat-value.hl { color: #8b8bff; }
+  .analysis-content { padding: 12px 14px 14px; }
+  .analysis-grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+  @media (min-width: 768px) { .analysis-grid { grid-template-columns: 1fr 1fr; } }
+  @media (min-width: 1280px) { .analysis-grid { grid-template-columns: 1fr 1fr 1fr; } }
+  .analysis-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 10px 12px;
+  }
+  .analysis-card h4 {
+    font-size: 10px;
+    color: var(--muted-foreground);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin-bottom: 8px;
+    font-weight: 600;
+  }
+  .analysis-card .stat-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 3px 0;
+    font-size: 11px;
+    font-family: var(--font-mono);
+  }
+  .analysis-card .stat-label { color: var(--muted); }
+  .analysis-card .stat-value { color: var(--foreground); font-weight: 600; }
+  .analysis-card .stat-value.pos { color: var(--success); }
+  .analysis-card .stat-value.neg { color: var(--destructive); }
+  .analysis-card .stat-value.hl { color: var(--primary); }
   .analysis-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
-  .analysis-tag { font-size: 10px; padding: 2px 8px; border-radius: 3px; }
-  .analysis-tag.strength { background: #10b98118; color: #10b981; border: 1px solid #10b98133; }
-  .analysis-tag.explore { background: #f59e0b18; color: #f59e0b; border: 1px solid #f59e0b33; }
-  .analysis-setup { font-size: 11px; color: #aaa; padding: 4px 0 8px; }
-  .analysis-setup b { color: #e0e0e0; }
-  .analysis-loading { text-align: center; padding: 20px; color: #444; font-size: 12px; }
+  .analysis-tag { font-size: 10px; padding: 3px 8px; border-radius: 999px; font-weight: 500; }
+  .analysis-tag.strength { background: rgba(16,185,129,.1); color: var(--success); border: 1px solid rgba(16,185,129,.25); }
+  .analysis-tag.explore { background: rgba(245,158,11,.1); color: var(--warning); border: 1px solid rgba(245,158,11,.25); }
+  .analysis-setup { font-size: 11px; color: #aaa; padding: 4px 0 8px; line-height: 1.5; }
+  .analysis-setup b { color: var(--foreground); }
+  .analysis-loading { text-align: center; padding: 24px; color: var(--muted-foreground); font-size: 12px; }
   .equity-sparkline { width: 100%; height: 40px; margin-top: 4px; }
 
-  /* ── Trade Filters Bar ── */
-  .trade-filters { display: flex; gap: 10px; padding: 6px 16px; background: #0d0d14; border-bottom: 1px solid #1a1a24; align-items: center; font-size: 11px; }
-  .trade-filters label { color: #555; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; white-space: nowrap; }
-  .trade-filters select { background: #1a1a24; color: #e0e0e0; border: 1px solid #333; padding: 3px 6px; border-radius: 3px; font-family: inherit; font-size: 11px; cursor: pointer; }
-  .trade-filters select:focus { border-color: #8b8bff; outline: none; }
-  .trade-filters .filter-active { border-color: #8b8bff; color: #8b8bff; }
-  .trade-filters .filter-summary { color: #666; margin-left: auto; font-size: 10px; }
-  .trade-filters .filter-summary .num { color: #a78bfa; }
+  /* ───────── Trade Filters Bar ───────── */
+  .trade-filters {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    padding: 10px 14px;
+    background: var(--card-elevated);
+    border-bottom: 1px solid var(--border);
+    align-items: center;
+    font-size: 11px;
+  }
+  .trade-filters label {
+    color: var(--muted-foreground);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    white-space: nowrap;
+  }
+  .trade-filters select {
+    background: var(--input);
+    color: var(--foreground);
+    border: 1px solid var(--border-strong);
+    padding: 6px 8px;
+    border-radius: var(--radius-sm);
+    font-family: inherit;
+    font-size: 11px;
+    cursor: pointer;
+    min-height: 32px;
+    touch-action: manipulation;
+  }
+  .trade-filters select:focus { border-color: var(--primary); outline: none; box-shadow: 0 0 0 2px rgba(139,139,255,.18); }
+  .trade-filters .filter-active { border-color: var(--primary); color: var(--primary); }
+  .trade-filters .filter-summary { color: var(--muted-foreground); margin-left: auto; font-size: 10px; }
+  .trade-filters .filter-summary .num { color: var(--primary-soft); font-family: var(--font-mono); }
 
-  /* ── Mode Toggle (Replay / Live) ── */
-  .mode-toggle { display: flex; gap: 0; border: 1px solid #333; border-radius: 4px; overflow: hidden; }
-  .mode-toggle button { background: #1a1a24; color: #888; border: none; padding: 5px 14px; cursor: pointer; font-family: inherit; font-size: 12px; transition: background 0.15s, color 0.15s; }
-  .mode-toggle button:hover { background: #2a2a3a; color: #ccc; }
-  .mode-toggle button.active { background: #8b8bff22; color: #8b8bff; border-bottom: 2px solid #8b8bff; }
+  /* ───────── Status Banner (Live Mode) ───────── */
+  .status-banner {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 14px;
+    background: var(--card-elevated);
+    border-bottom: 1px solid var(--border);
+    font-size: 12px;
+    flex-wrap: wrap;
+  }
+  .status-banner .stat { display: flex; align-items: center; gap: 4px; color: #aaa; font-family: var(--font-mono); }
+  .status-banner .badge-live {
+    background: rgba(244,63,94,.12);
+    color: var(--destructive);
+    padding: 3px 10px;
+    border-radius: 999px;
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    border: 1px solid rgba(244,63,94,.35);
+    letter-spacing: 0.04em;
+  }
+  .status-banner .badge-paper {
+    background: rgba(245,158,11,.12);
+    color: var(--warning);
+    padding: 3px 10px;
+    border-radius: 999px;
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    border: 1px solid rgba(245,158,11,.35);
+    letter-spacing: 0.04em;
+  }
+  .status-banner .pnl-pos { color: var(--success); font-weight: 600; }
+  .status-banner .pnl-neg { color: var(--destructive); font-weight: 600; }
 
-  /* ── Status Banner (Live Mode) ── */
-  .status-banner { display: flex; align-items: center; gap: 16px; padding: 6px 16px; background: #0d0d14; border-bottom: 1px solid #1a1a24; font-size: 12px; flex-wrap: wrap; }
-  .status-banner .stat { display: flex; align-items: center; gap: 4px; color: #aaa; }
-  .status-banner .badge-live { background: #f43f5e22; color: #f43f5e; padding: 2px 8px; border-radius: 3px; font-size: 10px; font-weight: 700; text-transform: uppercase; border: 1px solid #f43f5e44; }
-  .status-banner .badge-paper { background: #f59e0b22; color: #f59e0b; padding: 2px 8px; border-radius: 3px; font-size: 10px; font-weight: 700; text-transform: uppercase; border: 1px solid #f59e0b44; }
-  .status-banner .pnl-pos { color: #10b981; font-weight: 600; }
-  .status-banner .pnl-neg { color: #f43f5e; font-weight: 600; }
+  /* ───────── Connection Status Indicator ───────── */
+  .connection-status {
+    display: none;
+    align-items: center;
+    gap: 6px;
+    font-size: 10px;
+    color: var(--muted-foreground);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-weight: 600;
+  }
+  .connection-status::before {
+    content: '';
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+  }
+  .connection-status.connected { color: var(--success); }
+  .connection-status.connected::before { background: var(--success); box-shadow: 0 0 0 3px rgba(16,185,129,.15); }
+  .connection-status.disconnected { color: var(--destructive); }
+  .connection-status.disconnected::before { background: var(--destructive); box-shadow: 0 0 0 3px rgba(244,63,94,.15); }
 
-  /* ── Connection Status Indicator ── */
-  .connection-status { display: none; align-items: center; gap: 4px; font-size: 10px; color: #666; }
-  .connection-status::before { content: ''; display: inline-block; width: 8px; height: 8px; border-radius: 50%; }
-  .connection-status.connected { color: #10b981; }
-  .connection-status.connected::before { background: #10b981; box-shadow: 0 0 4px #10b98166; }
-  .connection-status.disconnected { color: #f43f5e; }
-  .connection-status.disconnected::before { background: #f43f5e; box-shadow: 0 0 4px #f43f5e66; }
-
-  /* ── Live Mode Utilities ── */
+  /* ───────── Live Mode Utilities ───────── */
   .live-hidden { display: none !important; }
   .trade-new { animation: flash-new 1.2s ease-out; }
   @keyframes flash-new {
-    0% { background: #10b98133; }
+    0% { background: rgba(16,185,129,.2); }
     100% { background: transparent; }
   }
-  .auto-scroll-toggle { position: absolute; top: 8px; right: 12px; z-index: 5; background: #1a1a24; color: #888; border: 1px solid #333; padding: 3px 8px; border-radius: 3px; cursor: pointer; font-family: inherit; font-size: 10px; }
-  .auto-scroll-toggle:hover { border-color: #8b8bff; color: #ccc; }
-  .auto-scroll-toggle.active { border-color: #8b8bff; color: #8b8bff; background: #8b8bff11; }
+  .auto-scroll-toggle {
+    position: absolute;
+    top: 8px; right: 12px;
+    z-index: 5;
+    background: var(--input);
+    color: var(--muted);
+    border: 1px solid var(--border-strong);
+    padding: 6px 10px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 10px;
+    font-weight: 500;
+    touch-action: manipulation;
+  }
+  .auto-scroll-toggle:hover { border-color: var(--primary); color: #ccc; }
+  .auto-scroll-toggle.active { border-color: var(--primary); color: var(--primary); background: rgba(139,139,255,0.08); }
 
-  /* ── Loading ── */
-  .loading { display: flex; align-items: center; justify-content: center; height: 200px; color: #444; font-size: 14px; }
-  .no-data { text-align: center; padding: 40px; color: #444; }
+  /* ───────── Loading ───────── */
+  .loading { display: flex; align-items: center; justify-content: center; height: 200px; color: var(--muted-foreground); font-size: 14px; }
+  .no-data { text-align: center; padding: 40px 20px; color: var(--muted-foreground); }
 
-  /* ── Config Button ── */
-  .config-btn { background: #1a1a24; color: #8b8bff; border: 1px solid #8b8bff44; padding: 5px 14px; border-radius: 4px; cursor: pointer; font-family: inherit; font-size: 12px; white-space: nowrap; }
-  .config-btn:hover { background: #2a2a3a; border-color: #8b8bff; }
-  .run-btn { background: #10b98122; color: #10b981; border: 1px solid #10b98144; padding: 5px 14px; border-radius: 4px; cursor: pointer; font-family: inherit; font-size: 12px; white-space: nowrap; }
-  .run-btn:hover { background: #10b98133; border-color: #10b981; }
+  /* ───────── Buttons (shadcn-style) ───────── */
+  .config-btn, .run-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 7px 14px;
+    min-height: 34px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 12px;
+    font-weight: 500;
+    white-space: nowrap;
+    transition: background-color .15s, border-color .15s, color .15s, opacity .15s;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .config-btn {
+    background: var(--input);
+    color: var(--primary);
+    border: 1px solid rgba(139,139,255,0.3);
+  }
+  .config-btn:hover { background: #2a2a3a; border-color: var(--primary); }
+  .run-btn {
+    background: rgba(16,185,129,0.12);
+    color: var(--success);
+    border: 1px solid rgba(16,185,129,0.3);
+  }
+  .run-btn:hover:not(:disabled) { background: rgba(16,185,129,0.2); border-color: var(--success); }
   .run-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
-  /* ── Config Modal ── */
-  .modal-overlay { display: none; position: fixed; inset: 0; background: #000a; z-index: 100; justify-content: center; align-items: flex-start; padding: 40px 20px; overflow-y: auto; }
+  /* ───────── Config Dialog (shadcn-style) ───────── */
+  .modal-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.65);
+    backdrop-filter: blur(4px);
+    z-index: 100;
+    justify-content: center;
+    align-items: flex-start;
+    padding: 16px;
+    overflow-y: auto;
+  }
+  @media (min-width: 640px) { .modal-overlay { padding: 40px 20px; } }
   .modal-overlay.open { display: flex; }
-  .modal { background: #111118; border: 1px solid #333; border-radius: 8px; width: 680px; max-width: 100%; max-height: calc(100vh - 80px); overflow-y: auto; }
-  .modal-header { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid #222; position: sticky; top: 0; background: #111118; z-index: 1; }
-  .modal-header h2 { font-size: 14px; color: #8b8bff; font-weight: 600; }
-  .modal-close { color: #666; cursor: pointer; font-size: 18px; background: none; border: none; padding: 4px 8px; }
-  .modal-close:hover { color: #fff; }
-  .modal-body { padding: 12px 16px; }
-  .modal-footer { display: flex; gap: 12px; justify-content: flex-end; align-items: center; padding: 12px 16px; border-top: 1px solid #222; position: sticky; bottom: 0; background: #111118; }
+  .modal {
+    background: var(--card);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius);
+    width: 100%;
+    max-width: min(680px, 95vw);
+    max-height: calc(100dvh - 32px);
+    overflow-y: auto;
+    box-shadow: 0 20px 50px rgba(0,0,0,0.5);
+  }
+  @media (min-width: 640px) { .modal { max-height: calc(100dvh - 80px); } }
+  .modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--border-strong);
+    position: sticky;
+    top: 0;
+    background: var(--card);
+    z-index: 1;
+  }
+  .modal-header h2 { font-size: 15px; color: var(--primary); font-weight: 600; }
+  .modal-close {
+    color: var(--muted-foreground);
+    cursor: pointer;
+    font-size: 22px;
+    line-height: 1;
+    background: none;
+    border: none;
+    padding: 6px 10px;
+    border-radius: var(--radius-sm);
+    touch-action: manipulation;
+  }
+  .modal-close:hover { color: #fff; background: var(--input); }
+  .modal-body { padding: 14px 16px; }
+  .modal-footer {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    justify-content: flex-end;
+    align-items: center;
+    padding: 12px 16px;
+    border-top: 1px solid var(--border-strong);
+    position: sticky;
+    bottom: 0;
+    background: var(--card);
+  }
 
-  /* ── Config Sections ── */
-  .cfg-section { margin-bottom: 16px; }
-  .cfg-section-title { font-size: 11px; color: #8b8bff; text-transform: uppercase; letter-spacing: 1px; padding: 6px 0 8px; border-bottom: 1px solid #1a1a24; margin-bottom: 8px; cursor: pointer; display: flex; justify-content: space-between; }
+  /* ───────── Config Sections ───────── */
+  .cfg-section { margin-bottom: 18px; }
+  .cfg-section-title {
+    font-size: 11px;
+    color: var(--primary);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    padding: 8px 0 10px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 10px;
+    cursor: pointer;
+    display: flex;
+    justify-content: space-between;
+    font-weight: 600;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+  }
   .cfg-section-title:hover { color: #a8a8ff; }
   .cfg-section-title .chevron { transition: transform 0.15s; }
   .cfg-section.collapsed .cfg-fields { display: none; }
   .cfg-section.collapsed .chevron { transform: rotate(-90deg); }
-  .cfg-row { display: grid; grid-template-columns: 180px 1fr; align-items: center; gap: 8px; padding: 3px 0; }
-  .cfg-label { font-size: 11px; color: #888; }
-  .cfg-input { background: #0a0a0f; color: #e0e0e0; border: 1px solid #333; padding: 4px 8px; border-radius: 3px; font-family: inherit; font-size: 12px; width: 100%; }
-  .cfg-input:focus { border-color: #8b8bff; outline: none; }
-  .cfg-input[type="number"] { width: 100px; }
-  .cfg-input[type="checkbox"] { width: auto; margin: 0; }
-  .cfg-check-row { display: flex; align-items: center; gap: 8px; padding: 3px 0; }
-  .cfg-check-row label { font-size: 11px; color: #888; cursor: pointer; }
+  .cfg-row {
+    display: grid;
+    grid-template-columns: 1fr;
+    align-items: start;
+    gap: 4px;
+    padding: 6px 0;
+  }
+  @media (min-width: 640px) {
+    .cfg-row { grid-template-columns: 180px 1fr; align-items: center; gap: 8px; padding: 3px 0; }
+  }
+  .cfg-label { font-size: 11px; color: var(--muted); }
+  .cfg-input {
+    background: var(--background);
+    color: var(--foreground);
+    border: 1px solid var(--border-strong);
+    padding: 8px 10px;
+    border-radius: var(--radius-sm);
+    font-family: inherit;
+    font-size: 13px;
+    width: 100%;
+    min-height: 36px;
+    touch-action: manipulation;
+  }
+  .cfg-input:focus { border-color: var(--primary); outline: none; box-shadow: 0 0 0 2px rgba(139,139,255,.18); }
+  .cfg-input[type="number"] { width: 100%; max-width: 140px; }
+  .cfg-input[type="checkbox"] { width: auto; min-height: 18px; margin: 0; }
+  .cfg-check-row { display: flex; align-items: center; gap: 8px; padding: 6px 0; }
+  .cfg-check-row label { font-size: 12px; color: var(--muted); cursor: pointer; }
   select.cfg-input { cursor: pointer; }
 
-  /* ── Name input at bottom ── */
-  .cfg-name-section { border-top: 1px solid #333; padding-top: 12px; margin-top: 8px; }
-  .cfg-name-row { display: grid; grid-template-columns: 80px 1fr; align-items: center; gap: 8px; }
+  /* ───────── Name input ───────── */
+  .cfg-name-section { border-top: 1px solid var(--border-strong); padding-top: 14px; margin-top: 10px; }
+  .cfg-name-row {
+    display: grid;
+    grid-template-columns: 1fr;
+    align-items: center;
+    gap: 6px;
+  }
+  @media (min-width: 640px) {
+    .cfg-name-row { grid-template-columns: 80px 1fr; gap: 8px; }
+  }
   .cfg-name-row .cfg-input { font-size: 13px; }
-  .cfg-name-hint { font-size: 10px; color: #555; margin-top: 4px; }
-  .cfg-hint { font-size: 10px; color: #555; grid-column: 1 / -1; padding: 0 0 2px 0; line-height: 1.4; }
+  .cfg-name-hint { font-size: 10px; color: var(--muted-foreground); margin-top: 4px; }
+  .cfg-hint { font-size: 10px; color: var(--muted-foreground); grid-column: 1 / -1; padding: 0 0 2px 0; line-height: 1.5; }
 
-  /* ── Run Status ── */
-  .run-status { font-size: 11px; color: #888; }
-  .run-status.running { color: #f59e0b; }
-  .run-status.done { color: #10b981; }
-  .run-status.error { color: #f43f5e; }
+  /* ───────── Run Status ───────── */
+  .run-status { font-size: 11px; color: var(--muted); font-family: var(--font-mono); }
+  .run-status.running { color: var(--warning); }
+  .run-status.done { color: var(--success); }
+  .run-status.error { color: var(--destructive); }
+
+  /* ───────── Indicator Menu Popup ───────── */
+  .chart-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 12px;
+    background: var(--card-elevated);
+    border-bottom: 1px solid var(--border);
+    font-size: 11px;
+    color: var(--muted-foreground);
+    flex-wrap: wrap;
+  }
+  .chart-toolbar .toolbar-title {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted-foreground);
+    font-weight: 600;
+    margin-right: 4px;
+  }
+  .ind-btn {
+    background: var(--input);
+    color: var(--primary-soft);
+    border: 1px solid rgba(139,139,255,0.3);
+    padding: 5px 10px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 11px;
+    font-weight: 500;
+    min-height: 28px;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    transition: border-color .15s, color .15s, background-color .15s;
+  }
+  .ind-btn:hover { background: #2a2a3a; border-color: var(--primary); color: var(--primary); }
+  .ind-btn .count-badge {
+    display: inline-block;
+    background: rgba(139,139,255,0.18);
+    color: var(--primary);
+    padding: 1px 6px;
+    border-radius: 999px;
+    font-size: 10px;
+    font-weight: 700;
+    margin-left: 4px;
+  }
+  .data-warning {
+    display: none;
+    background: rgba(245,158,11,0.08);
+    color: var(--warning);
+    border: 1px solid rgba(245,158,11,0.25);
+    padding: 4px 10px;
+    border-radius: var(--radius-sm);
+    font-size: 11px;
+    font-family: var(--font-mono);
+  }
+  .data-warning.visible { display: inline-flex; align-items: center; gap: 6px; }
+
+  /* Indicator popup modal */
+  .ind-menu {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.55);
+    backdrop-filter: blur(3px);
+    z-index: 200;
+    justify-content: center;
+    align-items: flex-start;
+    padding: 40px 16px 16px;
+    overflow-y: auto;
+  }
+  .ind-menu.open { display: flex; }
+  .ind-menu-inner {
+    background: var(--card);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius);
+    width: 100%;
+    max-width: 640px;
+    max-height: calc(100dvh - 64px);
+    overflow-y: auto;
+    box-shadow: 0 20px 50px rgba(0,0,0,0.6);
+  }
+  .ind-menu-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border-strong);
+    position: sticky;
+    top: 0;
+    background: var(--card);
+    z-index: 1;
+  }
+  .ind-menu-header h3 { font-size: 14px; color: var(--primary); font-weight: 600; }
+  .ind-menu-header .subtitle { font-size: 11px; color: var(--muted-foreground); font-weight: 400; margin-left: 8px; }
+  .ind-menu-close {
+    color: var(--muted-foreground);
+    cursor: pointer;
+    font-size: 20px;
+    line-height: 1;
+    background: none;
+    border: none;
+    padding: 4px 10px;
+    border-radius: var(--radius-sm);
+  }
+  .ind-menu-close:hover { color: #fff; background: var(--input); }
+  .ind-menu-body { padding: 12px 14px 4px; }
+  .ind-group { margin-bottom: 14px; }
+  .ind-group-title {
+    font-size: 10px;
+    color: var(--primary);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 600;
+    padding: 4px 0 6px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 8px;
+  }
+  .ind-grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 1px;
+  }
+  @media (min-width: 900px) {
+    .ind-grid { grid-template-columns: 1fr 1fr; gap: 1px 12px; }
+  }
+  /* Per-indicator row: name + per-timeframe toggle buttons */
+  .ind-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 8px;
+    border-radius: var(--radius-sm);
+    transition: background-color .12s;
+  }
+  .ind-row:hover { background: var(--input); }
+  .ind-row .ind-name {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    font-size: 11px;
+    color: var(--foreground);
+    font-family: var(--font-mono);
+  }
+  .ind-row .ind-name span:last-child {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .ind-swatch {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 2px;
+    flex-shrink: 0;
+  }
+  .ind-tf-buttons {
+    display: flex;
+    gap: 2px;
+    flex-shrink: 0;
+  }
+  .ind-tf-btn {
+    padding: 3px 6px;
+    font-size: 9px;
+    font-family: var(--font-mono);
+    font-weight: 600;
+    background: transparent;
+    color: var(--muted-foreground);
+    border: 1px solid var(--border-strong);
+    border-radius: 3px;
+    cursor: pointer;
+    min-width: 26px;
+    transition: border-color .12s, color .12s, background-color .12s;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .ind-tf-btn:hover { border-color: var(--primary); color: var(--primary); }
+  .ind-tf-btn.selected {
+    background: rgba(139,139,255,0.15);
+    color: var(--primary);
+    border-color: var(--primary);
+  }
+  .ind-menu-footer {
+    display: flex;
+    gap: 8px;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px 14px;
+    border-top: 1px solid var(--border-strong);
+    position: sticky;
+    bottom: 0;
+    background: var(--card);
+  }
+  .ind-menu-footer .presets { display: flex; gap: 6px; flex-wrap: wrap; }
+  .ind-preset {
+    background: var(--input);
+    color: var(--muted);
+    border: 1px solid var(--border-strong);
+    padding: 4px 10px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .ind-preset:hover { border-color: var(--primary); color: var(--primary); }
+
+  /* ───────── Scrollbar polish ───────── */
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 10px; }
+  ::-webkit-scrollbar-thumb:hover { background: #3a3a4a; }
 </style>
 </head>
 <body>
 
+<div class="nav-bar" id="nav-bar">
+  <span class="nav-brand">SPXer</span>
+  <a href="/replay/" class="active" id="nav-replay" data-path="/replay/" onclick="if(currentMode==='replay'){event.preventDefault();}else{setMode('replay');event.preventDefault();}">Replay</a>
+  <a href="#live" id="nav-live" onclick="setMode('live');event.preventDefault();">Live</a>
+  <a href="/replay/sweep" id="nav-leaderboard" data-path="/replay/sweep">🏆 Leaderboard</a>
+  <a href="/replay/analytics" id="nav-analytics" data-path="/replay/analytics">Analytics</a>
+  <a href="/replay/backfill" id="nav-backfill" data-path="/replay/backfill">Backfill</a>
+  <a href="/replay/journal" id="nav-journal" data-path="/replay/journal">📓 Journal</a>
+  <a href="/replay/account" id="nav-account" data-path="/replay/account">💰 Account</a>
+  <span class="nav-spacer"></span>
+  <a href="#" onclick="openConfigModal();event.preventDefault();" id="nav-settings" style="color:#666">⚙ Settings</a>
+</div>
+
 <div class="header">
-  <div class="mode-toggle" id="mode-toggle">
-    <button class="active" onclick="setMode('replay')">Replay</button>
-    <button onclick="setMode('live')">Live</button>
-  </div>
   <h1>SPXer Replay</h1>
-  <a href="/replay/sweep" id="sweep-link" style="color:#666;text-decoration:none;font-size:12px;margin-left:-8px">🏆 Leaderboard</a>
-  <a href="/replay/surface" style="color:#666;text-decoration:none;font-size:12px;margin-left:-8px">📊 Surface</a>
-  <select id="date-select"><option>Loading...</option></select>
-  <span style="color:#444">to</span>
-  <select id="date-end-select"><option value="">same</option></select>
+  <!-- Hidden native select — retained for API compat (other code reads .value / listens for 'change') -->
+  <select id="date-select" style="display:none" title="Day to view"><option>Loading...</option></select>
+  <span id="date-picker-wrap">
+    <button id="date-btn" type="button" title="Pick a trading day">
+      <span class="cal-icon">📅</span>
+      <span id="date-btn-label" style="display:none">Loading…</span>
+      <span class="cal-caret" style="display:none">▼</span>
+    </button>
+    <div id="date-popup" role="dialog" aria-label="Pick a date">
+      <div class="cal-head">
+        <button type="button" id="cal-prev" title="Previous month">‹</button>
+        <div class="cal-title" id="cal-title">—</div>
+        <button type="button" id="cal-next" title="Next month">›</button>
+      </div>
+      <div class="cal-grid" id="cal-grid"></div>
+      <div class="cal-foot">
+        <a id="cal-latest">Latest</a>
+        <span id="cal-count">—</span>
+      </div>
+    </div>
+  </span>
+  <select id="instrument-select" title="Underlying instrument" style="min-width:80px">
+    <option value="SPX">SPX</option>
+    <option value="NDX">NDX</option>
+  </select>
   <select id="config-select"><option>Loading...</option></select>
   <button class="config-btn" onclick="openConfigModal()">Settings</button>
-  <button class="run-btn" id="run-btn" onclick="runReplay()">Run</button>
+  <button class="run-btn" id="run-btn" onclick="runReplay()" title="Run selected config against ALL days in the table">Run All Days</button>
+  <button class="config-btn" id="backfill-btn" onclick="backfillLatest()" style="background:#f59e0b18;color:#f59e0b;border-color:#f59e0b44" title="Backfill latest trading day from Polygon">Backfill</button>
   <span class="run-status" id="run-status"></span>
   <span id="job-indicator" style="display:none;margin-left:8px;padding:2px 8px;background:#1a1a2e;border:1px solid #444;border-radius:4px;font-size:11px;color:#ffa500;cursor:pointer" onclick="showJobStatus()" title="Click for details"></span>
   <div class="summary" id="summary"></div>
@@ -222,7 +1104,10 @@
 <div id="live-config-panel" style="display:none; background:#0d0d15; border:1px solid #222; border-radius:6px; padding:10px 14px; margin:6px 10px; font-size:11px; color:#888; line-height:1.7">
   <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px">
     <span style="color:#aaa; font-weight:700; font-size:12px">📋 Live Config</span>
-    <span id="live-config-id" style="color:#3b82f6; font-family:monospace; font-size:11px"></span>
+    <span style="display:flex; align-items:center; gap:8px">
+      <span id="live-config-id" style="color:#3b82f6; font-family:monospace; font-size:11px"></span>
+      <button onclick="editLiveConfig()" style="background:#1a1a2e; color:#8b8bff; border:1px solid #333; padding:2px 10px; border-radius:3px; cursor:pointer; font-size:10px; font-family:inherit">✎ Edit</button>
+    </span>
   </div>
   <div id="live-config-details" style="display:grid; grid-template-columns:repeat(auto-fill,minmax(200px,1fr)); gap:2px 16px"></div>
 </div>
@@ -249,6 +1134,7 @@
       </div>
       <button class="config-btn" onclick="closeConfigModal()">Cancel</button>
       <button class="run-btn" onclick="saveAndRun()">Save &amp; Run</button>
+      <button class="run-btn" id="update-live-btn" onclick="updateLiveConfig()" style="display:none; background:#3b82f622; color:#3b82f6; border-color:#3b82f644">Update Live</button>
     </div>
   </div>
 </div>
@@ -299,13 +1185,21 @@
   <span class="filter-summary" id="filter-summary"></span>
 </div>
 
+<div class="chart-toolbar">
+  <span class="toolbar-title" id="chart-toolbar-title">SPX Chart</span>
+  <button class="ind-btn" onclick="openIndicatorMenu('spx')">
+    📈 Indicators<span class="count-badge" id="spx-ind-count">2</span>
+  </button>
+  <span class="data-warning" id="spx-data-warning" title="Click for details"></span>
+</div>
+
 <div id="spx-chart"><div class="loading">Select a date and config...</div></div>
 
 <div class="trades-section">
   <h2>Trades</h2>
   <table class="trades-table">
     <thead><tr>
-      <th>#</th><th>Side</th><th>Strike</th><th>Entry</th><th>Exit</th><th>P&L</th><th>%</th><th>Reason</th>
+      <th>#</th><th>Side</th><th>Strike</th><th>Qty</th><th>Cost</th><th>Entry</th><th>Exit</th><th>P&L</th><th>%</th><th>Reason</th>
     </tr></thead>
     <tbody id="trades-body"></tbody>
   </table>
@@ -314,7 +1208,37 @@
 <div id="expanded-chart-wrap">
   <span class="close-btn" onclick="closeExpanded()">&times;</span>
   <div id="expanded-chart-label"></div>
+  <div class="chart-toolbar" style="border-top: 1px solid var(--border)">
+    <span class="toolbar-title">Contract</span>
+    <button class="ind-btn" onclick="openIndicatorMenu('contract')">
+      📈 Indicators<span class="count-badge" id="contract-ind-count">2</span>
+    </button>
+    <span class="data-warning" id="contract-data-warning"></span>
+  </div>
   <div id="expanded-chart"></div>
+</div>
+
+<!-- Indicator selection popup -->
+<div class="ind-menu" id="ind-menu">
+  <div class="ind-menu-inner">
+    <div class="ind-menu-header">
+      <h3>Indicators<span class="subtitle" id="ind-menu-subtitle"></span></h3>
+      <button class="ind-menu-close" onclick="closeIndicatorMenu()">&times;</button>
+    </div>
+    <div class="ind-menu-body" id="ind-menu-body"></div>
+    <div class="ind-menu-footer">
+      <div class="presets">
+        <button class="ind-preset" onclick="applyIndicatorPreset('none')">None</button>
+        <button class="ind-preset" onclick="applyIndicatorPreset('default')">Default (HMA 5/19)</button>
+        <button class="ind-preset" onclick="applyIndicatorPreset('trend')">Trend (HMA+EMA)</button>
+        <button class="ind-preset" onclick="applyIndicatorPreset('bands')">Bands (BB+KC+VWAP)</button>
+        <button class="ind-preset" onclick="applyIndicatorPreset('osc')">Oscillators</button>
+        <button class="ind-preset" onclick="applyIndicatorPreset('vol')">+ Volume</button>
+        <button class="ind-preset" onclick="applyIndicatorPreset('all')">All</button>
+      </div>
+      <button class="ind-btn" onclick="closeIndicatorMenu()" style="color:var(--primary)">Done</button>
+    </div>
+  </div>
 </div>
 
 <div class="mini-section">
@@ -331,6 +1255,14 @@
 // Path prefix for reverse proxy (e.g. '/spxer/replay' behind bitloom.cloud)
 const BASE = (document.querySelector('meta[name="base-path"]')?.content || '') || '';
 const API = BASE + '/replay/api';
+
+// Fix nav links for reverse proxy base path
+if (BASE) {
+  document.querySelectorAll('.nav-bar a[data-path]').forEach(a => {
+    a.href = BASE + a.dataset.path;
+  });
+}
+
 let allContracts = [];
 let allTrades = [];
 
@@ -383,38 +1315,965 @@ function toEtDisplay(utcTs) {
   return utcTs + etOffsetSec;
 }
 
+// ── Indicator System ────────────────────────────────────────────────────────
+// Each indicator can be plotted at multiple timeframes simultaneously.
+// Selection entries are strings of the form "{key}@{tf}", e.g. "hma5@3m".
+// This matters because signals trigger on specific TFs (e.g. HMA5×HMA19 on 3m
+// option contract bars). Showing only 1m would hide the actual signal line.
+const TIMEFRAMES = ['1m', '2m', '3m', '5m', '10m', '15m'];
+
+// Per-TF line style so overlays at different TFs are visually distinct.
+// Colors come from INDICATOR_DEFS; we only vary lineStyle/width by TF.
+// lightweight-charts LineStyle: 0=Solid, 1=Dotted, 2=Dashed, 3=LargeDashed, 4=SparseDotted
+const TF_STYLE = {
+  '1m':  { lineStyle: 0, widthBoost: 0 },
+  '2m':  { lineStyle: 0, widthBoost: -1 },
+  '3m':  { lineStyle: 2, widthBoost: 0 },
+  '5m':  { lineStyle: 3, widthBoost: 0 },
+  '10m': { lineStyle: 1, widthBoost: 0 },
+  '15m': { lineStyle: 4, widthBoost: 0 },
+};
+
+// All indicators produced by src/core/indicator-engine.ts. Each def has:
+//   key       — field name in bar.ind
+//   label     — UI label
+//   color     — line color
+//   group     — section in popup
+//   pane      — 'price' (overlay on candles) or pane name for own subpane
+//   width     — line width (default 1)
+//   dash      — if true, dashed line
+//   histogram — if true, render as histogram (MACD hist)
+const INDICATOR_DEFS = [
+  // HMA (price overlays)
+  { key: 'hma3',   label: 'HMA 3',   color: '#4ade80', group: 'HMA',       pane: 'price' },
+  { key: 'hma5',   label: 'HMA 5',   color: '#10b981', group: 'HMA',       pane: 'price', width: 2 },
+  { key: 'hma15',  label: 'HMA 15',  color: '#06b6d4', group: 'HMA',       pane: 'price' },
+  { key: 'hma17',  label: 'HMA 17',  color: '#0ea5e9', group: 'HMA',       pane: 'price' },
+  { key: 'hma19',  label: 'HMA 19',  color: '#3b82f6', group: 'HMA',       pane: 'price', width: 2 },
+  { key: 'hma25',  label: 'HMA 25',  color: '#6366f1', group: 'HMA',       pane: 'price' },
+  // EMA (price overlays)
+  { key: 'ema9',   label: 'EMA 9',   color: '#fb923c', group: 'EMA',       pane: 'price' },
+  { key: 'ema21',  label: 'EMA 21',  color: '#f59e0b', group: 'EMA',       pane: 'price' },
+  { key: 'ema50',  label: 'EMA 50',  color: '#d97706', group: 'EMA',       pane: 'price' },
+  { key: 'ema200', label: 'EMA 200', color: '#b45309', group: 'EMA',       pane: 'price' },
+  // Volume-weighted / other overlays
+  { key: 'vwap',   label: 'VWAP',    color: '#a78bfa', group: 'Other',     pane: 'price', width: 2 },
+  // Volume — bar-source (read from b.v, not b.ind). Renders as histogram in its own pane.
+  // Volume renders as an OVERLAY on the price pane (TV-style), pinned to the
+  // bottom ~20% via scaleMargins. `pane: 'price'` keeps it in pane 0; the
+  // empty priceScaleId + scaleMargins handling happens in drawIndicators.
+  { key: 'volume', label: 'Volume',  color: '#475569', group: 'Other',     pane: 'price', histogram: true, source: 'bar' },
+  // Bollinger Bands
+  { key: 'bbUpper',  label: 'BB Upper',  color: '#94a3b8', group: 'Bollinger', pane: 'price' },
+  { key: 'bbMiddle', label: 'BB Middle', color: '#64748b', group: 'Bollinger', pane: 'price', dash: true },
+  { key: 'bbLower',  label: 'BB Lower',  color: '#94a3b8', group: 'Bollinger', pane: 'price' },
+  // Keltner Channels
+  { key: 'kcUpper',  label: 'KC Upper',  color: '#f472b6', group: 'Keltner',   pane: 'price' },
+  { key: 'kcMiddle', label: 'KC Middle', color: '#ec4899', group: 'Keltner',   pane: 'price', dash: true },
+  { key: 'kcLower',  label: 'KC Lower',  color: '#f472b6', group: 'Keltner',   pane: 'price' },
+  // Oscillators (separate panes)
+  { key: 'rsi14',        label: 'RSI 14',        color: '#eab308', group: 'Oscillators', pane: 'rsi' },
+  { key: 'macd',         label: 'MACD',          color: '#60a5fa', group: 'Oscillators', pane: 'macd' },
+  { key: 'macdSignal',   label: 'MACD Signal',   color: '#f97316', group: 'Oscillators', pane: 'macd' },
+  { key: 'macdHistogram',label: 'MACD Hist',     color: '#64748b', group: 'Oscillators', pane: 'macd', histogram: true },
+  { key: 'stochK',       label: 'Stoch %K',      color: '#38bdf8', group: 'Oscillators', pane: 'stoch' },
+  { key: 'cci20',        label: 'CCI 20',        color: '#f59e0b', group: 'Oscillators', pane: 'cci' },
+  { key: 'momentum10',   label: 'Momentum 10',   color: '#a78bfa', group: 'Oscillators', pane: 'momentum' },
+  { key: 'adx14',        label: 'ADX 14',        color: '#22c55e', group: 'Oscillators', pane: 'adx' },
+  { key: 'atr14',        label: 'ATR 14',        color: '#f472b6', group: 'Volatility',  pane: 'atr' },
+  { key: 'atrPct',       label: 'ATR %',         color: '#fb7185', group: 'Volatility',  pane: 'atrPct' },
+  { key: 'bbWidth',      label: 'BB Width',      color: '#94a3b8', group: 'Volatility',  pane: 'bbWidth' },
+  { key: 'kcWidth',      label: 'KC Width',      color: '#f472b6', group: 'Volatility',  pane: 'kcWidth' },
+  { key: 'kcSlope',      label: 'KC Slope',      color: '#ec4899', group: 'Volatility',  pane: 'kcSlope' },
+];
+
+// Presets — entries are "{key}@{tf}" pairs
+const INDICATOR_PRESETS = {
+  none:    [],
+  default: ['hma5@1m', 'hma19@1m'],
+  trend:   ['hma5@1m', 'hma19@1m', 'ema9@1m', 'ema21@1m', 'ema50@1m'],
+  bands:   ['bbUpper@1m', 'bbMiddle@1m', 'bbLower@1m', 'kcUpper@1m', 'kcMiddle@1m', 'kcLower@1m', 'vwap@1m'],
+  osc:     ['hma5@1m', 'hma19@1m', 'rsi14@1m', 'macd@1m', 'macdSignal@1m', 'macdHistogram@1m'],
+  // "+ Volume" — add volume to whatever's already selected (click adds, doesn't replace)
+  vol:     null,
+  // Signal TFs — what the agent actually crosses on (3m HMA is the common signal timeframe)
+  signal3m:['hma5@3m', 'hma19@3m', 'hma5@1m', 'hma19@1m'],
+  // Multi-timeframe HMA5 stack for comparing fast vs slow TFs
+  mtf:     ['hma5@1m', 'hma5@3m', 'hma5@5m', 'hma19@1m', 'hma19@3m', 'hma19@5m'],
+  all:     INDICATOR_DEFS.map(d => `${d.key}@1m`),
+};
+
+// Selection state (per chart key: 'spx' or 'contract') — persisted to localStorage.
+// Format: array of "{key}@{tf}" strings. Backward-compat: legacy bare keys
+// (e.g. "hma5") are auto-migrated to "hma5@1m".
+function getIndicatorSelection(chartKey) {
+  try {
+    const saved = localStorage.getItem(`spxer-indicators-${chartKey}`);
+    if (saved) {
+      const arr = JSON.parse(saved);
+      if (Array.isArray(arr)) {
+        return arr.map(s => String(s).includes('@') ? s : `${s}@1m`);
+      }
+    }
+  } catch {}
+  return [...INDICATOR_PRESETS.default];
+}
+function setIndicatorSelection(chartKey, entries) {
+  localStorage.setItem(`spxer-indicators-${chartKey}`, JSON.stringify(entries));
+  const badge = document.getElementById(`${chartKey}-ind-count`);
+  if (badge) badge.textContent = entries.length;
+}
+// Parse "hma5@3m" → { key: "hma5", tf: "3m" }
+function parseIndicatorEntry(e) {
+  const idx = String(e).indexOf('@');
+  if (idx === -1) return { key: String(e), tf: '1m' };
+  return { key: String(e).slice(0, idx), tf: String(e).slice(idx + 1) };
+}
+
+// ── Indicator Popup ────────────────────────────────────────────────────────
+let _indMenuTarget = 'spx';
+function openIndicatorMenu(chartKey) {
+  _indMenuTarget = chartKey;
+  const sub = document.getElementById('ind-menu-subtitle');
+  sub.textContent = chartKey === 'spx' ? `— ${currentInstrument()} Chart` : '— Contract Chart';
+  renderIndicatorMenu();
+  document.getElementById('ind-menu').classList.add('open');
+}
+function closeIndicatorMenu() {
+  document.getElementById('ind-menu').classList.remove('open');
+  // Re-render charts so changes are applied
+  reapplyIndicators();
+}
+function renderIndicatorMenu() {
+  const selected = new Set(getIndicatorSelection(_indMenuTarget));
+  const body = document.getElementById('ind-menu-body');
+
+  // Group indicators
+  const groups = {};
+  for (const def of INDICATOR_DEFS) {
+    if (!groups[def.group]) groups[def.group] = [];
+    groups[def.group].push(def);
+  }
+
+  // Header note explaining TF selection
+  const note = `<div style="font-size:11px;color:var(--muted-foreground);padding:4px 8px 10px;line-height:1.45">
+    Click a timeframe button to overlay that indicator at that bar timeframe.
+    Signals trigger on the agent's <code style="color:var(--primary-soft)">signalTimeframe</code> — usually 3m for HMA crosses.
+  </div>`;
+
+  // Custom HMA input — lets users add any hma{N} period (e.g. hma7, hma23, hma42)
+  // that's not in INDICATOR_DEFS. Matches the config UI's free-form hmaCrossFast
+  // / hmaCrossSlow inputs. Value is computed on-the-fly if missing from DB.
+  const currentCustomHmas = [...selected]
+    .filter(e => /^hma\d+@/.test(e))
+    .filter(e => {
+      const key = e.split('@')[0];
+      return !INDICATOR_DEFS.some(d => d.key === key);
+    });
+  const customRow = `
+    <div class="ind-group">
+      <div class="ind-group-title">Custom HMA Period</div>
+      <div style="padding:6px 8px 4px;font-size:11px;color:var(--muted-foreground);line-height:1.45">
+        Type any HMA period (matches the config's <code style="color:var(--primary-soft)">hmaCrossFast</code> /
+        <code style="color:var(--primary-soft)">hmaCrossSlow</code>). Computed on-the-fly if not in DB.
+      </div>
+      <div style="padding:6px 8px;display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+        <input id="custom-hma-period" type="number" min="2" max="500" step="1" placeholder="e.g. 7"
+               style="width:80px;padding:4px 6px;background:var(--background);color:var(--foreground);
+                      border:1px solid var(--border);border-radius:4px;font-size:12px" />
+        ${TIMEFRAMES.map(tf => `
+          <button class="ind-tf-btn" onclick="addCustomHmaFromInput('${tf}')">+${tf}</button>
+        `).join('')}
+      </div>
+      ${currentCustomHmas.length ? `
+        <div style="padding:4px 8px 8px;display:flex;gap:4px;flex-wrap:wrap">
+          ${currentCustomHmas.map(e => `
+            <span style="display:inline-flex;align-items:center;gap:4px;padding:3px 8px;
+                         background:var(--muted);border-radius:10px;font-size:11px">
+              ${e}
+              <button onclick="removeIndicatorEntry('${e}')"
+                      style="background:none;border:none;color:var(--muted-foreground);
+                             cursor:pointer;padding:0;font-size:14px;line-height:1">&times;</button>
+            </span>
+          `).join('')}
+        </div>
+      ` : ''}
+    </div>
+  `;
+
+  body.innerHTML = note + customRow + Object.entries(groups).map(([groupName, defs]) => `
+    <div class="ind-group">
+      <div class="ind-group-title">${groupName}</div>
+      <div class="ind-grid">
+        ${defs.map(d => `
+          <div class="ind-row" data-key="${d.key}">
+            <div class="ind-name">
+              <span class="ind-swatch" style="background:${d.color}"></span>
+              <span>${d.label}</span>
+            </div>
+            <div class="ind-tf-buttons">
+              ${TIMEFRAMES.map(tf => `
+                <button class="ind-tf-btn${selected.has(`${d.key}@${tf}`) ? ' selected' : ''}"
+                        data-key="${d.key}" data-tf="${tf}"
+                        onclick="toggleIndicatorTf('${d.key}','${tf}',this)">
+                  ${tf}
+                </button>
+              `).join('')}
+            </div>
+          </div>
+        `).join('')}
+      </div>
+    </div>
+  `).join('');
+}
+function toggleIndicatorTf(key, tf, btn) {
+  const entry = `${key}@${tf}`;
+  const current = new Set(getIndicatorSelection(_indMenuTarget));
+  if (current.has(entry)) {
+    current.delete(entry);
+    btn && btn.classList.remove('selected');
+  } else {
+    current.add(entry);
+    btn && btn.classList.add('selected');
+  }
+  setIndicatorSelection(_indMenuTarget, [...current]);
+}
+// Add a custom HMA period from the popup's numeric input. Period is validated
+// and must be ≥2. Entry is stored as "hma{N}@{tf}" and drawIndicators will
+// synthesize a def + compute on-the-fly if the DB doesn't have it.
+function addCustomHmaFromInput(tf) {
+  const el = document.getElementById('custom-hma-period');
+  if (!el) return;
+  const period = parseInt(el.value, 10);
+  if (!Number.isFinite(period) || period < 2) {
+    alert('Enter an HMA period ≥ 2');
+    return;
+  }
+  const entry = `hma${period}@${tf}`;
+  const current = new Set(getIndicatorSelection(_indMenuTarget));
+  if (current.has(entry)) return;  // already selected
+  current.add(entry);
+  setIndicatorSelection(_indMenuTarget, [...current]);
+  renderIndicatorMenu();
+}
+// Remove a specific entry from the selection (used by custom HMA chip close button).
+function removeIndicatorEntry(entry) {
+  const current = new Set(getIndicatorSelection(_indMenuTarget));
+  current.delete(entry);
+  setIndicatorSelection(_indMenuTarget, [...current]);
+  renderIndicatorMenu();
+}
+function applyIndicatorPreset(preset) {
+  // Special case: "+ Volume" is additive — toggles volume@1m on top of whatever's selected.
+  if (preset === 'vol') {
+    const current = new Set(getIndicatorSelection(_indMenuTarget));
+    if (current.has('volume@1m')) current.delete('volume@1m');
+    else current.add('volume@1m');
+    setIndicatorSelection(_indMenuTarget, [...current]);
+  } else {
+    const entries = INDICATOR_PRESETS[preset] || [];
+    setIndicatorSelection(_indMenuTarget, [...entries]);
+  }
+  renderIndicatorMenu();
+}
+
+// Close on backdrop click
+document.addEventListener('click', (e) => {
+  const menu = document.getElementById('ind-menu');
+  if (menu && menu.classList.contains('open') && e.target === menu) {
+    closeIndicatorMenu();
+  }
+});
+
+// ── Bars Cache (per symbol × date × timeframe) ─────────────────────────────
+// Indicator overlays can render at multiple TFs simultaneously. We fetch each
+// (symbol, date, tf) at most once per day and cache it. Cleared on _loadDayData.
+const _barsCache = new Map();
+function barsCacheKey(symbol, date, tf) { return `${symbol}|${date}|${tf}`; }
+async function fetchBarsForTf(symbol, date, tf) {
+  const key = barsCacheKey(symbol, date, tf);
+  if (_barsCache.has(key)) {
+    const cached = _barsCache.get(key);
+    return (cached && typeof cached.then === 'function') ? await cached : cached;
+  }
+  const base = `${API}/bars?date=${date}&symbol=${encodeURIComponent(symbol)}`;
+  const url = tf === '1m' ? base : `${base}&tf=${tf}`;
+  const promise = fetch(url).then(r => r.ok ? r.json() : []).catch(() => []);
+  _barsCache.set(key, promise);
+  const bars = await promise;
+  _barsCache.set(key, bars);
+  return bars;
+}
+
+// ── Indicator Drawing ──────────────────────────────────────────────────────
+// Replaces the previous hardcoded HMA5/HMA19 overlays. Works on any chart and
+// any bar series. Stores series references on the chart object so we can
+// remove them cleanly when toggling. Handles multi-TF selections like
+// "hma5@1m + hma5@3m" by fetching additional TFs from the cache as needed.
+async function drawIndicators(chart, barsOrMap, chartKey, ctx) {
+  if (!chart || !barsOrMap) return;
+
+  // Accept either a plain bars array (legacy — treated as 1m) or a
+  // { '1m': bars, '3m': bars3m, '5m': bars5m } map for multi-TF support.
+  const barsByTf = Array.isArray(barsOrMap) ? { '1m': barsOrMap } : { ...barsOrMap };
+  if (!barsByTf['1m'] || !barsByTf['1m'].length) return;
+
+  // Stash ctx so reapplyIndicators() (called after popup close) can redraw.
+  if (ctx) chart._indCtx = { symbol: ctx.symbol, date: ctx.date };
+
+  // Seed cache with already-known bars so we don't re-fetch them
+  if (ctx && ctx.symbol && ctx.date) {
+    for (const tf of Object.keys(barsByTf)) {
+      if (barsByTf[tf] && barsByTf[tf].length) {
+        _barsCache.set(barsCacheKey(ctx.symbol, ctx.date, tf), barsByTf[tf]);
+      }
+    }
+  }
+
+  // Pre-fetch any additional TFs the selection needs (e.g. hma5@15m on contract)
+  const selectionPreview = getIndicatorSelection(chartKey);
+  const neededTfs = new Set(selectionPreview.map(e => parseIndicatorEntry(e).tf));
+  const missingTfs = [...neededTfs].filter(
+    tf => (!barsByTf[tf] || !barsByTf[tf].length) && ctx && ctx.symbol && ctx.date
+  );
+  if (missingTfs.length) {
+    const fetched = await Promise.all(
+      missingTfs.map(tf => fetchBarsForTf(ctx.symbol, ctx.date, tf))
+    );
+    for (let i = 0; i < missingTfs.length; i++) barsByTf[missingTfs[i]] = fetched[i];
+  }
+
+  // Remove any previously-added indicator series on this chart
+  if (chart._indicatorSeries) {
+    for (const s of chart._indicatorSeries) {
+      try { chart.removeSeries(s); } catch {}
+    }
+  }
+  chart._indicatorSeries = [];
+  chart._indicatorMeta = [];  // parallel array for legend rendering
+
+  // Track the 1m bars used for OHLC/volume readout in the legend
+  if (barsByTf['1m']) chart._legendBars1m = barsByTf['1m'];
+
+  const selected = getIndicatorSelection(chartKey);
+  const defByKey = Object.fromEntries(INDICATOR_DEFS.map(d => [d.key, d]));
+  const paneIndexByName = { price: 0 };
+  let nextPaneIndex = 1;
+
+  for (const entry of selected) {
+    const { key, tf } = parseIndicatorEntry(entry);
+    // Resolve def — or synthesize one for arbitrary hma{N} keys so users can
+    // chart any HMA period they've configured (hmaCrossFast / hmaCrossSlow
+    // in the config UI are free-form numeric inputs: hma7, hma23, hma42…).
+    let def = defByKey[key];
+    if (!def) {
+      const hmaPeriod = parseHmaKeyPeriod(key);
+      if (hmaPeriod != null) {
+        def = {
+          key,
+          label: `HMA ${hmaPeriod}`,
+          color: hmaColorForPeriod(hmaPeriod),
+          group: 'HMA',
+          pane: 'price',
+          width: 1,
+          _synthesized: true,
+        };
+      } else {
+        continue;
+      }
+    }
+    const tfBars = barsByTf[tf];
+    if (!tfBars || !tfBars.length) continue;
+
+    // Volume reads from b.v; all other indicators from b.ind[key]
+    let data = def.source === 'bar'
+      ? tfBars
+          .filter(b => b.v != null && !Number.isNaN(b.v))
+          .map(b => ({
+            time: toEtDisplay(b.ts),
+            value: b.v,
+            color: (b.c >= b.o) ? '#10b98177' : '#f43f5e77',
+          }))
+      : tfBars
+          .filter(b => b.ind && b.ind[key] != null && !Number.isNaN(b.ind[key]))
+          .map(b => ({ time: toEtDisplay(b.ts), value: b.ind[key] }));
+    // On-the-fly HMA fallback: when DB indicators are missing (e.g. NDX dates
+    // where compute-indicators.ts hasn't been run, or arbitrary periods like
+    // hma7/hma23 that aren't pre-baked), compute from close prices.
+    // Matches the same HMA definition as src/pipeline/indicators/tier1.ts.
+    const fallbackPeriod = parseHmaKeyPeriod(key);
+    if (data.length === 0 && def.source !== 'bar' && fallbackPeriod != null) {
+      const closes = tfBars.map(b => b.c);
+      const hmaVals = computeHMASeries(closes, fallbackPeriod);
+      data = [];
+      for (let i = 0; i < tfBars.length; i++) {
+        const v = hmaVals[i];
+        if (v != null && !Number.isNaN(v)) {
+          data.push({ time: toEtDisplay(tfBars[i].ts), value: v });
+        }
+      }
+      if (data.length) {
+        console.log(`[drawIndicators] computed ${key}@${tf} on-the-fly (${data.length} points) — DB indicators missing`);
+      }
+    }
+    if (!data.length) continue;
+    // Skip volume entirely when the series is all zero (e.g. SPX index has no
+    // tradeable volume). Otherwise we'd create an empty overlay + dead space.
+    if (def.source === 'bar' && data.every(d => !d.value)) continue;
+
+    // Resolve pane index
+    let paneIndex = paneIndexByName[def.pane];
+    if (paneIndex == null) {
+      paneIndex = nextPaneIndex++;
+      paneIndexByName[def.pane] = paneIndex;
+    }
+
+    const tfStyle = TF_STYLE[tf] || { lineStyle: 0, widthBoost: 0 };
+    const titleSuffix = tf === '1m' ? '' : ` (${tf})`;
+
+    try {
+      let series;
+      if (def.histogram) {
+        series = chart.addSeries(LightweightCharts.HistogramSeries, {
+          color: def.color,
+          priceLineVisible: false,
+          lastValueVisible: false,
+          title: def.label + titleSuffix,
+          // Volume is an overlay on the price pane — its own invisible scale
+          // (priceScaleId: '') so the candle price axis is untouched. The
+          // scaleMargins below pin it to the bottom ~20% of the pane.
+          ...(def.key === 'volume' ? { priceFormat: { type: 'volume' }, priceScaleId: '' } : {}),
+        }, paneIndex);
+        // Pin volume to the bottom 20% of the price pane. Must set via the
+        // overlay scale (priceScaleId:'') not the main 'right' scale — doing
+        // the latter would compress the candles.
+        if (def.key === 'volume') {
+          try {
+            series.priceScale().applyOptions({ scaleMargins: { top: 0.8, bottom: 0 } });
+          } catch {}
+        }
+      } else {
+        const baseWidth = def.width || 1;
+        const lineWidth = Math.max(1, baseWidth + (tfStyle.widthBoost || 0));
+        const lineStyle = def.dash ? 2 : tfStyle.lineStyle;
+        series = chart.addSeries(LightweightCharts.LineSeries, {
+          color: def.color,
+          lineWidth,
+          lineStyle,
+          priceLineVisible: false,
+          lastValueVisible: false,
+          crosshairMarkerVisible: paneIndex === 0 ? false : true,
+          title: def.label + titleSuffix,
+        }, paneIndex);
+      }
+      series.setData(data);
+      chart._indicatorSeries.push(series);
+      // Remember metadata so the legend can look up the value by key+tf
+      chart._indicatorMeta.push({
+        key, tf,
+        label: def.label,
+        color: def.color,
+        isHistogram: !!def.histogram,
+        source: def.source || 'ind',  // 'bar' = b.v, otherwise b.ind[key]
+        precision: def.histogram ? 0 : 2,
+      });
+    } catch (err) {
+      console.warn(`Failed to draw indicator ${entry}:`, err);
+    }
+  }
+
+  // Refresh legend (if one is attached to this chart)
+  if (chart._legendRefresh) chart._legendRefresh();
+}
+
+// ── Chart Legend (TradingView-style overlay) ───────────────────────────────
+// Shows symbol + OHLC + Volume + each enabled indicator's value at the top-left
+// of the chart. Updates as the user moves the crosshair; falls back to the
+// most recent bar when the mouse leaves the chart.
+function formatVolume(v) {
+  if (v == null || Number.isNaN(v)) return '—';
+  if (v >= 1e6) return (v / 1e6).toFixed(2) + 'M';
+  if (v >= 1e3) return (v / 1e3).toFixed(1) + 'K';
+  return String(Math.round(v));
+}
+function formatNumber(v, precision = 2) {
+  if (v == null || Number.isNaN(v)) return '—';
+  return Number(v).toFixed(precision);
+}
+
+// Binary search bars array for the ET-display timestamp param (lightweight-charts
+// passes the time we set, which is already ET-display-shifted).
+function findBarByTime(bars, timeDisplay) {
+  if (!bars || !bars.length) return null;
+  // bars store UTC ts; convert to ET-display on the fly for comparison
+  let lo = 0, hi = bars.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const t = toEtDisplay(bars[mid].ts);
+    if (t === timeDisplay) return bars[mid];
+    if (t < timeDisplay) lo = mid + 1;
+    else hi = mid - 1;
+  }
+  // Return closest (last bar at or before timeDisplay)
+  return bars[Math.max(0, hi)];
+}
+
+// Build/refresh the legend overlay. Called:
+//   - Once per chart creation (via attachChartLegend)
+//   - On every crosshair move
+//   - On every indicator rebuild (via chart._legendRefresh)
+function renderChartLegend(chart, param) {
+  const el = chart._legendEl;
+  if (!el) return;
+  const bars = chart._legendBars1m || [];
+  const meta = chart._indicatorMeta || [];
+  const symbol = chart._legendSymbol || '';
+
+  // Pick the bar: hovered (param.time) or latest
+  let bar = null;
+  if (param && param.time != null) {
+    bar = findBarByTime(bars, param.time);
+  }
+  if (!bar && bars.length) bar = bars[bars.length - 1];
+
+  const parts = [];
+  parts.push(`<span class="lg-symbol">${symbol}</span>`);
+
+  if (bar) {
+    const upDn = (bar.c >= bar.o) ? 'up' : 'dn';
+    parts.push(`<span class="lg-ohlc">`
+      + `O<b>${formatNumber(bar.o)}</b> `
+      + `H<b>${formatNumber(bar.h)}</b> `
+      + `L<b>${formatNumber(bar.l)}</b> `
+      + `C<b class="${upDn}">${formatNumber(bar.c)}</b> `
+      + `V<b>${formatVolume(bar.v)}</b>`
+      + `</span>`);
+  }
+
+  // For each indicator: find its value on the same bar (at that indicator's TF).
+  // We approximate by reading from the cached bars for that TF.
+  for (const m of meta) {
+    let val = null;
+    if (m.source === 'bar') {
+      val = bar ? bar.v : null;
+    } else {
+      // Look up in per-TF cache for this chart's symbol/date
+      const ctx = chart._indCtx || {};
+      const tfBars = (ctx.symbol && ctx.date)
+        ? _barsCache.get(barsCacheKey(ctx.symbol, ctx.date, m.tf))
+        : null;
+      if (Array.isArray(tfBars) && tfBars.length && bar) {
+        const tfBar = findBarByTime(tfBars, toEtDisplay(bar.ts));
+        val = tfBar && tfBar.ind ? tfBar.ind[m.key] : null;
+      } else if (m.tf === '1m' && bar && bar.ind) {
+        val = bar.ind[m.key];
+      }
+    }
+    const tfPill = m.tf === '1m' ? '' : `<span class="lg-ind-tf">${m.tf}</span>`;
+    parts.push(`<span class="lg-ind">`
+      + `<span class="lg-ind-swatch" style="background:${m.color}"></span>`
+      + `<span class="lg-ind-label">${m.label}${tfPill}</span>`
+      + `<span class="lg-ind-val">${formatNumber(val, m.precision)}</span>`
+      + `</span>`);
+  }
+
+  el.innerHTML = parts.join(' ');
+}
+
+// Attach a legend overlay to a chart. Idempotent — if one is already attached
+// to this chart instance, just update its symbol.
+function attachChartLegend(chart, container, symbol) {
+  if (!chart || !container) return;
+  chart._legendSymbol = symbol || '';
+  if (chart._legendEl && container.contains(chart._legendEl)) {
+    renderChartLegend(chart, null);
+    return;
+  }
+  const el = document.createElement('div');
+  el.className = 'chart-legend';
+  container.appendChild(el);
+  chart._legendEl = el;
+  chart._legendRefresh = () => renderChartLegend(chart, null);
+  try {
+    chart.subscribeCrosshairMove((param) => renderChartLegend(chart, param));
+  } catch (err) {
+    console.warn('Failed to subscribe crosshair for legend:', err);
+  }
+  renderChartLegend(chart, null);
+}
+
+// Re-apply indicators to current charts (called after popup closes). Each
+// chart remembers its own context (symbol/date) on _indCtx so we can fetch
+// additional TFs lazily from the bars cache.
+async function reapplyIndicators() {
+  const jobs = [];
+  if (spxChart && lastSpxBars && lastSpxBars.length) {
+    const date = document.getElementById('date-select')?.value;
+    jobs.push(drawIndicators(spxChart, {
+      '1m': lastSpxBars,
+      '3m': lastSpx3m || [],
+      '5m': lastSpx5m || [],
+    }, 'spx', { symbol: 'SPX', date }));
+  }
+  if (expandedChart && window._expandedBars) {
+    const ctx = expandedChart._indCtx || {};
+    jobs.push(drawIndicators(expandedChart, window._expandedBars, 'contract', ctx));
+  }
+  await Promise.all(jobs);
+}
+
+// ── Data Quality ───────────────────────────────────────────────────────────
+// Detects (a) bar gaps and (b) missing indicator coverage in replay_bars.
+// The 4/17-style bug shows up as partial indicator backfill: e.g. hma3 and
+// hma15 present but hma5/hma19/hma25/EMAs/RSI all NULL. When that happens the
+// chart would render WITHOUT those lines — we surface a warning explaining it.
+const CRITICAL_INDICATORS = ['hma5', 'hma19', 'ema9', 'ema21', 'rsi14', 'vwap', 'bbUpper'];
+function checkSpxDataQuality(bars) {
+  const warn = document.getElementById('spx-data-warning');
+  if (!warn || !bars || !bars.length) {
+    if (warn) warn.classList.remove('visible');
+    return;
+  }
+  // 1) Bar gaps
+  let gaps = 0, missingBars = 0, biggestGap = 0;
+  for (let i = 1; i < bars.length; i++) {
+    const delta = bars[i].ts - bars[i - 1].ts;
+    if (delta > 60) {
+      gaps++;
+      const m = Math.floor(delta / 60) - 1;
+      missingBars += m;
+      if (m > biggestGap) biggestGap = m;
+    }
+  }
+  // 2) Indicator coverage — count how many criticals are entirely missing.
+  //    Skip HMA keys: drawIndicators computes them on the fly from closes
+  //    when DB values are NULL, so they're not actually missing from the chart.
+  const missingInds = [];
+  for (const key of CRITICAL_INDICATORS) {
+    if (parseHmaKeyPeriod(key) != null) continue;  // client-side fallback exists
+    const nonNull = bars.reduce((n, b) => n + (b.ind && b.ind[key] != null ? 1 : 0), 0);
+    if (nonNull === 0) missingInds.push(key);
+  }
+
+  const parts = [];
+  if (gaps > 0) parts.push(`${gaps} gap${gaps === 1 ? '' : 's'} (${missingBars}m missing)`);
+  if (missingInds.length) parts.push(`${missingInds.length} indicator${missingInds.length === 1 ? '' : 's'} missing: ${missingInds.slice(0, 4).join(', ')}${missingInds.length > 4 ? '…' : ''}`);
+
+  if (!parts.length) {
+    warn.classList.remove('visible');
+    warn.textContent = '';
+    warn.title = '';
+  } else {
+    warn.classList.add('visible');
+    warn.textContent = '⚠ ' + parts.join(' · ');
+    const tooltip = [];
+    if (gaps > 0) tooltip.push(`${currentInstrument()} feed had ${gaps} gap${gaps === 1 ? '' : 's'} this session — ${missingBars} bar${missingBars === 1 ? '' : 's'} missing (largest ${biggestGap}m). Indicator continuity across gaps may be inaccurate.`);
+    if (missingInds.length) tooltip.push(`replay_bars has NULL values for: ${missingInds.join(', ')}. Re-run indicator backfill for this date: BAR_TABLE=replay_bars npx tsx scripts/backfill/compute-indicators.ts <date>.`);
+    warn.title = tooltip.join('\n\n');
+  }
+}
+
+// Initialize indicator count badges on page load
+function initIndicatorBadges() {
+  const spxBadge = document.getElementById('spx-ind-count');
+  const contractBadge = document.getElementById('contract-ind-count');
+  if (spxBadge) spxBadge.textContent = getIndicatorSelection('spx').length;
+  if (contractBadge) contractBadge.textContent = getIndicatorSelection('contract').length;
+}
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', initIndicatorBadges);
+} else {
+  initIndicatorBadges();
+}
+
 // ── Init ───────────────────────────────────────────────────────────────────
 
-async function init() {
-  const [dates, configs] = await Promise.all([
-    fetch(`${API}/dates`).then(r => r.json()),
-    fetch(`${API}/configs`).then(r => r.json()),
-  ]);
+// Helpers: current instrument selection and derived routing values
+function currentInstrument() {
+  return document.getElementById('instrument-select')?.value || 'SPX';
+}
+function currentProfileId() {
+  return currentInstrument() === 'NDX' ? 'ndx-0dte' : 'spx-0dte';
+}
 
+async function refreshDatesForInstrument(autoSelectLatest = true) {
+  const instrument = currentInstrument();
+  const dates = await fetch(`${API}/dates?instrument=${instrument}`).then(r => r.json());
   const dateSel = document.getElementById('date-select');
+  if (!dates.length) {
+    dateSel.innerHTML = `<option value="">(no ${instrument} data)</option>`;
+    CalendarPicker.setAvailable([]);
+    CalendarPicker.syncFromSelect();
+    return [];
+  }
   dateSel.innerHTML = dates.map(d => `<option value="${d}">${d}</option>`).join('');
+  if (autoSelectLatest) dateSel.value = dates[dates.length - 1];
+  CalendarPicker.setAvailable(dates);
+  CalendarPicker.syncFromSelect();
+  return dates;
+}
 
-  const dateEndSel = document.getElementById('date-end-select');
-  dateEndSel.innerHTML = '<option value="">same</option>' + dates.map(d => `<option value="${d}">${d}</option>`).join('');
+// ── Calendar popup picker (drives the hidden #date-select) ─────────────────
+// API:
+//   CalendarPicker.setAvailable(['YYYY-MM-DD', ...])  — feed list of valid trading days
+//   CalendarPicker.syncFromSelect()                   — re-read #date-select.value → update label + calendar selection
+// Clicking a day: sets dateSel.value + dispatches 'change' (so existing loadDay runs).
+const CalendarPicker = (() => {
+  const state = {
+    available: new Set(),           // Set<'YYYY-MM-DD'>
+    availableSorted: [],            // sorted asc
+    viewYear: null,
+    viewMonth: null,                // 0-11
+    open: false,
+  };
+
+  function parse(ymd) { const [y,m,d] = ymd.split('-').map(Number); return { y, m: m-1, d }; }
+  function pad(n) { return String(n).padStart(2, '0'); }
+  function fmt(y, m, d) { return `${y}-${pad(m+1)}-${pad(d)}`; }
+  function prettyLabel(ymd) {
+    // Render 'YYYY-MM-DD' as 'Mon YYYY-MM-DD (Wed)' — weekday hint with no locale surprises
+    if (!ymd) return '—';
+    const { y, m, d } = parse(ymd);
+    const dt = new Date(Date.UTC(y, m, d));
+    const dow = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][dt.getUTCDay()];
+    return `${dow} ${ymd}`;
+  }
+
+  function setAvailable(dates) {
+    state.available = new Set(dates);
+    state.availableSorted = [...dates].sort();
+    // Initial view: month of selected date, or most recent available
+    const selected = document.getElementById('date-select')?.value;
+    const anchor = (selected && state.available.has(selected))
+      ? selected
+      : (state.availableSorted[state.availableSorted.length - 1] || null);
+    if (anchor) {
+      const { y, m } = parse(anchor);
+      state.viewYear = y;
+      state.viewMonth = m;
+    } else {
+      const now = new Date();
+      state.viewYear = now.getUTCFullYear();
+      state.viewMonth = now.getUTCMonth();
+    }
+    render();
+  }
+
+  function syncFromSelect() {
+    const selected = document.getElementById('date-select')?.value;
+    const label = document.getElementById('date-btn-label');
+    if (label) label.textContent = prettyLabel(selected);
+    render();
+  }
+
+  function shiftMonth(delta) {
+    let y = state.viewYear;
+    let m = state.viewMonth + delta;
+    while (m < 0) { m += 12; y -= 1; }
+    while (m > 11) { m -= 12; y += 1; }
+    state.viewYear = y;
+    state.viewMonth = m;
+    render();
+  }
+
+  function canShift(delta) {
+    if (!state.availableSorted.length) return false;
+    const first = state.availableSorted[0];
+    const last  = state.availableSorted[state.availableSorted.length - 1];
+    const { y: fy, m: fm } = parse(first);
+    const { y: ly, m: lm } = parse(last);
+    const cur = state.viewYear * 12 + state.viewMonth;
+    const min = fy * 12 + fm;
+    const max = ly * 12 + lm;
+    return delta < 0 ? cur > min : cur < max;
+  }
+
+  function monthName(m) {
+    return ['January','February','March','April','May','June','July','August','September','October','November','December'][m];
+  }
+
+  function render() {
+    const grid = document.getElementById('cal-grid');
+    const title = document.getElementById('cal-title');
+    const prev = document.getElementById('cal-prev');
+    const next = document.getElementById('cal-next');
+    const count = document.getElementById('cal-count');
+    if (!grid || !title) return;
+
+    title.textContent = `${monthName(state.viewMonth)} ${state.viewYear}`;
+    if (prev) prev.disabled = !canShift(-1);
+    if (next) next.disabled = !canShift(1);
+
+    const selected = document.getElementById('date-select')?.value;
+    const firstDow = new Date(Date.UTC(state.viewYear, state.viewMonth, 1)).getUTCDay();
+    const daysInMonth = new Date(Date.UTC(state.viewYear, state.viewMonth + 1, 0)).getUTCDate();
+
+    const cells = [];
+    ['Su','Mo','Tu','We','Th','Fr','Sa'].forEach(dow => {
+      cells.push(`<div class="cal-dow">${dow}</div>`);
+    });
+    for (let i = 0; i < firstDow; i++) cells.push('<div class="cal-day blank"></div>');
+    let monthAvail = 0;
+    for (let d = 1; d <= daysInMonth; d++) {
+      const ymd = fmt(state.viewYear, state.viewMonth, d);
+      const isAvail = state.available.has(ymd);
+      const isSel = ymd === selected;
+      if (isAvail) monthAvail++;
+      const cls = ['cal-day'];
+      if (isAvail) cls.push('avail');
+      if (isSel) cls.push('selected');
+      cells.push(`<div class="${cls.join(' ')}" data-ymd="${ymd}" ${isAvail ? 'role="button" tabindex="0"' : ''}>${d}</div>`);
+    }
+    grid.innerHTML = cells.join('');
+    if (count) count.textContent = `${monthAvail} day${monthAvail === 1 ? '' : 's'} this month`;
+  }
+
+  function pickDate(ymd) {
+    if (!state.available.has(ymd)) return;
+    const dateSel = document.getElementById('date-select');
+    if (!dateSel) return;
+    if (dateSel.value !== ymd) {
+      dateSel.value = ymd;
+      dateSel.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+    syncFromSelect();
+    close();
+  }
+
+  function openPopup() {
+    const pop = document.getElementById('date-popup');
+    if (!pop) return;
+    // Snap view to selected date's month
+    const selected = document.getElementById('date-select')?.value;
+    if (selected && state.available.has(selected)) {
+      const { y, m } = parse(selected);
+      state.viewYear = y;
+      state.viewMonth = m;
+    }
+    render();
+    pop.classList.add('open');
+    state.open = true;
+  }
+  function close() {
+    const pop = document.getElementById('date-popup');
+    if (!pop) return;
+    pop.classList.remove('open');
+    state.open = false;
+  }
+  function toggle() { state.open ? close() : openPopup(); }
+
+  function initEvents() {
+    const btn = document.getElementById('date-btn');
+    const pop = document.getElementById('date-popup');
+    const prev = document.getElementById('cal-prev');
+    const next = document.getElementById('cal-next');
+    const latest = document.getElementById('cal-latest');
+    const grid = document.getElementById('cal-grid');
+    const dateSel = document.getElementById('date-select');
+    if (!btn || !pop) return;
+
+    btn.addEventListener('click', (e) => { e.stopPropagation(); toggle(); });
+    if (prev) prev.addEventListener('click', (e) => { e.stopPropagation(); shiftMonth(-1); });
+    if (next) next.addEventListener('click', (e) => { e.stopPropagation(); shiftMonth(1); });
+    if (latest) latest.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const last = state.availableSorted[state.availableSorted.length - 1];
+      if (last) pickDate(last);
+    });
+    if (grid) grid.addEventListener('click', (e) => {
+      const cell = e.target.closest('.cal-day.avail');
+      if (cell) pickDate(cell.dataset.ymd);
+    });
+    // Keyboard accessibility on day cells
+    if (grid) grid.addEventListener('keydown', (e) => {
+      const cell = e.target.closest('.cal-day.avail');
+      if (cell && (e.key === 'Enter' || e.key === ' ')) {
+        e.preventDefault();
+        pickDate(cell.dataset.ymd);
+      }
+    });
+    // Close on outside click / Escape
+    document.addEventListener('click', (e) => {
+      if (!state.open) return;
+      if (pop.contains(e.target) || btn.contains(e.target)) return;
+      close();
+    });
+    document.addEventListener('keydown', (e) => {
+      if (state.open && e.key === 'Escape') close();
+    });
+    // Keep button label in sync if someone sets dateSel.value programmatically and dispatches change
+    if (dateSel) dateSel.addEventListener('change', syncFromSelect);
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initEvents);
+  } else {
+    initEvents();
+  }
+
+  return { setAvailable, syncFromSelect };
+})();
+
+let _allConfigs = [];
+
+function renderConfigOptions() {
+  const configSel = document.getElementById('config-select');
+  const inst = currentInstrument();
+  // Filter to configs matching the selected instrument (symbol defaults to 'SPX'
+  // on legacy configs that predate execution.symbol).
+  const matching = _allConfigs.filter(c => (c.symbol || 'SPX') === inst);
+  // Sort: put named/important configs first
+  const important = matching.filter(c => c.name !== 'Default Configuration');
+  const defaults = matching.filter(c => c.name === 'Default Configuration');
+  const sorted = [...important, ...defaults];
+  configSel.innerHTML = sorted.length
+    ? sorted.map(c => `<option value="${c.id}">${configLabel(c)}</option>`).join('')
+    : `<option value="">(no ${inst} configs)</option>`;
+}
+
+async function init() {
+  _allConfigs = await fetch(`${API}/configs`).then(r => r.json());
+  const dates = await refreshDatesForInstrument(true);
 
   const configSel = document.getElementById('config-select');
-  // Sort: put named/important configs first
-  const important = configs.filter(c => c.name !== 'Default Configuration');
-  const defaults = configs.filter(c => c.name === 'Default Configuration');
-  const sorted = [...important, ...defaults];
-  configSel.innerHTML = sorted.map(c =>
-    `<option value="${c.id}">${configLabel(c)}</option>`
-  ).join('');
+  renderConfigOptions();
 
+  const dateSel = document.getElementById('date-select');
   dateSel.addEventListener('change', loadDay);
   configSel.addEventListener('change', loadDay);
 
-  // Auto-load latest date (skip if we're about to enter live mode)
-  if (dates.length) {
-    dateSel.value = dates[dates.length - 1];
-    if (location.hash !== '#live') {
-      loadDay();
+  // When instrument changes: refresh dates list and auto-select config matching the instrument.
+  // Also reset currentConfig so the Settings modal reloads fresh fields from the new default,
+  // and inject the target default option into the dropdown if it's missing from /api/configs
+  // (e.g. a brand-new NDX config with zero backtest history).
+  const instSel = document.getElementById('instrument-select');
+  instSel.addEventListener('change', async () => {
+    await refreshDatesForInstrument(true);
+    // Re-filter the config dropdown to only show configs matching the new instrument.
+    renderConfigOptions();
+    const targetConfigId = currentInstrument() === 'NDX' ? 'ndx-default' : 'spx-default';
+    let opt = Array.from(configSel.options).find(o => o.value === targetConfigId);
+    if (!opt) {
+      // Default isn't in the dropdown — fetch it directly and inject an <option>.
+      try {
+        const cfg = await fetch(`${API}/config/${targetConfigId}`).then(r => r.ok ? r.json() : null);
+        if (cfg && cfg.id) {
+          opt = document.createElement('option');
+          opt.value = cfg.id;
+          opt.textContent = cfg.name || cfg.id;
+          configSel.insertBefore(opt, configSel.firstChild);
+        }
+      } catch { /* ignore — fall through to leaving whatever was selected */ }
     }
+    if (opt) configSel.value = targetConfigId;
+    // Flush cached config so Settings modal fetches the (new) selected config.
+    currentConfig = null;
+    if (document.getElementById('date-select').value) loadDay();
+  });
+
+  // Auto-load latest date (skip if we're about to enter live mode)
+  if (dates.length && location.hash !== '#live') {
+    loadDay();
   }
 }
 
@@ -422,12 +2281,24 @@ async function init() {
 
 async function loadDay() {
   if (typeof currentMode !== 'undefined' && currentMode === 'live') return; // don't load replay data in live mode
+  await _loadDayData();
+}
+
+// Live mode also loads from the replay DB — same data, just auto-selected date/config
+async function loadDayForLive() {
+  await _loadDayData();
+}
+
+async function _loadDayData() {
   const date = document.getElementById('date-select').value;
   const configId = document.getElementById('config-select').value;
   if (!date || !configId) return;
 
   // Set ET offset for this date (EST=-5h or EDT=-4h)
   etOffsetSec = isDST(date) ? -4 * 3600 : -5 * 3600;
+
+  // New day → flush per-TF bars cache so indicators refetch from the new date
+  _barsCache.clear();
 
   // Fetch config to sync trade filters with config settings
   const config = await fetch(`${API}/config/${configId}`).then(r => r.json()).catch(() => null);
@@ -436,12 +2307,13 @@ async function loadDay() {
   }
 
   // Fetch everything in parallel — 1m bars + 3m/5m bars from DB (pre-computed with continuity)
+  const underlying = currentInstrument();
   const [spxBars, spx3m, spx5m, results, contracts] = await Promise.all([
-    fetch(`${API}/bars?date=${date}&symbol=SPX`).then(r => r.json()),
-    fetch(`${API}/bars?date=${date}&symbol=SPX&tf=3m`).then(r => r.json()),
-    fetch(`${API}/bars?date=${date}&symbol=SPX&tf=5m`).then(r => r.json()),
+    fetch(`${API}/bars?date=${date}&symbol=${underlying}`).then(r => r.json()),
+    fetch(`${API}/bars?date=${date}&symbol=${underlying}&tf=3m`).then(r => r.json()),
+    fetch(`${API}/bars?date=${date}&symbol=${underlying}&tf=5m`).then(r => r.json()),
     fetch(`${API}/results?date=${date}&configId=${configId}`).then(r => r.json()),
-    fetch(`${API}/contracts?date=${date}`).then(r => r.json()),
+    fetch(`${API}/contracts?date=${date}&instrument=${underlying}`).then(r => r.json()),
   ]);
 
   allContracts = contracts;
@@ -573,6 +2445,25 @@ function renderSummary(s) {
 }
 
 // ── Multi-Timeframe HMA Computation ───────────────────────────────────────
+// Client-side fallback for when DB indicators are missing (NDX backfill not
+// run, arbitrary config-driven periods like hma7/hma23/hma42 that aren't
+// pre-baked into replay_bars). drawIndicators() calls parseHmaKeyPeriod() to
+// extract the period from any key matching /^hma(\d+)$/ and feeds it to
+// computeHMASeries(closes, period).
+const HMA_PERIOD_RE = /^hma(\d+)$/;
+function parseHmaKeyPeriod(key) {
+  if (!key) return null;
+  const m = HMA_PERIOD_RE.exec(key);
+  if (!m) return null;
+  const p = parseInt(m[1], 10);
+  return Number.isFinite(p) && p >= 2 ? p : null;
+}
+// Deterministic color for synthesized HMA defs (periods not in INDICATOR_DEFS).
+// Walks the HSL hue wheel so distinct periods get distinct colors.
+function hmaColorForPeriod(period) {
+  const hue = (period * 47) % 360;  // 47 = coprime with 360 → good spread
+  return `hsl(${hue} 70% 55%)`;
+}
 
 function computeWMA(values, period) {
   if (values.length < period) return null;
@@ -657,9 +2548,12 @@ function computeMultiTfHma(bars1m, period, tfMinutes) {
 function renderSpxChart(bars, trades, bars3m, bars5m) {
   const container = document.getElementById('spx-chart');
   container.innerHTML = '';
+  const inst = currentInstrument();
+  const toolbarTitle = document.getElementById('chart-toolbar-title');
+  if (toolbarTitle) toolbarTitle.textContent = `${inst} Chart`;
 
   if (!bars.length) {
-    container.innerHTML = '<div class="no-data">No SPX data for this date</div>';
+    container.innerHTML = `<div class="no-data">No ${inst} data for this date</div>`;
     return;
   }
 
@@ -684,58 +2578,21 @@ function renderSpxChart(bars, trades, bars3m, bars5m) {
   const candleData = bars.map(b => ({ time: toEtDisplay(b.ts), open: b.o, high: b.h, low: b.l, close: b.c }));
   spxCandleSeries.setData(candleData);
 
-  // HMA overlays — 1m (from pre-computed indicators)
-  const hma5Data = bars.filter(b => b.ind.hma5).map(b => ({ time: toEtDisplay(b.ts), value: b.ind.hma5 }));
-  const hma19Data = bars.filter(b => b.ind.hma19).map(b => ({ time: toEtDisplay(b.ts), value: b.ind.hma19 }));
+  // Indicator overlays — driven by user selection (localStorage-backed).
+  // Defaults to HMA5 + HMA19 on the price pane; oscillators render in sub-panes.
+  // Pass multi-TF bars so user can overlay 1m/3m/5m indicators simultaneously;
+  // additional TFs (2m/10m/15m) are fetched lazily from the bars cache.
+  drawIndicators(spxChart, {
+    '1m': bars,
+    '3m': bars3m || [],
+    '5m': bars5m || [],
+  }, 'spx', { symbol: inst, date: document.getElementById('date-select')?.value });
 
-  if (hma5Data.length) {
-    spxChart.addSeries(LightweightCharts.LineSeries, {
-      color: '#10b98155', lineWidth: 1, lineStyle: 0, priceLineVisible: false,
-      lastValueVisible: false, crosshairMarkerVisible: false,
-      title: 'HMA5 1m',
-    }).setData(hma5Data);
-  }
-  if (hma19Data.length) {
-    spxChart.addSeries(LightweightCharts.LineSeries, {
-      color: '#3b82f655', lineWidth: 1, lineStyle: 0, priceLineVisible: false,
-      lastValueVisible: false, crosshairMarkerVisible: false,
-      title: 'HMA19 1m',
-    }).setData(hma19Data);
-  }
+  // TradingView-style legend overlay — symbol + OHLCV + indicator values
+  attachChartLegend(spxChart, container, inst);
 
-  // Multi-timeframe HMA overlays — from pre-computed DB bars (with cross-day continuity)
-  if (bars3m && bars3m.length) {
-    const hma5_3m = bars3m.filter(b => b.ind.hma5).map(b => ({ time: toEtDisplay(b.ts), value: b.ind.hma5 }));
-    const hma19_3m = bars3m.filter(b => b.ind.hma19).map(b => ({ time: toEtDisplay(b.ts), value: b.ind.hma19 }));
-    if (hma5_3m.length) {
-      spxChart.addSeries(LightweightCharts.LineSeries, {
-        color: '#f59e0b88', lineWidth: 2, lineStyle: 0, priceLineVisible: false,
-        lastValueVisible: false, crosshairMarkerVisible: false, title: 'HMA5 3m',
-      }).setData(hma5_3m);
-    }
-    if (hma19_3m.length) {
-      spxChart.addSeries(LightweightCharts.LineSeries, {
-        color: '#f59e0b55', lineWidth: 2, lineStyle: 2, priceLineVisible: false,
-        lastValueVisible: false, crosshairMarkerVisible: false, title: 'HMA19 3m',
-      }).setData(hma19_3m);
-    }
-  }
-  if (bars5m && bars5m.length) {
-    const hma5_5m = bars5m.filter(b => b.ind.hma5).map(b => ({ time: toEtDisplay(b.ts), value: b.ind.hma5 }));
-    const hma19_5m = bars5m.filter(b => b.ind.hma19).map(b => ({ time: toEtDisplay(b.ts), value: b.ind.hma19 }));
-    if (hma5_5m.length) {
-      spxChart.addSeries(LightweightCharts.LineSeries, {
-        color: '#a78bfa99', lineWidth: 2, lineStyle: 0, priceLineVisible: false,
-        lastValueVisible: false, crosshairMarkerVisible: false, title: 'HMA5 5m',
-      }).setData(hma5_5m);
-    }
-    if (hma19_5m.length) {
-      spxChart.addSeries(LightweightCharts.LineSeries, {
-        color: '#a78bfa55', lineWidth: 2, lineStyle: 2, priceLineVisible: false,
-        lastValueVisible: false, crosshairMarkerVisible: false, title: 'HMA19 5m',
-      }).setData(hma19_5m);
-    }
-  }
+  // Data quality: detect gaps in the 1m SPX series and surface a warning.
+  checkSpxDataQuality(bars);
 
   // Entry/exit markers on SPX chart
   const markers = [];
@@ -763,7 +2620,7 @@ function renderSpxChart(bars, trades, bars3m, bars5m) {
 
   // Resize handler
   const ro = new ResizeObserver(() => {
-    spxChart.applyOptions({ width: container.clientWidth });
+    spxChart.applyOptions({ width: container.clientWidth, height: container.clientHeight });
   });
   ro.observe(container);
 }
@@ -773,7 +2630,7 @@ function renderSpxChart(bars, trades, bars3m, bars5m) {
 function renderTradesTable(trades) {
   const tbody = document.getElementById('trades-body');
   if (!trades.length) {
-    tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:#444;padding:16px">No trades</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;color:#444;padding:16px">No trades</td></tr>';
     return;
   }
 
@@ -783,10 +2640,17 @@ function renderTradesTable(trades) {
     const entryStr = t.entryPrice > 0 ? `${t.entryET || ''} @ $${t.entryPrice.toFixed(2)}` : (t.entryET || '—');
     const exitStr = t.exitPrice > 0 ? `${t.exitET || ''} @ $${t.exitPrice.toFixed(2)}` : (t.exitET || '—');
     const pctStr = t.pnlPct ? `${t.pnlPct >= 0 ? '+' : ''}${t.pnlPct.toFixed(0)}%` : '';
+    // Position size from the config — qty is stored on every trade record.
+    // Cost basis = qty × entryPrice × 100 (option contracts are 100-multiplier).
+    const qty = t.qty || 0;
+    const cost = qty * (t.entryPrice || 0) * 100;
+    const costStr = cost >= 1000 ? `$${(cost / 1000).toFixed(1)}k` : `$${cost.toFixed(0)}`;
     return `<tr data-idx="${i}" onclick="selectTrade(${i})">
       <td>${i + 1}</td>
       <td class="${sideClass}">${t.side.toUpperCase()}</td>
       <td>${t.strike}</td>
+      <td title="Contracts per config sizing">${qty}</td>
+      <td title="Cost basis = qty × entry × 100">${costStr}</td>
       <td>${entryStr}</td>
       <td>${exitStr}</td>
       <td class="${pnlClass}">$${t['pnl$'].toFixed(0)}</td>
@@ -797,8 +2661,8 @@ function renderTradesTable(trades) {
 }
 
 function formatReason(r) {
-  const map = { take_profit: 'TP', stop_loss: 'SL', signal_reversal: 'REV', time_exit: 'EOD' };
-  return map[r] || r;
+  const map = { take_profit: 'TP', stop_loss: 'SL', signal_reversal: 'REV', time_exit: 'EOD', tp: 'TP', sl: 'SL', rev: 'REV', signal: 'REV' };
+  return map[r] || (r || '').toUpperCase();
 }
 
 function selectTrade(idx) {
@@ -835,7 +2699,12 @@ async function openExpanded(trade) {
   label.textContent = `${trade.symbol} — ${sideLabel} ${trade.strike} | ${trade.entryET} -> ${trade.exitET} | $${trade['pnl$'].toFixed(0)}`;
 
   const date = document.getElementById('date-select').value;
-  const bars = await fetch(`${API}/bars?date=${date}&symbol=${trade.symbol}`).then(r => r.json());
+  // Fetch 1m + 3m + 5m in parallel so the user can overlay indicators at the agent's signal TF.
+  const [bars, bars3m, bars5m] = await Promise.all([
+    fetch(`${API}/bars?date=${date}&symbol=${trade.symbol}`).then(r => r.json()),
+    fetch(`${API}/bars?date=${date}&symbol=${trade.symbol}&tf=3m`).then(r => r.json()).catch(() => []),
+    fetch(`${API}/bars?date=${date}&symbol=${trade.symbol}&tf=5m`).then(r => r.json()).catch(() => []),
+  ]);
 
   if (!bars.length) {
     container.innerHTML = '<div class="no-data">No bar data for this contract</div>';
@@ -862,19 +2731,13 @@ async function openExpanded(trade) {
 
   expandedSeries.setData(bars.map(b => ({ time: toEtDisplay(b.ts), open: b.o, high: b.h, low: b.l, close: b.c })));
 
-  // HMA overlays
-  const hma5 = bars.filter(b => b.ind.hma5).map(b => ({ time: toEtDisplay(b.ts), value: b.ind.hma5 }));
-  const hma19 = bars.filter(b => b.ind.hma19).map(b => ({ time: toEtDisplay(b.ts), value: b.ind.hma19 }));
-  if (hma5.length) {
-    expandedChart.addSeries(LightweightCharts.LineSeries, {
-      color: '#10b98166', lineWidth: 1, priceLineVisible: false, lastValueVisible: false,
-    }).setData(hma5);
-  }
-  if (hma19.length) {
-    expandedChart.addSeries(LightweightCharts.LineSeries, {
-      color: '#3b82f666', lineWidth: 1, priceLineVisible: false, lastValueVisible: false,
-    }).setData(hma19);
-  }
+  // Indicator overlays — user-selectable via contract indicator menu
+  const barsMap = { '1m': bars, '3m': bars3m || [], '5m': bars5m || [] };
+  window._expandedBars = barsMap;
+  drawIndicators(expandedChart, barsMap, 'contract', { symbol: trade.symbol, date });
+
+  // TradingView-style legend overlay — symbol + OHLCV + indicator values
+  attachChartLegend(expandedChart, container, trade.symbol);
 
   // Entry/exit markers
   const markers = [
@@ -899,7 +2762,7 @@ async function openExpanded(trade) {
   });
 
   const ro = new ResizeObserver(() => {
-    if (expandedChart) expandedChart.applyOptions({ width: container.clientWidth });
+    if (expandedChart) expandedChart.applyOptions({ width: container.clientWidth, height: container.clientHeight });
   });
   ro.observe(container);
 }
@@ -907,6 +2770,7 @@ async function openExpanded(trade) {
 function closeExpanded() {
   document.getElementById('expanded-chart-wrap').style.display = 'none';
   if (expandedChart) { expandedChart.remove(); expandedChart = null; }
+  window._expandedBars = null;
 }
 
 // ── Mini Chart Grid ────────────────────────────────────────────────────────
@@ -1022,7 +2886,11 @@ async function openMiniExpanded(contract, date) {
 
     label.textContent = `${contract.symbol} — ${contract.type.toUpperCase()} ${contract.strike} (no trades)`;
 
-    const bars = await fetch(`${API}/bars?date=${date}&symbol=${contract.symbol}`).then(r => r.json());
+    const [bars, bars3m, bars5m] = await Promise.all([
+      fetch(`${API}/bars?date=${date}&symbol=${contract.symbol}`).then(r => r.json()),
+      fetch(`${API}/bars?date=${date}&symbol=${contract.symbol}&tf=3m`).then(r => r.json()).catch(() => []),
+      fetch(`${API}/bars?date=${date}&symbol=${contract.symbol}&tf=5m`).then(r => r.json()).catch(() => []),
+    ]);
     if (!bars.length) { container.innerHTML = '<div class="no-data">No data</div>'; return; }
 
     if (expandedChart) { expandedChart.remove(); expandedChart = null; }
@@ -1040,10 +2908,19 @@ async function openMiniExpanded(contract, date) {
       borderUpColor: '#10b981', borderDownColor: '#f43f5e',
     });
     expandedSeries.setData(bars.map(b => ({ time: toEtDisplay(b.ts), open: b.o, high: b.h, low: b.l, close: b.c })));
+
+    // Indicator overlays (user-selectable via contract menu)
+    const barsMap = { '1m': bars, '3m': bars3m || [], '5m': bars5m || [] };
+    window._expandedBars = barsMap;
+    drawIndicators(expandedChart, barsMap, 'contract', { symbol: contract.symbol, date });
+
+    // TradingView-style legend overlay — symbol + OHLCV + indicator values
+    attachChartLegend(expandedChart, container, contract.symbol);
+
     expandedChart.timeScale().fitContent();
 
     const ro = new ResizeObserver(() => {
-      if (expandedChart) expandedChart.applyOptions({ width: container.clientWidth });
+      if (expandedChart) expandedChart.applyOptions({ width: container.clientWidth, height: container.clientHeight });
     });
     ro.observe(container);
   }
@@ -1095,6 +2972,7 @@ const CONFIG_SECTIONS = [
     { path: 'signals.optionRsiOversold', label: 'Option RSI Oversold', type: 'num', min: 1, max: 50 },
     { path: 'signals.optionRsiOverbought', label: 'Option RSI Overbought', type: 'num', min: 50, max: 99 },
     { path: 'signals.allowedSides', label: 'Allowed Sides', type: 'select', options: ['both', 'calls', 'puts'], hint: 'both = calls + puts. calls = long only (bullish). puts = short only (bearish).' },
+    { path: 'signals.reverseSignals', label: 'Reverse Signals (Chop Mode)', type: 'bool', hint: 'Flip all signal directions — bullish→bearish, bearish→bullish. Fade every cross instead of following it.' },
     { path: 'signals.targetOtmDistance', label: 'Target OTM/ITM Distance ($)', type: 'num-null', min: -100, max: 200 },
     { path: 'signals.targetContractPrice', label: 'Target Contract Price ($)', type: 'num-null', min: 0, max: 50 },
     { path: 'signals.maxEntryPrice', label: 'Max Entry Price ($)', type: 'num-null', min: 0, max: 50, hint: 'Filter: skip trades above this price' },
@@ -1118,6 +2996,10 @@ const CONFIG_SECTIONS = [
     { path: 'strikeSelector.contractPriceMin', label: 'Contract Price Min ($)', type: 'num', min: 0, max: 20, step: 0.05 },
     { path: 'strikeSelector.contractPriceMax', label: 'Contract Price Max ($)', type: 'num', min: 0, max: 50, step: 0.5 },
   ]},
+  { key: 'basket', title: 'Basket (Multi-Strike)', collapsed: false, fields: [
+    { path: 'basket.enabled', label: 'Basket Mode', type: 'bool', hint: 'When ON: this config runs as N isolated single-strike replays (one per member). Deploy writes N live agents.' },
+    { path: 'basket.members', label: 'Members', type: 'basket-members', hint: 'Each row = one strike. id is a label (e.g. atm, otm5, itm10). Offset is $ from ATM: 0=ATM, +5=OTM5 (call strike > SPX / put strike < SPX), -5=ITM5.' },
+  ]},
   { key: 'timeWindows', title: 'Time Windows', fields: [
     { path: 'timeWindows.activeStart', label: 'Active Start (ET)', type: 'time' },
     { path: 'timeWindows.activeEnd', label: 'Active End (ET)', type: 'time' },
@@ -1132,6 +3014,15 @@ const CONFIG_SECTIONS = [
     { path: 'exit.timeBasedExitEnabled', label: 'Time-Based Exit', type: 'bool' },
     { path: 'exit.timeBasedExitMinutes', label: 'Time Exit (minutes)', type: 'num', min: 1, max: 60 },
     { path: 'exit.reversalSizeMultiplier', label: 'Reversal Size Mult', type: 'num', min: 0.1, max: 5, step: 0.1 },
+  ]},
+  { key: 'reentryTp', title: 'Take-Profit Re-entry', collapsed: true, fields: [
+    { path: 'exit.reentryOnTakeProfit.enabled', label: 'Enable', type: 'bool', hint: 'When a position closes via TP, immediately open a same-side follow-on at a fresh OTM strike to ride continuing momentum.' },
+    { path: 'exit.reentryOnTakeProfit.strategy', label: 'Re-entry Mode', type: 'select', options: ['same_direction', 'fresh_signal_required'], hint: 'same_direction: re-enter on same side without re-confirm. fresh_signal_required: only re-enter if option HMA still confirms the side.' },
+    { path: 'exit.reentryOnTakeProfit.maxReentriesPerDay', label: 'Max Re-entries / Day', type: 'num', min: 0, max: 50, step: 1 },
+    { path: 'exit.reentryOnTakeProfit.maxReentriesPerSignal', label: 'Max Chain Depth', type: 'num', min: 0, max: 10, step: 1, hint: 'Max chained TP re-entries from a single original entry. 1 = one re-entry only.' },
+    { path: 'exit.reentryOnTakeProfit.cooldownSec', label: 'Cooldown (s)', type: 'num', min: 0, max: 3600, step: 5, hint: 'Independent of judges.entryCooldownSec.' },
+    { path: 'exit.reentryOnTakeProfit.sizeMultiplier', label: 'Size Mult', type: 'num', min: 0.1, max: 5, step: 0.1, hint: 'Multiplier on computeQty() for re-entry size. 1.0 = same size, 0.5 = half.' },
+    { path: 'exit.reentryOnTakeProfit.requireOptionHmaConfirm', label: 'Require Option HMA Confirm', type: 'bool', hint: 'Even in same_direction mode, require option-contract HMA still matches the side.' },
   ]},
   { key: 'regime', title: 'Regime Classification', collapsed: true, fields: [
     { path: 'regime.enabled', label: 'Enabled', type: 'bool' },
@@ -1200,14 +3091,35 @@ async function openConfigModal() {
   const modal = document.getElementById('config-modal');
   modal.classList.add('open');
 
-  // Load the selected config (or defaults if none loaded)
+  // Load the selected config (or instrument-aware defaults if the fetch fails).
+  // fetch() does NOT throw on 404 — it resolves to an error JSON like
+  // { error: "Config not found" }. We must explicitly check res.ok and that the
+  // payload looks like a real config (has an id) before trusting it; otherwise
+  // every input in the form renders empty because the section paths are all
+  // undefined on an error object.
   const selectedConfigId = document.getElementById('config-select').value;
   if (!currentConfig) {
-    try {
-      currentConfig = await fetch(`${API}/config/${selectedConfigId}`).then(r => r.json());
-    } catch {
-      currentConfig = await fetch(`${API}/defaults`).then(r => r.json());
+    const instrument = (typeof currentInstrument === 'function' ? currentInstrument() : 'SPX');
+    let loaded = null;
+    if (selectedConfigId) {
+      try {
+        const res = await fetch(`${API}/config/${selectedConfigId}`);
+        if (res.ok) {
+          const body = await res.json();
+          if (body && body.id && !body.error) loaded = body;
+        }
+      } catch { /* fall through to defaults */ }
     }
+    if (!loaded) {
+      try {
+        const res = await fetch(`${API}/defaults?instrument=${encodeURIComponent(instrument)}`);
+        if (res.ok) {
+          const body = await res.json();
+          if (body && !body.error) loaded = body;
+        }
+      } catch { /* ignore */ }
+    }
+    currentConfig = loaded || {};
   }
 
   // Backfill new sizing fields for old configs that don't have them
@@ -1251,14 +3163,27 @@ async function openConfigModal() {
 
 function closeConfigModal() {
   document.getElementById('config-modal').classList.remove('open');
+  document.getElementById('update-live-btn').style.display = 'none';
+  liveEditConfigId = null;
 }
 
 function renderConfigForm() {
   const body = document.getElementById('config-body');
+  // Preserve each section's collapse state across re-renders so editing
+  // a field (esp. basket members, which re-render on every change) doesn't
+  // reset the user's toggles.
+  const prevCollapse = {};
+  for (const section of CONFIG_SECTIONS) {
+    const el = document.getElementById(`cfg-sec-${section.key}`);
+    if (el) prevCollapse[section.key] = el.classList.contains('collapsed');
+  }
   let html = '';
 
   for (const section of CONFIG_SECTIONS) {
-    const collapsed = section.collapsed ? ' collapsed' : '';
+    const isCollapsed = section.key in prevCollapse
+      ? prevCollapse[section.key]
+      : !!section.collapsed;
+    const collapsed = isCollapsed ? ' collapsed' : '';
     html += `<div class="cfg-section${collapsed}" id="cfg-sec-${section.key}">`;
     html += `<div class="cfg-section-title" onclick="toggleSection('${section.key}')">
       <span>${section.title}</span><span class="chevron">▼</span></div>`;
@@ -1313,6 +3238,8 @@ function renderConfigForm() {
           <input type="text" id="${inputId}" class="cfg-input" value="${val || ''}" placeholder="HH:MM"
             style="width:80px" onchange="cfgChanged('${f.path}', this.value)">
         </div>`;
+      } else if (f.type === 'basket-members') {
+        html += renderBasketMembersField(f, val);
       }
     }
     html += `</div></div>`;
@@ -1323,6 +3250,109 @@ function renderConfigForm() {
 
 function toggleSection(key) {
   document.getElementById(`cfg-sec-${key}`).classList.toggle('collapsed');
+}
+
+// ── Basket members repeater ─────────────────────────────────────────────
+// Renders the basket.members[] array as editable rows: id (label) + offset ($).
+// "+ Add member" appends; "×" on each row removes. Changes write straight
+// into currentConfig.basket.members via cfgChanged() so save picks them up.
+function renderBasketMembersField(f, val) {
+  const members = Array.isArray(val) ? val : [];
+  const rows = members.map((m, idx) => {
+    const offsetLabel = m.strikeOffset === 0 ? 'ATM' : m.strikeOffset > 0 ? `OTM${m.strikeOffset}` : `ITM${-m.strikeOffset}`;
+    return `<div class="basket-member-row" data-idx="${idx}" style="display:flex;gap:6px;align-items:center;margin-bottom:4px">
+      <span style="color:#555;font-family:var(--font-mono);font-size:10px;min-width:18px;text-align:right">${idx + 1}.</span>
+      <input type="text" value="${(m.id || '').replace(/"/g, '&quot;')}" placeholder="id (e.g. atm)"
+        onchange="basketMemberChange(${idx}, 'id', this.value)"
+        style="width:90px;background:#0a0a12;color:#ddd;border:1px solid #333;padding:3px 6px;border-radius:3px;font-size:11px;font-family:var(--font-mono)">
+      <input type="number" value="${m.strikeOffset ?? 0}" step="5" min="-100" max="100"
+        onchange="basketMemberChange(${idx}, 'strikeOffset', parseFloat(this.value)||0)"
+        style="width:70px;background:#0a0a12;color:#ddd;border:1px solid #333;padding:3px 6px;border-radius:3px;font-size:11px">
+      <span style="color:#8b5cf6;font-size:10px;font-family:var(--font-mono);min-width:56px">${offsetLabel}</span>
+      <button type="button" onclick="basketMemberRemove(${idx})"
+        style="background:#ef444422;color:#ef4444;border:1px solid #ef444444;padding:2px 8px;border-radius:3px;cursor:pointer;font-size:11px" title="Remove member">×</button>
+    </div>`;
+  }).join('');
+  return `<div class="cfg-row" style="flex-direction:column;align-items:stretch">
+    <span class="cfg-label" style="margin-bottom:4px">${f.label} <span style="color:#666">(${members.length})</span></span>
+    <div id="basket-members-list">${rows || '<div style="color:#666;font-size:11px;font-style:italic;padding:4px 0">No members yet — add one below</div>'}</div>
+    <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap">
+      <button type="button" onclick="basketMemberAdd()" style="background:#8b5cf622;color:#8b5cf6;border:1px solid #8b5cf644;padding:4px 10px;border-radius:3px;cursor:pointer;font-size:11px">+ Add member</button>
+      <button type="button" onclick="basketPreset('5strike')" style="background:#222;color:#8b8bff;border:1px solid #333;padding:4px 10px;border-radius:3px;cursor:pointer;font-size:11px" title="Replace with 5-strike preset: ITM10/ITM5/ATM/OTM5/OTM10">5-strike preset</button>
+      <button type="button" onclick="basketPreset('3strike')" style="background:#222;color:#8b8bff;border:1px solid #333;padding:4px 10px;border-radius:3px;cursor:pointer;font-size:11px" title="Replace with 3-strike preset: ITM5/ATM/OTM5">3-strike preset</button>
+      <button type="button" onclick="basketMembersClear()" style="background:#222;color:#888;border:1px solid #333;padding:4px 10px;border-radius:3px;cursor:pointer;font-size:11px">Clear all</button>
+    </div>
+    ${f.hint ? `<div class="cfg-hint" style="margin-top:4px">${f.hint}</div>` : ''}
+  </div>`;
+}
+
+function basketMembersArray() {
+  if (!currentConfig.basket) currentConfig.basket = { enabled: false, members: [] };
+  if (!Array.isArray(currentConfig.basket.members)) currentConfig.basket.members = [];
+  return currentConfig.basket.members;
+}
+
+function basketMemberAdd() {
+  const m = basketMembersArray();
+  // Suggest a sensible default id/offset — step out from what's already there
+  const existingOffsets = m.map(x => Number(x.strikeOffset) || 0);
+  const nextOffset = existingOffsets.length === 0 ? 0 : Math.max(...existingOffsets) + 5;
+  const id = nextOffset === 0 ? 'atm' : nextOffset > 0 ? `otm${nextOffset}` : `itm${-nextOffset}`;
+  m.push({ id, strikeOffset: nextOffset });
+  renderConfigForm();
+  updateAutoName();
+}
+
+function basketMemberRemove(idx) {
+  const m = basketMembersArray();
+  m.splice(idx, 1);
+  renderConfigForm();
+  updateAutoName();
+}
+
+function basketMemberChange(idx, field, val) {
+  const m = basketMembersArray();
+  if (!m[idx]) return;
+  m[idx] = { ...m[idx], [field]: val };
+  // Auto-suggest id when offset changes and id looks auto-generated (itmN/otmN/atm)
+  if (field === 'strikeOffset' && /^(itm\d+|otm\d+|atm)$/.test(m[idx].id || '')) {
+    const off = Number(val) || 0;
+    m[idx].id = off === 0 ? 'atm' : off > 0 ? `otm${off}` : `itm${-off}`;
+  }
+  renderConfigForm();
+  updateAutoName();
+}
+
+function basketMembersClear() {
+  if (!confirm('Remove all basket members?')) return;
+  currentConfig.basket = currentConfig.basket || { enabled: false };
+  currentConfig.basket.members = [];
+  renderConfigForm();
+  updateAutoName();
+}
+
+function basketPreset(kind) {
+  const presets = {
+    '5strike': [
+      { id: 'itm10', strikeOffset: -10 },
+      { id: 'itm5',  strikeOffset: -5  },
+      { id: 'atm',   strikeOffset: 0   },
+      { id: 'otm5',  strikeOffset: 5   },
+      { id: 'otm10', strikeOffset: 10  },
+    ],
+    '3strike': [
+      { id: 'itm5', strikeOffset: -5 },
+      { id: 'atm',  strikeOffset: 0  },
+      { id: 'otm5', strikeOffset: 5  },
+    ],
+  };
+  const preset = presets[kind];
+  if (!preset) return;
+  if (!currentConfig.basket) currentConfig.basket = { enabled: true, members: [] };
+  currentConfig.basket.members = preset.map(p => ({ ...p }));
+  currentConfig.basket.enabled = true;
+  renderConfigForm();
+  updateAutoName();
 }
 
 function cfgChanged(path, val) {
@@ -1343,15 +3373,25 @@ function cfgNullToggle(path, inputId, enabled) {
 
 function updateAutoName() {
   if (!currentConfig) return;
+  // Symbol prefix (SPX / NDX) — drawn from the config's execution routing
+  // so the generated id/name always reflects the underlying instrument.
+  const sym = (currentConfig.execution?.symbol || 'SPX').toUpperCase();
   const parts = [];
+  parts.push(sym); // first token — becomes the prefix of both id and name
   const s = currentConfig.signals || {};
   if (s.enableHmaCrosses) parts.push(`HMA${s.hmaCrossFast || 5}x${s.hmaCrossSlow || 19}`);
   if (s.enableRsiCrosses) parts.push('RSI');
   if (s.enableEmaCrosses) parts.push(`EMA${s.emaCrossFast || 9}x${s.emaCrossSlow || 21}`);
   if (s.enablePriceCrossHma) parts.push('PxHMA');
+  if (s.reverseSignals) parts.push('REV');
   if (s.requireUnderlyingHmaCross) parts.push('UndHMA');
   if (s.targetOtmDistance != null) parts.push(s.targetOtmDistance >= 0 ? `OTM${s.targetOtmDistance}` : `ITM${Math.abs(s.targetOtmDistance)}`);
   if (s.targetContractPrice != null) parts.push(`$${s.targetContractPrice}`);
+  // Basket summary: replaces single-strike label with e.g. "basket-5strike" when enabled
+  const bk = currentConfig.basket;
+  if (bk?.enabled && Array.isArray(bk.members) && bk.members.length > 0) {
+    parts.push(`basket-${bk.members.length}strike`);
+  }
   const p = currentConfig.position || {};
   if (p.takeProfitMultiplier) parts.push(`TP${p.takeProfitMultiplier}x`);
   if (p.stopLossPercent > 0) parts.push(`SL${p.stopLossPercent}%`);
@@ -1359,7 +3399,14 @@ function updateAutoName() {
   const tf = currentConfig.pipeline?.timeframe;
   if (tf && tf !== '1m') parts.push(tf);
 
-  const autoId = parts.join('-').toLowerCase().replace(/[^a-z0-9-]/g, '');
+  // Include sizing info so position size changes produce different IDs
+  const sz = currentConfig.sizing || {};
+  if (sz.maxContracts && sz.maxContracts !== 99) parts.push(`${sz.maxContracts}c`);
+  if (sz.sizingValue) parts.push(`$${sz.sizingValue}`);
+  const mp = currentConfig.position?.maxPositionsOpen;
+  if (mp && mp > 1) parts.push(`${mp}pos`);
+
+  const autoId = parts.join('-').toLowerCase().replace(/[^a-z0-9$-]/g, '');
   const autoName = parts.join(' | ');
 
   const idInput = document.getElementById('cfg-id');
@@ -1373,48 +3420,29 @@ function updateAutoName() {
 }
 
 async function saveAndRun() {
-  const dates = getSelectedDates();
-  if (!dates.length) return alert('Select a date first');
+  // Runs always execute against ALL days in the table — runReplayWithConfig
+  // ignores the first arg and pulls the full list from the date dropdown.
+  const dates = getAllDates();
+  if (!dates.length) return alert('No dates available in the table');
 
-  let configId = document.getElementById('cfg-id').value || `custom-${Date.now()}`;
-  let configName = document.getElementById('cfg-name').value || configId;
+  const configId = document.getElementById('cfg-id').value || `custom-${Date.now()}`;
+  const configName = document.getElementById('cfg-name').value || configId;
 
-  // If config changed from when modal opened, create a new versioned ID
-  const configChanged = originalConfigSnapshot && JSON.stringify(currentConfig) !== originalConfigSnapshot;
-  if (configChanged) {
-    // Check if this ID already exists in the config dropdown
-    const configSel = document.getElementById('config-select');
-    const existingIds = new Set([...configSel.options].map(o => o.value));
-    if (existingIds.has(configId)) {
-      // Find next available version: base-v2, base-v3, etc.
-      const base = configId.replace(/-v\d+$/, '');
-      let v = 2;
-      while (existingIds.has(`${base}-v${v}`)) v++;
-      configId = `${base}-v${v}`;
-      // Update name too if it wasn't manually edited
-      const nameInput = document.getElementById('cfg-name');
-      if (!nameInput.dataset.userEdited) configName = `${configName} v${v}`;
-    }
-  }
-
+  // Server handles auto-versioning: if configId already exists with different
+  // settings, the server auto-creates base-v2, base-v3, etc.
   closeConfigModal();
   await runReplayWithConfig(dates, currentConfig, configId, configName);
+
+  // Reset so next modal open loads fresh from DB (prevents stale state)
+  currentConfig = null;
+  originalConfigSnapshot = null;
 }
 
-function getSelectedDates() {
-  const start = document.getElementById('date-select').value;
-  const end = document.getElementById('date-end-select').value;
-  if (!start) return [];
-  if (!end || end === start) return [start];
-  // Get all dates between start and end from the dropdown options
+// The day dropdown is for VIEWING only — runs always execute against every
+// date in the table. This returns the full list of available dates.
+function getAllDates() {
   const dateSel = document.getElementById('date-select');
-  const allDates = Array.from(dateSel.options).map(o => o.value);
-  const startIdx = allDates.indexOf(start);
-  const endIdx = allDates.indexOf(end);
-  if (startIdx < 0 || endIdx < 0) return [start];
-  const lo = Math.min(startIdx, endIdx);
-  const hi = Math.max(startIdx, endIdx);
-  return allDates.slice(lo, hi + 1);
+  return Array.from(dateSel.options).map(o => o.value).filter(Boolean);
 }
 
 // ── Background job polling ──────────────────────────────────────────────────
@@ -1497,8 +3525,111 @@ function showJobStatus() {
   });
 }
 
+// ── Backfill latest day from Polygon ──────────────────────────────────────
+
+async function backfillLatest() {
+  // Determine what date to backfill: next trading day after the last available date
+  const dateSel = document.getElementById('date-select');
+  const existingDates = Array.from(dateSel.options).map(o => o.value).filter(Boolean);
+  const lastDate = existingDates.length ? existingDates[existingDates.length - 1] : null;
+
+  // Calculate the next trading day after the last one we have
+  let targetDate;
+  if (lastDate) {
+    const d = new Date(lastDate + 'T12:00:00Z');
+    // Move forward to find next trading day
+    do {
+      d.setDate(d.getDate() + 1);
+    } while (d.getDay() === 0 || d.getDay() === 6);
+    targetDate = d.toISOString().slice(0, 10);
+  } else {
+    // No dates at all — use today
+    targetDate = new Date().toISOString().slice(0, 10);
+  }
+
+  // Don't backfill future dates
+  const today = new Date().toISOString().slice(0, 10);
+  if (targetDate > today) {
+    alert(`No new trading day to backfill.\nLatest data: ${lastDate || 'none'}\nToday: ${today}`);
+    return;
+  }
+
+  if (!confirm(`Backfill data for ${targetDate} from Polygon?\n\nThis will fetch SPX + ~80 option contracts.\nEstimated time: 30-60 seconds.`)) return;
+
+  const statusEl = document.getElementById('run-status');
+  const btn = document.getElementById('backfill-btn');
+  btn.disabled = true;
+  statusEl.className = 'run-status running';
+  statusEl.textContent = `Backfilling ${targetDate}...`;
+
+  try {
+    const resp = await fetch(`${API}/backfill`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ date: targetDate, profileId: currentProfileId() }),
+    });
+    const data = await resp.json();
+
+    if (!resp.ok) {
+      statusEl.className = 'run-status error';
+      statusEl.textContent = `Backfill error: ${data.error}`;
+      btn.disabled = false;
+      return;
+    }
+
+    // Poll for completion
+    const jobId = data.jobId;
+    const pollInterval = setInterval(async () => {
+      try {
+        const sr = await fetch(`${API}/backfill/${jobId}`);
+        const st = await sr.json();
+
+        if (st.status === 'running') {
+          const contracts = st.optionContracts || 0;
+          const bars = st.optionBars || 0;
+          const replay = st.replay || { completed: 0, total: 0 };
+          if (replay.total > 0) {
+            statusEl.textContent = `${st.phase} (${replay.completed}/${replay.total} configs)`;
+          } else {
+            statusEl.textContent = `Backfilling ${targetDate}: ${st.phase} (${contracts} contracts, ${bars} bars)`;
+          }
+        } else if (st.status === 'completed') {
+          clearInterval(pollInterval);
+          statusEl.className = 'run-status done';
+          const replay = st.replay || { completed: 0, total: 0 };
+          const replayMsg = replay.total > 0 ? ` | ${replay.completed} configs replayed` : '';
+          statusEl.textContent = `✓ ${targetDate}: ${st.spxBars} SPX, ${st.optionContracts} contracts, ${st.optionBars} bars${replayMsg}`;
+          btn.disabled = false;
+
+          // Reload dates dropdown to include the new date (filtered by instrument)
+          const dates = await refreshDatesForInstrument(false);
+
+          // Select the newly backfilled date
+          if (dates.includes(targetDate)) {
+            dateSel.value = targetDate;
+          }
+        } else if (st.status === 'failed') {
+          clearInterval(pollInterval);
+          statusEl.className = 'run-status error';
+          const errMsg = st.errors?.length ? st.errors[0] : 'Unknown error';
+          statusEl.textContent = `Backfill failed: ${errMsg}`;
+          btn.disabled = false;
+        }
+      } catch {
+        // Polling error — keep trying
+      }
+    }, 2000);
+
+  } catch (e) {
+    statusEl.className = 'run-status error';
+    statusEl.textContent = `Backfill error: ${e.message}`;
+    btn.disabled = false;
+  }
+}
+
 async function runReplay() {
-  const dates = getSelectedDates();
+  // Always run against ALL days in the table — the day dropdown is view-only.
+  const dates = getAllDates();
   const configId = document.getElementById('config-select').value;
   if (!dates.length || !configId) return;
 
@@ -1531,7 +3662,7 @@ async function runReplay() {
     return;
   }
 
-  // Multi-day — launch background job
+  // Multi-day — launch background job over ALL dates
   try {
     statusEl.className = 'run-status running';
     statusEl.textContent = `Launching ${dates.length}-day batch...`;
@@ -1550,8 +3681,10 @@ async function runReplay() {
   }
 }
 
-async function runReplayWithConfig(dates, config, configId, configName) {
-  if (typeof dates === 'string') dates = [dates];
+async function runReplayWithConfig(_datesIgnored, config, configId, configName) {
+  // Always run against ALL days in the table — ignore any passed-in date(s).
+  const dates = getAllDates();
+  if (!dates.length) return;
   const statusEl = document.getElementById('run-status');
   const runBtn = document.getElementById('run-btn');
   runBtn.disabled = true;
@@ -1778,12 +3911,12 @@ async function boot() {
 
   if (paramDate || paramConfig) loadDay();
 
-  // Check hash routing after boot completes
+}
+boot().then(() => {
+  // Activate live mode after boot completes (dropdowns populated)
   if (location.hash === '#live') {
     setMode('live');
   }
-}
-boot().then(() => {
   // On page load, check if there's an active background job to resume polling
   fetch(`${API}/jobs`).then(r => r.json()).then(jobList => {
     const running = jobList.find(j => j.status === 'running' || j.status === 'pending');
@@ -1814,58 +3947,45 @@ function setMode(mode) {
   if (mode === currentMode) return;
   currentMode = mode;
 
-  // Update toggle buttons
-  const buttons = document.querySelectorAll('#mode-toggle button');
-  buttons.forEach(b => b.classList.remove('active'));
-  if (mode === 'replay') buttons[0].classList.add('active');
-  else buttons[1].classList.add('active');
+  // Update nav bar active state
+  document.getElementById('nav-replay').classList.toggle('active', mode === 'replay');
+  document.getElementById('nav-live').classList.toggle('active', mode === 'live');
 
   if (mode === 'live') {
-    // Hide replay-only elements
-    for (const id of ['date-select', 'config-select', 'run-btn', 'date-end-select', 'run-status', 'sweep-link']) {
+    // Hide replay-only controls (run button, backfill)
+    for (const id of ['run-btn', 'run-status']) {
       const el = document.getElementById(id);
       if (el) el.classList.add('live-hidden');
     }
-    // Hide Settings button and "to" label
     document.querySelectorAll('.config-btn').forEach(el => el.classList.add('live-hidden'));
-    const headerSelects = document.querySelectorAll('.header span[style*="color:#444"]');
-    headerSelects.forEach(s => { if (s.textContent.trim() === 'to') s.classList.add('live-hidden'); });
 
-    document.getElementById('analysis-toggle').classList.add('live-hidden');
-    document.getElementById('analysis-panel').classList.add('live-hidden');
-    document.querySelector('.trade-filters').classList.add('live-hidden');
+    // Keep analysis and trade filters visible — same data, just auto-selected
+    // Hide config modal trigger (settings is in nav bar)
     document.getElementById('config-modal').classList.add('live-hidden');
 
-    // Show live elements
+    // Show live status banner
     document.getElementById('status-banner').style.display = 'flex';
     document.getElementById('conn-status').style.display = 'inline-flex';
 
-    // Update page title
-    document.querySelector('.header h1').textContent = 'SPXer Live';
-
-    initLiveMode();
+    initLiveMode().catch(err => {
+      console.error('initLiveMode failed:', err);
+      // Fallback: just load whatever is in the dropdowns
+      _loadDayData().catch(() => {});
+    });
     location.hash = '#live';
   } else {
-    // Show replay elements
-    for (const id of ['date-select', 'config-select', 'run-btn', 'date-end-select', 'run-status', 'sweep-link']) {
+    // Show all replay elements
+    for (const id of ['run-btn', 'run-status']) {
       const el = document.getElementById(id);
       if (el) el.classList.remove('live-hidden');
     }
     document.querySelectorAll('.config-btn').forEach(el => el.classList.remove('live-hidden'));
-    const headerSelects = document.querySelectorAll('.header span[style*="color:#444"]');
-    headerSelects.forEach(s => s.classList.remove('live-hidden'));
 
-    document.getElementById('analysis-toggle').classList.remove('live-hidden');
-    document.getElementById('analysis-panel').classList.remove('live-hidden');
-    document.querySelector('.trade-filters').classList.remove('live-hidden');
     document.getElementById('config-modal').classList.remove('live-hidden');
 
     // Hide live elements
     document.getElementById('status-banner').style.display = 'none';
     document.getElementById('conn-status').style.display = 'none';
-
-    // Restore page title
-    document.querySelector('.header h1').textContent = 'SPXer Replay';
 
     teardownLiveMode();
     loadDay();
@@ -1895,44 +4015,84 @@ function normalizeLiveBars(bars) {
 
 async function initLiveMode() {
   try {
-    // Guess ET offset from current time
-    etOffsetSec = isDST(new Date().toISOString().slice(0, 10)) ? -4 * 3600 : -5 * 3600;
+    // 1. Get agent config to know which config ID is active
+    let liveConfigId = null;
+    try {
+      const cfg = await fetch(`${API}/live/agent/config`).then(r => r.json());
+      if (cfg && !cfg.error && cfg.id) liveConfigId = cfg.id;
+    } catch {}
 
-    // 1. Fetch SPX bars and render chart
-    // Request enough bars for a full RTH session, then filter to today only
-    // to avoid overnight gaps that make the chart unreadable
-    const rawBars = await fetch(`${API}/live/spx/bars?tf=1m&n=600`).then(r => r.json()).catch(() => []);
-    const allBars = normalizeLiveBars(rawBars);
-    // Filter: keep only today's bars (9:30 ET onward = ts within last 7 hours)
-    const todayOpen = (() => {
-      const now = new Date();
-      const etNow = new Date(now.getTime() + etOffsetSec * 1000);
-      const y = etNow.getUTCFullYear(), m = etNow.getUTCMonth(), d = etNow.getUTCDate();
-      // 9:30 ET in UTC = 9:30 - etOffset
-      const open930 = new Date(Date.UTC(y, m, d, 9, 30, 0));
-      return Math.floor(open930.getTime() / 1000) - etOffsetSec;
-    })();
-    const bars = allBars.filter(b => b.ts >= todayOpen);
-    renderSpxChart(bars.length ? bars : allBars, [], [], []);
+    // 2. Select latest date and agent config in the dropdowns
+    const dateSel = document.getElementById('date-select');
+    if (dateSel && dateSel.options.length > 0) {
+      dateSel.value = dateSel.options[dateSel.options.length - 1].value;
+    }
 
-    // 2. Fetch and display live agent config
-    await loadLiveConfig();
+    const configSel = document.getElementById('config-select');
+    if (configSel && liveConfigId) {
+      const exists = Array.from(configSel.options).some(o => o.value === liveConfigId);
+      if (exists) configSel.value = liveConfigId;
+    }
 
-    // 3. Fetch agent status
+    // 3. Set ET offset for today
+    const todayStr = new Date().toISOString().slice(0, 10);
+    etOffsetSec = isDST(todayStr) ? -4 * 3600 : -5 * 3600;
+    _barsCache.clear();
+
+    // 4. Load today's bars from the LIVE data service (not the replay DB)
+    // The replay DB may not have today's bars — they're only in the live pipeline.
+    const underlying = currentInstrument();
+    const [liveBars1m, liveBars3m, liveBars5m] = await Promise.all([
+      fetch(`${API}/live/spx/bars?tf=1m&n=500`).then(r => r.json()).catch(() => []),
+      fetch(`${API}/live/spx/bars?tf=3m&n=200`).then(r => r.json()).catch(() => []),
+      fetch(`${API}/live/spx/bars?tf=5m&n=200`).then(r => r.json()).catch(() => []),
+    ]);
+
+    // Normalize live format {open,high,low,close,indicators} → replay format {o,h,l,c,ind}
+    // Filter to today only — the data service may return trailing bars from the prior session.
+    const midnightEtUtc = new Date(todayStr + 'T00:00:00Z').getTime() / 1000 - etOffsetSec;
+    const filterToday = (bars) => bars.filter(b => b.ts >= midnightEtUtc);
+    lastSpxBars = normalizeLiveBars(filterToday(liveBars1m));
+    lastSpx3m = normalizeLiveBars(filterToday(liveBars3m));
+    lastSpx5m = normalizeLiveBars(filterToday(liveBars5m));
+    rawTrades = [];
+    allContracts = [];
+
+    // Try loading contracts from live service
+    try {
+      const liveContracts = await fetch(`${API}/live/contracts/active`).then(r => r.json());
+      if (Array.isArray(liveContracts)) allContracts = liveContracts;
+    } catch {}
+
+    // Render the chart with live bars
+    applyTradeFilters();
+
+    // 5. Fetch agent status for the banner
     await pollAgentStatus();
 
-    // 4. Fetch recent activity and render trades
-    await pollActivity();
+    // 6. Show live agent config panel
+    try { await loadLiveConfig(); } catch {}
 
-    // 5. Load active contracts for mini-chart grid (today only)
-    await loadLiveContracts();
+    // 7. Fetch live trades from agent activity
+    try { await pollActivity(); } catch {}
 
-    // 5. Connect WebSocket for real-time updates
-    connectLiveWs();
+    // 8. Load live contracts for mini charts
+    try { await loadLiveContracts(); } catch {}
 
-    // 6. Start polling timers
-    liveStatusTimer = setInterval(pollAgentStatus, 5000);
-    liveActivityTimer = setInterval(pollActivity, 10000);
+    // 9. Determine if we're in RTH for WebSocket + polling
+    const nowET = new Date(Date.now() + etOffsetSec * 1000);
+    const etH = nowET.getUTCHours(), etM = nowET.getUTCMinutes();
+    const isWeekday = nowET.getUTCDay() >= 1 && nowET.getUTCDay() <= 5;
+    const inRTH = isWeekday && (etH > 9 || (etH === 9 && etM >= 30)) && etH < 16;
+
+    if (inRTH) {
+      connectLiveWs();
+      liveStatusTimer = setInterval(pollAgentStatus, 5000);
+      liveActivityTimer = setInterval(pollActivity, 15000);
+    } else {
+      liveStatusTimer = setInterval(pollAgentStatus, 60000);
+      // Still poll activity once outside RTH to show last session's trades
+    }
   } catch (err) {
     console.error('Live mode init failed:', err);
   }
@@ -1962,6 +4122,9 @@ function teardownLiveMode() {
   if (configPanel) configPanel.style.display = 'none';
   lastActivityCount = 0;
   setConnectionStatus(false);
+
+  // Reload current replay day since we may have changed the dropdowns
+  loadDay();
 }
 
 function connectLiveWs() {
@@ -2052,8 +4215,8 @@ function handleLiveWsMessage(msg) {
 
 function updateStatusBanner(data) {
   const banner = document.getElementById('status-banner');
-  if (!data || data.status === 'offline') {
-    document.getElementById('live-mode-badge').innerHTML = '<span style="color:#666">Agent Offline</span>';
+  if (!data || (data.status === 'offline' && !data.ts)) {
+    document.getElementById('live-mode-badge').innerHTML = '<span style="color:#666">No Data</span>';
     document.getElementById('live-spx-price').textContent = '';
     document.getElementById('live-daily-pnl').textContent = '';
     document.getElementById('live-open-positions').textContent = '';
@@ -2064,12 +4227,22 @@ function updateStatusBanner(data) {
     return;
   }
 
+  // Check if this is stale data (agent not currently running)
+  const isStale = data.ts && (Date.now() - data.ts > 5 * 60 * 1000); // >5 min old
+
   // data.mode is market mode (rth/premarket), not trading mode
   // data.paper indicates paper vs live trading mode
   const marketMode = (data.mode || '').toUpperCase();
   const tradingMode = data.paper === true ? 'PAPER' : data.paper === false ? 'LIVE' : 'PAPER';
   const badgeClass = tradingMode === 'LIVE' ? 'badge-live' : 'badge-paper';
-  document.getElementById('live-mode-badge').innerHTML = `<span class="${badgeClass}">${tradingMode}</span>${marketMode ? ` <span style="color:#555;font-size:10px">${marketMode}</span>` : ''}`;
+
+  if (isStale) {
+    // Show last session info with timestamp
+    const lastTime = data.timeET || new Date(data.ts).toLocaleString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+    document.getElementById('live-mode-badge').innerHTML = `<span style="color:#f59e0b">LAST SESSION</span> <span style="color:#555;font-size:10px">${lastTime}</span>`;
+  } else {
+    document.getElementById('live-mode-badge').innerHTML = `<span class="${badgeClass}">${tradingMode}</span>${marketMode ? ` <span style="color:#555;font-size:10px">${marketMode}</span>` : ''}`;
+  }
 
   document.getElementById('live-spx-price').textContent = data.spxPrice
     ? `SPX $${parseFloat(data.spxPrice).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
@@ -2097,8 +4270,16 @@ function updateStatusBanner(data) {
     hmaEl.innerHTML = `HMA <span style="color:${color}">${dir === 'up' ? '▲ BULL' : '▼ BEAR'}</span>`;
   }
 
-  // Uptime
-  if (data.upSince || data.startTime) {
+  // Uptime / last active
+  if (isStale) {
+    // Show how long ago the agent was last active
+    const ago = Math.floor((Date.now() - data.ts) / 60000);
+    const agoH = Math.floor(ago / 60);
+    const agoM = ago % 60;
+    const agoText = agoH > 0 ? `${agoH}h${agoM}m ago` : `${agoM}m ago`;
+    document.getElementById('live-uptime').textContent = agoText;
+    document.getElementById('live-minutes-close').textContent = '';
+  } else if (data.upSince || data.startTime) {
     const started = new Date(data.upSince || data.startTime).getTime();
     const elapsed = Math.floor((Date.now() - started) / 1000);
     const hours = Math.floor(elapsed / 3600);
@@ -2151,6 +4332,79 @@ async function loadLiveConfig() {
   }
 }
 
+let liveEditConfigId = null; // set when editing live config
+
+async function editLiveConfig() {
+  try {
+    // Load the full config from the live agent's config ID
+    const cfg = await fetch(`${API}/live/agent/config`).then(r => r.json());
+    if (!cfg || cfg.error) return alert('Could not load live config');
+
+    liveEditConfigId = cfg.id;
+
+    // Load the full config object from the replay config store
+    const fullCfg = await fetch(`${API}/config/${cfg.id}`).then(r => r.json());
+    if (!fullCfg || fullCfg.error) return alert(`Config '${cfg.id}' not found in DB`);
+
+    // Pre-load into the config modal
+    currentConfig = fullCfg;
+    originalConfigSnapshot = JSON.stringify(currentConfig);
+
+    // Open modal and show the Update Live button
+    const modal = document.getElementById('config-modal');
+    modal.classList.add('open');
+    document.getElementById('update-live-btn').style.display = 'inline-block';
+
+    // Pre-fill id/name
+    const idInput = document.getElementById('cfg-id');
+    const nameInput = document.getElementById('cfg-name');
+    idInput.value = fullCfg.id || '';
+    nameInput.value = fullCfg.name || '';
+    delete idInput.dataset.userEdited;
+    delete nameInput.dataset.userEdited;
+
+    renderConfigForm();
+  } catch (e) {
+    alert('Error loading live config: ' + e.message);
+  }
+}
+
+async function updateLiveConfig() {
+  if (!liveEditConfigId || !currentConfig) return;
+
+  const configChanged = originalConfigSnapshot && JSON.stringify(currentConfig) !== originalConfigSnapshot;
+  if (!configChanged) {
+    closeConfigModal();
+    return alert('No changes detected');
+  }
+
+  if (!confirm(`Update live config "${liveEditConfigId}" in-place?\n\nThe agent will use these settings on next restart.\n\nNote: this overwrites the config — use "Save & Run" instead if you want to create a new version and backtest first.`)) {
+    return;
+  }
+
+  try {
+    // Save directly to the DB under the same ID (no versioning — intentional overwrite)
+    const res = await fetch(`${API}/config/${liveEditConfigId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(currentConfig),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Save failed');
+
+    closeConfigModal();
+    currentConfig = null;
+    originalConfigSnapshot = null;
+    liveEditConfigId = null;
+
+    // Refresh the live config display
+    await loadLiveConfig();
+    alert('Live config updated. Agent will use new settings on next restart.');
+  } catch (e) {
+    alert('Error saving live config: ' + e.message);
+  }
+}
+
 async function pollAgentStatus() {
   try {
     const data = await fetch(`${API}/live/agent/status`).then(r => r.json());
@@ -2162,84 +4416,117 @@ async function pollAgentStatus() {
 
 async function pollActivity() {
   try {
-    const activities = await fetch(`${API}/live/agent/activity?n=50`).then(r => r.json());
-    if (!Array.isArray(activities)) return;
+    // Fetch today's round-trip trades from Tradier orders API
+    const resp = await fetch(`${API}/live/trades`);
+    const data = await resp.json();
 
-    // Extract actual trade close events from cycle activity entries
-    // Each activity has details.closeEvents[] with { symbol, reason, pnl }
-    const closedTrades = [];
-    for (const a of activities) {
-      const closes = a.details?.closeEvents || [];
-      for (const ce of closes) {
-        // Parse symbol: SPXW260330C06330000 → type=call, strike=6330
-        const sym = ce.symbol || '';
-        const isCall = sym.includes('C0') || sym.includes('C1');
-        const strikeMatch = sym.match(/[CP](\d{5,})$/);
-        const strike = strikeMatch ? parseInt(strikeMatch[1]) / 1000 : 0;
-        const exitTime = a.timeET || '—';
-        closedTrades.push({
-          side: isCall ? 'call' : 'put',
-          strike: strike,
-          entryET: '',
-          exitET: exitTime,
-          entryPrice: ce.entryPrice || 0,
-          exitPrice: ce.exitPrice || 0,
-          'pnl$': ce.pnl ?? 0,
-          pnlPct: ce.pnlPct || 0,
-          reason: ce.reason || '—',
-          symbol: sym,
-          entryTs: 0,
-          exitTs: a.ts ? a.ts / 1000 : 0,
-        });
-      }
+    // New format: { trades: [...], summary: { total, closed, open, wins, losses, winRate, totalPnl } }
+    const trades = data?.trades || [];
+    const summary = data?.summary || {};
+
+    if (!trades.length && !data?.error) {
+      const tbody = document.getElementById('trades-body');
+      if (tbody) tbody.innerHTML = `<tr><td colspan="8" style="color:#666;text-align:center;padding:12px">
+        No trades today
+      </td></tr>`;
+      document.getElementById('summary').innerHTML = `<span class="neutral">No trades</span>`;
+      return;
+    }
+    if (data?.error) {
+      console.warn('Live trades error:', data.error);
+      return;
     }
 
-    // Also get summary stats from latest activity
-    const latest = activities[activities.length - 1];
-    const totalTrades = latest?.details?.tradesTotal || closedTrades.length;
-    const dailyPnl = latest?.details?.dailyPnl ?? 0;
+    // Convert Tradier round-trips to the format renderTradesTable expects
+    const displayTrades = trades.map(t => {
+      const entryTs = t.entryTs ? t.entryTs / 1000 : 0;
+      const exitTs = t.exitTs ? t.exitTs / 1000 : 0;
+      const entryET = t.entryTime ? new Date(t.entryTime).toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour12: false, hour: '2-digit', minute: '2-digit' }) : '';
+      const exitET = t.exitTime ? new Date(t.exitTime).toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour12: false, hour: '2-digit', minute: '2-digit' }) : '';
+      const pnl = t.pnl ?? 0;
+      const pnlPct = t.entryFill > 0 ? (pnl / (t.entryFill * (t.qty || 1) * 100)) * 100 : 0;
 
-    const hasNew = closedTrades.length > lastActivityCount;
-    lastActivityCount = closedTrades.length;
+      return {
+        side: t.side,
+        strike: t.strike,
+        entryET,
+        exitET,
+        entryPrice: t.entryFill || 0,
+        exitPrice: t.exitFill || 0,
+        'pnl$': pnl,
+        pnlPct,
+        reason: t.exitReason === 'OPEN' ? 'open' : t.exitReason?.toLowerCase() || 'open',
+        symbol: t.symbol,
+        entryTs,
+        exitTs,
+        qty: t.qty,
+        stopLoss: t.slTarget,
+        takeProfit: t.tpTarget,
+        status: t.status,
+      };
+    });
 
-    const tbody = document.getElementById('trades-body');
+    const hasNew = displayTrades.length > lastActivityCount;
+    lastActivityCount = displayTrades.length;
 
-    if (closedTrades.length > 0) {
-      // Show closed trades in the trades table
-      allTrades = closedTrades;
-      renderTradesTable(closedTrades);
+    allTrades = displayTrades;
+    renderTradesTable(displayTrades);
 
-      // Flash animation for new trades
-      if (hasNew) {
-        const firstRow = document.querySelector('#trades-body tr');
-        if (firstRow) {
-          firstRow.classList.add('trade-new');
-          setTimeout(() => firstRow.classList.remove('trade-new'), 1200);
+    // Plot trade markers on the SPX chart
+    if (spxCandleSeries && displayTrades.length > 0) {
+      const markers = [];
+      for (const t of displayTrades) {
+        if (t.entryTs) {
+          markers.push({
+            time: toEtDisplay(t.entryTs),
+            position: 'belowBar',
+            color: t.side === 'call' ? '#10b981' : '#f43f5e',
+            shape: 'arrowUp',
+            text: `${t.side === 'call' ? 'C' : 'P'}${t.strike}`,
+          });
+        }
+        if (t.exitTs && t.reason !== 'open') {
+          markers.push({
+            time: toEtDisplay(t.exitTs),
+            position: 'aboveBar',
+            color: t['pnl$'] >= 0 ? '#10b981' : '#f43f5e',
+            shape: 'arrowDown',
+            text: `$${t['pnl$'].toFixed(0)}`,
+          });
         }
       }
-    } else if (activities.length > 0) {
-      // No closed trades yet — show a summary row
-      const lastSummary = latest?.summary || 'Scanning...';
-      tbody.innerHTML = `<tr><td colspan="8" style="color:#666;text-align:center;padding:12px">
-        ${totalTrades} trades today · ${lastSummary}
-      </td></tr>`;
+      markers.sort((a, b) => a.time - b.time);
+      // Dedupe markers at same time (lightweight-charts requires unique times per position)
+      const seen = new Set();
+      const uniqueMarkers = markers.filter(m => {
+        const key = `${m.time}-${m.position}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+      spxMarkers = uniqueMarkers;
+      try { LightweightCharts.createSeriesMarkers(spxCandleSeries, uniqueMarkers); } catch {}
     }
 
-    // Update the summary bar
-    const wins = closedTrades.filter(t => t['pnl$'] > 0).length;
-    const summaryEl = document.getElementById('summary');
-    if (closedTrades.length > 0) {
-      const totalPnl = closedTrades.reduce((s, t) => s + (t['pnl$'] || 0), 0);
-      const winRate = closedTrades.length > 0 ? wins / closedTrades.length : 0;
-      const pnlClass = totalPnl > 0 ? 'win' : totalPnl < 0 ? 'loss' : 'neutral';
-      summaryEl.innerHTML = `
-        <span class="neutral">${closedTrades.length} trades</span>
-        <span class="${winRate >= 0.5 ? 'win' : 'loss'}">${(winRate * 100).toFixed(0)}% WR</span>
-        <span class="${pnlClass}">$${totalPnl.toFixed(0)}</span>
-      `;
-    } else {
-      summaryEl.innerHTML = '<span class="neutral">No closed trades</span>';
+    if (hasNew) {
+      const firstRow = document.querySelector('#trades-body tr');
+      if (firstRow) {
+        firstRow.classList.add('trade-new');
+        setTimeout(() => firstRow.classList.remove('trade-new'), 1200);
+      }
     }
+
+    // P&L summary from Tradier data (complete — no separate status fetch needed)
+    const summaryEl = document.getElementById('summary');
+    const pnl = summary.totalPnl ?? 0;
+    const pnlClass = pnl > 0 ? 'win' : pnl < 0 ? 'loss' : 'neutral';
+    const winRate = summary.winRate ?? 0;
+    summaryEl.innerHTML = `
+      <span class="neutral">${summary.total || 0} trades</span>
+      <span class="neutral">${summary.wins || 0}W/${summary.losses || 0}L (${winRate}%)</span>
+      <span class="${pnlClass}">P&L $${pnl.toLocaleString()}</span>
+      ${summary.open > 0 ? `<span class="neutral">${summary.open} open</span>` : ''}
+    `;
   } catch (err) {
     console.error('Activity poll failed:', err);
   }
@@ -2382,11 +4669,13 @@ function setConnectionStatus(connected) {
 }
 
 // ── Hash-based URL routing ─────────────────────────────────────────────────
-// Note: #live on initial load is handled inside boot() above.
 
 window.addEventListener('hashchange', () => {
-  if (location.hash === '#live' && currentMode !== 'live') setMode('live');
-  else if (location.hash !== '#live' && currentMode !== 'replay') setMode('replay');
+  if (location.hash === '#live' && currentMode !== 'live') {
+    setMode('live');
+  } else if (location.hash !== '#live' && currentMode === 'live') {
+    setMode('replay');
+  }
 });
 </script>
 </body>

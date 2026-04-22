@@ -6,6 +6,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 const LOGS_DIR = path.join(process.cwd(), 'logs');
+const STATUS_FILE = path.join(LOGS_DIR, 'agent-status.json');
 const ACTIVITY_LOG = path.join(LOGS_DIR, 'agent-activity.jsonl');
 const MAX_ACTIVITY_LINES = 500;
 
@@ -14,8 +15,8 @@ let agentSuffix = '';
 
 /**
  * Set the agent identifier for per-agent status files.
- * Call once at startup: setAgentId('spx') or setAgentId('xsp').
- * Status writes to: logs/agent-status-spx.json or logs/agent-status-xsp.json.
+ * Call once at startup: setAgentId('spx').
+ * Status writes to: logs/agent-status-spx.json.
  * Also writes the legacy logs/agent-status.json for backward compatibility.
  */
 export function setAgentId(id: string): void {
@@ -40,6 +41,13 @@ export interface AgentStatus {
   scannerReads: { id: string; read: string; setups: number }[];
   nextCheckSecs: number;
   upSince: string;
+  /** Task 3.3: OTOCO bracket protection counters for TP re-entries.
+   *  Optional for backward compat with older status consumers. */
+  executionCounters?: {
+    tpReentriesAttempted: number;
+    tpReentriesProtected: number;
+    tpReentriesUnprotected: number;
+  };
 }
 
 let startTime = new Date().toISOString();
@@ -49,7 +57,7 @@ export function writeStatus(status: AgentStatus): void {
     fs.mkdirSync(LOGS_DIR, { recursive: true });
     const payload = JSON.stringify({ ...status, upSince: startTime }, null, 2);
 
-    // Write agent-specific status file (e.g. agent-status-xsp.json)
+    // Write agent-specific status file (e.g. agent-status-spx.json)
     if (agentSuffix) {
       fs.writeFileSync(path.join(LOGS_DIR, `agent-status-${agentSuffix}.json`), payload);
     }

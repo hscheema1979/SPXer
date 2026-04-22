@@ -3,7 +3,12 @@ import path from 'path';
 import type { AuditEntry, PositionClose } from './types';
 
 const LOG_DIR = path.resolve('./logs');
-const LOG_PATH = path.join(LOG_DIR, 'agent-audit.jsonl');
+let logPath = path.join(LOG_DIR, 'agent-audit.jsonl');
+
+/** Set per-agent audit file suffix. Call once at startup alongside setAgentId(). */
+export function setAuditId(id: string): void {
+  logPath = path.join(LOG_DIR, id ? `agent-audit-${id}.jsonl` : 'agent-audit.jsonl');
+}
 
 function ensureDir() {
   mkdirSync(LOG_DIR, { recursive: true });
@@ -11,7 +16,7 @@ function ensureDir() {
 
 export function logEntry(entry: AuditEntry): void {
   ensureDir();
-  appendFileSync(LOG_PATH, JSON.stringify(entry) + '\n');
+  appendFileSync(logPath, JSON.stringify(entry) + '\n');
 }
 
 export function logClose(close: PositionClose): void {
@@ -48,7 +53,7 @@ export function logClose(close: PositionClose): void {
       '2.0x': pos.highPrice >= pos.entryPrice * 2.0,
     } : null,
   };
-  appendFileSync(LOG_PATH, JSON.stringify(line) + '\n');
+  appendFileSync(logPath, JSON.stringify(line) + '\n');
   const highPct = pos.maxPnlPct != null ? `peak +${(pos.maxPnlPct * 100).toFixed(0)}%` : '';
   const lowPct = pos.maxDrawdownPct != null ? `trough ${(pos.maxDrawdownPct * 100).toFixed(0)}%` : '';
   console.log(`[audit] ${pos.symbol} closed ${close.reason}: PnL ${line.pnlFormatted} | high=$${pos.highPrice?.toFixed(2) ?? '?'} low=$${pos.lowPrice?.toFixed(2) ?? '?'} | ${highPct} ${lowPct} | held ${holdTimeSec}s`);
@@ -56,7 +61,7 @@ export function logClose(close: PositionClose): void {
 
 export function logRejected(reason: string, symbol: string, signalType: string): void {
   ensureDir();
-  appendFileSync(LOG_PATH, JSON.stringify({
+  appendFileSync(logPath, JSON.stringify({
     type: 'risk_rejected',
     ts: Date.now(),
     symbol,

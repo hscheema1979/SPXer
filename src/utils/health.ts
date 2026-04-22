@@ -15,6 +15,10 @@ export interface ProviderHealth {
   staleSec: number | null;
   consecutiveFailures: number;
   healthy: boolean;
+  /** True when the provider is a suppressed cold-standby (e.g. Tradier options
+   *  while ThetaData WS is primary). Standby providers are excluded from the
+   *  overall-status vote so a healthy primary doesn't flag the system degraded. */
+  standby: boolean;
 }
 
 export interface DataHealth {
@@ -43,6 +47,7 @@ const FAILURE_THRESHOLD = 3;
 
 export class HealthTracker {
   private providers = new Map<string, ProviderStatus>();
+  private standbyProviders = new Set<string>();
   private lastBarTs = new Map<string, number>();
   private startTime: number;
 
@@ -54,6 +59,22 @@ export class HealthTracker {
     const s = this.getOrCreate(provider);
     s.lastSuccessTs = Date.now();
     s.consecutiveFailures = 0;
+    // An actual success means the provider is live, not standby.
+    this.standbyProviders.delete(provider);
+  }
+
+  /** Mark a provider as cold-standby (currently suppressed by a primary).
+   *  Standby providers remain visible in /health but don't count toward the
+   *  degraded/critical vote. Clearing standby (or calling recordSuccess) restores
+   *  normal accounting. */
+  markStandby(provider: string, isStandby: boolean): void {
+    this.getOrCreate(provider);
+    if (isStandby) this.standbyProviders.add(provider);
+    else this.standbyProviders.delete(provider);
+  }
+
+  isStandby(provider: string): boolean {
+    return this.standbyProviders.has(provider);
   }
 
   recordFailure(provider: string): void {
@@ -69,6 +90,7 @@ export class HealthTracker {
   /** Reset all state — useful in tests */
   reset(): void {
     this.providers.clear();
+    this.standbyProviders.clear();
     this.lastBarTs.clear();
     this.startTime = Date.now();
   }
@@ -92,6 +114,7 @@ export class HealthTracker {
         staleSec: status.lastSuccessTs ? Math.round((ts - status.lastSuccessTs) / 1000) : null,
         consecutiveFailures: status.consecutiveFailures,
         healthy,
+        standby: this.standbyProviders.has(name),
       };
     }
 
@@ -131,9 +154,12 @@ export function isProviderHealthy(status: ProviderStatus, now: number): boolean 
 export function computeOverallStatus(
   providers: Record<string, ProviderHealth>,
 ): HealthStatus {
-  const values = Object.values(providers);
+  // Exclude cold-standby providers from the vote — they're suppressed by
+  // design (e.g. Tradier options while ThetaData WS is primary) and will
+  // always look stale. Counting them would flag a healthy system as degraded.
+  const values = Object.values(providers).filter(p => !p.standby);
 
-  // No providers registered yet — nothing to report
+  // No non-standby providers registered yet — nothing to report
   if (values.length === 0) return 'n/a';
 
   const allHealthy = values.every(p => p.healthy);

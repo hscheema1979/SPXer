@@ -4,17 +4,12 @@
 #
 # Usage:
 #   ./scripts/agent-ctl.sh restart spx          # Restart SPX agent
-#   ./scripts/agent-ctl.sh restart xsp          # Restart XSP agent  
-#   ./scripts/agent-ctl.sh restart both         # Restart both
 #   ./scripts/agent-ctl.sh stop spx             # Stop SPX agent
-#   ./scripts/agent-ctl.sh stop both            # Stop both
 #   ./scripts/agent-ctl.sh pause "doing code changes"  # Pause monitor
 #   ./scripts/agent-ctl.sh unpause              # Resume monitor
 #
 # Before stopping/restarting, writes a maintenance signal file that the
-# account-monitor reads. The monitor will skip all remediation actions
-# (no force-closing positions, no cancelling brackets) while the signal
-# is active.
+# Previously wrote a maintenance signal for the account-monitor (now removed).
 #
 
 set -e
@@ -24,15 +19,13 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 MAINTENANCE_FILE="$PROJECT_DIR/logs/agent-maintenance.json"
 
 ACTION="${1:-help}"
-TARGET="${2:-both}"
+TARGET="${2:-spx}"
 REASON="${3:-Agent restart via agent-ctl}"
 
 # Resolve PM2 process names
 resolve_targets() {
   case "$1" in
     spx)  echo "spxer-agent" ;;
-    xsp)  echo "spxer-xsp" ;;
-    both) echo "spxer-agent spxer-xsp" ;;
     *)    echo "Unknown target: $1" >&2; exit 1 ;;
   esac
 }
@@ -153,8 +146,8 @@ case "$ACTION" in
     echo "Usage: $0 <action> [target] [reason]"
     echo ""
     echo "Actions:"
-    echo "  restart <spx|xsp|both>     Safe restart with monitor coordination"
-    echo "  stop <spx|xsp|both>        Stop agent(s), pause monitor"
+    echo "  restart spx                Safe restart with monitor coordination"
+    echo "  stop spx                   Stop agent, pause monitor"
     echo "  pause [reason]             Pause monitor without touching agents"
     echo "  unpause                    Resume monitor"  
     echo "  status                     Show maintenance state"

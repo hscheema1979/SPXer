@@ -29,24 +29,6 @@ describe('parseOptionSymbol — real option symbols', () => {
     expect(result!.expiry).toBe('2026-04-07');
   });
 
-  it('parses XSP call option', () => {
-    const result = parseOptionSymbol('XSP260407C00659000');
-    expect(result).not.toBeNull();
-    expect(result!.prefix).toBe('XSP');
-    expect(result!.callPut).toBe('C');
-    expect(result!.side).toBe('call');
-    expect(result!.strike).toBe(659);
-    expect(result!.expiry).toBe('2026-04-07');
-  });
-
-  it('parses XSP put option', () => {
-    const result = parseOptionSymbol('XSP260407P00661000');
-    expect(result).not.toBeNull();
-    expect(result!.prefix).toBe('XSP');
-    expect(result!.side).toBe('put');
-    expect(result!.strike).toBe(661);
-  });
-
   it('returns null for invalid symbol', () => {
     expect(parseOptionSymbol('INVALID')).toBeNull();
   });
@@ -74,12 +56,6 @@ describe('parseOptionSymbol — real option symbols', () => {
     expect(result!.strike).toBe(6590);
   });
 
-  it('parses XSP260407P00661000 (from audit)', () => {
-    const result = parseOptionSymbol('XSP260407P00661000');
-    expect(result).not.toBeNull();
-    expect(result!.side).toBe('put');
-    expect(result!.strike).toBe(661);
-  });
 });
 
 describe('openToCorePosition — real position conversion', () => {
@@ -110,25 +86,6 @@ describe('openToCorePosition — real position conversion', () => {
     expect(core.entryTs).toBeGreaterThan(0);
   });
 
-  it('handles XSP positions', () => {
-    const openPos: OpenPosition = {
-      id: 'test-id',
-      symbol: 'XSP260407P00661000',
-      side: 'put',
-      strike: 661,
-      expiry: '2026-04-07',
-      entryPrice: 4.90,
-      quantity: 1,
-      stopLoss: 0.49,
-      takeProfit: 6.13,
-      openedAt: Date.now(),
-    };
-
-    const core = openToCorePosition(openPos);
-    expect(core.id).toBe('XSP260407P00661000');
-    expect(core.qty).toBe(1);
-    expect(core.entryPrice).toBe(4.90);
-  });
 });
 
 describe('reconciliation logic — pure computation', () => {

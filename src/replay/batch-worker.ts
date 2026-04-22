@@ -16,6 +16,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import Database from 'better-sqlite3';
 import { runReplay } from './machine';
+import { runBasketReplay } from './basket-runner';
 import type { Config } from '../config/types';
 
 interface JobSpec {
@@ -25,6 +26,8 @@ interface JobSpec {
   dates: string[];
   config: Config;
   dbPath: string;
+  /** Metadata DB (configs, results, jobs) — defaults to dbPath for backward compat */
+  metaDbPath?: string;
   noJudge: boolean;
 }
 
@@ -36,9 +39,10 @@ if (!jobFile || !fs.existsSync(jobFile)) {
 
 const spec: JobSpec = JSON.parse(fs.readFileSync(jobFile, 'utf-8'));
 const { jobId, configId, configName, dates, config, dbPath, noJudge } = spec;
+const metaDbPath = spec.metaDbPath || dbPath;
 
 function getDb(): Database.Database {
-  return new Database(dbPath);
+  return new Database(metaDbPath);
 }
 
 function updateJob(fields: Record<string, any>) {
@@ -53,7 +57,8 @@ function updateJob(fields: Record<string, any>) {
 }
 
 async function main() {
-  console.log(`[batch-worker] Starting job ${jobId}: ${dates.length} dates for config ${configName}`);
+  const isBasket = !!(config.basket?.enabled && config.basket.members?.length);
+  console.log(`[batch-worker] Starting job ${jobId}: ${dates.length} dates for config ${configName}${isBasket ? ` (BASKET ${config.basket!.members.length} members)` : ''}`);
 
   // Mark as running with our PID
   updateJob({ status: 'running', pid: process.pid, currentDate: dates[0] });
@@ -65,18 +70,29 @@ async function main() {
     updateJob({ currentDate: date, completed: i });
 
     try {
-      const result = await runReplay(config, date, {
-        dataDbPath: dbPath,
-        storeDbPath: dbPath,
-        verbose: false,
-        noJudge,
-      });
-      results.push({
-        date,
-        trades: result.trades,
-        wins: result.wins,
-        totalPnl: result.totalPnl,
-      });
+      let trades: number, wins: number, totalPnl: number;
+      if (isBasket) {
+        const br = await runBasketReplay(config, date, {
+          dataDbPath: dbPath,
+          storeDbPath: metaDbPath,
+          verbose: false,
+          noJudge,
+        });
+        trades = br.aggregate.trades;
+        wins = br.aggregate.wins;
+        totalPnl = br.aggregate.totalPnl;
+      } else {
+        const result = await runReplay(config, date, {
+          dataDbPath: dbPath,
+          storeDbPath: metaDbPath,
+          verbose: false,
+          noJudge,
+        });
+        trades = result.trades;
+        wins = result.wins;
+        totalPnl = result.totalPnl;
+      }
+      results.push({ date, trades, wins, totalPnl });
     } catch (err: any) {
       console.error(`[batch-worker] ${date} error: ${err.message}`);
       results.push({ date, trades: 0, wins: 0, totalPnl: 0 });

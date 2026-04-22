@@ -1,8 +1,8 @@
 import express, { type Express } from 'express';
 import { createServer, type Server } from 'http';
 import { statSync } from 'fs';
-import { getBars, getLatestBar, getAllActiveContracts, getDbSizeMb } from '../storage/queries';
-import { getMarketMode } from '../pipeline/scheduler';
+import { getBars, getLatestBar, getAllActiveContracts, getDbSizeMb, getOptionBarHealth } from '../storage/queries';
+import { getMarketMode } from '../pipeline/spx/scheduler';
 import { fetchOptionsChain, fetchExpirations } from '../providers/tradier';
 import { readStatus, readRecentActivity } from '../agent/reporter';
 import { healthTracker } from '../utils/health';
@@ -13,7 +13,7 @@ import { createReplayRoutes } from './replay-routes';
 import { refreshPipelineHealth } from '../ops/pipeline-health';
 import { getLatestMetrics, getMetricSeries, getMetricsSummary } from '../ops/metrics-api';
 import { getAlertHistory, getRules as getAlertRules } from '../ops/alert-rules';
-import { getDb } from '../storage/db';
+import { getDb, getCurrentDbPath } from '../storage/db';
 import Database from 'better-sqlite3';
 import * as path from 'path';
 import {
@@ -30,7 +30,13 @@ export function setLastSpxPrice(p: number) { lastSpxPrice = p; }
 let trackerCountFn: () => number = () => 0;
 export function setTrackerCountFn(fn: () => number) { trackerCountFn = fn; }
 
-let optionStreamStatusFn: () => { connected: boolean; symbolCount: number; lastActivity: number } = () => ({
+interface OptionStreamStatus {
+  connected: boolean;
+  symbolCount: number;
+  lastActivity: number;
+  theta?: { connected: boolean; symbolCount: number; lastActivity: number; primary: boolean };
+}
+let optionStreamStatusFn: () => OptionStreamStatus = () => ({
   connected: false, symbolCount: 0, lastActivity: 0,
 });
 export function setOptionStreamStatusFn(fn: typeof optionStreamStatusFn) { optionStreamStatusFn = fn; }
@@ -48,7 +54,7 @@ export function startHttpServer(port: number): { app: Express; httpServer: Serve
     // WAL file size (best-effort — file may not exist)
     let walSizeMb = 0;
     try {
-      const walPath = (config.dbPath || './data/spxer.db') + '-wal';
+      const walPath = (getCurrentDbPath() || config.dbPath || './data/spxer.db') + '-wal';
       walSizeMb = Math.round(statSync(walPath).size / 1024 / 1024 * 10) / 10;
     } catch {}
 
@@ -72,7 +78,21 @@ export function startHttpServer(port: number): { app: Express; httpServer: Serve
         connected: optionStream.connected,
         symbolCount: optionStream.symbolCount,
         lastActivity: optionStream.lastActivity,
+        theta: optionStream.theta,
       },
+      optionBarHealth: (() => {
+        try {
+          const sinceTs = Math.floor(Date.now() / 1000) - 1800; // last 30 min
+          const h = getOptionBarHealth(sinceTs);
+          return {
+            totalBars30m: h.total,
+            syntheticBars30m: h.synthetic,
+            staleBars30m: h.stale,
+            contracts30m: h.contracts,
+            syntheticRatio: h.total > 0 ? Math.round((h.synthetic / h.total) * 100) / 100 : 0,
+          };
+        } catch { return null; }
+      })(),
       // Backward-compatible fields
       uptime: Math.floor((Date.now() - startTime) / 1000),
       mode: getMarketMode(),
@@ -155,7 +175,7 @@ export function startHttpServer(port: number): { app: Express; httpServer: Serve
   });
 
   app.get('/agent/activity', (req, res) => {
-    const n = Math.min(parseInt(req.query.n as string) || 50, 200);
+    const n = Math.min(parseInt(req.query.n as string) || 50, 500);
     res.json(readRecentActivity(n));
   });
 
@@ -166,12 +186,13 @@ export function startHttpServer(port: number): { app: Express; httpServer: Serve
     res.json(signal);
   });
 
-  app.get('/agent/config', (_req, res) => {
+  app.get('/agent/config', (req, res) => {
     // Serve the live agent config from the DB (same source the agents use)
     try {
       const { createStore } = require('../replay/store');
       const store = createStore();
-      const configId = process.env.AGENT_CONFIG_ID || 'hma3x17-scannerReverse-live';
+      const configId = process.env.AGENT_CONFIG_ID || (req.query.id as string);
+      if (!configId) return res.json({ error: 'No AGENT_CONFIG_ID configured' });
       const cfg = store.getConfig(configId);
       store.close();
       if (!cfg) return res.json({ error: `Config '${configId}' not found in DB` });

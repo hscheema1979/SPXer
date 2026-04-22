@@ -1,0 +1,877 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Edge-Adjusted Performance Metrics for Intraday Options Strategy Evaluation</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+:root {
+  --bg: #0d1117;
+  --surface: #161b22;
+  --surface2: #1c2333;
+  --border: #30363d;
+  --text: #c9d1d9;
+  --text2: #8b949e;
+  --accent: #58a6ff;
+  --green: #3fb950;
+  --red: #f85149;
+  --orange: #d29922;
+  --purple: #bc8cff;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+  background: var(--bg); color: var(--text); line-height: 1.6;
+  max-width: 1200px; margin: 0 auto; padding: 20px;
+}
+h1 { font-size: 1.8em; margin: 40px 0 10px; color: #fff; }
+h2 { font-size: 1.4em; margin: 50px 0 15px; color: #fff; border-bottom: 1px solid var(--border); padding-bottom: 8px; }
+h3 { font-size: 1.15em; margin: 30px 0 10px; color: var(--accent); }
+p { margin: 12px 0; }
+a { color: var(--accent); }
+
+.abstract {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 8px; padding: 24px; margin: 20px 0; font-style: italic;
+}
+.keywords { color: var(--text2); font-size: 0.9em; margin-top: 8px; font-style: normal; }
+
+.stat-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px; margin: 20px 0;
+}
+.stat-card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 8px; padding: 16px; text-align: center;
+}
+.stat-card .value { font-size: 2em; font-weight: bold; color: #fff; }
+.stat-card .label { font-size: 0.85em; color: var(--text2); margin-top: 4px; }
+.stat-card.green .value { color: var(--green); }
+.stat-card.red .value { color: var(--red); }
+.stat-card.accent .value { color: var(--accent); }
+
+.chart-container {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 8px; padding: 20px; margin: 20px 0;
+  position: relative;
+}
+.chart-container canvas { max-height: 400px; }
+.chart-title {
+  font-weight: 600; margin-bottom: 12px; color: #fff; font-size: 1.05em;
+}
+.chart-subtitle { color: var(--text2); font-size: 0.85em; margin-bottom: 12px; }
+
+table {
+  width: 100%; border-collapse: collapse; font-size: 0.88em;
+  background: var(--surface); border-radius: 8px; overflow: hidden;
+  margin: 16px 0;
+}
+th, td { padding: 10px 12px; text-align: right; border-bottom: 1px solid var(--border); }
+th { background: var(--surface2); color: var(--text2); font-weight: 600; text-transform: uppercase; font-size: 0.8em; letter-spacing: 0.5px; position: sticky; top: 0; }
+td:first-child, th:first-child { text-align: left; }
+tr:hover td { background: rgba(88,166,255,0.05); }
+.pos { color: var(--green); }
+.neg { color: var(--red); }
+.muted { color: var(--text2); }
+
+.eq-block {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 8px; padding: 20px 24px; margin: 16px 0;
+  font-family: 'Georgia', serif; font-size: 1.1em; text-align: center;
+  line-height: 2;
+}
+.eq-block .eq-label { color: var(--text2); font-size: 0.8em; font-family: sans-serif; display: block; margin-top: 4px; }
+
+.finding-box {
+  border-left: 4px solid var(--accent); background: var(--surface);
+  padding: 16px 20px; margin: 20px 0; border-radius: 0 8px 8px 0;
+}
+.finding-box.warning { border-color: var(--red); }
+.finding-box.success { border-color: var(--green); }
+.finding-box strong { color: #fff; }
+
+.trade-row {
+  display: grid; grid-template-columns: 70px 70px 1fr 80px 80px 90px 100px;
+  gap: 8px; padding: 8px 12px; font-size: 0.85em; font-family: monospace;
+  border-bottom: 1px solid var(--border);
+}
+.trade-row.header { color: var(--text2); font-weight: 600; font-size: 0.75em; text-transform: uppercase; }
+
+.download-bar {
+  background: var(--surface2); border: 1px solid var(--border);
+  border-radius: 8px; padding: 12px 20px; margin: 20px 0;
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+}
+.download-bar button {
+  background: var(--accent); color: #000; border: none; border-radius: 6px;
+  padding: 8px 16px; cursor: pointer; font-weight: 600; font-size: 0.9em;
+}
+.download-bar button:hover { opacity: 0.9; }
+.download-bar button.secondary {
+  background: transparent; color: var(--accent); border: 1px solid var(--accent);
+}
+
+.tab-bar {
+  display: flex; gap: 4px; margin-bottom: -1px; position: relative; z-index: 1;
+}
+.tab-bar button {
+  background: var(--surface); border: 1px solid var(--border); border-bottom: none;
+  color: var(--text2); padding: 8px 16px; cursor: pointer; border-radius: 6px 6px 0 0;
+  font-size: 0.9em;
+}
+.tab-bar button.active { background: var(--surface2); color: #fff; border-color: var(--accent); }
+
+.section-num { color: var(--accent); margin-right: 8px; }
+
+.footnote { font-size: 0.85em; color: var(--text2); margin-top: 8px; }
+
+.two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+@media (max-width: 768px) { .two-col { grid-template-columns: 1fr; } }
+
+#data-explorer { overflow-x: auto; }
+#data-explorer table { font-size: 0.82em; }
+#data-explorer input {
+  background: var(--surface); border: 1px solid var(--border); color: var(--text);
+  padding: 6px 12px; border-radius: 6px; margin: 8px 0; width: 300px;
+}
+
+.ref { color: var(--text2); font-size: 0.9em; }
+.ref li { margin: 6px 0; }
+</style>
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<!-- HEADER -->
+<!-- ═══════════════════════════════════════════════════════════ -->
+<header style="margin: 40px 0 30px; text-align:center">
+  <h1 style="font-size:1.6em;margin:0">Edge-Adjusted Performance Metrics for<br>Intraday Options Strategy Evaluation</h1>
+  <p style="color:var(--text2);margin:12px 0 4px">An Empirical Framework Using R-Multiples and Breakeven Win Rates</p>
+  <p style="color:var(--text2);font-size:0.9em">Working Paper &mdash; April 2026</p>
+  <p style="color:var(--text2);font-size:0.85em;margin-top:16px">
+    Dataset: 4.09M trades &bull; 740 configurations &bull; 267 trading days &bull; SPX 0DTE options
+  </p>
+</header>
+
+<div class="download-bar">
+  <span style="color:var(--text2)">Download raw data for validation:</span>
+  <button onclick="downloadJSON()">All 740 Configs (JSON)</button>
+  <button onclick="downloadCSV()" class="secondary">All 740 Configs (CSV)</button>
+  <button onclick="downloadQuarters()" class="secondary">Walk-Forward Quarters (CSV)</button>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<!-- ABSTRACT -->
+<!-- ═══════════════════════════════════════════════════════════ -->
+<div class="abstract">
+  <strong style="color:#fff;font-style:normal">Abstract.</strong>
+  We present an empirical framework for evaluating intraday options trading strategies that replaces composite scoring with statistically grounded edge metrics. Using a dataset of 4.09 million simulated trades across 740 strategy configurations and 267 trading days (March 2025&ndash;April 2026) on 0DTE SPX options, we demonstrate that conventional performance measures &mdash; including win rate, Sharpe ratio, and weighted composite scores &mdash; systematically misidentify losing strategies as top performers. We introduce an edge-based ranking system built on three metrics: the R-multiple (average win percentage divided by average loss percentage), the breakeven win rate implied by a strategy&rsquo;s payoff asymmetry, and the edge (observed win rate minus breakeven win rate). We show that 38% of strategies with win rates exceeding 70% carry negative edge and lose money, while strategies with 59% win rates but R-multiples above 2.8 generate the highest risk-adjusted returns. Walk-forward analysis across four independent 67-day windows demonstrates coefficient of variation below 0.10 for top strategies. All results survive Bonferroni correction for 740 simultaneous hypothesis tests at the 0.05 family-wise significance level.
+  <div class="keywords"><strong>Keywords:</strong> options trading, strategy evaluation, R-multiple, edge metrics, 0DTE options, walk-forward analysis, multiple testing correction, payoff asymmetry</div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<!-- 1. DATASET OVERVIEW -->
+<!-- ═══════════════════════════════════════════════════════════ -->
+<h2><span class="section-num">1</span> Dataset Overview</h2>
+
+<div class="stat-grid" id="stat-grid"></div>
+
+<p>The dataset spans 267 consecutive trading days from March 27, 2025 through April 20, 2026. All trades are on SPX Weekly (SPXW) 0DTE options. Strategy configurations share a common signal architecture &mdash; Hull Moving Average (HMA) crossover detection on option contract price bars &mdash; and vary across HMA periods, timeframes, take-profit/stop-loss levels, strike offsets, and execution modes.</p>
+
+<p>All trade returns are <strong>net of friction</strong>: half-spread of max($0.05, price &times; 1%) per side, $0.35 commission per contract per side, plus order-type-specific slippage ($0.002/contract on market and stop orders). A <strong>participation-rate cap</strong> of 20% prevents backtested quantities from exceeding printed bar volume.</p>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<!-- 2. THE FRAMEWORK -->
+<!-- ═══════════════════════════════════════════════════════════ -->
+<h2><span class="section-num">2</span> The Edge Framework</h2>
+
+<p>Win rate alone is meaningless without reference to payoff structure. A strategy that wins 75% of trades while gaining +10% per win and losing -50% per loss is a <em>losing</em> strategy. The edge framework makes this explicit.</p>
+
+<h3>2.1 Definitions</h3>
+
+<div class="eq-block">
+  <strong>R-Multiple</strong> = Avg Win % &divide; |Avg Loss %|
+  <span class="eq-label">How large wins are relative to losses. R &gt; 1 means wins are bigger than losses.</span>
+</div>
+
+<div class="eq-block">
+  <strong>Breakeven Win Rate</strong> = |Avg Loss| &divide; (Avg Win + |Avg Loss|) = 1 &divide; (1 + R)
+  <span class="eq-label">The minimum win rate needed to break even, given the payoff ratio.</span>
+</div>
+
+<div class="eq-block">
+  <strong>Edge</strong> = Observed Win Rate &minus; Breakeven Win Rate
+  <span class="eq-label">Positive = profitable strategy. Negative = losing strategy regardless of win rate.</span>
+</div>
+
+<div class="eq-block">
+  <strong>Expected Value</strong> = (WR &times; Avg Win %) + ((1 &minus; WR) &times; Avg Loss %)
+  <span class="eq-label">The expected percentage return per trade.</span>
+</div>
+
+<h3>2.2 Why This Matters</h3>
+
+<div class="finding-box warning">
+  <strong>Central Finding:</strong> 38% of strategies with win rates above 70% carry negative edge and lose money. Win rate is not predictive of profitability without the payoff ratio.
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<!-- 3. KEY RESULTS: THE WIN RATE TRAP -->
+<!-- ═══════════════════════════════════════════════════════════ -->
+<h2><span class="section-num">3</span> The Win Rate Trap</h2>
+
+<p>The following table demonstrates the central finding. Strategies are ordered by win rate (highest first). Note that the highest-WR configurations are <strong>money losers</strong>.</p>
+
+<table id="trap-table">
+  <thead>
+    <tr>
+      <th style="text-align:left">Configuration</th>
+      <th>Win Rate</th>
+      <th>Avg Win</th>
+      <th>Avg Loss</th>
+      <th>R-Multiple</th>
+      <th>Breakeven WR</th>
+      <th>Edge</th>
+      <th>Trades</th>
+      <th>Total P&L</th>
+    </tr>
+  </thead>
+  <tbody id="trap-tbody"></tbody>
+</table>
+<p class="footnote">Strategies with negative edge are highlighted in red. These strategies lose money despite high win rates because their payoff ratio demands even higher win rates to break even.</p>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<!-- 4. CHARTS -->
+<!-- ═══════════════════════════════════════════════════════════ -->
+<h2><span class="section-num">4</span> Visualizations</h2>
+
+<h3>4.1 Win Rate vs. Edge &mdash; The Decorrelation</h3>
+<div class="chart-container">
+  <div class="chart-title">Win Rate (%) vs. Edge (%) across 740 configurations</div>
+  <div class="chart-subtitle">Each dot is one strategy configuration tested over 267 days. If win rate predicted profitability, this would be a tight diagonal line. It isn't.</div>
+  <canvas id="scatter-wr-edge"></canvas>
+</div>
+
+<h3>4.2 Edge Distribution</h3>
+<div class="chart-container">
+  <div class="chart-title">Distribution of Edge across 740 configurations</div>
+  <div class="chart-subtitle">Median edge is -5.2%. Only 36% of configurations show positive edge. Most strategy configurations lose money.</div>
+  <canvas id="hist-edge"></canvas>
+</div>
+
+<h3>4.3 R-Multiple vs. Edge</h3>
+<div class="chart-container">
+  <div class="chart-title">R-Multiple vs. Edge &mdash; The Payoff Ratio Matters</div>
+  <div class="chart-subtitle">Higher R-multiples lower the breakeven bar, creating wider edge. Strategies with R &lt; 0.5 almost never have positive edge.</div>
+  <canvas id="scatter-r-edge"></canvas>
+</div>
+
+<h3>4.4 Cumulative P&L &mdash; Equity Curves</h3>
+<div class="chart-container">
+  <div class="chart-title">Cumulative P&L over 267 days (fixed sizing, no compounding)</div>
+  <div class="chart-subtitle">Green: top edge strategy (HMA 3x25 TP3x SL90%, edge +39%). Blue: top basket (3-strike TP10x SL25%, edge +33%). Red: high-WR loser (TP1.1x SL50%, edge -8.4%).</div>
+  <canvas id="equity-chart"></canvas>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<!-- 5. WALK-FORWARD -->
+<!-- ═══════════════════════════════════════════════════════════ -->
+<h2><span class="section-num">5</span> Walk-Forward Temporal Stability</h2>
+
+<p>To assess whether the edge is stable or an artifact of curve-fitting, we partition the 267 days into four non-overlapping quarterly windows (~67 days each) and compute edge independently in each window. Coefficient of variation (CV) below 0.10 indicates temporal stability.</p>
+
+<div class="chart-container">
+  <div class="chart-title">Edge by Quarter &mdash; Walk-Forward Analysis</div>
+  <div class="chart-subtitle">Each group of bars shows a strategy's edge in Q1 (Mar-Jul '25), Q2 (Jul-Oct '25), Q3 (Oct-Jan '26), Q4 (Jan-Apr '26). Stable strategies show similar-height bars.</div>
+  <canvas id="quarter-chart"></canvas>
+</div>
+
+<table id="quarter-table">
+  <thead>
+    <tr>
+      <th style="text-align:left">Configuration</th>
+      <th>Q1 Edge</th>
+      <th>Q2 Edge</th>
+      <th>Q3 Edge</th>
+      <th>Q4 Edge</th>
+      <th>Mean Edge</th>
+      <th>CV</th>
+      <th>Stable?</th>
+    </tr>
+  </thead>
+  <tbody id="quarter-tbody"></tbody>
+</table>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<!-- 6. MONTHLY BREAKDOWN -->
+<!-- ═══════════════════════════════════════════════════════════ -->
+<h2><span class="section-num">6</span> Monthly Edge Consistency</h2>
+
+<div class="chart-container">
+  <div class="chart-title">Monthly Edge: Top Strategy vs. Negative-Edge Control</div>
+  <div class="chart-subtitle">The top strategy (green) maintains positive edge every single month for 14 months. The negative-edge control (red) loses every single month.</div>
+  <canvas id="monthly-chart"></canvas>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<!-- 7. STATISTICAL SIGNIFICANCE -->
+<!-- ═══════════════════════════════════════════════════════════ -->
+<h2><span class="section-num">7</span> Statistical Significance</h2>
+
+<p>With 740 simultaneous hypothesis tests, we apply <strong>Bonferroni correction</strong> to control the family-wise error rate at &alpha; = 0.05. This requires z &gt; 4.08 for any individual strategy to be declared significant.</p>
+
+<table>
+  <thead>
+    <tr>
+      <th style="text-align:left">Configuration</th>
+      <th>Win Rate</th>
+      <th>BE WR</th>
+      <th>Edge</th>
+      <th>n (trades)</th>
+      <th>z-score</th>
+      <th>Required z</th>
+      <th>Significant?</th>
+    </tr>
+  </thead>
+  <tbody id="sig-tbody"></tbody>
+</table>
+
+<div class="finding-box success">
+  <strong>All top positive-edge configurations survive Bonferroni correction</strong> by an order of magnitude (z-scores of 49&ndash;118 vs. threshold of 4.08). The negative-edge control is also significantly negative (z = -14.5), confirming the framework detects both real edge and real anti-edge.
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<!-- 8. SAMPLE TRADES -->
+<!-- ═══════════════════════════════════════════════════════════ -->
+<h2><span class="section-num">8</span> Sample Trades &mdash; April 1, 2025</h2>
+
+<p>Below are the actual trades for the top configuration (HMA 3x25, ITM5, TP3x, SL90%) on a single day. All prices are after friction and slippage.</p>
+
+<div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;overflow:hidden;margin:16px 0">
+  <div class="trade-row header">
+    <span>Entry</span><span>Exit</span><span>Contract</span><span>Qty</span><span>Entry $</span><span>Exit $</span><span>P&L %</span>
+  </div>
+  <div id="sample-trades"></div>
+</div>
+<p class="footnote">Note: Friction model applied. Entry at $21.21 with raw exit at $17.30 would be -18.4% without friction; the reported -20.0% includes half-spread + commission + slippage.</p>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<!-- 9. DATA EXPLORER -->
+<!-- ═══════════════════════════════════════════════════════════ -->
+<h2><span class="section-num">9</span> Full Data Explorer</h2>
+
+<p>All 740 configurations, sortable and searchable. Click any column header to sort. Download the full dataset above for independent analysis.</p>
+
+<div id="data-explorer">
+  <input type="text" id="search-input" placeholder="Filter configs... (e.g. 'basket', 'hma3x25', 'tp10x')" oninput="filterTable()">
+  <div style="margin:8px 0;color:var(--text2);font-size:0.85em" id="filter-count"></div>
+  <div style="max-height:600px;overflow-y:auto">
+    <table id="explorer-table">
+      <thead>
+        <tr>
+          <th style="text-align:left;cursor:pointer" onclick="sortExplorer('id')">#</th>
+          <th style="text-align:left;cursor:pointer;min-width:200px" onclick="sortExplorer('id')">Config</th>
+          <th style="cursor:pointer" onclick="sortExplorer('edge')">Edge %</th>
+          <th style="cursor:pointer" onclick="sortExplorer('rMult')">R-Mult</th>
+          <th style="cursor:pointer" onclick="sortExplorer('ev')">EV %</th>
+          <th style="cursor:pointer" onclick="sortExplorer('wr')">WR %</th>
+          <th style="cursor:pointer" onclick="sortExplorer('beWR')">BE WR %</th>
+          <th style="cursor:pointer" onclick="sortExplorer('trades')">Trades</th>
+          <th style="cursor:pointer" onclick="sortExplorer('pnl')">Total P&L</th>
+          <th style="cursor:pointer" onclick="sortExplorer('avgWin')">Avg Win</th>
+          <th style="cursor:pointer" onclick="sortExplorer('avgLoss')">Avg Loss</th>
+          <th>Green Days</th>
+        </tr>
+      </thead>
+      <tbody id="explorer-tbody"></tbody>
+    </table>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<!-- 10. DISCUSSION & LIMITATIONS -->
+<!-- ═══════════════════════════════════════════════════════════ -->
+<h2><span class="section-num">10</span> Discussion &amp; Limitations</h2>
+
+<h3>10.1 Why Composite Scores Fail</h3>
+<p>The composite score previously used was: <code>Score = (WR &times; 40) + (clamp(Sharpe,0,1) &times; 30) + (AvgPnl&gt;0 ? 20 : 0) + (WorstDay&gt;-500 ? 10 : 0)</code>. This formula weights win rate at 40% without reference to payoff structure, clamps Sharpe at 1.0 (non-discriminating for high-frequency strategies), and uses binary P&L thresholds with cliff effects. The edge framework replaces all four components with a single metric that directly answers: <em>"Does this strategy win often enough, given its payoff ratio, to make money?"</em></p>
+
+<h3>10.2 Limitations</h3>
+<div class="finding-box warning">
+  <strong>In-sample optimization.</strong> All 740 configurations were designed with knowledge of the full 267-day sample. A true out-of-sample test requires a holdout period not seen during strategy development. The walk-forward quarterly analysis partially mitigates this concern but does not fully resolve it.
+</div>
+
+<p><strong>Non-independence of trades.</strong> The z-test assumes independent observations. Intraday trades on the same underlying share market microstructure. The effective sample size may be smaller than the nominal trade count. Clustering standard errors by trading day would provide more conservative inference.</p>
+
+<p><strong>Single underlying.</strong> All results are on SPX 0DTE options. Generalizability to other underlyings remains untested.</p>
+
+<p><strong>Fill model assumptions.</strong> While more realistic than unconstrained backtesting (participation-rate cap, price-proportional spreads, order-type slippage), the model still assumes fills at bar-level prices rather than tick-level order book simulation.</p>
+
+<h3>10.3 Practitioner Implications</h3>
+<ol style="margin:12px 0 12px 24px;color:var(--text)">
+  <li style="margin:8px 0"><strong>Never evaluate by win rate alone.</strong> Always compute the breakeven win rate. A "70% WR" may need 83% to break even.</li>
+  <li style="margin:8px 0"><strong>R-multiples above 2.0 create safety margin.</strong> With R=2, breakeven is 33%. Even significant signal degradation from 60% to 45% preserves profitability.</li>
+  <li style="margin:8px 0"><strong>Fixed sizing isolates signal quality.</strong> Edge is computed in percentage terms, not dollars. Size optimization is a separate problem to solve only after edge is confirmed.</li>
+</ol>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<!-- REFERENCES -->
+<!-- ═══════════════════════════════════════════════════════════ -->
+<h2><span class="section-num">11</span> References</h2>
+<ol class="ref">
+  <li>Kelly, J.L. (1956). A new interpretation of information rate. <em>Bell System Technical Journal</em>, 35(4), 917&ndash;926.</li>
+  <li>Tharp, V.K. (2006). <em>Trade Your Way to Financial Freedom</em> (2nd ed.). McGraw-Hill.</li>
+  <li>Israelov, R., &amp; Nielsen, L.N. (2015). Covered calls uncovered. <em>Financial Analysts Journal</em>, 71(6), 44&ndash;57.</li>
+  <li>Holm, S. (1979). A simple sequentially rejective multiple test procedure. <em>Scandinavian Journal of Statistics</em>, 6(2), 65&ndash;70.</li>
+  <li>Andersen, T.G., Bondarenko, O., &amp; Gonzalez-Perez, M.T. (2017). Uncovering the skewness news impact curve. <em>Journal of Financial Economics</em>, 126(2), 232&ndash;250.</li>
+</ol>
+
+<div style="text-align:center;margin:60px 0 40px;color:var(--text2);font-size:0.9em">
+  <p>Generated April 2026 &bull; All data available for download above</p>
+  <p>Replay system: SPXer &bull; Data sources: ThetaData (options), Polygon (SPX underlying)</p>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<!-- DATA + SCRIPTS -->
+<!-- ═══════════════════════════════════════════════════════════ -->
+<script>
+// ── Embedded Data ──────────────────────────────────────────
+let DATA = null;
+let explorerSort = { col: 'edge', dir: -1 };
+
+async function loadData() {
+  // Data will be injected by the build step or fetched
+  try {
+    const resp = await fetch('/replay/api/sweep?limit=5000&minDays=267');
+    const json = await resp.json();
+    DATA = { configs: json.rows.map(r => ({
+      id: r.configId, wr: +(r.winRate*100).toFixed(1), edge: +((r.edge||0)*100).toFixed(1),
+      rMult: +(r.rMultiple||0).toFixed(3), ev: +(r.ev||0).toFixed(2),
+      beWR: +((r.breakEvenWR||0)*100).toFixed(1), trades: r.trades,
+      pnl: Math.round(r.totalPnl), avgWin: +(r.avgWinPct||0).toFixed(1),
+      avgLoss: +(r.avgLossPct||0).toFixed(1), days: r.days, profitDays: r.profitDays||0,
+      worstDay: Math.round(r.worstDay||0),
+    }))};
+  } catch(e) {
+    // Use inline data as fallback
+    DATA = INLINE_DATA;
+  }
+  render();
+}
+
+// Inline data fallback (populated at build time or hardcoded)
+const INLINE_DATA = PLACEHOLDER_DATA;
+
+// ── Rendering ──────────────────────────────────────────────
+function render() {
+  if (!DATA) return;
+  const C = DATA.configs;
+  renderStats(C);
+  renderTrapTable(C);
+  renderScatterWREdge(C);
+  renderHistogram(C);
+  renderScatterREdge(C);
+  renderSignificance(C);
+  renderExplorer(C);
+}
+
+function fmtMoney(v) {
+  if (Math.abs(v) >= 1e6) return (v < 0 ? '-' : '') + '$' + (Math.abs(v)/1e6).toFixed(2) + 'M';
+  if (Math.abs(v) >= 1e3) return (v < 0 ? '-' : '') + '$' + (Math.abs(v)/1e3).toFixed(0) + 'K';
+  return '$' + v.toFixed(0);
+}
+
+function renderStats(C) {
+  const totalTrades = C.reduce((s,c) => s + c.trades, 0);
+  const posEdge = C.filter(c => c.edge > 0).length;
+  const grid = document.getElementById('stat-grid');
+  grid.innerHTML = [
+    { v: '267', l: 'Trading Days', cls: 'accent' },
+    { v: '740', l: 'Strategy Configs', cls: 'accent' },
+    { v: (totalTrades/1e6).toFixed(2) + 'M', l: 'Total Trades', cls: 'accent' },
+    { v: posEdge, l: 'Positive Edge (' + (posEdge*100/C.length).toFixed(0) + '%)', cls: 'green' },
+    { v: C.length - posEdge, l: 'Negative Edge (' + ((C.length-posEdge)*100/C.length).toFixed(0) + '%)', cls: 'red' },
+    { v: '+' + Math.max(...C.map(c=>c.edge)).toFixed(1) + '%', l: 'Best Edge', cls: 'green' },
+  ].map(s => `<div class="stat-card ${s.cls}"><div class="value">${s.v}</div><div class="label">${s.l}</div></div>`).join('');
+}
+
+function renderTrapTable(C) {
+  // Pick specific examples that show the trap
+  const examples = [
+    C.find(c => c.id.includes('tp11x-sl50') && c.id.includes('itm5') && !c.id.includes('sl45')),
+    C.find(c => c.id.includes('tp11x-sl50') && c.id.includes('atm') && !c.id.includes('sl45')),
+    C.find(c => c.id === 'spx-hma3x25-itm5-tp115x-sl25-5m-25c-$15000'),
+    C.find(c => c.id === 'spx-hma3x25-itm5-tp3x-sl90'),
+    C.find(c => c.id === 'spx-hma3x12-itm5-basket-3strike-tp10x-sl25-3m-15c-$10000'),
+  ].filter(Boolean).sort((a,b) => b.wr - a.wr);
+
+  document.getElementById('trap-tbody').innerHTML = examples.map(c => {
+    const eClass = c.edge > 0 ? 'pos' : 'neg';
+    const rowStyle = c.edge < 0 ? 'background:rgba(248,81,73,0.08)' : '';
+    return `<tr style="${rowStyle}">
+      <td style="text-align:left;font-size:0.82em">${c.id}</td>
+      <td><strong>${c.wr}%</strong></td>
+      <td class="pos">+${c.avgWin}%</td>
+      <td class="neg">${c.avgLoss}%</td>
+      <td>${c.rMult.toFixed(2)}</td>
+      <td class="muted">${c.beWR}%</td>
+      <td class="${eClass}"><strong>${c.edge > 0 ? '+' : ''}${c.edge}%</strong></td>
+      <td>${c.trades.toLocaleString()}</td>
+      <td class="${c.pnl >= 0 ? 'pos' : 'neg'}">${fmtMoney(c.pnl)}</td>
+    </tr>`;
+  }).join('');
+}
+
+// ── Charts ─────────────────────────────────────────────────
+function renderScatterWREdge(C) {
+  const ctx = document.getElementById('scatter-wr-edge').getContext('2d');
+  new Chart(ctx, {
+    type: 'scatter',
+    data: {
+      datasets: [{
+        label: 'Positive Edge',
+        data: C.filter(c=>c.edge>0).map(c=>({x:c.wr, y:c.edge})),
+        backgroundColor: 'rgba(63,185,80,0.6)', pointRadius: 4,
+      },{
+        label: 'Negative Edge',
+        data: C.filter(c=>c.edge<=0).map(c=>({x:c.wr, y:c.edge})),
+        backgroundColor: 'rgba(248,81,73,0.5)', pointRadius: 4,
+      },{
+        label: 'Zero Edge Line',
+        data: [{x:0,y:0},{x:100,y:0}],
+        type: 'line', borderColor: '#555', borderDash: [5,5], pointRadius: 0, borderWidth: 1,
+      }]
+    },
+    options: {
+      responsive: true,
+      plugins: { legend: { labels: { color: '#8b949e' } } },
+      scales: {
+        x: { title: { display: true, text: 'Win Rate (%)', color: '#8b949e' }, ticks: { color: '#8b949e' }, grid: { color: '#21262d' } },
+        y: { title: { display: true, text: 'Edge (%)', color: '#8b949e' }, ticks: { color: '#8b949e' }, grid: { color: '#21262d' } },
+      }
+    }
+  });
+}
+
+function renderHistogram(C) {
+  const bins = [];
+  for (let b = -50; b < 45; b += 5) bins.push(b);
+  const counts = bins.map(b => C.filter(c => c.edge >= b && c.edge < b+5).length);
+
+  const ctx = document.getElementById('hist-edge').getContext('2d');
+  new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: bins.map(b => b + '%'),
+      datasets: [{
+        data: counts,
+        backgroundColor: bins.map(b => b >= 0 ? 'rgba(63,185,80,0.7)' : 'rgba(248,81,73,0.5)'),
+        borderWidth: 0,
+      }]
+    },
+    options: {
+      responsive: true,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { title: { display: true, text: 'Edge (%)', color: '#8b949e' }, ticks: { color: '#8b949e' }, grid: { display: false } },
+        y: { title: { display: true, text: 'Number of Configurations', color: '#8b949e' }, ticks: { color: '#8b949e' }, grid: { color: '#21262d' } },
+      }
+    }
+  });
+}
+
+function renderScatterREdge(C) {
+  const valid = C.filter(c => c.rMult > 0 && c.rMult < 10);
+  const ctx = document.getElementById('scatter-r-edge').getContext('2d');
+  new Chart(ctx, {
+    type: 'scatter',
+    data: {
+      datasets: [{
+        label: 'Positive Edge',
+        data: valid.filter(c=>c.edge>0).map(c=>({x:c.rMult, y:c.edge})),
+        backgroundColor: 'rgba(63,185,80,0.6)', pointRadius: 4,
+      },{
+        label: 'Negative Edge',
+        data: valid.filter(c=>c.edge<=0).map(c=>({x:c.rMult, y:c.edge})),
+        backgroundColor: 'rgba(248,81,73,0.5)', pointRadius: 4,
+      }]
+    },
+    options: {
+      responsive: true,
+      plugins: { legend: { labels: { color: '#8b949e' } } },
+      scales: {
+        x: { title: { display: true, text: 'R-Multiple', color: '#8b949e' }, ticks: { color: '#8b949e' }, grid: { color: '#21262d' }, min: 0, max: 5 },
+        y: { title: { display: true, text: 'Edge (%)', color: '#8b949e' }, ticks: { color: '#8b949e' }, grid: { color: '#21262d' } },
+      }
+    }
+  });
+}
+
+function renderSignificance(C) {
+  const configs = [
+    { id: 'spx-hma3x25-itm5-tp3x-sl90', label: 'HMA 3x25 ITM5 TP3x SL90%' },
+    { id: 'spx-hma3x19-undhma-otm0-tp25x-sl70', label: 'HMA 3x19 UndHMA TP2.5x SL70%' },
+    { id: 'spx-hma3x12-itm5-basket-3strike-tp10x-sl25-3m-15c-$10000', label: 'Basket TP10x SL25% (AGG)' },
+    { id: 'spx-hma3x12-itm5-basket-3strike-tp125x-sl25-3m-15c-$10000', label: 'Basket TP1.25x SL25% (AGG)' },
+    { id: 'spx-sweep-tpsl-tp20-sl80', label: 'Sweep TP2x SL80%' },
+    { id: 'spx-hma3x15-itm5-tp11x-sl50-3m-25c-$30000', label: 'TP1.1x SL50% (negative control)' },
+  ];
+
+  const tbody = document.getElementById('sig-tbody');
+  tbody.innerHTML = configs.map(cfg => {
+    const c = C.find(r => r.id === cfg.id);
+    if (!c) return '';
+    const be = c.beWR / 100;
+    const wr = c.wr / 100;
+    const n = c.trades;
+    const z = be > 0 && be < 1 ? (wr - be) / Math.sqrt(be * (1-be) / n) : 0;
+    const sig = Math.abs(z) > 4.08;
+    const zClass = z > 0 ? 'pos' : 'neg';
+    return `<tr>
+      <td style="text-align:left">${cfg.label}</td>
+      <td>${c.wr}%</td>
+      <td class="muted">${c.beWR}%</td>
+      <td class="${c.edge>0?'pos':'neg'}">${c.edge>0?'+':''}${c.edge}%</td>
+      <td>${n.toLocaleString()}</td>
+      <td class="${zClass}"><strong>${z.toFixed(1)}</strong></td>
+      <td class="muted">4.08</td>
+      <td class="${sig?'pos':'neg'}"><strong>${sig?'YES':'no'}</strong></td>
+    </tr>`;
+  }).join('');
+}
+
+// ── Data Explorer ──────────────────────────────────────────
+let explorerData = [];
+
+function renderExplorer(C) {
+  explorerData = [...C];
+  sortAndRenderExplorer();
+}
+
+function sortExplorer(col) {
+  if (explorerSort.col === col) explorerSort.dir *= -1;
+  else { explorerSort.col = col; explorerSort.dir = -1; }
+  sortAndRenderExplorer();
+}
+
+function sortAndRenderExplorer() {
+  const col = explorerSort.col;
+  const dir = explorerSort.dir;
+  const filter = (document.getElementById('search-input')?.value || '').toLowerCase();
+  let filtered = explorerData.filter(c => !filter || c.id.toLowerCase().includes(filter));
+  filtered.sort((a,b) => {
+    const av = typeof a[col] === 'string' ? a[col] : (a[col]||0);
+    const bv = typeof b[col] === 'string' ? b[col] : (b[col]||0);
+    return av < bv ? dir : av > bv ? -dir : 0;
+  });
+  document.getElementById('filter-count').textContent = `Showing ${filtered.length} of ${explorerData.length} configs (sorted by ${col} ${dir>0?'ASC':'DESC'})`;
+  document.getElementById('explorer-tbody').innerHTML = filtered.slice(0, 200).map((c,i) => {
+    const ec = c.edge > 0 ? 'pos' : c.edge < 0 ? 'neg' : '';
+    return `<tr>
+      <td style="text-align:left;color:var(--text2)">${i+1}</td>
+      <td style="text-align:left;font-size:0.82em">${c.id}</td>
+      <td class="${ec}"><strong>${c.edge>0?'+':''}${c.edge}%</strong></td>
+      <td>${c.rMult.toFixed(2)}</td>
+      <td class="${c.ev>0?'pos':'neg'}">${c.ev>0?'+':''}${c.ev}%</td>
+      <td>${c.wr}%</td>
+      <td class="muted">${c.beWR}%</td>
+      <td>${c.trades.toLocaleString()}</td>
+      <td class="${c.pnl>=0?'pos':'neg'}">${fmtMoney(c.pnl)}</td>
+      <td class="pos">+${c.avgWin}%</td>
+      <td class="neg">${c.avgLoss}%</td>
+      <td>${c.profitDays}/${c.days}</td>
+    </tr>`;
+  }).join('');
+}
+
+function filterTable() { sortAndRenderExplorer(); }
+
+// ── Downloads ──────────────────────────────────────────────
+function downloadJSON() {
+  const blob = new Blob([JSON.stringify(DATA.configs, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+  a.download = 'edge-framework-740-configs.json'; a.click();
+}
+
+function downloadCSV() {
+  const headers = ['configId','edge%','rMultiple','ev%','winRate%','breakevenWR%','trades','totalPnl','avgWin%','avgLoss%','days','profitDays'];
+  const rows = DATA.configs.map(c => [c.id,c.edge,c.rMult,c.ev,c.wr,c.beWR,c.trades,c.pnl,c.avgWin,c.avgLoss,c.days,c.profitDays].join(','));
+  const csv = [headers.join(','), ...rows].join('\n');
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+  a.download = 'edge-framework-740-configs.csv'; a.click();
+}
+
+function downloadQuarters() {
+  // Quarters data embedded from the API
+  const csv = 'configId,quarter,edge%,rMultiple,winRate%,trades\nData available via /replay/api/sweep endpoint';
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+  a.download = 'edge-framework-quarters.csv'; a.click();
+}
+
+// ── Initialize ─────────────────────────────────────────────
+const PLACEHOLDER_DATA = { configs: [] };
+
+// Try API first, then fall back to inline
+document.addEventListener('DOMContentLoaded', async () => {
+  await loadData();
+  // Render charts that need hardcoded data
+  renderHardcodedCharts();
+});
+
+function renderHardcodedCharts() {
+  // Equity curves (hardcoded from DB query)
+  renderEquityCurve();
+  // Quarters (hardcoded)
+  renderQuarterChart();
+  // Monthly (hardcoded)
+  renderMonthlyChart();
+  // Sample trades (hardcoded)
+  renderSampleTrades();
+}
+
+function renderEquityCurve() {
+  // Fetch daily P&L from API
+  Promise.all([
+    fetch('/replay/api/sweep/spx-hma3x25-itm5-tp3x-sl90/daily').then(r=>r.json()).catch(()=>null),
+    fetch('/replay/api/sweep/spx-hma3x12-itm5-basket-3strike-tp10x-sl25-3m-15c-$10000/daily').then(r=>r.json()).catch(()=>null),
+    fetch('/replay/api/sweep/spx-hma3x15-itm5-tp11x-sl50-3m-25c-$30000/daily').then(r=>r.json()).catch(()=>null),
+  ]).then(([top, basket, loser]) => {
+    const datasets = [];
+    function buildCum(data, label, color) {
+      if (!data?.rows) return;
+      let cum = 0;
+      const points = data.rows.map(r => { cum += r.pnl; return { x: r.date, y: Math.round(cum) }; });
+      datasets.push({ label, data: points, borderColor: color, backgroundColor: 'transparent', borderWidth: 2, pointRadius: 0, tension: 0.1 });
+    }
+    buildCum(top, 'HMA 3x25 TP3x SL90% (edge +39%)', '#3fb950');
+    buildCum(basket, 'Basket 3-strike TP10x (edge +33%)', '#58a6ff');
+    buildCum(loser, 'TP1.1x SL50% (edge -8.4%)', '#f85149');
+
+    if (datasets.length === 0) return;
+
+    const ctx = document.getElementById('equity-chart').getContext('2d');
+    new Chart(ctx, {
+      type: 'line',
+      data: { datasets },
+      options: {
+        responsive: true,
+        plugins: { legend: { labels: { color: '#8b949e' } } },
+        scales: {
+          x: { type: 'category', ticks: { color: '#8b949e', maxTicksLimit: 12 }, grid: { color: '#21262d' } },
+          y: { title: { display: true, text: 'Cumulative P&L ($)', color: '#8b949e' }, ticks: { color: '#8b949e', callback: v => fmtMoney(v) }, grid: { color: '#21262d' } },
+        }
+      }
+    });
+  });
+}
+
+function renderQuarterChart() {
+  const qData = {
+    'HMA3x25 TP3x': [40.8, 41.0, 37.8, 36.8],
+    'HMA3x19 TP2.5x': [40.1, 35.7, 38.5, 37.8],
+    'Sweep TP2x': [35.5, 33.8, 36.7, 35.3],
+    'Basket TP10x': [35.7, 28.8, 32.0, 36.8],
+    'Basket TP1.25x': [27.5, 20.6, 23.9, 27.0],
+    'TP1.1x SL50% (loser)': [-9.6, -6.9, -8.8, -8.2],
+  };
+  const colors = ['#3fb950','#58a6ff','#bc8cff','#d29922','#79c0ff','#f85149'];
+
+  const ctx = document.getElementById('quarter-chart').getContext('2d');
+  new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: ['Q1 (Mar-Jul 25)', 'Q2 (Jul-Oct 25)', 'Q3 (Oct-Jan 26)', 'Q4 (Jan-Apr 26)'],
+      datasets: Object.entries(qData).map(([label, data], i) => ({
+        label, data, backgroundColor: colors[i] + '99', borderColor: colors[i], borderWidth: 1,
+      }))
+    },
+    options: {
+      responsive: true,
+      plugins: { legend: { labels: { color: '#8b949e' } } },
+      scales: {
+        x: { ticks: { color: '#8b949e' }, grid: { display: false } },
+        y: { title: { display: true, text: 'Edge (%)', color: '#8b949e' }, ticks: { color: '#8b949e' }, grid: { color: '#21262d' } },
+      }
+    }
+  });
+
+  // Table
+  const tbody = document.getElementById('quarter-tbody');
+  tbody.innerHTML = Object.entries(qData).map(([label, qs]) => {
+    const mean = qs.reduce((s,v)=>s+v,0)/qs.length;
+    const std = Math.sqrt(qs.reduce((s,v)=>s+(v-mean)**2,0)/qs.length);
+    const cv = Math.abs(mean) > 0 ? (std/Math.abs(mean)).toFixed(3) : '---';
+    const stable = parseFloat(cv) < 0.10;
+    const neg = mean < 0;
+    return `<tr${neg?' style="background:rgba(248,81,73,0.08)"':''}>
+      <td style="text-align:left">${label}</td>
+      ${qs.map(q => `<td class="${q>0?'pos':'neg'}">${q>0?'+':''}${q.toFixed(1)}%</td>`).join('')}
+      <td class="${mean>0?'pos':'neg'}"><strong>${mean>0?'+':''}${mean.toFixed(1)}%</strong></td>
+      <td>${cv}</td>
+      <td class="${stable?'pos':'neg'}">${stable?'YES':'no'}</td>
+    </tr>`;
+  }).join('');
+}
+
+function renderMonthlyChart() {
+  const months = ['2025-03','2025-04','2025-05','2025-06','2025-07','2025-08','2025-09','2025-10','2025-11','2025-12','2026-01','2026-02','2026-03','2026-04'];
+  const topEdge = [29.4,39.3,43.4,39.7,42.7,36.5,43.4,38.8,43.0,34.0,35.5,40.9,32.5,41.3];
+  const loserEdge = [-10.0,-10.9,-6.8,-9.1,-8.3,-5.2,-12.2,-7.3,-10.8,-9.4,-7.1,-9.7,-7.9,-7.5];
+
+  const ctx = document.getElementById('monthly-chart').getContext('2d');
+  new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: months,
+      datasets: [
+        { label: 'HMA 3x25 TP3x SL90% (top)', data: topEdge, backgroundColor: 'rgba(63,185,80,0.7)', borderColor: '#3fb950', borderWidth: 1 },
+        { label: 'TP1.1x SL50% (loser)', data: loserEdge, backgroundColor: 'rgba(248,81,73,0.5)', borderColor: '#f85149', borderWidth: 1 },
+      ]
+    },
+    options: {
+      responsive: true,
+      plugins: { legend: { labels: { color: '#8b949e' } } },
+      scales: {
+        x: { ticks: { color: '#8b949e' }, grid: { display: false } },
+        y: { title: { display: true, text: 'Edge (%)', color: '#8b949e' }, ticks: { color: '#8b949e' }, grid: { color: '#21262d' } },
+      }
+    }
+  });
+}
+
+function renderSampleTrades() {
+  const trades = [
+    { entry: '09:50', exit: '09:55', sym: 'SPXW...C05605', qty: 4, ep: 21.21, xp: 17.30, pnl: -20.0, reason: 'signal_reversal' },
+    { entry: '09:55', exit: '10:25', sym: 'SPXW...P05600', qty: 4, ep: 22.41, xp: 32.00, pnl: 40.0, reason: 'signal_reversal' },
+    { entry: '10:25', exit: '11:16', sym: 'SPXW...C05580', qty: 5, ep: 19.51, xp: 59.10, pnl: 199.9, reason: 'take_profit' },
+    { entry: '11:25', exit: '12:05', sym: 'SPXW...P05640', qty: 5, ep: 17.01, xp: 14.00, pnl: -19.3, reason: 'signal_reversal' },
+    { entry: '12:05', exit: '12:10', sym: 'SPXW...C05640', qty: 6, ep: 14.91, xp: 16.50, pnl: 8.5, reason: 'signal_reversal' },
+    { entry: '12:10', exit: '12:15', sym: 'SPXW...P05645', qty: 7, ep: 13.54, xp: 13.50, pnl: -2.3, reason: 'signal_reversal' },
+    { entry: '12:15', exit: '12:20', sym: 'SPXW...C05645', qty: 7, ep: 13.18, xp: 15.91, pnl: 18.3, reason: 'signal_reversal' },
+    { entry: '12:20', exit: '12:50', sym: 'SPXW...P05650', qty: 7, ep: 13.01, xp: 27.47, pnl: 106.9, reason: 'signal_reversal' },
+    { entry: '12:50', exit: '13:15', sym: 'SPXW...C05625', qty: 7, ep: 14.01, xp: 13.00, pnl: -9.1, reason: 'signal_reversal' },
+    { entry: '13:15', exit: '13:35', sym: 'SPXW...P05630', qty: 8, ep: 11.82, xp: 20.20, pnl: 67.6, reason: 'signal_reversal' },
+    { entry: '13:35', exit: '13:55', sym: 'SPXW...C05615', qty: 9, ep: 11.02, xp: 9.45, pnl: -15.9, reason: 'signal_reversal' },
+    { entry: '13:55', exit: '14:40', sym: 'SPXW...P05615', qty: 8, ep: 11.22, xp: 26.55, pnl: 132.0, reason: 'signal_reversal' },
+    { entry: '14:40', exit: '15:35', sym: 'SPXW...C05590', qty: 10, ep: 9.52, xp: 28.90, pnl: 200.6, reason: 'take_profit' },
+  ];
+
+  document.getElementById('sample-trades').innerHTML = trades.map(t => {
+    const pClass = t.pnl >= 0 ? 'pos' : 'neg';
+    return `<div class="trade-row">
+      <span>${t.entry}</span>
+      <span>${t.exit}</span>
+      <span>${t.sym} (${t.reason === 'take_profit' ? 'TP' : 'REV'})</span>
+      <span>${t.qty}</span>
+      <span>$${t.ep.toFixed(2)}</span>
+      <span>$${t.xp.toFixed(2)}</span>
+      <span class="${pClass}">${t.pnl >= 0 ? '+' : ''}${t.pnl.toFixed(1)}%</span>
+    </div>`;
+  }).join('');
+}
+</script>
+</body>
+</html>

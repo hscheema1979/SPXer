@@ -1,33 +1,60 @@
 /**
- * backfill-replay-options.ts — Backfill SPXW option bars from Polygon to replay_bars table ONLY.
+ * backfill-replay-options.ts — Backfill option bars from ThetaData to replay_bars table ONLY.
  *
- * This script fetches clean options data from Polygon API and writes it to replay_bars,
- * leaving the production bars table untouched. Used for reliable backtesting data.
+ * This script fetches clean options data from the local ThetaTerminal (OPRA feed)
+ * and writes it to replay_bars, leaving the production bars table untouched.
+ * ThetaData replaces Polygon for options because Polygon's volume/trade detail
+ * was incomplete for SPXW 0DTE contracts.
  *
  * Usage:
- *   npx tsx scripts/backfill/backfill-replay-options.ts 2026-03-20           # single date
- *   npx tsx scripts/backfill/backfill-replay-options.ts 2026-02-20 2026-03-24  # date range
+ *   npx tsx scripts/backfill/backfill-replay-options.ts 2026-03-20                     # SPX single date
+ *   npx tsx scripts/backfill/backfill-replay-options.ts 2026-02-20 2026-03-24          # SPX range
+ *   npx tsx scripts/backfill/backfill-replay-options.ts 2026-03-20 --profile=ndx-0dte  # NDX single
+ *   npx tsx scripts/backfill/backfill-replay-options.ts 2026-03-20 2026-04-17 --profile=ndx-0dte
  *
- * Rate limits: Polygon paid plan (no rate limit needed)
+ * Profiles supported: spx-0dte (default), ndx-0dte, spy-1dte, qqq-1dte.
+ * The underlying bars (SPX, NDX, SPY, QQQ) must already be in replay_bars —
+ * run scripts/backfill/backfill-worker.ts first for that.
  *
  * Strategy:
- *   - Fetch SPX close from existing replay_bars to determine strike range
- *   - Fetch all option contracts within ±100 points of SPX
- *   - 5-point strike intervals (standard SPXW strikes)
+ *   - Read the profile to resolve {prefix, underlyingDbSymbol, strikeInterval, bandHalfWidth}
+ *   - Fetch underlying close from existing replay_bars to determine strike range
+ *   - Fetch all option contracts within ±band of the underlying close
+ *   - Use profile's strike interval (5 SPXW, 10 NDXP, 1 SPY/QQQ)
  *   - Both calls and puts
  */
 import * as dotenv from 'dotenv';
 dotenv.config();
 import Database from 'better-sqlite3';
 import * as path from 'path';
+import { fetchOptionTimesales } from '../../src/providers/thetadata';
 
 const DB_PATH = path.resolve(__dirname, '../../data/spxer.db');
-const POLYGON_KEY = process.env.POLYGON_API_KEY!;
-const POLYGON_BASE = 'https://api.polygon.io';
 
-if (!POLYGON_KEY) {
-  console.error('POLYGON_API_KEY not set in .env');
-  process.exit(1);
+// ── Profile resolution ────────────────────────────────────────────────────────
+
+interface BackfillTarget {
+  profileId: string;
+  prefix: string;
+  underlyingDbSymbol: string;
+  strikeInterval: number;
+  bandHalfWidthDollars: number;
+}
+
+function resolveTarget(profileId: string | undefined): BackfillTarget {
+  switch (profileId) {
+    case 'ndx-0dte':
+      return { profileId: 'ndx-0dte', prefix: 'NDXP', underlyingDbSymbol: 'NDX', strikeInterval: 10, bandHalfWidthDollars: 500 };
+    case 'spy-1dte':
+      return { profileId: 'spy-1dte', prefix: 'SPY', underlyingDbSymbol: 'SPY', strikeInterval: 1, bandHalfWidthDollars: 10 };
+    case 'qqq-1dte':
+      return { profileId: 'qqq-1dte', prefix: 'QQQ', underlyingDbSymbol: 'QQQ', strikeInterval: 1, bandHalfWidthDollars: 10 };
+    case 'spx-0dte':
+    case undefined:
+      return { profileId: 'spx-0dte', prefix: 'SPXW', underlyingDbSymbol: 'SPX', strikeInterval: 5, bandHalfWidthDollars: 100 };
+    default:
+      throw new Error(`Unknown profile id: ${profileId}. Expected one of: spx-0dte, ndx-0dte, spy-1dte, qqq-1dte.`);
+  }
 }
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -77,71 +104,50 @@ function getTradingDays(from: string, to: string): string[] {
   return days;
 }
 
-// ── Polygon API ───────────────────────────────────────────────────────────────
+// ── ThetaData option fetch (RTH-filtered) ────────────────────────────────────
 
-async function fetchPolygonBars(ticker: string, date: string): Promise<PolygonBar[]> {
-  const url = `${POLYGON_BASE}/v2/aggs/ticker/${ticker}/range/1/minute/${date}/${date}?adjusted=true&sort=asc&limit=50000&apiKey=${POLYGON_KEY}`;
-
-  const res = await fetch(url, {
-    signal: AbortSignal.timeout(30000),
-  });
-
-  if (!res.ok) {
-    throw new Error(`HTTP ${res.status} for ${ticker}`);
-  }
-
-  const data = await res.json() as any;
-  if (data.status === 'ERROR') {
-    throw new Error(data.error || 'Polygon API error');
-  }
-  if (!data.results || data.results.length === 0) {
-    return [];
-  }
+/**
+ * Fetch 1m option OHLC bars from ThetaData, RTH-filtered, shaped like the
+ * original Polygon bar output so the rest of this script is unchanged.
+ */
+async function fetchThetaBars(dbSymbol: string, date: string): Promise<PolygonBar[]> {
+  const raws = await fetchOptionTimesales(dbSymbol, date);
+  if (raws.length === 0) return [];
 
   // Filter to RTH only: 9:30 AM - 4:00 PM ET
   const edt = isDST(date);
   const utcOffset = edt ? 4 : 5;
   const dayStartMs = new Date(date + 'T00:00:00Z').getTime();
-  const rthStartMs = dayStartMs + (9.5 + utcOffset) * 3600000;
-  const rthEndMs = dayStartMs + (16 + utcOffset) * 3600000;
+  const rthStartSec = Math.floor((dayStartMs + (9.5 + utcOffset) * 3600_000) / 1000);
+  const rthEndSec = Math.floor((dayStartMs + (16 + utcOffset) * 3600_000) / 1000);
 
-  // Store timestamps in real UTC (Polygon already returns real UTC milliseconds)
-  return data.results
-    .filter((b: any) => b.t >= rthStartMs && b.t <= rthEndMs)
-    .map((b: any) => ({
-      o: b.o,
-      h: b.h,
-      l: b.l,
-      c: b.c,
-      v: b.v || 0,
-      vw: b.vw || 0,
-      n: b.n || 0,
-      t: Math.floor(b.t / 1000),  // Convert ms to seconds, real UTC
+  return raws
+    .filter((b) => b.ts >= rthStartSec && b.ts <= rthEndSec)
+    .map((b) => ({
+      o: b.open,
+      h: b.high,
+      l: b.low,
+      c: b.close,
+      v: b.volume || 0,
+      vw: 0,
+      n: 0,
+      t: b.ts,
     }));
 }
 
 // ── Symbol construction ───────────────────────────────────────────────────────
 
-function makePolygonOptionTicker(expiry: string, side: 'C' | 'P', strike: number): string {
-  // expiry: "2026-03-19" → "260319"
+function makeDbSymbol(prefix: string, expiry: string, side: 'C' | 'P', strike: number): string {
   const yy = expiry.slice(2, 4);
   const mm = expiry.slice(5, 7);
   const dd = expiry.slice(8, 10);
   const strikeStr = (strike * 1000).toString().padStart(8, '0');
-  return `O:SPXW${yy}${mm}${dd}${side}${strikeStr}`;
-}
-
-function makeDbSymbol(expiry: string, side: 'C' | 'P', strike: number): string {
-  const yy = expiry.slice(2, 4);
-  const mm = expiry.slice(5, 7);
-  const dd = expiry.slice(8, 10);
-  const strikeStr = (strike * 1000).toString().padStart(8, '0');
-  return `SPXW${yy}${mm}${dd}${side}${strikeStr}`;
+  return `${prefix}${yy}${mm}${dd}${side}${strikeStr}`;
 }
 
 // ── SPX range detection ───────────────────────────────────────────────────────
 
-function getSpxRangeForDate(db: Database.Database, date: string): SpxRange | null {
+function getSpxRangeForDate(db: Database.Database, date: string, target: BackfillTarget): SpxRange | null {
   // Query window in real UTC: 9:30 ET → 16:00 ET
   const edt = isDST(date);
   const utcOffset = edt ? 4 : 5;
@@ -151,25 +157,25 @@ function getSpxRangeForDate(db: Database.Database, date: string): SpxRange | nul
   const row = db.prepare(`
     SELECT ts, close
     FROM replay_bars
-    WHERE symbol = 'SPX' AND timeframe = '1m'
+    WHERE symbol = ? AND timeframe = '1m'
       AND ts >= ? AND ts <= ?
     ORDER BY ts DESC
     LIMIT 1
-  `).get(dayStartTs, dayEndTs) as { ts: number; close: number } | undefined;
+  `).get(target.underlyingDbSymbol, dayStartTs, dayEndTs) as { ts: number; close: number } | undefined;
 
   if (!row) {
     return null;
   }
 
   const close = row.close;
-  // Round to nearest 5
-  const baseStrike = Math.round(close / 5) * 5;
+  // Round to nearest strike interval for this profile
+  const baseStrike = Math.round(close / target.strikeInterval) * target.strikeInterval;
 
   return {
     date,
     close,
-    minStrike: baseStrike - 100,
-    maxStrike: baseStrike + 100,
+    minStrike: baseStrike - target.bandHalfWidthDollars,
+    maxStrike: baseStrike + target.bandHalfWidthDollars,
   };
 }
 
@@ -179,9 +185,10 @@ async function backfillDate(
   db: Database.Database,
   date: string,
   spxRange: SpxRange,
+  target: BackfillTarget,
 ): Promise<{ fetched: number; withData: number; totalBars: number; errors: string[] }> {
   const strikes: number[] = [];
-  for (let s = spxRange.minStrike; s <= spxRange.maxStrike; s += 5) {
+  for (let s = spxRange.minStrike; s <= spxRange.maxStrike; s += target.strikeInterval) {
     strikes.push(s);
   }
 
@@ -191,30 +198,27 @@ async function backfillDate(
   let withData = 0;
   const errors: string[] = [];
 
-  // Prepare upsert statement
+  // Prepare upsert statement — options come from ThetaData (OPRA feed)
   const upsert = db.prepare(`
     INSERT INTO replay_bars (symbol, timeframe, ts, open, high, low, close, volume, synthetic, gap_type, indicators, source)
-    VALUES (?, '1m', ?, ?, ?, ?, ?, ?, 0, NULL, '{}', 'polygon')
+    VALUES (?, '1m', ?, ?, ?, ?, ?, ?, 0, NULL, '{}', 'thetadata')
     ON CONFLICT(symbol, timeframe, ts) DO UPDATE SET
       open=excluded.open, high=excluded.high, low=excluded.low,
       close=excluded.close, volume=excluded.volume, synthetic=0,
-      gap_type=NULL, indicators='{}', source='polygon'
+      gap_type=NULL, indicators='{}', source='thetadata'
   `);
 
-  // Check what we already have
+  // Check what we already have (ThetaData-sourced)
   const alreadyHave = db.prepare(`
     SELECT COUNT(*) as cnt FROM replay_bars
-    WHERE symbol = ? AND timeframe = '1m' AND source = 'polygon'
+    WHERE symbol = ? AND timeframe = '1m' AND source = 'thetadata'
   `);
-
-  const dayStartTs = Math.floor(new Date(date + 'T09:30:00').getTime() / 1000);
 
   for (const side of sides) {
     for (const strike of strikes) {
-      const polygonTicker = makePolygonOptionTicker(date, side, strike);
-      const dbSymbol = makeDbSymbol(date, side, strike);
+      const dbSymbol = makeDbSymbol(target.prefix, date, side, strike);
 
-      // Check if we already have Polygon data for this contract
+      // Check if we already have ThetaData for this contract
       const existing = alreadyHave.get(dbSymbol) as any;
       if (existing && existing.cnt > 50) {
         process.stdout.write('.');
@@ -224,7 +228,7 @@ async function backfillDate(
       fetched++;
 
       try {
-        const bars = await fetchPolygonBars(polygonTicker, date);
+        const bars = await fetchThetaBars(dbSymbol, date);
 
         if (bars.length === 0) {
           process.stdout.write('_');
@@ -244,7 +248,7 @@ async function backfillDate(
         totalBars += bars.length;
         process.stdout.write('✓');
       } catch (e: any) {
-        const msg = `${polygonTicker}: ${e.message}`;
+        const msg = `${dbSymbol}: ${e.message}`;
         errors.push(msg);
         process.stdout.write('!');
       }
@@ -257,26 +261,38 @@ async function backfillDate(
 // ── Main ─────────────────────────────────────────────────────────────────────
 
 async function main() {
-  const args = process.argv.slice(2);
-  if (args.length < 1) {
+  const rawArgs = process.argv.slice(2);
+  // Split positional dates from --flags
+  const positional = rawArgs.filter((a) => !a.startsWith('--'));
+  const flags = rawArgs.filter((a) => a.startsWith('--'));
+  const profileFlag = flags.find((f) => f.startsWith('--profile='))?.slice('--profile='.length);
+
+  if (positional.length < 1) {
     console.error(`
 Usage:
-  npx tsx scripts/backfill/backfill-replay-options.ts <date>
-  npx tsx scripts/backfill/backfill-replay-options.ts <start-date> <end-date>
+  npx tsx scripts/backfill/backfill-replay-options.ts <date> [--profile=spx-0dte|ndx-0dte|spy-1dte|qqq-1dte]
+  npx tsx scripts/backfill/backfill-replay-options.ts <start-date> <end-date> [--profile=<id>]
 
-Example:
+Examples:
   npx tsx scripts/backfill/backfill-replay-options.ts 2026-03-20
   npx tsx scripts/backfill/backfill-replay-options.ts 2026-02-20 2026-03-24
+  npx tsx scripts/backfill/backfill-replay-options.ts 2026-04-17 --profile=ndx-0dte
+
+Prereq: the underlying bars (SPX/NDX/SPY/QQQ) must already be in replay_bars
+for each target date. Run backfill-worker.ts first (it fetches from Polygon).
     `);
     process.exit(1);
   }
 
-  const startDate = args[0];
-  const endDate = args[1] || startDate;
+  const target = resolveTarget(profileFlag);
+
+  const startDate = positional[0];
+  const endDate = positional[1] || startDate;
   const dates = getTradingDays(startDate, endDate);
 
   console.log(`\n${'═'.repeat(70)}`);
-  console.log(`  Polygon Options Backfill to replay_bars`);
+  console.log(`  ThetaData Options Backfill to replay_bars`);
+  console.log(`  Profile: ${target.profileId} (${target.prefix} options, ${target.underlyingDbSymbol} underlying)`);
   console.log(`  ${dates.length} trading days: ${startDate} → ${endDate}`);
   console.log(`${'═'.repeat(70)}\n`);
 
@@ -289,17 +305,17 @@ Example:
   const allErrors: string[] = [];
 
   for (const date of dates) {
-    // Get SPX range for this date
-    const spxRange = getSpxRangeForDate(db, date);
+    // Get underlying range for this date
+    const spxRange = getSpxRangeForDate(db, date, target);
 
     if (!spxRange) {
-      console.log(`  ${date}: ⚠️  No SPX data in replay_bars, skipping`);
+      console.log(`  ${date}: ⚠️  No ${target.underlyingDbSymbol} data in replay_bars, skipping`);
       continue;
     }
 
-    console.log(`  ${date}: SPX=${spxRange.close.toFixed(2)} strikes=${spxRange.minStrike}-${spxRange.maxStrike}`);
+    console.log(`  ${date}: ${target.underlyingDbSymbol}=${spxRange.close.toFixed(2)} strikes=${spxRange.minStrike}-${spxRange.maxStrike} step ${target.strikeInterval}`);
 
-    const result = await backfillDate(db, date, spxRange);
+    const result = await backfillDate(db, date, spxRange, target);
 
     totalFetched += result.fetched;
     totalWithData += result.withData;

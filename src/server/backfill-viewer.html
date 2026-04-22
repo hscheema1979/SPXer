@@ -1,0 +1,566 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#0a0a0f">
+<title>SPXer Symbols & Backfill</title>
+<style>
+  :root {
+    --background: #0a0a0f;
+    --foreground: #e0e0e0;
+    --muted: #888;
+    --muted-foreground: #555;
+    --card: #111118;
+    --card-elevated: #0d0d14;
+    --border: #1a1a24;
+    --border-strong: #222;
+    --input: #1a1a24;
+    --primary: #8b8bff;
+    --primary-soft: #a78bfa;
+    --success: #10b981;
+    --destructive: #f43f5e;
+    --info: #3b82f6;
+    --warning: #f59e0b;
+    --radius: 8px;
+    --radius-sm: 6px;
+    --font-sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", "Fira Code", Consolas, monospace;
+  }
+
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    background: var(--background);
+    color: var(--foreground);
+    font-family: var(--font-sans);
+    font-size: 13px;
+    line-height: 1.45;
+    min-height: 100dvh;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .nav-bar {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    padding: 0 12px;
+    background: var(--card-elevated);
+    border-bottom: 1px solid var(--border);
+    font-size: 12px;
+    overflow-x: auto;
+    white-space: nowrap;
+  }
+  .nav-bar::-webkit-scrollbar { height: 0; display: none; }
+  .nav-bar a {
+    color: var(--muted-foreground);
+    text-decoration: none;
+    padding: 10px 14px;
+    border-bottom: 2px solid transparent;
+    transition: color .15s, border-color .15s;
+  }
+  .nav-bar a:hover { color: var(--primary-soft); }
+  .nav-bar a.active { color: var(--primary); border-bottom-color: var(--primary); }
+  .nav-brand { font-weight: 700; font-size: 14px; padding: 10px 14px 10px 4px; color: var(--foreground); }
+
+  .content { max-width: 1200px; margin: 0 auto; padding: 20px; }
+  h1 { font-size: 20px; margin-bottom: 20px; font-weight: 600; }
+
+  /* Cards / Panels */
+  .panel {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px;
+    margin-bottom: 16px;
+  }
+  .panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 12px;
+  }
+  .panel-title { font-size: 14px; font-weight: 600; color: var(--foreground); }
+
+  /* Buttons */
+  .btn {
+    font-family: inherit;
+    font-size: 12px;
+    padding: 6px 14px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    border: 1px solid var(--border-strong);
+    background: var(--card);
+    color: var(--foreground);
+    transition: background .1s, border-color .1s;
+  }
+  .btn:hover { background: var(--card-elevated); border-color: var(--muted-foreground); }
+  .btn-primary { background: var(--primary); color: #000; border-color: var(--primary); font-weight: 600; }
+  .btn-primary:hover { background: var(--primary-soft); }
+  .btn-danger { color: var(--destructive); border-color: var(--destructive); }
+  .btn-danger:hover { background: #f43f5e18; }
+  .btn-sm { padding: 3px 10px; font-size: 11px; }
+
+  /* Symbol grid */
+  .symbol-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 12px;
+  }
+  .symbol-card {
+    background: var(--card-elevated);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 14px;
+    cursor: pointer;
+    transition: border-color .15s;
+    position: relative;
+  }
+  .symbol-card:hover { border-color: var(--primary); }
+  .symbol-card.selected { border-color: var(--primary); box-shadow: 0 0 0 1px var(--primary); }
+  .symbol-card .sym-name { font-size: 15px; font-weight: 700; margin-bottom: 4px; }
+  .symbol-card .sym-meta { font-size: 11px; color: var(--muted); }
+  .symbol-card .sym-badge {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    font-size: 10px;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-weight: 600;
+  }
+  .badge-live { background: #10b98128; color: var(--success); border: 1px solid #10b98144; }
+  .badge-backtest { background: #3b82f618; color: var(--info); border: 1px solid #3b82f644; }
+
+  /* Coverage heatmap */
+  .heatmap { display: flex; flex-wrap: wrap; gap: 2px; margin-top: 10px; }
+  .heatmap-cell {
+    width: 14px; height: 14px; border-radius: 2px;
+    cursor: pointer; position: relative;
+  }
+  .heatmap-cell[title]:hover::after {
+    content: attr(title);
+    position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%);
+    background: #222; color: #eee; padding: 2px 6px; border-radius: 3px;
+    font-size: 10px; white-space: nowrap; z-index: 10;
+  }
+  .heat-complete { background: var(--success); }
+  .heat-partial { background: var(--warning); }
+  .heat-missing { background: var(--destructive); opacity: .7; }
+  .heat-empty { background: var(--border); }
+
+  /* Jobs panel */
+  .jobs-list { max-height: 300px; overflow-y: auto; }
+  .job-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--border);
+    font-size: 12px;
+  }
+  .job-row:last-child { border-bottom: none; }
+  .job-status {
+    padding: 2px 6px; border-radius: 3px; font-size: 10px; font-weight: 600;
+  }
+  .status-running { background: #f59e0b28; color: var(--warning); }
+  .status-completed { background: #10b98128; color: var(--success); }
+  .status-failed { background: #f43f5e28; color: var(--destructive); }
+  .status-cancelled { background: #88888828; color: var(--muted); }
+  .status-pending { background: #3b82f618; color: var(--info); }
+
+  .progress-bar { height: 4px; background: var(--border); border-radius: 2px; flex: 1; min-width: 60px; }
+  .progress-fill { height: 100%; background: var(--primary); border-radius: 2px; transition: width .3s; }
+
+  /* Add Symbol Modal */
+  .modal-overlay {
+    display: none; position: fixed; inset: 0; background: rgba(0,0,0,.7);
+    z-index: 1000; align-items: center; justify-content: center;
+  }
+  .modal-overlay.open { display: flex; }
+  .modal {
+    background: var(--card); border: 1px solid var(--border-strong);
+    border-radius: var(--radius); padding: 24px; min-width: 400px; max-width: 600px;
+    max-height: 80vh; overflow-y: auto;
+  }
+  .modal h2 { font-size: 16px; margin-bottom: 16px; }
+  .modal input, .modal select {
+    width: 100%; padding: 8px 12px; border-radius: var(--radius-sm);
+    border: 1px solid var(--border-strong); background: var(--input);
+    color: var(--foreground); font-family: inherit; font-size: 13px;
+    margin-bottom: 10px;
+  }
+  .modal label { display: block; font-size: 11px; color: var(--muted); margin-bottom: 4px; font-weight: 600; }
+  .modal .field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .modal .warnings { background: #f59e0b12; border: 1px solid #f59e0b44; border-radius: 4px; padding: 8px; margin: 10px 0; font-size: 11px; color: var(--warning); }
+  .modal .btn-row { display: flex; gap: 10px; justify-content: flex-end; margin-top: 16px; }
+
+  .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--border-strong); border-top-color: var(--primary); border-radius: 50%; animation: spin .6s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .empty-state { color: var(--muted); font-size: 12px; text-align: center; padding: 30px; }
+</style>
+</head>
+<body>
+
+<div class="nav-bar">
+  <span class="nav-brand">SPXer</span>
+  <a href="/replay/" data-path="/replay/">Replay</a>
+  <a href="/replay/#live" data-path="/replay/#live">Live</a>
+  <a href="/replay/sweep" data-path="/replay/sweep">Leaderboard</a>
+  <a href="/replay/backfill" data-path="/replay/backfill" class="active">Backfill</a>
+  <a href="/replay/journal" data-path="/replay/journal">📓 Journal</a>
+  <a href="/replay/account" data-path="/replay/account">💰 Account</a>
+</div>
+
+<div class="content">
+  <div class="panel">
+    <div class="panel-header">
+      <span class="panel-title">Instruments</span>
+      <button class="btn btn-primary btn-sm" onclick="openAddModal()">+ Add Symbol</button>
+    </div>
+    <div id="symbols-grid" class="symbol-grid">
+      <div class="empty-state">Loading...</div>
+    </div>
+  </div>
+
+  <div class="panel" id="coverage-panel" style="display:none">
+    <div class="panel-header">
+      <span class="panel-title" id="coverage-title">Coverage</span>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-sm btn-primary" id="backfill-start-btn" onclick="startBackfill()">Start Backfill</button>
+        <button class="btn btn-sm btn-danger" id="delete-profile-btn" onclick="deleteSelectedProfile()">Delete</button>
+      </div>
+    </div>
+    <div id="coverage-summary" style="font-size:12px;color:var(--muted);margin-bottom:10px"></div>
+    <div id="coverage-heatmap" class="heatmap"></div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-header">
+      <span class="panel-title">Backfill Jobs</span>
+      <button class="btn btn-sm" onclick="refreshJobs()">Refresh</button>
+    </div>
+    <div id="jobs-list" class="jobs-list">
+      <div class="empty-state">No jobs</div>
+    </div>
+  </div>
+</div>
+
+<!-- Add Symbol Modal -->
+<div class="modal-overlay" id="add-modal">
+  <div class="modal">
+    <h2>Add Symbol</h2>
+    <label>Ticker</label>
+    <div style="display:flex;gap:8px;margin-bottom:10px">
+      <input id="discover-ticker" placeholder="e.g. AAPL, TSLA, NDX" style="margin:0;flex:1">
+      <button class="btn btn-primary" id="discover-btn" onclick="discoverTicker()">Discover</button>
+    </div>
+    <div id="discover-status" style="font-size:11px;color:var(--muted);margin-bottom:10px"></div>
+    <div id="discover-result" style="display:none">
+      <div id="discover-warnings"></div>
+      <div class="field-row">
+        <div><label>Display Name</label><input id="field-displayName"></div>
+        <div><label>Asset Class</label><input id="field-assetClass" readonly></div>
+      </div>
+      <div class="field-row">
+        <div><label>Option Prefix</label><input id="field-optionPrefix"></div>
+        <div><label>Strike Interval</label><input id="field-strikeInterval" type="number" step="0.5"></div>
+      </div>
+      <div class="field-row">
+        <div><label>Band Half-Width ($)</label><input id="field-bandHalfWidthDollars" type="number"></div>
+        <div><label>Tier</label><select id="field-tier"><option value="1">1 (Equity/ETF)</option><option value="2">2 (Index)</option></select></div>
+      </div>
+      <div class="field-row">
+        <div><label>Expiry Cadences</label><input id="field-expiryCadences" placeholder="daily,weekly,monthly"></div>
+        <div><label>Avg Daily Range ($)</label><input id="field-avgDailyRange" type="number" step="0.01" readonly></div>
+      </div>
+      <div class="btn-row">
+        <button class="btn" onclick="closeAddModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="confirmAdd()">Add Profile</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const API = '/replay/api';
+let profiles = [];
+let selectedProfileId = null;
+let discoveredProfile = null;
+let jobPollTimer = null;
+
+// ── Symbols ──────────────────────────────────────────────────────────────
+
+async function loadSymbols() {
+  try {
+    const r = await fetch(`${API}/symbols`);
+    const data = await r.json();
+    profiles = data.profiles || [];
+    renderSymbols();
+  } catch (e) {
+    document.getElementById('symbols-grid').innerHTML = `<div class="empty-state">Error loading profiles</div>`;
+  }
+}
+
+function renderSymbols() {
+  const grid = document.getElementById('symbols-grid');
+  if (!profiles.length) {
+    grid.innerHTML = `<div class="empty-state">No instruments configured. Click "+ Add Symbol" to get started.</div>`;
+    return;
+  }
+  grid.innerHTML = profiles.map(p => `
+    <div class="symbol-card ${p.id === selectedProfileId ? 'selected' : ''}" onclick="selectProfile('${p.id}')">
+      <div class="sym-name">${p.underlyingSymbol}</div>
+      <div class="sym-meta">${p.displayName} &middot; ${p.assetClass} &middot; $${p.strikeInterval} strikes &middot; band &plusmn;$${p.bandHalfWidthDollars}</div>
+      <div class="sym-meta" style="margin-top:2px">${(p.expiryCadences || []).join(', ')}</div>
+      <span class="sym-badge ${p.canGoLive ? 'badge-live' : 'badge-backtest'}">${p.canGoLive ? 'LIVE' : 'BACKTEST'}</span>
+    </div>
+  `).join('');
+}
+
+async function selectProfile(id) {
+  selectedProfileId = id;
+  renderSymbols();
+  document.getElementById('coverage-panel').style.display = '';
+  const profile = profiles.find(p => p.id === id);
+  document.getElementById('coverage-title').textContent = `Coverage: ${profile?.underlyingSymbol || id}`;
+  document.getElementById('delete-profile-btn').style.display = profile?.canGoLive ? 'none' : '';
+  await loadCoverage(id);
+}
+
+async function loadCoverage(id) {
+  const heatmap = document.getElementById('coverage-heatmap');
+  const summary = document.getElementById('coverage-summary');
+  heatmap.innerHTML = '<span class="spinner"></span>';
+  summary.textContent = '';
+  try {
+    const r = await fetch(`${API}/symbols/${id}/coverage`);
+    const data = await r.json();
+    summary.textContent = `${data.totalDates} trading days tracked, ${data.pendingDates} need work`;
+    renderHeatmap(data.gaps || []);
+  } catch (e) {
+    heatmap.innerHTML = '<span style="color:var(--destructive)">Error loading coverage</span>';
+  }
+}
+
+function renderHeatmap(gaps) {
+  const el = document.getElementById('coverage-heatmap');
+  if (!gaps.length) {
+    el.innerHTML = '<span style="color:var(--muted);font-size:11px">No trading days in range (need SPX anchor data)</span>';
+    return;
+  }
+  el.innerHTML = gaps.map(g => {
+    let cls = 'heat-complete';
+    if (g.missingRaw) cls = 'heat-missing';
+    else if (g.missingMtfs.length || g.missingIndicators.length) cls = 'heat-partial';
+    return `<div class="heatmap-cell ${cls}" title="${g.date}: ${g.missingRaw ? 'no data' : g.missingMtfs.length ? 'MTFs missing' : g.missingIndicators.length ? 'indicators missing' : 'complete'}"></div>`;
+  }).join('');
+}
+
+async function deleteSelectedProfile() {
+  if (!selectedProfileId) return;
+  if (!confirm(`Delete profile "${selectedProfileId}"? This does not purge historical bars.`)) return;
+  try {
+    const r = await fetch(`${API}/symbols/${selectedProfileId}`, { method: 'DELETE' });
+    const data = await r.json();
+    if (!r.ok) return alert(data.error || 'Delete failed');
+    selectedProfileId = null;
+    document.getElementById('coverage-panel').style.display = 'none';
+    await loadSymbols();
+  } catch (e) {
+    alert('Delete failed: ' + e.message);
+  }
+}
+
+// ── Add Symbol Modal ─────────────────────────────────────────────────────
+
+function openAddModal() {
+  discoveredProfile = null;
+  document.getElementById('discover-ticker').value = '';
+  document.getElementById('discover-status').textContent = '';
+  document.getElementById('discover-result').style.display = 'none';
+  document.getElementById('discover-warnings').innerHTML = '';
+  document.getElementById('add-modal').classList.add('open');
+  document.getElementById('discover-ticker').focus();
+}
+
+function closeAddModal() {
+  document.getElementById('add-modal').classList.remove('open');
+}
+
+async function discoverTicker() {
+  const ticker = document.getElementById('discover-ticker').value.trim();
+  if (!ticker) return;
+  const btn = document.getElementById('discover-btn');
+  const status = document.getElementById('discover-status');
+  btn.disabled = true;
+  status.innerHTML = '<span class="spinner"></span> Discovering...';
+  document.getElementById('discover-result').style.display = 'none';
+
+  try {
+    const r = await fetch(`${API}/symbols/discover`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ticker }),
+    });
+    const data = await r.json();
+    if (!r.ok) { status.textContent = data.error || 'Discovery failed'; return; }
+    discoveredProfile = data.profile;
+    status.textContent = 'Found! Review and confirm below.';
+    fillDiscoverFields(discoveredProfile);
+    document.getElementById('discover-result').style.display = '';
+  } catch (e) {
+    status.textContent = 'Error: ' + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function fillDiscoverFields(p) {
+  document.getElementById('field-displayName').value = p.displayName || '';
+  document.getElementById('field-assetClass').value = p.assetClass || '';
+  document.getElementById('field-optionPrefix').value = p.optionPrefix || '';
+  document.getElementById('field-strikeInterval').value = p.strikeInterval || '';
+  document.getElementById('field-bandHalfWidthDollars').value = p.bandHalfWidthDollars || '';
+  document.getElementById('field-tier').value = p.tier || 1;
+  document.getElementById('field-expiryCadences').value = (p.expiryCadences || []).join(',');
+  document.getElementById('field-avgDailyRange').value = p.avgDailyRange != null ? p.avgDailyRange.toFixed(2) : '';
+  const warns = document.getElementById('discover-warnings');
+  if (p.warnings && p.warnings.length) {
+    warns.innerHTML = `<div class="warnings">${p.warnings.map(w => `<div>${w}</div>`).join('')}</div>`;
+  } else {
+    warns.innerHTML = '';
+  }
+}
+
+async function confirmAdd() {
+  if (!discoveredProfile) return;
+  const payload = {
+    ...discoveredProfile,
+    displayName: document.getElementById('field-displayName').value,
+    optionPrefix: document.getElementById('field-optionPrefix').value,
+    strikeInterval: Number(document.getElementById('field-strikeInterval').value) || discoveredProfile.strikeInterval,
+    bandHalfWidthDollars: Number(document.getElementById('field-bandHalfWidthDollars').value) || discoveredProfile.bandHalfWidthDollars,
+    tier: Number(document.getElementById('field-tier').value) || 1,
+    expiryCadences: document.getElementById('field-expiryCadences').value.split(',').map(s => s.trim()).filter(Boolean),
+  };
+  try {
+    const r = await fetch(`${API}/symbols`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await r.json();
+    if (!r.ok) return alert(data.error || 'Save failed');
+    closeAddModal();
+    await loadSymbols();
+    selectProfile(data.profile.id);
+  } catch (e) {
+    alert('Save failed: ' + e.message);
+  }
+}
+
+// ── Backfill Orchestration ───────────────────────────────────────────────
+
+async function startBackfill() {
+  if (!selectedProfileId) return;
+  const btn = document.getElementById('backfill-start-btn');
+  btn.disabled = true;
+  btn.textContent = 'Starting...';
+  try {
+    const r = await fetch(`${API}/backfill/orchestrate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profileId: selectedProfileId }),
+    });
+    const data = await r.json();
+    if (!r.ok) { alert(data.error || 'Failed to start'); return; }
+    btn.textContent = 'Started!';
+    setTimeout(() => { btn.textContent = 'Start Backfill'; btn.disabled = false; }, 2000);
+    refreshJobs();
+    startJobPoll();
+  } catch (e) {
+    alert('Error: ' + e.message);
+  } finally {
+    setTimeout(() => { btn.disabled = false; btn.textContent = 'Start Backfill'; }, 3000);
+  }
+}
+
+// ── Jobs ─────────────────────────────────────────────────────────────────
+
+async function refreshJobs() {
+  const el = document.getElementById('jobs-list');
+  try {
+    const params = new URLSearchParams({ kind: 'backfill', limit: '20' });
+    if (selectedProfileId) params.set('profile_id', selectedProfileId);
+    const r = await fetch(`${API}/jobs?${params}`);
+    const data = await r.json();
+    const jobs = data.jobs || [];
+    if (!jobs.length) { el.innerHTML = '<div class="empty-state">No backfill jobs</div>'; return; }
+    el.innerHTML = jobs.map(renderJobRow).join('');
+    // Keep polling if any are running
+    if (jobs.some(j => j.status === 'running' || j.status === 'pending')) {
+      startJobPoll();
+    } else {
+      stopJobPoll();
+    }
+  } catch (e) {
+    el.innerHTML = `<div class="empty-state" style="color:var(--destructive)">Error loading jobs</div>`;
+  }
+}
+
+function renderJobRow(j) {
+  const progress = j.progress || {};
+  const pct = j.total > 0 ? Math.round((progress.completedDates || j.completed || 0) / j.total * 100) : 0;
+  const phase = progress.phase || j.status;
+  const canCancel = j.status === 'running' || j.status === 'pending';
+  return `
+    <div class="job-row">
+      <span class="job-status status-${j.status}">${j.status}</span>
+      <span style="font-family:var(--font-mono);font-size:11px;color:var(--muted)">${j.profileId || '—'}</span>
+      <span style="font-size:11px;color:var(--muted-foreground)">${phase}</span>
+      <div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div>
+      <span style="font-size:11px;color:var(--muted);min-width:40px">${pct}%</span>
+      ${canCancel ? `<button class="btn btn-sm btn-danger" onclick="cancelJob('${j.id}')">Cancel</button>` : ''}
+    </div>
+  `;
+}
+
+async function cancelJob(jobId) {
+  if (!confirm('Cancel this job?')) return;
+  try {
+    await fetch(`${API}/jobs/${jobId}/cancel`, { method: 'POST' });
+    refreshJobs();
+  } catch (e) { alert('Cancel failed'); }
+}
+
+function startJobPoll() {
+  if (jobPollTimer) return;
+  jobPollTimer = setInterval(refreshJobs, 3000);
+}
+
+function stopJobPoll() {
+  if (jobPollTimer) { clearInterval(jobPollTimer); jobPollTimer = null; }
+}
+
+// ── Init ─────────────────────────────────────────────────────────────────
+
+document.addEventListener('DOMContentLoaded', () => {
+  loadSymbols();
+  refreshJobs();
+});
+
+// Close modal on overlay click
+document.getElementById('add-modal').addEventListener('click', (e) => {
+  if (e.target === e.currentTarget) closeAddModal();
+});
+
+// Discover on Enter key
+document.getElementById('discover-ticker').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') discoverTicker();
+});
+</script>
+</body>
+</html>

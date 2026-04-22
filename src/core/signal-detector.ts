@@ -7,8 +7,7 @@
  *
  * Used by:
  *   - src/replay/machine.ts  — replay system (getContractBarsAt → detectSignals)
- *   - agent-xsp.ts           — live XSP agent (buildContractBars → detectSignals)
- *   - agent.ts               — live SPX agent (same pattern)
+ *   - spx_agent.ts           — live SPX agent (buildContractBars → detectSignals)
  *
  * Config-driven: all thresholds, periods, and toggle flags come from Config.
  * Returns Signal[] using the canonical type from ./types.
@@ -19,16 +18,20 @@
 
 import type { CoreBar, Signal, SignalType, Direction } from './types';
 import type { Config } from '../config/types';
+import { registerHmaPeriod } from './indicator-engine';
 
-/** HMA periods pre-computed by the indicator engine. Any config requesting a period
- *  outside this set will never produce a signal — fail fast at startup instead. */
-export const VALID_HMA_PERIODS = [3, 5, 15, 17, 19, 25] as const;
+/** EMA periods still use a fixed set — adding EMA periods requires changing
+ *  the tier-1/tier-2 compute branches, not just registering a number. */
 export const VALID_EMA_PERIODS = [9, 21, 50, 200] as const;
 
 /**
- * Validate that config signal periods are computable by the indicator engine.
- * Call this at agent/replay startup — throws if misconfigured so the issue is
- * caught immediately rather than silently never firing signals.
+ * Validate config signal periods AND register any requested HMA periods with
+ * the indicator engine. Call this at agent/replay/data-service startup after
+ * config load — ensures `ind['hma${period}']` is populated on every bar before
+ * the signal detector tries to read it.
+ *
+ * HMA periods: registered dynamically (any integer ≥2 becomes valid).
+ * EMA periods: still restricted to [9, 21, 50, 200] — fast-fail on misconfig.
  */
 export function validateSignalConfig(config: Config): void {
   const sig = config.signals;
@@ -38,15 +41,13 @@ export function validateSignalConfig(config: Config): void {
   const emaSlow = sig.emaCrossSlow ?? 21;
 
   if (sig.enableHmaCrosses) {
-    if (!(VALID_HMA_PERIODS as readonly number[]).includes(hmaFast)) {
-      throw new Error(`[signal-detector] hmaCrossFast=${hmaFast} is not computed by the indicator engine. Valid periods: ${VALID_HMA_PERIODS.join(', ')}`);
-    }
-    if (!(VALID_HMA_PERIODS as readonly number[]).includes(hmaSlow)) {
-      throw new Error(`[signal-detector] hmaCrossSlow=${hmaSlow} is not computed by the indicator engine. Valid periods: ${VALID_HMA_PERIODS.join(', ')}`);
-    }
     if (hmaFast >= hmaSlow) {
       throw new Error(`[signal-detector] hmaCrossFast(${hmaFast}) must be < hmaCrossSlow(${hmaSlow})`);
     }
+    // Teach the indicator engine about whatever periods this config needs.
+    // registerHmaPeriod throws on non-integer / <2, giving us the fast-fail.
+    registerHmaPeriod(hmaFast);
+    registerHmaPeriod(hmaSlow);
   }
 
   if (sig.enableEmaCrosses) {
@@ -95,6 +96,29 @@ function makeSignal(
 }
 
 /**
+ * Check bar quality for a contract. Returns true if the synthetic bar ratio
+ * exceeds the threshold — meaning the data is too unreliable for signal detection.
+ *
+ * Bars without a `synthetic` field are treated as real (conservative — assumes
+ * they came from a path that doesn't track synthetic status).
+ *
+ * @param bars - Contract bars (chronological, newest last)
+ * @param maxSyntheticRatio - Maximum allowed synthetic ratio (0-1, default 0.5)
+ * @param lookback - Number of recent bars to check (default 20)
+ */
+export function isBarDataUnhealthy(
+  bars: CoreBar[],
+  maxSyntheticRatio: number = 0.5,
+  lookback: number = 20,
+): boolean {
+  if (bars.length < 5) return true; // too few bars to be reliable
+  const recent = bars.slice(-lookback);
+  const total = recent.length;
+  const syntheticCount = recent.filter(b => b.synthetic === true).length;
+  return (syntheticCount / total) > maxSyntheticRatio;
+}
+
+/**
  * Detect trading signals across all option contracts.
  *
  * @param contractBars - Map of symbol → bars (ordered chronologically, newest last)
@@ -137,6 +161,11 @@ export function detectSignals(
 
     // Warm-up guard: require minimum bars for indicator stability
     if (minWarmupBars > 0 && bars.length < minWarmupBars) continue;
+
+    // Bar quality gate — skip contracts with too many synthetic/filler bars.
+    // If >50% of recent bars are synthetic, the HMA is computed on mostly
+    // interpolated data and any detected cross is unreliable.
+    if (isBarDataUnhealthy(bars)) continue;
 
     // Parse symbol for call/put and strike
     const parsed = parseSymbol(symbol);

@@ -18,7 +18,14 @@ import { checkExit, type ExitContext } from './position-manager';
 import { isRiskBlocked, type RiskState } from './risk-guard';
 import { selectStrike } from './strike-selector';
 import { computeQty } from './position-sizer';
-import { frictionEntry, computeRealisticPnl } from './friction';
+import { frictionEntry, computeRealisticPnl, resolveSpreadModel, type ExitKind, type SpreadModel } from './friction';
+
+/** Map exit reason to friction kind (duplicated from trade-manager to avoid cycle). */
+function exitKindForReason(reason: string): ExitKind {
+  if (reason === 'take_profit') return 'tp';
+  if (reason === 'stop_loss') return 'sl';
+  return 'market';
+}
 import { nowET } from '../utils/et-time';
 
 // ── Exported Types ──────────────────────────────────────────────────────────
@@ -91,7 +98,7 @@ export interface TickInput {
   positionPrices: Map<string, number>;     // live tick price per open position
   /** Bar high/low for open positions — used for intrabar TP/SL detection in replay.
    *  Key = position symbol. If absent, intrabar pricing is skipped (close-only). */
-  positionBars?: Map<string, { high: number; low: number }>;
+  positionBars?: Map<string, { high: number; low: number; open?: number; spread?: number }>;
 }
 
 /**
@@ -306,6 +313,13 @@ export function detectHmaCross(
 /**
  * Check if a unix timestamp falls within the active trading window.
  * Uses ET timezone conversion.
+ *
+ * Boundary semantics: start is INCLUSIVE, end is EXCLUSIVE.
+ *   activeStart='09:30' → 09:30:00 is IN window
+ *   activeEnd='15:45'   → 15:45:00 is OUT of window
+ * This matches the replay main-entry loop (`etHHMM >= activeEnd → skip`) and
+ * the expectation that "stop trading at 15:45" means no entries at or after
+ * 15:45:00.
  */
 export function isInActiveWindow(ts: number, config: Config): boolean {
   const now = new Date(ts * 1000);
@@ -317,7 +331,7 @@ export function isInActiveWindow(ts: number, config: Config): boolean {
   const startMinutes = startH * 60 + startM;
   const endMinutes = endH * 60 + endM;
 
-  return currentMinutes >= startMinutes && currentMinutes <= endMinutes;
+  return currentMinutes >= startMinutes && currentMinutes < endMinutes;
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -456,6 +470,7 @@ export function tick(
   input: TickInput,
   config: Config,
 ): TickResult {
+  const sm = resolveSpreadModel(config);
   const { hmaCrossFast, hmaCrossSlow } = config.signals;
 
   // ── Step 1a: Direction cross (entry gating) ───────────────────────────
@@ -530,6 +545,8 @@ export function tick(
       highWaterPrice: highWater,
       barHigh: posBar?.high,
       barLow: posBar?.low,
+      barOpen: posBar?.open,
+      barSpread: (posBar as any)?.spread,
     };
 
     // If no price, only check time-based and signal-reversal exits
@@ -537,7 +554,7 @@ export function tick(
       // Check with entry price as fallback (only time/reversal can fire)
       const check = checkExit(corePos, pos.entryPrice, config, exitCtx);
       if (check.shouldExit && (check.reason === 'time_exit' || check.reason === 'signal_reversal')) {
-        const pnl = computeRealisticPnl(pos.entryPrice, pos.entryPrice, pos.qty);
+        const pnl = computeRealisticPnl(pos.entryPrice, pos.entryPrice, pos.qty, exitKindForReason(check.reason), sm);
         const flipTo = getFlipDirection(check.reason, pos.side, config);
         exits.push({
           positionId: posId,
@@ -556,7 +573,7 @@ export function tick(
     if (check.shouldExit && check.reason !== null) {
       // Use intrabar exitPrice when available (exact TP/SL fill), otherwise bar close
       const fillPrice = check.exitPrice ?? currentPrice;
-      const pnl = computeRealisticPnl(pos.entryPrice, fillPrice, pos.qty);
+      const pnl = computeRealisticPnl(pos.entryPrice, fillPrice, pos.qty, exitKindForReason(check.reason), sm);
       const flipTo = getFlipDirection(check.reason, pos.side, config);
       exits.push({
         positionId: posId,
@@ -683,7 +700,7 @@ export function tick(
   }
 
   // Compute effective entry with friction
-  const effectiveEntry = frictionEntry(candidate.price);
+  const effectiveEntry = frictionEntry(candidate.price, sm);
 
   // Compute SL and TP
   const stopLoss = effectiveEntry * (1 - config.position.stopLossPercent / 100);

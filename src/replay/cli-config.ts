@@ -35,6 +35,14 @@ interface CliOverrides {
   signalTimeframe?: string;
   directionTimeframe?: string;
   exitTimeframe?: string;
+  // ── TP re-entry ──
+  reentryTpEnabled?: boolean;
+  reentryTpStrategy?: string;
+  reentryTpMaxPerDay?: number;
+  reentryTpMaxPerSignal?: number;
+  reentryTpCooldownSec?: number;
+  reentryTpSizeMult?: number;
+  reentryTpRequireHmaConfirm?: boolean;
   label?: string;
 }
 
@@ -71,6 +79,13 @@ export function parseCliFlags(args: string[]): CliOverrides {
       case 'maxPositionsOpen': flags.maxPositionsOpen = parseInt(val); break;
       case 'exitStrategy': flags.exitStrategy = val; break;
       case 'exitPricing': flags.exitPricing = val; break;
+      case 'reentryTpEnabled': flags.reentryTpEnabled = val === 'true'; break;
+      case 'reentryTpStrategy': flags.reentryTpStrategy = val; break;
+      case 'reentryTpMaxPerDay': flags.reentryTpMaxPerDay = parseInt(val); break;
+      case 'reentryTpMaxPerSignal': flags.reentryTpMaxPerSignal = parseInt(val); break;
+      case 'reentryTpCooldownSec': flags.reentryTpCooldownSec = parseInt(val); break;
+      case 'reentryTpSizeMult': flags.reentryTpSizeMult = parseFloat(val); break;
+      case 'reentryTpRequireHmaConfirm': flags.reentryTpRequireHmaConfirm = val === 'true'; break;
       case 'signalTimeframe': flags.signalTimeframe = val; break;
       case 'directionTimeframe': flags.directionTimeframe = val; break;
       case 'exitTimeframe': flags.exitTimeframe = val; break;
@@ -169,6 +184,39 @@ export function buildConfigFromFlags(flags: CliOverrides, base?: Config): Config
       ...config.exit,
       ...(flags.exitStrategy !== undefined && { strategy: flags.exitStrategy as any }),
       ...(flags.exitPricing !== undefined && { exitPricing: flags.exitPricing as any }),
+    };
+  }
+  if (
+    flags.reentryTpEnabled !== undefined ||
+    flags.reentryTpStrategy !== undefined ||
+    flags.reentryTpMaxPerDay !== undefined ||
+    flags.reentryTpMaxPerSignal !== undefined ||
+    flags.reentryTpCooldownSec !== undefined ||
+    flags.reentryTpSizeMult !== undefined ||
+    flags.reentryTpRequireHmaConfirm !== undefined
+  ) {
+    const baseExit = overrides.exit ?? config.exit;
+    const baseReentry = baseExit.reentryOnTakeProfit ?? {
+      enabled: false,
+      strategy: 'same_direction' as const,
+      maxReentriesPerDay: 3,
+      maxReentriesPerSignal: 1,
+      cooldownSec: 30,
+      sizeMultiplier: 1.0,
+      requireOptionHmaConfirm: false,
+    };
+    overrides.exit = {
+      ...baseExit,
+      reentryOnTakeProfit: {
+        ...baseReentry,
+        ...(flags.reentryTpEnabled !== undefined && { enabled: flags.reentryTpEnabled }),
+        ...(flags.reentryTpStrategy !== undefined && { strategy: flags.reentryTpStrategy as any }),
+        ...(flags.reentryTpMaxPerDay !== undefined && { maxReentriesPerDay: flags.reentryTpMaxPerDay }),
+        ...(flags.reentryTpMaxPerSignal !== undefined && { maxReentriesPerSignal: flags.reentryTpMaxPerSignal }),
+        ...(flags.reentryTpCooldownSec !== undefined && { cooldownSec: flags.reentryTpCooldownSec }),
+        ...(flags.reentryTpSizeMult !== undefined && { sizeMultiplier: flags.reentryTpSizeMult }),
+        ...(flags.reentryTpRequireHmaConfirm !== undefined && { requireOptionHmaConfirm: flags.reentryTpRequireHmaConfirm }),
+      },
     };
   }
   if (flags.label) {

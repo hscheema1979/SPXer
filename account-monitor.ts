@@ -1,8 +1,8 @@
 /**
- * Unified Account Monitor — SPX + XSP
+ * SPX Account Monitor
  *
  * LLM-powered oversight agent using the Anthropic SDK.
- * Monitors BOTH trading accounts, agent processes, data pipeline, and system health.
+ * Monitors the SPX trading account, agent process, data pipeline, and system health.
  * Does NOT trade — observe and alert only.
  *
  * Architecture:
@@ -12,7 +12,7 @@
  *   4. Dedup + log
  *
  * Features:
- *   - Both accounts (SPX margin + XSP cash)
+ *   - SPX margin account
  *   - Market-hours-aware scheduling (30s RTH, 5min pre-market, 30min overnight, off weekends)
  *   - Alert deduplication (no spam)
  *   - Session reset every 120 cycles (prevents context bloat / OOM)
@@ -36,8 +36,34 @@ import {
   type MonitorTools,
 } from './src/monitor/engine';
 import { MONITOR_TOOLS } from './src/monitor/tools';
-import { SYSTEM_PROMPT, buildCyclePrompt } from './src/monitor/prompts';
+import { buildSystemPrompt, buildCyclePrompt } from './src/monitor/prompts';
 import { type Severity } from './src/monitor/types';
+import { createStore } from './src/replay/store';
+
+// ── Active HMA pair (from agent config) ─────────────────────────────────────
+// The monitor's system prompt must describe the strategy the agent is ACTUALLY
+// running — not a stale hardcoded pair. Loaded once at startup.
+function resolveActiveHmaPair(): { fast: number; slow: number } {
+  let fast = 3;
+  let slow = 17;
+  const configId = process.env.AGENT_CONFIG_ID;
+  if (!configId) return { fast, slow };
+  try {
+    const store = createStore();
+    const cfg = store.getConfig(configId);
+    store.close();
+    if (cfg?.signals) {
+      fast = cfg.signals.hmaCrossFast ?? fast;
+      slow = cfg.signals.hmaCrossSlow ?? slow;
+    }
+  } catch (e: any) {
+    console.warn(`[monitor] failed to resolve HMA pair from ${configId}: ${e.message}`);
+  }
+  return { fast, slow };
+}
+const { fast: ACTIVE_HMA_FAST, slow: ACTIVE_HMA_SLOW } = resolveActiveHmaPair();
+const SYSTEM_PROMPT = buildSystemPrompt(ACTIVE_HMA_FAST, ACTIVE_HMA_SLOW);
+console.log(`[monitor] System prompt built with HMA(${ACTIVE_HMA_FAST})×HMA(${ACTIVE_HMA_SLOW})`);
 
 // ── Anthropic Client ────────────────────────────────────────────────────────
 
@@ -199,17 +225,17 @@ async function main(): Promise<void> {
     '\n╔══════════════════════════════════════════════════════════════╗',
   );
   console.log(
-    '║   Unified Account Monitor                                    ║',
+    '║   SPX Account Monitor                                        ║',
   );
   console.log(
-    '║   SPX (6YA51425) + XSP (6YA58635) | Both Accounts           ║',
+    '║   SPX (6YA51425) | Margin Account                            ║',
   );
   console.log(
     '╚══════════════════════════════════════════════════════════════╝\n',
   );
 
   fs.mkdirSync('logs', { recursive: true });
-  logEntry('Monitor starting — unified account monitor (SPX + XSP)', 'info');
+  logEntry('Monitor starting — SPX account monitor', 'info');
   logEntry(`Using model: ${MODEL}`, 'info');
 
   // Core components

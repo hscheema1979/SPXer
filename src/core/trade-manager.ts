@@ -11,15 +11,28 @@
 
 import type { Direction, ExitReason, Position } from './types';
 import type { Config } from '../config/types';
-import { getEntryCooldownSec } from '../config/types';
 import type { StrikeCandidate } from './strike-selector';
 import type { CorePosition, SignalResult } from './strategy-engine';
-import { isInActiveWindow, getFlipDirection } from './strategy-engine';
+import { getFlipDirection } from './strategy-engine';
 import { checkExit, type ExitContext } from './position-manager';
-import { isRiskBlocked, type RiskState } from './risk-guard';
+import { checkEntryGates } from './entry-gate';
 import { selectStrike } from './strike-selector';
 import { computeQty } from './position-sizer';
-import { frictionEntry, computeRealisticPnl } from './friction';
+import { frictionEntry, computeRealisticPnl, resolveSpreadModel, type ExitKind, type SpreadModel } from './friction';
+import { resolveSlippage, slipBuyPrice } from './fill-model';
+import { roundToOptionTick } from './option-tick';
+
+/**
+ * Map an ExitReason to the friction ExitKind.
+ *   take_profit   → 'tp'     (limit sell, no half-spread)
+ *   stop_loss     → 'sl'     (stop→market, full half-spread + slippage)
+ *   anything else → 'market' (signal_reversal, time_exit, scannerReverse)
+ */
+function exitKindFor(reason: ExitReason): ExitKind {
+  if (reason === 'take_profit') return 'tp';
+  if (reason === 'stop_loss') return 'sl';
+  return 'market';
+}
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -60,6 +73,8 @@ export interface EntryContext {
    *  Live: buying power from Tradier. Replay: simulated account.
    *  Null = fall back to baseDollarsPerTrade. */
   accountValue?: number | null;
+  /** Total HMA cross signals detected this session (for circuit breaker). */
+  sessionSignalCount?: number;
 }
 
 // ── Exit Evaluation ─────────────────────────────────────────────────────────
@@ -78,7 +93,7 @@ export function evaluateExit(
   config: Config,
   ts: number,
   closeCutoffTs: number,
-  barHighLow?: { high: number; low: number },
+  barHighLow?: { high: number; low: number; open?: number; spread?: number },
 ): ExitDecision | null {
   const corePos: Position = {
     id: pos.id,
@@ -105,13 +120,17 @@ export function evaluateExit(
     highWaterPrice: highWater,
     barHigh: barHighLow?.high,
     barLow: barHighLow?.low,
+    barOpen: barHighLow?.open,
+    barSpread: barHighLow?.spread,
   };
+
+  const sm = resolveSpreadModel(config);
 
   // No price — only check time-based and signal-reversal exits
   if (currentPrice === null) {
     const check = checkExit(corePos, pos.entryPrice, config, exitCtx);
     if (check.shouldExit && (check.reason === 'time_exit' || check.reason === 'signal_reversal')) {
-      const pnl = computeRealisticPnl(pos.entryPrice, pos.entryPrice, pos.qty);
+      const pnl = computeRealisticPnl(pos.entryPrice, pos.entryPrice, pos.qty, exitKindFor(check.reason), sm);
       return {
         positionId: pos.id,
         symbol: pos.symbol,
@@ -127,7 +146,7 @@ export function evaluateExit(
   const check = checkExit(corePos, currentPrice, config, exitCtx);
   if (check.shouldExit && check.reason !== null) {
     const fillPrice = check.exitPrice ?? currentPrice;
-    const pnl = computeRealisticPnl(pos.entryPrice, fillPrice, pos.qty);
+    const pnl = computeRealisticPnl(pos.entryPrice, fillPrice, pos.qty, exitKindFor(check.reason), sm);
     return {
       positionId: pos.id,
       symbol: pos.symbol,
@@ -188,38 +207,20 @@ export function evaluateEntry(
     entryReason = `fresh HMA(${hmaCrossFast}x${hmaCrossSlow}) ${signal.directionState.cross} cross`;
   }
 
-  // ── Gates (risk, time, cooldown) ──────────────────────────────────────
-
-  // Risk guard
-  const riskState: RiskState = {
-    openPositions: positionsAfterExits,
+  // ── Shared entry gate: risk + time-window + cooldown ────────────────────
+  // The gate enforces flip-bypasses-cooldown internally via EntryKind.
+  const gate = checkEntryGates({
+    ts: context.ts,
+    kind: isFlip ? 'flip_on_reversal' : 'fresh_cross',
+    openPositionsAfterExits: positionsAfterExits,
     tradesCompleted: context.tradesCompleted,
     dailyPnl: context.dailyPnl,
-    currentTs: context.ts,
     closeCutoffTs: context.closeCutoffTs,
-    lastEscalationTs: context.lastEntryTs,
-  };
-
-  const riskCheck = isRiskBlocked(riskState, config);
-  if (riskCheck.blocked) {
-    return { entry: null, skipReason: riskCheck.reason };
-  }
-
-  // Time window gate
-  if (!isInActiveWindow(context.ts, config)) {
-    return { entry: null, skipReason: 'outside active window' };
-  }
-
-  // Cooldown gate — flip-on-reversal BYPASSES cooldown.
-  // A signal reversal is a new directional signal, not a re-entry into the same losing trade.
-  // This matches replay behavior where flips execute immediately at the same timestamp.
-  if (!isFlip) {
-    const cooldownSec = getEntryCooldownSec(config);
-    const elapsed = context.ts - context.lastEntryTs;
-    if (context.lastEntryTs > 0 && elapsed < cooldownSec) {
-      const remaining = cooldownSec - elapsed;
-      return { entry: null, skipReason: `cooldown (${remaining}s remaining)` };
-    }
+    lastEntryTs: context.lastEntryTs,
+    sessionSignalCount: context.sessionSignalCount,
+  }, config);
+  if (!gate.allowed) {
+    return { entry: null, skipReason: gate.reason };
   }
 
   if (entryDirection === null) {
@@ -229,6 +230,12 @@ export function evaluateEntry(
   // requireUnderlyingHmaCross gate
   if (config.signals.requireUnderlyingHmaCross && signal.directionState.cross === null) {
     return { entry: null, skipReason: 'requireUnderlyingHmaCross — no direction cross' };
+  }
+
+  // Reverse signals (chop mode): flip direction so bullish→bearish, bearish→bullish
+  // This makes the system buy puts when HMA says long, and calls when HMA says short.
+  if (config.signals.reverseSignals) {
+    entryDirection = entryDirection === 'bullish' ? 'bearish' : 'bullish';
   }
 
   const side: 'call' | 'put' = entryDirection === 'bullish' ? 'call' : 'put';
@@ -271,18 +278,43 @@ export function evaluateEntry(
     };
   }
 
-  // Compute effective entry with friction
-  const effectiveEntry = frictionEntry(candidate.price);
-  const stopLoss = effectiveEntry * (1 - config.position.stopLossPercent / 100);
-  const takeProfit = effectiveEntry * config.position.takeProfitMultiplier;
-  const qty = computeQty(effectiveEntry, config, context.accountValue);
+  // Compute effective entry with friction (raw price + half-spread).
+  // Size qty off the pre-slippage effective entry so slippage and sizing
+  // don't feed back on each other in a loop.
+  const smEntry = resolveSpreadModel(config);
+  const unslippedEffective = frictionEntry(candidate.price, smEntry);
+  let qty = computeQty(unslippedEffective, config, context.accountValue);
+
+  // Phase 4: participation-rate liquidity gate.
+  // Cap qty to participationRate × signal-bar volume. If capped qty falls
+  // below minContracts, skip the trade entirely.
+  const participationRate = config.fill?.participationRate;
+  if (participationRate != null && participationRate > 0 && candidate.volume > 0) {
+    const maxFill = Math.floor(candidate.volume * participationRate);
+    qty = Math.min(qty, maxFill);
+    if (qty < (config.fill?.minContracts ?? 1)) {
+      return {
+        entry: null,
+        skipReason: `liquidity gate: barVol=${candidate.volume} → maxFill=${maxFill} < minContracts=${config.fill?.minContracts ?? 1}`,
+      };
+    }
+  }
+
+  // Apply Phase 3 entry slippage (size-based book walking on market buy).
+  // Default ResolvedSlippage is all-zero, so this is a no-op for configs
+  // without fill.slippage.entrySlipPerContract.
+  const slip = resolveSlippage(config);
+  const slippedRawPrice = slipBuyPrice(candidate.price, qty, slip);
+  const effectiveEntry = frictionEntry(slippedRawPrice, smEntry);
+  const stopLoss = roundToOptionTick(effectiveEntry * (1 - config.position.stopLossPercent / 100));
+  const takeProfit = roundToOptionTick(effectiveEntry * config.position.takeProfitMultiplier);
 
   return {
     entry: {
       symbol: candidate.symbol,
       side,
       strike: candidate.strike,
-      price: candidate.price,
+      price: slippedRawPrice, // raw (unfricted) fill; friction layered downstream in P&L
       qty,
       stopLoss,
       takeProfit,

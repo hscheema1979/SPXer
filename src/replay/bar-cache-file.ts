@@ -24,7 +24,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 const MAGIC = 0x58435242; // "BRCX" (little-endian)
-const VERSION = 1;
+const VERSION = 2; // v2 adds per-contract-bar `spread` (float64, NaN = unknown)
 const FLAG_PRICE_ONLY = 0x01;
 const FLAG_WITH_INDICATORS = 0x02;
 
@@ -40,12 +40,14 @@ const IND_COLS = [
 const BYTES_PER_BAR_PRICE = 40;       // 4 + 8*4 + 4
 const BYTES_PER_INDICATOR = 8;        // float64
 const BYTES_PER_BAR_FULL = BYTES_PER_BAR_PRICE + IND_COLS.length * BYTES_PER_INDICATOR; // 40 + 168 = 208
+const BYTES_PER_SPREAD = 8;           // float64 (v2+, contract bars only)
 
 interface Bar {
   ts: number;
   open: number; high: number; low: number; close: number;
   volume: number;
   indicators: Record<string, number | null>;
+  spread?: number; // v2+: bid-ask spread observed during bar (contract bars only)
 }
 
 interface BarCache {
@@ -79,7 +81,7 @@ export function writeBarCacheFile(
   for (const [symbol, bars] of cache.contractBars) {
     totalSize += 2 + Buffer.byteLength(symbol, 'utf8'); // symbol
     totalSize += 8; // strike
-    totalSize += 4 + bars.length * barSize; // bar count + bars
+    totalSize += 4 + bars.length * (barSize + BYTES_PER_SPREAD); // bar count + bars (+ spread per bar)
   }
 
   const buf = Buffer.alloc(totalSize);
@@ -130,6 +132,8 @@ export function writeBarCacheFile(
           buf.writeDoubleLE(bar.indicators[col] ?? NaN, offset); offset += 8;
         }
       }
+      // v2+: per-bar spread (NaN = unknown)
+      buf.writeDoubleLE(bar.spread ?? NaN, offset); offset += 8;
     }
   }
 
@@ -150,7 +154,9 @@ export function readBarCacheFile(
   const magic = buf.readUInt32LE(offset); offset += 4;
   if (magic !== MAGIC) return null;
   const version = buf.readUInt16LE(offset); offset += 2;
-  if (version !== VERSION) return null;
+  // Accept v1 (legacy, no spread) and v2 (with spread). Reject unknown/future versions.
+  if (version !== 1 && version !== VERSION) return null;
+  const hasSpread = version >= 2;
   const flags = buf.readUInt16LE(offset); offset += 2;
 
   const isPriceOnly = (flags & FLAG_PRICE_ONLY) !== 0;
@@ -199,16 +205,21 @@ export function readBarCacheFile(
       const close = buf.readDoubleLE(offset); offset += 8;
       const volume = buf.readUInt32LE(offset); offset += 4;
 
-      if (isPriceOnly) {
-        bars[i] = { ts, open, high, low, close, volume, indicators: emptyInd };
-      } else {
-        const indicators: Record<string, number | null> = {};
+      let indicators: Record<string, number | null> = emptyInd;
+      if (!isPriceOnly) {
+        const indMap: Record<string, number | null> = {};
         for (const col of IND_COLS) {
           const val = buf.readDoubleLE(offset); offset += 8;
-          if (!Number.isNaN(val)) indicators[col] = val;
+          if (!Number.isNaN(val)) indMap[col] = val;
         }
-        bars[i] = { ts, open, high, low, close, volume, indicators };
+        indicators = indMap;
       }
+      const bar: Bar = { ts, open, high, low, close, volume, indicators };
+      if (hasSpread) {
+        const sp = buf.readDoubleLE(offset); offset += 8;
+        if (!Number.isNaN(sp)) bar.spread = sp;
+      }
+      bars[i] = bar;
     }
 
     contractBars.set(symbol, bars);

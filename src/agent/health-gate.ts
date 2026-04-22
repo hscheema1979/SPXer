@@ -104,11 +104,12 @@ export class HealthGate {
 
       // Check SPX bar freshness
       const spxData = data?.data?.SPX || data?.data?.ES;
-      if (spxData?.staleSec != null) {
-        spxBarAgeSec = spxData.staleSec;
-        if (spxBarAgeSec > this.config.staleThresholdSec && !failed) {
+      const staleSec: number | null = spxData?.staleSec ?? null;
+      if (staleSec != null) {
+        spxBarAgeSec = staleSec;
+        if (staleSec > this.config.staleThresholdSec && !failed) {
           failed = true;
-          reason = `SPX data stale: ${spxBarAgeSec}s (threshold: ${this.config.staleThresholdSec}s)`;
+          reason = `SPX data stale: ${staleSec}s (threshold: ${this.config.staleThresholdSec}s)`;
         }
       }
 

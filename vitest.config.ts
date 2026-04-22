@@ -5,5 +5,6 @@ export default defineConfig({
     environment: 'node',
     testTimeout: 10000,
     include: ['tests/**/*.test.ts'],
+    exclude: ['tests/e2e/live-*.test.ts'],
   },
 });

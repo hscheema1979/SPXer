@@ -99,14 +99,6 @@ function renderState(state) {
     document.getElementById('tradesToday').textContent = trades ?? '—';
   }
   
-  if (state.agents.xsp) {
-    const agent = state.agents.xsp;
-    const age = agent.heartbeatAgeSec;
-    const healthy = agent.healthy;
-    // XSP shares status file with SPX for now
-    renderStatus('xspAgent', healthy, healthy ? `OK (${age}s)` : `STALE (${age}s)`, healthy);
-  }
-
   // Positions
   const posEl = document.getElementById('positions');
   if (state.positions && state.positions.length > 0) {
@@ -130,23 +122,23 @@ function renderState(state) {
 
   // Recent trades
   const tradesEl = document.getElementById('recentTrades');
-  const header = '<div class="trade-row trade-header"><span>Time</span><span>Symbol</span><span>Side</span><span>Qty</span><span>Fill</span><span>P&L</span></div>';
+  const header = '<div class="trade-header"><span>Time</span><span>Symbol</span><span>Side</span><span>Qty</span><span>Fill</span><span>P&L</span></div>';
   if (state.recentTrades && state.recentTrades.length > 0) {
     const rows = state.recentTrades.map(t => {
       const pnlClass = t.pnl != null ? (t.pnl >= 0 ? 'pnl-positive' : 'pnl-negative') : '';
       const pnlStr = t.pnl != null ? `$${t.pnl.toFixed(0)}` : '—';
       return `<div class="trade-row">
-        <span>${t.timeET}</span>
-        <span>${t.symbol.slice(-13)}</span>
-        <span>${t.side.slice(0,1).toUpperCase()}</span>
-        <span>${t.qty}x</span>
-        <span>$${t.fillPrice.toFixed(2)}</span>
-        <span class="${pnlClass}">${pnlStr}</span>
+        <span class="cell" data-label="Time">${t.timeET}</span>
+        <span class="cell" data-label="Symbol">${t.symbol.slice(-13)}</span>
+        <span class="cell" data-label="Side">${t.side.slice(0,1).toUpperCase()}</span>
+        <span class="cell" data-label="Qty">${t.qty}x</span>
+        <span class="cell" data-label="Fill">$${t.fillPrice.toFixed(2)}</span>
+        <span class="cell ${pnlClass}" data-label="P&L">${pnlStr}</span>
       </div>`;
     }).join('');
     tradesEl.innerHTML = header + rows;
   } else {
-    tradesEl.innerHTML = header + '<div class="trade-row"><span class="status-label" style="grid-column:1/-1">No recent trades</span></div>';
+    tradesEl.innerHTML = header + '<div class="trade-row empty">No recent trades</div>';
   }
 }
 

@@ -274,7 +274,7 @@ function readAgentStatus(agentId: string): MetricPoint[] {
 }
 
 function collectAgents(): MetricPoint[] {
-  return [...readAgentStatus('spx'), ...readAgentStatus('xsp')];
+  return readAgentStatus('spx');
 }
 
 interface PM2Process {

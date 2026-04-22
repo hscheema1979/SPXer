@@ -7,7 +7,8 @@
  */
 import type { Config } from '../config/types';
 import { isRiskBlocked, type RiskState } from '../core/risk-guard';
-import { etTimeToUnixTs, nowET, todayET } from '../utils/et-time';
+import { computeCloseCutoffTs } from '../core/entry-gate';
+import { nowET, todayET } from '../utils/et-time';
 
 export class RiskGuard {
   private dailyLoss = 0;
@@ -29,9 +30,8 @@ export class RiskGuard {
     }
   }
 
-  recordLoss(amount: number): void {
-    this.dailyLoss += amount;
-  }
+  // recordLoss() removed — P&L comes from broker via syncFromBroker() only.
+  // No more internal accumulation that drifts from reality.
 
   recordTrade(): void {
     this.tradesCompleted++;
@@ -95,7 +95,8 @@ export class RiskGuard {
   }
 
   private computeCloseCutoffTs(): number {
-    return etTimeToUnixTs('17:00');
+    // Delegate to core so live and replay share the same cutoff semantics (config.risk.cutoffTimeET)
+    return computeCloseCutoffTs(this.cfg);
   }
 
   /**

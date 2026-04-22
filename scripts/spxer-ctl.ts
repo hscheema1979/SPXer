@@ -27,10 +27,10 @@ const DB_PATH = path.join(DATA_DIR, 'spxer.db');
 const WAL_PATH = DB_PATH + '-wal';
 const MAINTENANCE_FILE = path.join(LOGS_DIR, 'agent-maintenance.json');
 const STATUS_SPX = path.join(LOGS_DIR, 'agent-status-spx.json');
-const STATUS_XSP = path.join(LOGS_DIR, 'agent-status-xsp.json');
 const ACTIVITY_LOG = path.join(LOGS_DIR, 'agent-activity.jsonl');
 const AUDIT_LOG = path.join(LOGS_DIR, 'agent-audit.jsonl');
-const MONITOR_LOG = path.join(LOGS_DIR, 'account-monitor.log');
+// account-monitor removed — was interfering with successful trades
+const MONITOR_LOG = ''; // placeholder — account-monitor log no longer exists
 
 // ─── ANSI Colors ─────────────────────────────────────────────────────────────
 
@@ -217,7 +217,6 @@ const TRADIER_BASE = 'https://api.tradier.com/v1';
 
 const ACCOUNTS: Record<string, { id: string; label: string; type: string }> = {
   spx: { id: '6YA51425', label: 'SPX (Margin)', type: 'margin' },
-  xsp: { id: '6YA58635', label: 'XSP (Cash)',   type: 'cash' },
 };
 
 function tradierGet(endpoint: string, timeoutMs = 8000): Promise<any> {
@@ -253,7 +252,7 @@ function resolveAccountId(hint?: string): { id: string; label: string } {
 }
 
 function parseOptionSymbol(sym: string): { expiry: string; type: string; strike: number; prefix: string } | null {
-  const m = sym.match(/^(SPXW?|XSP)(\d{6})([CP])(\d{8})$/);
+  const m = sym.match(/^(SPXW?)(\d{6})([CP])(\d{8})$/);
   if (!m) return null;
   const [, prefix, expiryCode, type, strikeCode] = m;
   return {
@@ -315,7 +314,7 @@ function getPM2Procs(): PM2Proc[] {
 }
 
 function getSPXerProcs(): PM2Proc[] {
-  const known = ['spxer', 'spxer-agent', 'spxer-xsp', 'account-monitor', 'spxer-dashboard', 'replay-viewer', 'schwaber'];
+  const known = ['spxer', 'spxer-agent', 'spxer-dashboard', 'replay-viewer', 'schwaber'];
   return getPM2Procs().filter(p => known.includes(p.name));
 }
 
@@ -385,14 +384,11 @@ const TARGET_MAP: Record<string, string[]> = {
   'pipeline':   ['spxer'],
   'agent-spx':  ['spxer-agent'],
   'agent':      ['spxer-agent'],
-  'agent-xsp':  ['spxer-xsp'],
-  'xsp':        ['spxer-xsp'],
-  'agents':     ['spxer-agent', 'spxer-xsp'],
-  'monitor':    ['account-monitor'],
+  'agents':     ['spxer-agent'],
   'dashboard':  ['spxer-dashboard'],
   'viewer':     ['replay-viewer'],
   'schwaber':   ['schwaber'],
-  'all':        ['spxer', 'spxer-agent', 'spxer-xsp', 'account-monitor', 'spxer-dashboard', 'replay-viewer', 'schwaber'],
+  'all':        ['spxer', 'spxer-agent', 'spxer-dashboard', 'replay-viewer', 'schwaber'],
 };
 
 function resolveTarget(target: string): string[] {
@@ -405,9 +401,6 @@ const LOG_MAP: Record<string, string> = {
   'agent':     'spxer-agent-out.log',
   'agent-spx': 'spxer-agent-out.log',
   'spx':       'spxer-agent-out.log',
-  'xsp':       'spxer-xsp-out.log',
-  'agent-xsp': 'spxer-xsp-out.log',
-  'monitor':   'xsp-monitor-out.log',
   'dashboard': 'dashboard-out.log',
   'viewer':    'replay-viewer-out.log',
   'schwaber':  'schwaber-out.log',
@@ -419,9 +412,6 @@ const ERROR_LOG_MAP: Record<string, string> = {
   'agent':     'spxer-agent-error.log',
   'agent-spx': 'spxer-agent-error.log',
   'spx':       'spxer-agent-error.log',
-  'xsp':       'spxer-xsp-error.log',
-  'agent-xsp': 'spxer-xsp-error.log',
-  'monitor':   'xsp-monitor-error.log',
   'dashboard': 'dashboard-error.log',
   'viewer':    'replay-viewer-error.log',
   'schwaber':  'schwaber-error.log',
@@ -441,7 +431,6 @@ async function cmdStatus() {
   ]);
 
   const spxStatus = readJSON(STATUS_SPX);
-  const xspStatus = readJSON(STATUS_XSP);
   const maintenance = readJSON(MAINTENANCE_FILE);
 
   const W = 78;
@@ -521,9 +510,9 @@ async function cmdStatus() {
   console.log(hline(W, '├', '┤'));
   console.log(boxRow(bold('Agents'), W));
 
-  for (const [label, status] of [['SPX', spxStatus], ['XSP', xspStatus]] as const) {
+  for (const [label, status] of [['SPX', spxStatus]] as const) {
     if (!status) {
-      const age = fileAge(label === 'SPX' ? STATUS_SPX : STATUS_XSP);
+      const age = fileAge(STATUS_SPX);
       if (age < 86400000) {
         console.log(boxRow(`  ${bold(label)}: ${dim('status file stale')} (${formatUptime(age)} ago)`, W));
       } else {
@@ -533,7 +522,7 @@ async function cmdStatus() {
     }
     const pnl = formatMoney(status.dailyPnL || 0);
     const paperTag = status.paper ? yellow(' [PAPER]') : '';
-    const age = fileAge(label === 'SPX' ? STATUS_SPX : STATUS_XSP);
+    const age = fileAge(STATUS_SPX);
     const fresh = age < 120000 ? '' : dim(` (${formatUptime(age)} ago)`);
     console.log(boxRow(
       `  ${bold(label)}${paperTag}: cycle ${status.cycle}  pos: ${status.openPositions}  ` +
@@ -689,7 +678,7 @@ async function cmdAgents() {
   console.log(boxTop(W));
   console.log(boxRow(bold('Agent Deep Dive'), W));
 
-  for (const [label, statusFile] of [['SPX', STATUS_SPX], ['XSP', STATUS_XSP]] as const) {
+  for (const [label, statusFile] of [['SPX', STATUS_SPX]] as const) {
     console.log(hline(W, '├', '┤'));
     const status = readJSON(statusFile);
     if (!status) {
@@ -817,7 +806,7 @@ function cmdLogs(positional: string[], flags: Record<string, string>) {
 
   if (process === 'all') {
     for (const [name, file] of Object.entries(LOG_MAP)) {
-      if (['pipeline', 'agent-spx', 'agent-xsp'].includes(name)) continue; // skip aliases
+      if (['pipeline', 'agent-spx'].includes(name)) continue; // skip aliases
       const logPath = path.join(PM2_LOGS, file);
       if (!fs.existsSync(logPath)) continue;
       console.log(bold(`\n--- ${name} ---`));
@@ -864,8 +853,7 @@ function cmdErrors(flags: Record<string, string>) {
   const errorFiles: Record<string, string> = {
     'spxer':     'spxer-error.log',
     'agent-spx': 'spxer-agent-error.log',
-    'agent-xsp': 'spxer-xsp-error.log',
-    'monitor':   'xsp-monitor-error.log',
+    'monitor':   'account-monitor-error.log',
     'dashboard': 'dashboard-error.log',
     'viewer':    'replay-viewer-error.log',
     'schwaber':  'schwaber-error.log',
@@ -1966,7 +1954,7 @@ ${bold('USAGE')}
 ${bold('COMMANDS')}
   ${cyan('status')}                          Full system overview (default)
   ${cyan('pipeline')}                        Pipeline deep dive (providers, bars, indicators)
-  ${cyan('agents')}                          Agent deep dive (SPX + XSP)
+  ${cyan('agents')}                          Agent deep dive (SPX)
   ${cyan('trades')} [--today] [--agent=spx]  Trade history from audit log
   ${cyan('logs')} <process> [--lines=50]     Tail PM2 logs
   ${cyan('errors')} [--lines=20] [--since=1h] Recent errors across all processes
@@ -1990,8 +1978,8 @@ ${bold('COMMANDS')}
   ${cyan('alerts')} [--lines=20]             Recent alerts from monitor log
   ${cyan('check')}                           Health check (exit 0 or 1)
 
-${bold('BROKER')} (Tradier API — add --account=spx|xsp to filter)
-  ${cyan('broker')}                          Summary (balance + positions, all accounts)
+${bold('BROKER')} (Tradier API — SPX account only)
+  ${cyan('broker')}                          Summary (balance + positions)
   ${cyan('positions')}  ${dim('(pos)')}               Open positions
   ${cyan('orders')}     ${dim('(ord)')}  [--all]       Today's orders (--all for all)
   ${cyan('balance')}    ${dim('(bal)')}               Account balances & buying power

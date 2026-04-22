@@ -1,11 +1,20 @@
 import Database from 'better-sqlite3';
 import type { Database as DB } from 'better-sqlite3';
 import * as fs from 'fs';
+import * as path from 'path';
+import { seedCodeProfiles } from '../instruments/seed-profiles';
+import { refreshRegistryCache } from '../instruments/registry';
+import { MARKET_HOLIDAYS } from '../config';
 
 let db: DB;
+let currentDbPath: string = '';
 
-export function initDb(path: string): void {
-  db = new Database(path);
+/** Returns the path of the currently opened DB (set by initDb). */
+export function getDbPath(): string { return currentDbPath; }
+
+export function initDb(dbPath: string): void {
+  currentDbPath = dbPath;
+  db = new Database(dbPath);
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
   // Auto-checkpoint every 1000 pages (~4MB): SQLite automatically runs a PASSIVE checkpoint
@@ -18,7 +27,16 @@ export function initDb(path: string): void {
   db.pragma('cache_size = -64000');     // 64MB cache (negative = KB)
   db.pragma('temp_store = MEMORY');     // Temp tables in memory
   runMigrations();
-  runConfigMigrations();
+  runInstrumentProfileMigrations();
+  // Seed / refresh instrument profiles from code. Live-tradable profiles
+  // (SPX today) are overwritten on every boot so behavior stays git-traceable;
+  // backtest-only profiles are insert-if-absent so UI edits persist.
+  try {
+    seedCodeProfiles(db);
+    refreshRegistryCache(db);
+  } catch (err) {
+    console.error('[db] seed instrument_profiles failed:', err);
+  }
 
   // WAL management — two strategies:
   //
@@ -79,10 +97,13 @@ export function initDb(path: string): void {
     }
   }, 2 * 60 * 60 * 1000); // every 2 hours
 
-  // Daily backup
-  setInterval(() => backupDb(), 24 * 60 * 60 * 1000);
-  // Also backup immediately on first init
-  setTimeout(() => backupDb(), 10_000);
+  // Backups disabled (2026-04-18) — at 41GB the source DB is too large for
+  // better-sqlite3's online backup. A single run bloated the backup WAL to
+  // 31GB and filled the disk, causing live writes to fail with "readonly
+  // database". If reintroduced, do it out-of-process via `sqlite3 .backup`
+  // to a different filesystem.
+  // setInterval(() => backupDb(), 24 * 60 * 60 * 1000);
+  // setTimeout(() => backupDb(), 10_000);
 }
 
 export function getDb(): DB {
@@ -90,8 +111,74 @@ export function getDb(): DB {
   return db;
 }
 
+export function getCurrentDbPath(): string {
+  return currentDbPath;
+}
+
 export function closeDb(): void {
   if (db) db.close();
+}
+
+// ── Day-scoped live DB helpers ──
+
+/** Returns `data/live/YYYY-MM-DD.db` and ensures the directory exists. */
+export function dayDbPath(dateET: string): string {
+  const dir = path.resolve('data', 'live');
+  fs.mkdirSync(dir, { recursive: true });
+  return path.join(dir, `${dateET}.db`);
+}
+
+/** Walk backward from dateET skipping weekends + holidays to find the previous trading day. */
+export function previousTradingDay(dateET: string): string {
+  const d = new Date(dateET + 'T12:00:00Z'); // noon UTC to avoid DST edge
+  for (let i = 0; i < 10; i++) {
+    d.setUTCDate(d.getUTCDate() - 1);
+    const iso = d.toISOString().slice(0, 10);
+    const dow = d.getUTCDay(); // 0=Sun, 6=Sat
+    if (dow !== 0 && dow !== 6 && !MARKET_HOLIDAYS.has(iso)) {
+      return iso;
+    }
+  }
+  // Fallback — just return 1 day prior (shouldn't happen with 10-day lookback)
+  return new Date(new Date(dateET + 'T12:00:00Z').getTime() - 86400000).toISOString().slice(0, 10);
+}
+
+/**
+ * Copy the last N bars per symbol/timeframe from a previous day's DB into the
+ * current (freshly-created) DB. This primes indicator warmup so HMA/RSI/EMA
+ * start from a meaningful state instead of zero.
+ *
+ * Uses ATTACH + INSERT OR IGNORE — safe to call multiple times (mid-day restarts).
+ */
+export function copyWarmupBars(prevDbPath: string, n = 50): number {
+  if (!fs.existsSync(prevDbPath)) {
+    console.warn(`[db] No previous DB at ${prevDbPath} — indicators will warm from scratch`);
+    return 0;
+  }
+
+  const d = getDb();
+  try {
+    d.exec(`ATTACH DATABASE '${prevDbPath}' AS prev`);
+    const result = d.exec(`
+      INSERT OR IGNORE INTO bars (symbol, timeframe, ts, open, high, low, close, volume, synthetic, gap_type, indicators, spread)
+      SELECT symbol, timeframe, ts, open, high, low, close, volume, synthetic, gap_type, indicators, spread
+      FROM (
+        SELECT *, ROW_NUMBER() OVER (PARTITION BY symbol, timeframe ORDER BY ts DESC) AS rn
+        FROM prev.bars
+      ) ranked
+      WHERE rn <= ${n}
+    `);
+    d.exec('DETACH DATABASE prev');
+
+    // Count what we copied
+    const count = (d.prepare('SELECT COUNT(*) as c FROM bars').get() as any).c;
+    console.log(`[db] Warmup: copied up to ${n} bars/series from ${path.basename(prevDbPath)} → ${count} total rows`);
+    return count;
+  } catch (err) {
+    console.error('[db] copyWarmupBars failed:', err);
+    try { d.exec('DETACH DATABASE prev'); } catch {}
+    return 0;
+  }
 }
 
 /** @deprecated ConfigManager removed — configs live in replay_configs via ReplayStore */
@@ -99,7 +186,7 @@ export function closeDb(): void {
 export function backupDb(): void {
   try {
     const d = getDb();
-    const backupPath = (process.env.DB_PATH || './data/spxer.db') + '.backup';
+    const backupPath = (currentDbPath || './data/spxer.db') + '.backup';
     d.backup(backupPath);
     console.log(`[db] backup complete: ${backupPath}`);
   } catch (err) {
@@ -108,7 +195,7 @@ export function backupDb(): void {
 }
 
 export function getDbStats(): { sizeMb: number; walSizeMb: number } {
-  const dbPath = process.env.DB_PATH || './data/spxer.db';
+  const dbPath = currentDbPath || process.env.DB_PATH || './data/spxer.db';
   const sizeMb = fs.existsSync(dbPath) ? fs.statSync(dbPath).size / (1024 * 1024) : 0;
   const walPath = dbPath + '-wal';
   const walSizeMb = fs.existsSync(walPath) ? fs.statSync(walPath).size / (1024 * 1024) : 0;
@@ -146,47 +233,61 @@ function runMigrations(): void {
       created_at  INTEGER NOT NULL DEFAULT (unixepoch())
     );
   `);
+
+  // Additive migration: bar-level bid-ask spread for friction modeling (Task 2.3a).
+  // SQLite ALTER TABLE ADD COLUMN is idempotent-safe only via try/catch.
+  try {
+    const cols = db.prepare(`PRAGMA table_info(bars)`).all() as Array<{ name: string }>;
+    if (!cols.some(c => c.name === 'spread')) {
+      db.exec(`ALTER TABLE bars ADD COLUMN spread REAL`);
+    }
+  } catch (err) {
+    console.error('[db] migration: failed to add bars.spread column', err);
+  }
 }
 
-/** Add replay tables to the single DB. */
-function runConfigMigrations(): void {
-  // Create replay tables (migrated from replay.db)
-  // NOTE: Uses camelCase columns to match existing DB schema and query code
-  // in replay/store.ts and server/replay-routes.ts
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS replay_runs (
-      id          TEXT PRIMARY KEY,
-      configId    TEXT NOT NULL,
-      date        TEXT NOT NULL,
-      startedAt   INTEGER NOT NULL,
-      completedAt INTEGER,
-      status      TEXT NOT NULL,
-      error       TEXT,
-      FOREIGN KEY(configId) REFERENCES replay_configs(id),
-      UNIQUE(configId, date)
-    );
-    CREATE INDEX IF NOT EXISTS idx_runs_config ON replay_runs(configId);
-    CREATE INDEX IF NOT EXISTS idx_runs_date ON replay_runs(date);
+// Replay tables (replay_configs, replay_runs, replay_results, replay_jobs,
+// leaderboard_reports, optimizer_results) are managed by src/storage/replay-db.ts
+// which provides migrations and connection helpers. All tables live in spxer.db.
 
-    CREATE TABLE IF NOT EXISTS replay_results (
-      runId       TEXT PRIMARY KEY,
-      configId    TEXT NOT NULL,
-      date        TEXT NOT NULL,
-      trades      INTEGER NOT NULL,
-      wins        INTEGER NOT NULL,
-      winRate     REAL NOT NULL,
-      totalPnl    REAL NOT NULL,
-      avgPnlPerTrade REAL,
-      maxWin      REAL,
-      maxLoss     REAL,
-      maxConsecutiveWins INTEGER,
-      maxConsecutiveLosses INTEGER,
-      sharpeRatio REAL,
-      trades_json TEXT NOT NULL,
-      FOREIGN KEY(runId) REFERENCES replay_runs(id),
-      FOREIGN KEY(configId) REFERENCES replay_configs(id)
+/**
+ * instrument_profiles — DB-backed store of tradable-instrument metadata.
+ *
+ * See docs/UNIVERSAL-BACKFILL.md. Profiles in src/instruments/profiles/*.ts
+ * are seeds — on first boot they're written into this table. Runtime code
+ * reads from the DB. Live-tradable profiles (can_go_live=1) are overwritten
+ * from code on every boot to keep live behavior git-traceable.
+ *
+ * Vendor routing (underlying + options) is stored as JSON so we can extend
+ * without further migrations as new vendors are added.
+ */
+function runInstrumentProfileMigrations(): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS instrument_profiles (
+      id                      TEXT PRIMARY KEY,
+      display_name            TEXT NOT NULL,
+      underlying_symbol       TEXT NOT NULL,
+      asset_class             TEXT NOT NULL CHECK(asset_class IN ('index','equity','etf')),
+      option_prefix           TEXT NOT NULL,
+      strike_divisor          INTEGER NOT NULL DEFAULT 1,
+      strike_interval         REAL NOT NULL,
+      band_half_width_dollars REAL NOT NULL,
+      avg_daily_range         REAL,
+      expiry_cadence_json     TEXT NOT NULL DEFAULT '[]',
+      session_json            TEXT NOT NULL,
+      vendor_routing_json     TEXT NOT NULL,
+      tier                    INTEGER NOT NULL DEFAULT 1 CHECK(tier IN (1,2)),
+      can_go_live             INTEGER NOT NULL DEFAULT 0,
+      execution_account_id    TEXT,
+      source                  TEXT NOT NULL CHECK(source IN ('seed','ui-discovered','manual')),
+      created_at              INTEGER NOT NULL DEFAULT (unixepoch()),
+      updated_at              INTEGER NOT NULL DEFAULT (unixepoch())
     );
-    CREATE INDEX IF NOT EXISTS idx_results_config ON replay_results(configId);
-    CREATE INDEX IF NOT EXISTS idx_results_date ON replay_results(date);
+    CREATE INDEX IF NOT EXISTS idx_profiles_underlying
+      ON instrument_profiles(underlying_symbol);
+    CREATE INDEX IF NOT EXISTS idx_profiles_live
+      ON instrument_profiles(can_go_live);
   `);
 }
+
+// replay_jobs migrations removed — now handled by replay-db.ts

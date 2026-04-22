@@ -24,6 +24,19 @@ logs/
 .autoresearch-results.tsv
 .autoresearch-results.tsv.backup.*
 autoresearch-config.json
+.*-matrix-results.tsv
+.*-matrix.log
+.*-matrix-stdout.log
+.*-autoresearch*.log
+.*-autoresearch*.tsv
+
+# Test/replay output
+test-results/
+results/
+
+# Scripts
+ecosystem.config.js.pre-basket-bak
+rclone-*.deb
 
 # Screenshots (keep in docs/ if needed, not root)
 *.png

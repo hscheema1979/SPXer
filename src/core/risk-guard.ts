@@ -15,6 +15,8 @@ export interface RiskState {
   currentTs: number;
   closeCutoffTs: number;
   lastEscalationTs: number;
+  /** Total HMA cross signals detected this session (for circuit breaker). */
+  sessionSignalCount?: number;
 }
 
 /**
@@ -40,6 +42,15 @@ export function isRiskBlocked(
   // 3. Daily loss limit
   if (state.dailyPnl <= -config.risk.maxDailyLoss) {
     return { blocked: true, reason: `Daily loss limit reached ($${config.risk.maxDailyLoss})` };
+  }
+
+  // 3b. Signal rate circuit breaker
+  const maxSignals = config.risk.maxSignalsPerSession ?? 0;
+  if (maxSignals > 0 && (state.sessionSignalCount ?? 0) >= maxSignals) {
+    return {
+      blocked: true,
+      reason: `Signal rate circuit breaker: ${state.sessionSignalCount} signals this session (max ${maxSignals}) — possible noisy/corrupted data`,
+    };
   }
 
   // 4. Close cutoff

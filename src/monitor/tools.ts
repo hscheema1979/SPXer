@@ -29,6 +29,38 @@ import {
   recordAction,
   checkCooldown,
 } from './state';
+import { createStore } from '../replay/store';
+
+/**
+ * Active HMA pair — loaded lazily from AGENT_CONFIG_ID so the monitor reports
+ * the SAME pair the agent actually trades. Falls back to 3/17 if unset.
+ */
+let _activeHmaFast: number | null = null;
+let _activeHmaSlow: number | null = null;
+function getActiveHmaPair(): { fast: number; slow: number } {
+  if (_activeHmaFast != null && _activeHmaSlow != null) {
+    return { fast: _activeHmaFast, slow: _activeHmaSlow };
+  }
+  let fast = 3;
+  let slow = 17;
+  const configId = process.env.AGENT_CONFIG_ID;
+  if (configId) {
+    try {
+      const store = createStore();
+      const cfg = store.getConfig(configId);
+      store.close();
+      if (cfg?.signals) {
+        fast = cfg.signals.hmaCrossFast ?? fast;
+        slow = cfg.signals.hmaCrossSlow ?? slow;
+      }
+    } catch {
+      // Fall through to defaults.
+    }
+  }
+  _activeHmaFast = fast;
+  _activeHmaSlow = slow;
+  return { fast, slow };
+}
 
 /** Cooldown periods for remediation actions */
 const ACTION_COOLDOWNS: Record<string, number> = {
@@ -78,10 +110,8 @@ function recordRemediationAction(action: string, target: string, reason: string)
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 /** Resolve which account keys to query */
-function resolveAccounts(account?: string): AccountKey[] {
-  if (account === 'spx') return ['spx'];
-  if (account === 'xsp') return ['xsp'];
-  return ['spx', 'xsp']; // default: both
+function resolveAccounts(_account?: string): AccountKey[] {
+  return ['spx'];
 }
 
 /** Safe Tradier GET with timeout */
@@ -106,12 +136,11 @@ const getPositionsTool = {
   name: 'get_positions',
   label: 'Get Broker Positions',
   description:
-    'Fetch open positions from Tradier for one or both trading accounts. ' +
-    'Returns symbol, quantity, cost basis, date acquired, and computed entry price. ' +
-    'Use account="spx" for the SPX margin account, "xsp" for the XSP cash account, or "both" (default).',
+    'Fetch open positions from Tradier for the SPX margin account. ' +
+    'Returns symbol, quantity, cost basis, date acquired, and computed entry price.',
   parameters: Type.Object({
     account: Type.Optional(
-      Type.String({ description: 'Which account: "spx", "xsp", or "both" (default)' }),
+      Type.String({ description: 'Which account: "spx" (default, only supported)' }),
     ),
   }),
   execute: async (_id: string, params: any): Promise<ToolResult> => {
@@ -151,10 +180,10 @@ const getOrdersTool = {
   label: 'Get Recent Orders',
   description:
     "Fetch today's orders from Tradier. Shows order ID, status, class, side, symbol, fill price, and legs. " +
-    'Filter by account ("spx", "xsp", "both") and status ("all", "open", "filled", "rejected", "pending", "canceled").',
+    'Filter by status ("all", "open", "filled", "rejected", "pending", "canceled").',
   parameters: Type.Object({
     account: Type.Optional(
-      Type.String({ description: 'Which account: "spx", "xsp", or "both" (default)' }),
+      Type.String({ description: 'Which account: "spx" (default, only supported)' }),
     ),
     status_filter: Type.Optional(
       Type.String({
@@ -214,11 +243,11 @@ const getBalanceTool = {
   name: 'get_balance',
   label: 'Get Account Balance',
   description:
-    'Fetch account balances from Tradier for one or both accounts. ' +
+    'Fetch account balances from Tradier for the SPX margin account. ' +
     'Returns equity, buying power, market value, open P&L, and close P&L.',
   parameters: Type.Object({
     account: Type.Optional(
-      Type.String({ description: 'Which account: "spx", "xsp", or "both" (default)' }),
+      Type.String({ description: 'Which account: "spx" (default, only supported)' }),
     ),
   }),
   execute: async (_id: string, params: any): Promise<ToolResult> => {
@@ -269,7 +298,7 @@ const getQuotesTool = {
   parameters: Type.Object({
     symbols: Type.String({
       description:
-        'Comma-separated option symbols, e.g. "XSP260330P00632000,SPXW260330C06650000"',
+        'Comma-separated option symbols, e.g. "SPXW260330C06650000,SPXW260330P06500000"',
     }),
   }),
   execute: async (_id: string, params: any): Promise<ToolResult> => {
@@ -308,15 +337,20 @@ const getMarketSnapshotTool = {
       const { data } = await axios.get('http://localhost:3600/spx/snapshot', { timeout: 5000 });
       const ind = data.indicators || {};
 
+      const { fast, slow } = getActiveHmaPair();
+      const fastKey = `hma${fast}`;
+      const slowKey = `hma${slow}`;
+      const hmaFastVal = ind[fastKey];
+      const hmaSlowVal = ind[slowKey];
       const hmaCross =
-        (ind.hma3 ?? 0) > (ind.hma17 ?? 0) ? 'BULLISH' : 'BEARISH';
+        (hmaFastVal ?? 0) > (hmaSlowVal ?? 0) ? 'BULLISH' : 'BEARISH';
 
       const fmt = (v: number | undefined, d = 2) =>
         v != null ? v.toFixed(d) : '?';
 
       const lines = [
         `SPX: ${data.close} (O:${data.open} H:${data.high} L:${data.low})`,
-        `HMA(3): ${fmt(ind.hma3)} | HMA(17): ${fmt(ind.hma17)} | Cross: ${hmaCross}`,
+        `HMA(${fast}): ${fmt(hmaFastVal)} | HMA(${slow}): ${fmt(hmaSlowVal)} | Cross: ${hmaCross}`,
         `RSI(14): ${fmt(ind.rsi14, 1)}`,
         `EMA(9): ${fmt(ind.ema9)} | EMA(21): ${fmt(ind.ema21)} | EMA(50): ${fmt(ind.ema50)} | EMA(200): ${fmt(ind.ema200)}`,
         `MACD: ${fmt(ind.macd, 3)} | Signal: ${fmt(ind.macdSignal, 3)} | Hist: ${fmt(ind.macdHistogram, 3)}`,
@@ -338,12 +372,12 @@ const getAgentStatusTool = {
   name: 'get_agent_status',
   label: 'Get Agent Status',
   description:
-    'Read the current status of one or both trading agents. Shows cycle count, positions, P&L, last action, reasoning, ' +
+    'Read the current status of the SPX trading agent. Shows cycle count, positions, P&L, last action, reasoning, ' +
     'and file freshness. Warns if the status file is stale (not updated in >2 minutes). ' +
     'Also shows PM2 process state (online/stopped/errored) and restart count.',
   parameters: Type.Object({
     agent: Type.Optional(
-      Type.String({ description: 'Which agent: "spx", "xsp", or "both" (default)' }),
+      Type.String({ description: 'Which agent: "spx" (default, only supported)' }),
     ),
   }),
   execute: async (_id: string, params: any): Promise<ToolResult> => {
@@ -450,18 +484,20 @@ const checkSystemHealthTool = {
 
       // Database files
       lines.push(`── Database ──`);
-      const dbPath = 'data/spxer.db';
-      try {
-        const dbStat = fs.statSync(dbPath);
-        lines.push(`  spxer.db: ${(dbStat.size / 1024 / 1024 / 1024).toFixed(2)} GB`);
-      } catch {
-        lines.push(`  spxer.db: not found`);
-      }
-      try {
-        const walStat = fs.statSync(`${dbPath}-wal`);
-        lines.push(`  WAL: ${(walStat.size / 1024 / 1024).toFixed(1)} MB`);
-      } catch {
-        lines.push(`  WAL: not present`);
+      for (const dbFile of ['data/spxer.db']) {
+        try {
+          const dbStat = fs.statSync(dbFile);
+          const sizeGB = dbStat.size / 1024 / 1024 / 1024;
+          lines.push(`  ${dbFile}: ${sizeGB >= 1 ? sizeGB.toFixed(2) + ' GB' : (dbStat.size / 1024 / 1024).toFixed(1) + ' MB'}`);
+        } catch {
+          lines.push(`  ${dbFile}: not found`);
+        }
+        try {
+          const walStat = fs.statSync(`${dbFile}-wal`);
+          lines.push(`  ${dbFile} WAL: ${(walStat.size / 1024 / 1024).toFixed(1)} MB`);
+        } catch {
+          // no WAL — fine
+        }
       }
       // Check for leftover backup files
       for (const backup of ['data/spxer.db.backup', 'data/spxer.db.pre-utc-fix']) {
@@ -562,7 +598,7 @@ const cancelOrderTool = {
     'orphaned bracket legs, or stale orders that should not be active. ' +
     'Provide the account and order ID.',
   parameters: Type.Object({
-    account: Type.String({ description: 'Which account: "spx" or "xsp"' }),
+    account: Type.String({ description: 'Which account: "spx"' }),
     order_id: Type.String({ description: 'The Tradier order ID to cancel' }),
   }),
   execute: async (_id: string, params: any): Promise<ToolResult> => {
@@ -598,15 +634,14 @@ const cancelAllOrdersTool = {
     'e.g., agent in a rejection loop, orphaned bracket legs piling up, ' +
     'or pre-open cleanup of stale orders.',
   parameters: Type.Object({
-    account: Type.String({ description: 'Which account: "spx", "xsp", or "both"' }),
+    account: Type.String({ description: 'Which account: "spx"' }),
   }),
   execute: async (_id: string, params: any): Promise<ToolResult> => {
     const blocked = maintenanceGuard('cancel_all_orders');
     if (blocked) return blocked;
 
     try {
-      const keys = params.account === 'both' ? ['spx', 'xsp'] as AccountKey[]
-        : [params.account as AccountKey];
+      const keys = [params.account as AccountKey];
       const lines: string[] = [];
 
       for (const key of keys) {
@@ -655,7 +690,7 @@ const closePositionTool = {
     'to prevent expiration losses or margin violations. ' +
     'Provide the account, option symbol, and quantity.',
   parameters: Type.Object({
-    account: Type.String({ description: 'Which account: "spx" or "xsp"' }),
+    account: Type.String({ description: 'Which account: "spx"' }),
     option_symbol: Type.String({ description: 'The option symbol to close, e.g. "SPXW260331C06420000"' }),
     quantity: Type.Number({ description: 'Number of contracts to sell' }),
   }),
@@ -668,7 +703,7 @@ const closePositionTool = {
       const acct = ACCOUNTS[key];
       if (!acct) return textResult(`Unknown account: ${params.account}`);
 
-      const rootSymbol = key === 'xsp' ? 'XSP' : 'SPX';
+      const rootSymbol = 'SPX';
       const body = new URLSearchParams({
         class: 'option',
         symbol: rootSymbol,
@@ -706,7 +741,7 @@ const stopAgentTool = {
     'trading on expired contracts, account is insolvent, or agent is causing damage. ' +
     'The agent will NOT auto-restart after being stopped this way.',
   parameters: Type.Object({
-    agent: Type.String({ description: 'Which agent: "spx" or "xsp"' }),
+    agent: Type.String({ description: 'Which agent: "spx"' }),
     reason: Type.String({ description: 'Why the agent is being stopped — logged for audit' }),
   }),
   execute: async (_id: string, params: any): Promise<ToolResult> => {

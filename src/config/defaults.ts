@@ -117,6 +117,7 @@ export const DEFAULT_CONFIG: Config = {
     emaCrossTimeframe: null,
     priceCrossHmaTimeframe: null,
     allowedSides: 'both' as const,
+    reverseSignals: false,
     targetOtmDistance: null,
     targetContractPrice: null,
     maxEntryPrice: null,           // Filter: skip trades above this price
@@ -158,6 +159,7 @@ export const DEFAULT_CONFIG: Config = {
     maxRiskPerTrade: 2000,
     cutoffTimeET: '16:00',
     minMinutesToClose: 15,
+    maxSignalsPerSession: 30,
   },
 
   strikeSelector: {
@@ -190,6 +192,39 @@ export const DEFAULT_CONFIG: Config = {
     timeBasedExitEnabled: false,
     timeBasedExitMinutes: 30,
     reversalSizeMultiplier: 1.0,
+    reentryOnTakeProfit: {
+      enabled: false,
+      strategy: 'same_direction',
+      maxReentriesPerDay: 3,
+      maxReentriesPerSignal: 1,
+      cooldownSec: 30,
+      sizeMultiplier: 1.0,
+      requireOptionHmaConfirm: false,
+    },
+  },
+
+  fill: {
+    slippage: {
+      // $0.002/contract × 100 contracts = $0.20 extra slip (capped at $0.50).
+      // For a 10-lot, adds $0.02 — modest but non-zero.
+      // Symmetric between entry (market buy walks ask up) and SL exit (stop-market
+      // walks bid down). TPs are limit orders and get no slippage.
+      slSlipPerContract: 0.002,
+      slSlipMax: 0.50,
+      entrySlipPerContract: 0.002,
+      entrySlipMax: 0.50,
+    },
+    // Participation-rate gate: cap fill to 20% of the signal bar's printed volume.
+    // A 100-lot into a 50-contract bar gets capped to 10; if 10 < minContracts, skip.
+    participationRate: 0.20,
+    minContracts: 1,
+    // Spread model: 'flat' = legacy constant $0.05, 'scaled' = price-proportional.
+    // Scaled uses max($0.05, optionPrice × 1%), capturing ITM's wider spreads.
+    spreadModel: {
+      mode: 'scaled' as const,
+      spreadFloor: 0.05,
+      spreadPct: 0.01,
+    },
   },
 
   narrative: {
@@ -399,6 +434,26 @@ export function validateConfig(config: Config): { valid: boolean; errors: string
   // Regime
   if (config.regime.enabled && Object.keys(config.regime.signalGates).length === 0) {
     errors.push('regime.enabled is true but no signalGates defined');
+  }
+
+  // TP re-entry
+  const reentry = config.exit?.reentryOnTakeProfit;
+  if (reentry?.enabled) {
+    if (reentry.maxReentriesPerDay < 0 || reentry.maxReentriesPerDay > 50) {
+      errors.push(`reentryOnTakeProfit.maxReentriesPerDay must be 0-50, got ${reentry.maxReentriesPerDay}`);
+    }
+    if (reentry.maxReentriesPerSignal < 0 || reentry.maxReentriesPerSignal > 10) {
+      errors.push(`reentryOnTakeProfit.maxReentriesPerSignal must be 0-10, got ${reentry.maxReentriesPerSignal}`);
+    }
+    if (reentry.cooldownSec < 0 || reentry.cooldownSec > 3600) {
+      errors.push(`reentryOnTakeProfit.cooldownSec must be 0-3600, got ${reentry.cooldownSec}`);
+    }
+    if (reentry.sizeMultiplier <= 0 || reentry.sizeMultiplier > 5) {
+      errors.push(`reentryOnTakeProfit.sizeMultiplier must be in (0, 5], got ${reentry.sizeMultiplier}`);
+    }
+    if (reentry.strategy !== 'same_direction' && reentry.strategy !== 'fresh_signal_required') {
+      errors.push(`reentryOnTakeProfit.strategy must be 'same_direction' or 'fresh_signal_required', got '${reentry.strategy}'`);
+    }
   }
 
   return { valid: errors.length === 0, errors };

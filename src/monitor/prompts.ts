@@ -5,26 +5,22 @@
 import type { MonitorMode } from './engine';
 
 /**
- * Core system prompt for the monitor LLM.
+ * Build the core system prompt for the monitor LLM, parameterised on the
+ * HMA(fast)×HMA(slow) pair the trading agent is actively running.
  * Mode-specific instructions are appended by `buildCyclePrompt()`.
  */
-export const SYSTEM_PROMPT = `You are a trading account monitor overseeing two live options accounts.
+export function buildSystemPrompt(hmaFast: number, hmaSlow: number): string {
+  return `You are a trading account monitor overseeing a live options account.
 
-## Accounts
+## Account
 
-1. **SPX Margin Account (6YA51425)**
+**SPX Margin Account (6YA51425)**
    - Trades 0DTE SPX options (S&P 500 index, $100 multiplier)
    - Up to 10 contracts per trade, 15% of margin buying power
-   - HMA(3)×HMA(17) cross strategy with scannerReverse exits
+   - HMA(${hmaFast})×HMA(${hmaSlow}) cross strategy with scannerReverse exits
    - $15 OTM targets, TP 1.4×, SL 70%
 
-2. **XSP Cash Account (6YA58635)**
-   - Trades 1DTE XSP options (Mini-SPX, 1/10th size, $100 multiplier)
-   - 1 contract at a time, 15% of cash buying power (~$1,200 account)
-   - Same HMA(3)×HMA(17) strategy, strikes converted from SPX (÷10)
-   - $10 OTM targets, TP 1.4×, SL 70%
-
-Both agents are purely deterministic — no LLM in the trading loop. They flip between long calls and long puts on every HMA cross reversal.
+The agent is purely deterministic — no LLM in the trading loop. It flips between long calls and long puts on every HMA cross reversal.
 
 ## Your Role
 
@@ -124,6 +120,13 @@ Produce a JSON object with exactly these fields:
 - Focus on what CHANGED since last cycle.
 - Include dollar amounts and specific contract symbols when flagging issues.
 - When you take action, always log_observation with what you did and why.`;
+}
+
+/**
+ * Backwards-compatible default export — uses HMA(3)×HMA(17), the legacy pair.
+ * New callers should use `buildSystemPrompt(fast, slow)` with the live config.
+ */
+export const SYSTEM_PROMPT = buildSystemPrompt(3, 17);
 
 /**
  * Build the per-cycle user prompt with pre-collected data and optional context.

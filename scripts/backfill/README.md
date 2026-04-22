@@ -1,137 +1,164 @@
-# Polygon Backfill Scripts
+# Historical Backfill Scripts
 
-This directory contains scripts for backfilling historical options data from Polygon API.
+Universal, symbol-agnostic backfill pipeline. Supports SPX, NDX, SPY, QQQ, and
+any equity/ETF that has options listed on Polygon.
 
-## Quick Start
+## Architecture
 
-### Full Replay Data Setup (Recommended)
+The recommended entry point is the **orchestrator** — either via the Backfill
+management UI (`/replay/backfill`) or CLI. It detects coverage gaps (raw 1m,
+MTFs, indicators) per symbol and fills them automatically.
+
+```
+UI / CLI
+  └─ POST /api/backfill/orchestrate (replay-routes.ts)
+       └─ backfill-orchestrator-worker.ts  (detached process)
+            ├─ Phase A: spawn backfill-worker.ts per raw-missing date
+            └─ Phase B: in-process buildMtfForSymbol() per MTF-missing date
+```
+
+Progress is tracked in the `replay_jobs` table (`kind='backfill'`) and polled
+by the UI via `GET /api/jobs/:jobId`.
+
+## Data sources
+
+| Asset | Source | Why |
+|-------|--------|-----|
+| Index underlying (SPX, NDX) | Polygon `I:{ticker}` aggregates | Clean, firm close; pre/post coverage |
+| Equity/ETF underlying | Polygon `{ticker}` stock aggregates | Standard source |
+| SPX options (1m OHLCV) | ThetaData REST (`fetchOptionTimesales`) | OPRA tick-level; best for SPX |
+| Other options (NDX, SPY, etc.) | Polygon options aggregates | Universal coverage |
+
+The `replay_bars.source` column records origin: `'polygon'`, `'thetadata'`,
+`'live'`, or `'aggregated'`. The replay engine reads all sources transparently.
+
+## Quick start
 
 ```bash
-# 1. Build SPX underlying data in replay_bars
-npx tsx scripts/backfill/build-replay-bars.ts --spx-only 2026-02-20 2026-03-24
+# Via UI: navigate to /replay/backfill, select a profile, click "Start Backfill"
 
-# 2. Fetch clean options data from Polygon to replay_bars
-npx tsx scripts/backfill/backfill-replay-options.ts 2026-02-20 2026-03-24
+# Via CLI orchestrator (fill all gaps for a profile)
+npx tsx scripts/backfill/orchestrate-backfill.ts --profile=ndx-0dte
+
+# Single-date worker (low-level, usually spawned by orchestrator)
+npx tsx scripts/backfill/backfill-worker.ts <job-spec.json>
+
+# MTF-only rebuild for a profile
+npx tsx scripts/backfill/build-mtf-bars.ts --profile=spx-0dte --recompute-1m
+
+# Options-only backfill (ThetaData, SPX-specific)
+npx tsx scripts/backfill/backfill-replay-options.ts 2026-03-20
 ```
 
 ## Scripts
 
-### `backfill-replay-options.ts` ⭐ (NEW - Recommended)
+### `backfill-orchestrator-worker.ts`
 
-Fetches SPXW 0DTE option bars directly from Polygon API and writes to `replay_bars` table only.
-
-**Features:**
-- Clean, reliable data directly from Polygon
-- Writes to `replay_bars` table only (never touches production `bars` table)
-- Automatic strike range detection (±100 points from SPX close)
-- 5-point strike intervals
-- Both calls and puts
-- No rate limiting issues (uses paid Polygon plan)
-
-**Usage:**
-```bash
-npx tsx scripts/backfill/backfill-replay-options.ts 2026-03-20           # Single date
-npx tsx scripts/backfill/backfill-replay-options.ts 2026-02-20 2026-03-24  # Date range
+Detached worker spawned by `POST /api/backfill/orchestrate`. Reads a JSON spec:
+```json
+{ "jobId": "...", "profileId": "spx-0dte", "start": null, "end": null, "onlyMtf": false, "dbPath": "data/spxer.db" }
 ```
 
-**Output:**
-- ~235K option bars per day (82 contracts × ~390 bars/day)
-- ~550K total bars for 23 trading days
-- All data marked with `source='polygon'` in replay_bars table
+Orchestrates gap-fill in two phases:
+- **Phase A** — for each raw-missing date, spawns `backfill-worker.ts` as child
+- **Phase B** — for each MTF/indicator-missing date, runs `buildMtfForSymbol()` in-process
 
-### `build-replay-bars.ts`
+Supports cancellation via `replay_jobs.status='cancelled'` polling + SIGTERM.
 
-Builds the `replay_bars` table with SPX data from Polygon.
+### `backfill-worker.ts`
 
-**Usage:**
+Single-date worker that fetches raw 1m bars from vendor(s) based on the
+instrument profile. Steps:
+1. Fetch underlying from Polygon
+2. Compute strike band; fetch options from ThetaData (SPX) or Polygon (others)
+3. Build MTFs + indicators for all symbols on that date
+4. Optionally run replays against the new data
+
+### `orchestrate-backfill.ts`
+
+CLI wrapper over the orchestrator logic. Flags:
+- `--profile=<id>` — instrument profile to fill
+- `--start=YYYY-MM-DD`, `--end=YYYY-MM-DD` — date range
+- `--only-mtf` — skip raw fetch, only build MTFs + indicators
+- `--dry-run` — report gaps without filling
+
+### `build-mtf-bars.ts`
+
+Builds/rebuilds multi-timeframe bars (2m, 3m, 5m, 10m, 15m) + indicators.
+Thin CLI over `src/pipeline/mtf-builder.ts`.
+
 ```bash
-npx tsx scripts/backfill/build-replay-bars.ts --spx-only 2026-02-20 2026-03-24  # SPX only (recommended)
+npx tsx scripts/backfill/build-mtf-bars.ts --profile=spx-0dte --tf=5m
+npx tsx scripts/backfill/build-mtf-bars.ts --symbol=NDX --recompute-1m
 ```
 
-**Deprecated:** The default mode (without `--spx-only`) copies unreliable options data from the live `bars` table. Use `backfill-replay-options.ts` instead.
+### `daily-backfill.ts`
 
-### `backfill-polygon.ts` (Legacy)
+Runs nightly (via cron or PM2). Copies live `bars` → `replay_bars` for each
+`canGoLive` profile. Falls back to Polygon/ThetaData if live data is missing.
 
-Original backfill script that writes to the production `bars` table. **DO NOT USE** - it pollutes production data.
+### `backfill-replay-options.ts`
+
+Standalone options-only backfill via ThetaData. Useful when underlying exists
+but options need filling.
 
 ### `polygon-validate.ts`
 
 Compare local bars against Polygon to detect data quality issues.
 
-**Usage:**
-```bash
-npx tsx scripts/backfill/polygon-validate.ts compare 2026-03-20
-npx tsx scripts/backfill/polygon-validate.ts compare 2026-02-20 2026-03-24  # Date range
-npx tsx scripts/backfill/polygon-validate.ts overwrite 2026-03-20           # Fix mismatches
-```
-
-## Data Quality
-
-### replay_bars Table (Sanitized ✅)
-
-| Metric | Value |
-|--------|-------|
-| **Total Bars** | 546,354 |
-| **SPX Bars** | 10,913 (Polygon) |
-| **Option Bars** | 535,441 (Polygon) |
-| **Unique Contracts** | 1,885 |
-| **Trading Days** | 23 |
-| **Date Range** | Feb 20 → Mar 24, 2026 |
-| **Data Source** | Polygon API only |
-| **Synthetic Bars** | 0 (all real market data) |
-
-### bars Table (Production - Mixed Quality)
-
-- Contains live collection data (unreliable for backtesting)
-- Mixed sources (Tradier, Yahoo, live streaming)
-- May have gaps, interpolation, and data quality issues
-- **DO NOT USE** for replay/backtesting
-
-## API Keys
+## Environment
 
 Required in `.env`:
 ```
-POLYGON_API_KEY=your_polygon_api_key_here
+POLYGON_API_KEY=<key>       # Historical data (all tickers)
 ```
 
-## Rate Limits
+ThetaData requires the local `ThetaTerminal.jar` running on `127.0.0.1:25510`
+(REST) and `127.0.0.1:25520` (WS). No API key in env — auth is terminal-side.
+Only needed for SPX options backfill.
 
-- **Paid Polygon plan:** No effective rate limit
-- **Free/starter plan:** 5 requests/minute (requires 12s delays between requests)
+## Instrument Profiles
+
+Profiles define how each ticker is discovered, backfilled, and traded:
+- **Seeded on boot**: SPX, NDX, SPY (from `src/instruments/profiles/`)
+- **UI-discovered**: added via `/replay/backfill` → "+ Add Symbol" → Polygon discovery
+
+Profile fields: asset class, option prefix, strike interval, band half-width,
+vendor routing, tier, expiry cadences.
+
+## Coverage Detection
+
+`src/backfill/missing-dates.ts` detects per-date gaps:
+- `missingRaw` — no 1m bars at all
+- `missingMtfs` — which aggregated timeframes are absent
+- `missingIndicators` — which timeframes lack denormalized indicator columns
+
+The heatmap in the UI renders these as red (missing) / yellow (partial) /
+green (complete) cells.
+
+## Contract symbol format
+
+**Database / ThetaData symbol:** `SPXW260320C06575000`
+- `SPXW` = SPX weekly (or `NDXP`, `SPY`, etc.)
+- `260320` = expiry YYMMDD
+- `C` = call (or `P` for put)
+- `06575000` = strike x 1000, zero-padded to 8 digits
 
 ## Troubleshooting
 
 ### "No SPX data in replay_bars"
 
-Run `build-replay-bars.ts --spx-only` first to populate SPX data. `backfill-replay-options.ts` needs SPX data to determine strike ranges.
+Underlying must be backfilled before options (strike band is derived from
+the day's close). The orchestrator handles this ordering automatically.
 
-### "NOT_AUTHORIZED" errors
+### ThetaData returns 0 bars
 
-1. Check your `POLYGON_API_KEY` in `.env`
-2. Verify your Polygon plan includes options data
-3. Some far-OTM strikes may not have data on Polygon (normal - expect `_` symbols in output)
+Far-OTM strikes legitimately don't trade. If ALL contracts return empty:
+1. `curl http://127.0.0.1:25510/v2/list/expirations?root=SPXW`
+2. Verify subscription covers SPXW options
+3. Confirm date is a trading day
 
-### Database size growing
+### Polygon "NOT_AUTHORIZED"
 
-The `replay_bars` table is separate from production. To reset:
-```sql
-DELETE FROM replay_bars WHERE source = 'polygon';
-```
-
-## Contract Symbol Format
-
-**Polygon ticker:** `O:SPXW260320C06575000`
-- `O:` prefix = option
-- `SPXW` = SPX weekly
-- `260320` = expiry (March 20, 2026)
-- `C` = call (or `P` for put)
-- `06575000` = strike (6575 × 1000)
-
-**Database symbol:** `SPXW260320C06575000` (same format without `O:` prefix)
-
-## Future Work
-
-- [ ] Add Massive API as fallback for missing contracts
-- [ ] Implement parallel fetching for faster backfills
-- [ ] Add progress bar and ETA calculation
-- [ ] Store metadata (fetch date, API version) in replay table
+1. Check `POLYGON_API_KEY` in `.env`
+2. Verify plan includes index aggregates (`I:SPX`, `I:NDX`)

@@ -1,6 +1,6 @@
 /**
  * TradeExecutor: places orders via Tradier API.
- * Supports multiple execution targets (SPX, XSP, SPY) via Config.execution.
+ * Supports SPX execution via Config.execution.
  *
  * Order type logic:
  *   - Market order if bid-ask spread ≤ maxSpreadForMarket (default $0.75)
@@ -14,6 +14,12 @@ import { config, TRADIER_BASE } from '../config';
 import type { Config } from '../config/types';
 import type { AgentSignal, AgentDecision, OpenPosition } from './types';
 import { randomUUID } from 'crypto';
+import { roundToOptionTick } from '../core/option-tick';
+import {
+  incrReentryAttempted,
+  incrReentryProtected,
+  incrReentryUnprotected,
+} from './execution-counters';
 
 /** Maximum bid-ask spread to use a market order. Above this, use limit at ask. */
 const DEFAULT_MAX_SPREAD_FOR_MARKET = 0.50;
@@ -87,19 +93,100 @@ function qs(params: Record<string, string | number>): string {
     .join('&');
 }
 
+/**
+ * Poll Tradier for the leg statuses of an OTOCO parent order.
+ * Returns per-leg status: 'open' | 'filled' | 'rejected' | 'canceled' | 'expired' | 'unknown'.
+ *
+ * Used by verifyOtocoProtection() to detect partial OTOCO acceptance
+ * (entry filled but TP/SL rejected). Non-blocking — called with a short
+ * timeout so the agent's main loop does not stall.
+ */
+export async function waitForOtocoLegs(
+  bracketOrderId: number,
+  accountId: string,
+  timeoutMs = 3000,
+): Promise<{ entry: string; tp: string; sl: string; raw?: any }> {
+  const start = Date.now();
+  const pollMs = 500;
+
+  while (Date.now() - start < timeoutMs) {
+    try {
+      const { data } = await axios.get(
+        `${TRADIER_BASE}/accounts/${accountId}/orders/${bracketOrderId}`,
+        { headers: headers(), timeout: 2000 },
+      );
+      const order = data?.order;
+      if (!order) break;
+
+      const legs = Array.isArray(order.leg) ? order.leg : (order.leg ? [order.leg] : []);
+      const entry = legs[0]?.status || order.status || 'unknown';
+      const tp = legs[1]?.status || 'unknown';
+      const sl = legs[2]?.status || 'unknown';
+
+      // Return early once entry has a terminal status (filled/rejected),
+      // so we can decide whether to remediate.
+      if (entry === 'filled' || entry === 'rejected') {
+        return { entry, tp, sl, raw: order };
+      }
+    } catch {
+      // network error — keep retrying until timeout
+    }
+    await new Promise(r => setTimeout(r, pollMs));
+  }
+
+  return { entry: 'timeout', tp: 'unknown', sl: 'unknown' };
+}
+
+/**
+ * Verify that OTOCO protection is actually in place after submission.
+ *
+ * Design: non-blocking. Fires and forgets — the caller (openPosition)
+ * returns immediately; this runs in background, and if it detects a
+ * partial OTOCO accept (entry filled but TP/SL missing) it logs a loud
+ * ALERT so the monitor agent / next reconcile cycle can attach protection.
+ *
+ * We do NOT submit the standalone OCO directly here to avoid tight coupling
+ * — that path goes through PositionManager.submitStandaloneOco() which owns
+ * the position map. This function's role is detection + alerting.
+ *
+ * Returns immediately (caller does not await the result).
+ */
+export function verifyOtocoProtection(
+  bracketOrderId: number | undefined,
+  positionSymbol: string,
+  accountId: string,
+): void {
+  if (!bracketOrderId) return;
+  // Fire and forget
+  (async () => {
+    try {
+      const legs = await waitForOtocoLegs(bracketOrderId, accountId);
+      const tpMissing = legs.tp === 'rejected' || legs.tp === 'canceled' || legs.tp === 'expired';
+      const slMissing = legs.sl === 'rejected' || legs.sl === 'canceled' || legs.sl === 'expired';
+      if (legs.entry === 'filled' && (tpMissing || slMissing)) {
+        console.error(`[executor] 🚨 ALERT: OTOCO #${bracketOrderId} partial-accept for ${positionSymbol} — entry=filled TP=${legs.tp} SL=${legs.sl}. Position UNPROTECTED. Reconcile / monitor should attach standalone OCO.`);
+      } else if (legs.entry === 'timeout') {
+        console.warn(`[executor] ⏳ OTOCO #${bracketOrderId} leg verification timed out for ${positionSymbol} — check next cycle`);
+      }
+    } catch (e: any) {
+      console.warn(`[executor] OTOCO verification error for ${positionSymbol}: ${e.message}`);
+    }
+  })();
+}
+
 /** Get the Tradier account ID — uses execution config override or default .env */
 function getAccountId(execCfg?: Config['execution']): string {
   return execCfg?.accountId || config.tradierAccountId;
 }
 
-/** Get the root symbol for Tradier orders (e.g., 'SPX', 'XSP', 'SPY') */
+/** Get the root symbol for Tradier orders (e.g., 'SPX') */
 function getRootSymbol(execCfg?: Config['execution']): string {
   return execCfg?.symbol || 'SPX';
 }
 
 /**
  * Convert an SPXW option symbol to the target product.
- * e.g., SPXW260401C05700000 → XSP260401C00570000 (strike / 10)
+ * Returns the input unchanged for SPXW (the default and only active product).
  *
  * Option symbol format: PREFIX + YYMMDD + C/P + strike*1000 (8 digits, zero-padded)
  */
@@ -185,8 +272,12 @@ export async function openPosition(
   decision: AgentDecision,
   paper: boolean,
   execCfg?: Config['execution'],
+  reentryDepth?: number,
+  agentTag?: string,
 ): Promise<{ position: OpenPosition; execution: ExecutionResult }> {
   const qty = decision.positionSize;
+  const isReentry = (reentryDepth ?? 0) >= 1;
+  if (isReentry) incrReentryAttempted();
 
   // Determine order type from spread
   const order = chooseOrderType(signal.bid, signal.ask);
@@ -246,17 +337,40 @@ export async function openPosition(
     try {
       const result = await submitOtocoOrder(
         rootSymbol, executedSymbol, accountId, qty,
-        order, entryPrice, decision.takeProfit!, decision.stopLoss, spreadStr,
+        order, entryPrice, decision.takeProfit!, decision.stopLoss, spreadStr, agentTag,
       );
       position.tradierOrderId = result.entryOrderId;
       position.bracketOrderId = result.bracketOrderId;
       position.tpLegId = result.tpLegId;
       position.slLegId = result.slLegId;
+
+      // Task 1.2: verify legs actually accepted in background. If Tradier
+      // accepted the parent OTOCO but one OCO leg rejects (partial accept),
+      // this fires an ALERT so reconcile / monitor can attach standalone OCO.
+      // Non-blocking — does not delay the entry return.
+      verifyOtocoProtection(result.bracketOrderId, executedSymbol, accountId);
+
+      // Task 3.3: count TP re-entry protection outcome. "Protected" here
+      // means Tradier accepted the parent OTOCO; verifyOtocoProtection() may
+      // still downgrade individual legs in the background, but that's a
+      // partial-accept alert path, not the counter's concern.
+      if (isReentry) incrReentryProtected();
+
       return { position, execution: { orderId: result.entryOrderId, fillPrice: entryPrice, paper: false, executedSymbol, orderType: order.type, spread: order.spread } };
     } catch (e: any) {
-      console.warn(`[executor] OTOCO failed, falling back to single order: ${e.message}`);
+      // Task 1.3: loud-fail — this path leaves the position without
+      // server-side protection until reconcile runs. The monitor agent
+      // should surface this immediately.
+      const otocoErr = e?.response?.data?.errors?.error || e?.response?.data || e.message;
+      console.error(`[executor] 🚨 ALERT: OTOCO SUBMISSION FAILED for ${executedSymbol}: ${typeof otocoErr === 'string' ? otocoErr : JSON.stringify(otocoErr)} — falling back to bare entry order.`);
+      // Task 3.3: re-entry fell back to bare order — UNPROTECTED until reconcile.
+      if (isReentry) incrReentryUnprotected();
       // Fall through to single order below
     }
+  } else if (isReentry) {
+    // Re-entry path skipped OTOCO entirely (brackets disabled or no TP/SL) —
+    // bare entry order has no server-side protection.
+    incrReentryUnprotected();
   }
 
   // Fallback: single market/limit order (no server-side TP/SL)
@@ -268,6 +382,7 @@ export async function openPosition(
     quantity: qty,
     type: order.type,
     duration: 'day',
+    ...(agentTag ? { tag: agentTag } : {}),
   };
 
   // Only set price for limit orders
@@ -328,33 +443,35 @@ async function submitOtocoOrder(
   tpPrice: number,
   slPrice: number,
   spreadStr: string,
+  agentTag?: string,
 ): Promise<{ bracketOrderId: number; entryOrderId?: number; tpLegId?: number; slLegId?: number }> {
   // Build OTOCO params with indexed legs
   const params: Record<string, string | number> = {
     class: 'otoco',
     duration: 'day',
+    ...(agentTag ? { tag: agentTag } : {}),
     // Leg 0: entry
     'type[0]': order.type,
     'option_symbol[0]': optionSymbol,
     'side[0]': 'buy_to_open',
     'quantity[0]': qty,
-    // Leg 1: TP (limit sell)
+    // Leg 1: TP (limit sell) — round to valid option tick (Tradier rejects off-tick prices)
     'type[1]': 'limit',
     'option_symbol[1]': optionSymbol,
     'side[1]': 'sell_to_close',
     'quantity[1]': qty,
-    'price[1]': tpPrice.toFixed(2),
-    // Leg 2: SL (stop sell)
+    'price[1]': roundToOptionTick(tpPrice).toFixed(2),
+    // Leg 2: SL (stop sell) — round to valid option tick
     'type[2]': 'stop',
     'option_symbol[2]': optionSymbol,
     'side[2]': 'sell_to_close',
     'quantity[2]': qty,
-    'stop[2]': slPrice.toFixed(2),
+    'stop[2]': roundToOptionTick(slPrice).toFixed(2),
   };
 
-  // Set entry price for limit orders
+  // Set entry price for limit orders — round to valid option tick
   if (order.type === 'limit' && entryPrice > 0) {
-    params['price[0]'] = entryPrice.toFixed(2);
+    params['price[0]'] = roundToOptionTick(entryPrice).toFixed(2);
   }
 
   const body = qs(params);

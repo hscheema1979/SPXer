@@ -9,7 +9,7 @@ export type {
   Signal, Position, ExitCheck, TradeResult, CoreBar, PriceGetter,
 } from './types';
 
-export { detectSignals } from './signal-detector';
+export { detectSignals, isBarDataUnhealthy } from './signal-detector';
 export { checkExit } from './position-manager';
 export { computeQty } from './position-sizer';
 export { isRiskBlocked, type RiskState } from './risk-guard';
@@ -41,3 +41,17 @@ export {
   type ExitDecision,
   type EntryContext,
 } from './trade-manager';
+export {
+  evaluateReentry,
+  createInitialReentryState,
+  type ReentryState,
+  type ReentryDecision,
+  type ReentryGateContext,
+} from './reentry-evaluator';
+export {
+  checkEntryGates,
+  computeCloseCutoffTs,
+  type EntryKind,
+  type EntryGateInput,
+  type EntryGateResult,
+} from './entry-gate';

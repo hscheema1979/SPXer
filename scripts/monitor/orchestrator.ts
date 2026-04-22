@@ -73,7 +73,7 @@ function restartAgent(): void {
   try {
     execSync('tmux kill-session -t agent 2>/dev/null');
   } catch { /* may already be dead */ }
-  execSync("tmux new-session -d -s agent 'cd /home/ubuntu/SPXer && npx tsx agent.ts 2>&1 | tee logs/agent.log'");
+  execSync("tmux new-session -d -s agent 'cd /home/ubuntu/SPXer && npx tsx spx_agent.ts 2>&1 | tee logs/agent.log'");
   console.log('[orch] Agent restarted');
 }
 

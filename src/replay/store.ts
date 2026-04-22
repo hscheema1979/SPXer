@@ -1,20 +1,18 @@
 /**
  * Replay store — persistent storage for configs, runs, and results.
- * Uses the unified spxer.db database (replay tables created by config migration).
+ * All replay tables live in spxer.db (single database).
  */
 
 import Database from 'better-sqlite3';
-import * as path from 'path';
 import type { ReplayConfig, ReplayRun, ReplayResult } from './types';
-
-// Unified database — replay tables live in spxer.db alongside market data and configs
-const REPLAY_DB_PATH = path.resolve(process.cwd(), 'data/spxer.db');
+import { DEFAULT_CONFIG, mergeConfig } from '../config/defaults';
+import { REPLAY_META_DB } from '../storage/replay-db';
 
 export class ReplayStore {
   private db: Database.Database;
 
   constructor(dbPath?: string) {
-    this.db = new Database(dbPath || REPLAY_DB_PATH);
+    this.db = new Database(dbPath || REPLAY_META_DB);
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('busy_timeout = 10000');
     this.initTables();
@@ -72,22 +70,62 @@ export class ReplayStore {
 
   // ── Configs ────────────────────────────────────────────────────────────────
 
-  saveConfig(config: ReplayConfig) {
+  /**
+   * Save config with auto-versioning. If a config with the same ID already
+   * exists and has different settings, auto-create a new version (-v2, -v3, etc.)
+   * instead of overwriting the original. Returns the actual ID used.
+   */
+  saveConfig(config: ReplayConfig): string {
+    const existing = this.db.prepare('SELECT config_json FROM replay_configs WHERE id = ?')
+      .get(config.id) as { config_json: string } | undefined;
+
+    if (existing) {
+      // Compare configs ignoring id/name/description/timestamps
+      const strip = (c: any) => {
+        const { id, name, description, createdAt, ...rest } = c;
+        return JSON.stringify(rest);
+      };
+      const existingParsed = JSON.parse(existing.config_json);
+      if (strip(existingParsed) !== strip(config)) {
+        // Config changed — find next available version
+        const base = config.id.replace(/-v\d+$/, '');
+        let v = 2;
+        while (this.db.prepare('SELECT 1 FROM replay_configs WHERE id = ?').get(`${base}-v${v}`)) {
+          v++;
+        }
+        config.id = `${base}-v${v}`;
+        config.name = (config.name || '').replace(/ v\d+$/, '') + ` v${v}`;
+        console.log(`[replay-store] Config changed, auto-versioned to: ${config.id}`);
+      }
+    }
+
     this.db.prepare(`
       INSERT OR REPLACE INTO replay_configs
       (id, name, description, config_json, baselineConfigId, createdAt, updatedAt)
       VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(config.id, config.name, config.description || '', JSON.stringify(config), config.baselineId || null, config.createdAt, Date.now());
+    `).run(config.id, config.name, config.description || '', JSON.stringify(config), (config as any).baselineId || null, config.createdAt || Date.now(), Date.now());
+
+    return config.id;
   }
 
   getConfig(id: string): ReplayConfig | null {
     const row = this.db.prepare('SELECT config_json FROM replay_configs WHERE id = ?').get(id) as any;
-    return row ? JSON.parse(row.config_json) : null;
+    if (!row) return null;
+    // Merge with DEFAULT_CONFIG so newly-added fields (like fill.slippage from
+    // Phase 2) apply to configs saved before the field existed. Explicit values
+    // in the stored config still take precedence.
+    return mergeConfig(DEFAULT_CONFIG, JSON.parse(row.config_json));
+  }
+
+  /** Raw existence check without mergeConfig — used by callers that only need
+   *  to know whether a config ID is already in the store (FK purposes). */
+  getConfigRaw(id: string): boolean {
+    return !!this.db.prepare('SELECT 1 FROM replay_configs WHERE id = ?').get(id);
   }
 
   listConfigs(): ReplayConfig[] {
     const rows = this.db.prepare('SELECT config_json FROM replay_configs ORDER BY createdAt DESC').all() as any[];
-    return rows.map(r => JSON.parse(r.config_json));
+    return rows.map(r => mergeConfig(DEFAULT_CONFIG, JSON.parse(r.config_json)));
   }
 
   deleteConfig(id: string) {
@@ -138,13 +176,17 @@ export class ReplayStore {
     this.db.prepare(`
       INSERT OR REPLACE INTO replay_results
       (runId, configId, date, trades, wins, winRate, totalPnl, avgPnlPerTrade,
-       maxWin, maxLoss, maxConsecutiveWins, maxConsecutiveLosses, sharpeRatio, trades_json)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       maxWin, maxLoss, maxConsecutiveWins, maxConsecutiveLosses, sharpeRatio,
+       sumWinPct, cntWins, sumLossPct, cntLosses, trades_json)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       result.runId, result.configId, result.date, result.trades, result.wins,
       result.winRate, result.totalPnl, result.avgPnlPerTrade, result.maxWin,
       result.maxLoss, result.maxConsecutiveWins, result.maxConsecutiveLosses,
-      result.sharpeRatio, result.trades_json,
+      result.sharpeRatio,
+      result.sumWinPct ?? 0, result.cntWins ?? 0,
+      result.sumLossPct ?? 0, result.cntLosses ?? 0,
+      result.trades_json,
     );
   }
 

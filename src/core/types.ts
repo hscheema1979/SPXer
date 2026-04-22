@@ -36,7 +36,10 @@ export interface Position {
 export interface ExitCheck {
   shouldExit: boolean;
   reason: ExitReason | null;
-  /** When intrabar pricing is active, this is the exact TP/SL price (not bar close). */
+  /** Clamped fill price for TP/SL exits. Set by both intrabar and close-based
+   *  branches: TP fills at position.takeProfit (limit order), SL at position.stopLoss
+   *  (stop level — realistic slippage is layered on top by the fill model).
+   *  Undefined for non-TP/SL exits (time_exit, signal_reversal); caller uses bar close. */
   exitPrice?: number;
 }
 
@@ -67,6 +70,7 @@ export interface CoreBar {
   close: number;
   volume: number;
   indicators: Record<string, number | null>;
+  synthetic?: boolean;
 }
 
 /** Price getter function — abstracts bar cache (replay) vs API (live) */
