@@ -13,6 +13,7 @@ import { DEFAULT_CONFIG, mergeConfig, validateConfig } from '../config/defaults'
 import type { Config } from '../config/types';
 import { REPLAY_META_DB } from '../storage/replay-db';
 import { readHandlerState, readRoutingLog, writeCommand } from '../agent/handler-state';
+import { groupConfigSections } from './config-view';
 import Database from 'better-sqlite3';
 
 const execAsync = promisify(exec);
@@ -148,6 +149,25 @@ export function createAdminRoutes(): Router {
     }
   });
 
+  /** GET /admin/api/config/:id/grouped — get a config with parameters grouped for display */
+  router.get('/api/config/:id/grouped', (req, res) => {
+    const { id } = req.params;
+    const db = getDb();
+    try {
+      const row = db.prepare('SELECT config_json FROM replay_configs WHERE id = ?').get(id) as any;
+      if (!row) {
+        return res.status(404).json({ error: 'Config not found' });
+      }
+      const config = mergeConfig(DEFAULT_CONFIG, JSON.parse(row.config_json));
+      const sections = groupConfigSections(config);
+      res.json(sections);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    } finally {
+      db.close();
+    }
+  });
+
   /** POST /admin/api/config — create new config */
   router.post('/api/config', (req, res) => {
     const { id, name, description, config } = req.body as {
@@ -263,6 +283,48 @@ export function createAdminRoutes(): Router {
       res.json(simplified);
     } catch (e: any) {
       res.status(500).json({ error: e.message, stdout: e.stdout, stderr: e.stderr });
+    }
+  });
+
+  /** PUT /admin/api/process/:name/env/save-only — write env vars without restarting */
+  router.put('/api/process/:name/env/save-only', async (req, res) => {
+    const { name } = req.params;
+    const { envUpdates } = req.body as { envUpdates: Record<string, string> };
+
+    if (!envUpdates || typeof envUpdates !== 'object') {
+      return res.status(400).json({ error: 'envUpdates object required' });
+    }
+
+    try {
+      const ecosystemContent = await fs.readFile(ECOSYSTEM_PATH, 'utf-8');
+      let updatedContent = ecosystemContent;
+
+      for (const [key, value] of Object.entries(envUpdates)) {
+        const regex = new RegExp(`(name:\\s*['"]${name}['"][\\s\\S]*?env:\\s*\\{[^}]*?)(${key}:\\s*['"][^'"]*['"]|)`, 'g');
+        updatedContent = updatedContent.replace(regex, (match, prefix) => {
+          if (match.includes(`${key}:`)) {
+            return match.replace(new RegExp(`${key}:\\s*['"][^'"]*['"]`), `${key}: '${value}'`);
+          } else {
+            return prefix + `    ${key}: '${value}',\n`;
+          }
+        });
+      }
+
+      await fs.writeFile(ECOSYSTEM_PATH, updatedContent, 'utf-8');
+      res.json({ saved: true, envUpdates, pendingRestart: true });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  /** POST /admin/api/process/:name/apply-restart — restart PM2 process */
+  router.post('/api/process/:name/apply-restart', async (req, res) => {
+    const { name } = req.params;
+    try {
+      await execAsync(`pm2 restart ${name} --update-env`);
+      res.json({ restarted: true, name });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
     }
   });
 
@@ -399,6 +461,34 @@ export function createAdminRoutes(): Router {
     }
   });
 
+  /** GET /admin/api/ecosystem/validate — syntax check ecosystem.config.js */
+  router.get('/api/ecosystem/validate', async (_req, res) => {
+    try {
+      await execAsync(`node -c "${ECOSYSTEM_PATH}" 2>&1`);
+      res.json({ valid: true });
+    } catch (e: any) {
+      const error = e.stderr || e.message || 'Syntax error';
+      res.json({ valid: false, error });
+    }
+  });
+
+  /** POST /admin/api/ecosystem/revert — restore from backup */
+  router.post('/api/ecosystem/revert', async (_req, res) => {
+    const backupPath = ECOSYSTEM_PATH + '.backup';
+    try {
+      await fs.access(backupPath);
+    } catch {
+      return res.status(404).json({ error: 'No backup file found' });
+    }
+
+    try {
+      await fs.copyFile(backupPath, ECOSYSTEM_PATH);
+      res.json({ reverted: true });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   /** PUT /admin/api/ecosystem — update ecosystem.config.js and reload */
   router.put('/api/ecosystem', async (req, res) => {
     const { content } = req.body as { content: string };
@@ -407,22 +497,26 @@ export function createAdminRoutes(): Router {
       return res.status(400).json({ error: 'content is required' });
     }
 
+    const tmpPath = ECOSYSTEM_PATH + '.tmp';
     try {
-      // Validate it's valid JS by attempting to parse it
-      const { stdout } = await execAsync(`node -c "${ECOSYSTEM_PATH}"`);
-      // If no output, file is valid
+      await fs.writeFile(tmpPath, content, 'utf-8');
 
-      // Backup original
-      await fs.copyFile(ECOSYSTEM_PATH, ECOSYSTEM_PATH + '.backup', fs.constants.COPYFILE_EXCL);
+      try {
+        await execAsync(`node -c "${tmpPath}"`);
+      } catch {
+        await fs.unlink(tmpPath).catch(() => {});
+        return res.status(400).json({ error: 'Invalid JavaScript syntax', stdout: '' });
+      }
 
-      // Write new content
+      await fs.copyFile(ECOSYSTEM_PATH, ECOSYSTEM_PATH + '.backup');
       await fs.writeFile(ECOSYSTEM_PATH, content, 'utf-8');
+      await fs.unlink(tmpPath).catch(() => {});
 
-      // Reload PM2
       await execAsync('pm2 reload ecosystem.config.js --update-env');
 
       res.json({ message: 'Ecosystem config updated and PM2 reloaded' });
     } catch (e: any) {
+      await fs.unlink(tmpPath).catch(() => {});
       res.status(500).json({ error: e.message, stdout: e.stdout });
     }
   });
