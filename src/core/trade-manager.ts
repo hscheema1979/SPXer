@@ -220,7 +220,7 @@ export function evaluateEntry(
     sessionSignalCount: context.sessionSignalCount,
   }, config);
   if (!gate.allowed) {
-    return { entry: null, skipReason: gate.reason };
+    return { entry: null, skipReason: (gate as { allowed: false; reason: string }).reason };
   }
 
   if (entryDirection === null) {

@@ -68,7 +68,23 @@ export function validateSignalConfig(config: Config): void {
  * Matches trailing C or P followed by 4-5 digit strike, with optional trailing 000.
  * Examples: SPXW260318C05700000 → { isCall: true, strike: 5700 }
  */
-function parseSymbol(sym: string): { isCall: boolean; strike: number } | null {
+export function parseSymbol(sym: string): { isCall: boolean; strike: number; expiry?: string } | null {
+  // SPXW format: SPXW + YYMMDD + C/P + strike*1000
+  const spxwMatch = sym.match(/^SPXW(\d{6})([CP])(\d{8})$/);
+  if (spxwMatch) {
+    const [, expiryCode, type, strikeCode] = spxwMatch;
+    const year = 2000 + parseInt(expiryCode.substring(0, 2));
+    const month = parseInt(expiryCode.substring(2, 4));
+    const day = parseInt(expiryCode.substring(4, 6));
+    const expiry = `${year}-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}`;
+    return {
+      isCall: type === 'C',
+      strike: parseInt(strikeCode) / 1000,
+      expiry
+    };
+  }
+
+  // Legacy format: C or P followed by strike
   const m = sym.replace(/\s+/g, '').match(/([CP])(\d{4,5})(?:000)?$/i);
   if (!m) return null;
   return { isCall: m[1].toUpperCase() === 'C', strike: parseInt(m[2]) };

@@ -214,18 +214,18 @@ export async function fetchDailyPnl(accountId?: string): Promise<BrokerPnl> {
   const today = todayET();
 
   try {
-    // Try gainloss first — when available, it's the most accurate (broker-computed)
-    const glResult = await fetchFromGainloss(acctId, today);
-    if (glResult) {
-      cache.set(acctId, glResult);
-      return glResult;
-    }
-
     // Primary for same-day 0DTE: orders endpoint with broker avg_fill_price
     const ordersResult = await fetchFromOrders(acctId, today);
     if (ordersResult) {
       cache.set(acctId, ordersResult);
       return ordersResult;
+    }
+
+    // Fallback: gainloss endpoint (broker-computed, but T+1 settlement lag for 0DTE)
+    const glResult = await fetchFromGainloss(acctId, today);
+    if (glResult) {
+      cache.set(acctId, glResult);
+      return glResult;
     }
 
     // No trades today

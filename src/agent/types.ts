@@ -79,6 +79,7 @@ export interface OpenPosition {
   lowTs?: number;              // Timestamp of low
   maxPnlPct?: number;          // Peak unrealized P&L as % of entry (e.g. 0.35 = +35%)
   maxDrawdownPct?: number;     // Worst unrealized P&L as % of entry (e.g. -0.50 = -50%)
+  highWaterPrice?: number;     // Highest price for trailing stop calculations
   // TP re-entry chain metadata (mirrors src/replay/machine.ts SimPosition)
   reentryDepth?: number;       // 0 (or undefined) = original entry; 1+ = chained re-entry
   reentryOf?: string;          // position id of the chain root (the original non-reentry entry)

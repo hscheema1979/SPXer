@@ -382,7 +382,6 @@ export async function openPosition(
     quantity: qty,
     type: order.type,
     duration: 'day',
-    ...(agentTag ? { tag: agentTag } : {}),
   };
 
   // Only set price for limit orders
@@ -449,7 +448,6 @@ async function submitOtocoOrder(
   const params: Record<string, string | number> = {
     class: 'otoco',
     duration: 'day',
-    ...(agentTag ? { tag: agentTag } : {}),
     // Leg 0: entry
     'type[0]': order.type,
     'option_symbol[0]': optionSymbol,
@@ -484,6 +482,13 @@ async function submitOtocoOrder(
 
   // Parse response: order.id = parent OTOCO, order.leg[].id = each leg
   const parentOrder = data?.order;
+
+  // DEBUG: check if tag came back in response
+  const responseTag = parentOrder?.tag;
+  console.log(`[executor] 🏷️  Response tag='${responseTag || 'NONE'}' (order ${parentOrder?.id})`);
+  if (agentTag && responseTag !== agentTag) {
+    console.error(`[executor] 🚨 TAG MISMATCH: sent '${agentTag}' got '${responseTag || 'NONE'}'`);
+  }
   const bracketOrderId = parentOrder?.id;
   const legs = parentOrder?.leg;
 

@@ -137,8 +137,9 @@ export class PositionManager {
       // Legacy untagged orders: adopt only if no tagged orders exist on account.
       // Basket members NEVER adopt untagged positions —
       // they must only manage positions they explicitly opened.
-      // Detected by 'basket' prefix or ':'/'.'' in tag.
-      const isBasketMember = !!(agentTag && (agentTag.startsWith('basket') || agentTag.includes(':') || agentTag.includes('.')));
+      // Basket members: any agent with an explicit AGENT_TAG env var.
+      // These agents NEVER adopt untagged legacy positions — only their own tagged orders.
+      const isBasketMember = !!process.env.AGENT_TAG;
       const isLegacyOurs = !tag && !hasAnyTaggedOrders && !isBasketMember;
 
       if (!isTaggedOurs && !isLegacyOurs) continue;
