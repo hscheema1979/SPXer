@@ -6,7 +6,7 @@ import { buildBars, fillGaps, rawToBar } from './pipeline/bar-builder';
 import { aggregate } from './pipeline/aggregator';
 import { computeIndicators, seedState, resetVWAP } from './pipeline/indicator-engine';
 import { registerHmaPeriod, getActiveHmaPeriods } from './core/indicator-engine';
-import { validateSignalConfig } from './core/signal-detector';
+import { validateSignalConfig, parseSymbol } from './core/signal-detector';
 import { createStore } from './replay/store';
 import { ContractTracker } from './pipeline/spx/contract-tracker';
 import { getMarketMode, getActiveExpirations } from './pipeline/spx/scheduler';
@@ -24,6 +24,16 @@ import { startAlertMonitor } from './ops/alerter';
 import { startAlertEngine } from './ops/alert-rules';
 
 const HIGHER_TIMEFRAMES: [Timeframe, number][] = [['3m', 180], ['5m', 300], ['10m', 600], ['15m', 900], ['1h', 3600]];
+
+// HMA pairs to detect crosses for (common pairs used by configs)
+const HMA_PAIRS: [number, number][] = [
+  [3, 12],
+  [3, 19],
+  [5, 19],
+];
+
+// Only broadcast contract signals for strikes within ±$25 of SPX (covers ITM5/ATM/OTM5 range)
+const SIGNAL_STRIKE_BAND = 25;
 
 const tracker = new ContractTracker(STRIKE_BAND, STRIKE_INTERVAL);
 let lastSpxPrice: number | null = null;
@@ -311,6 +321,9 @@ async function initOptionStream(): Promise<void> {
             if (recent1m.length > 0) aggregateAndStore(recent1m, 2);
             healthTracker.recordBar(bar.symbol, bar.ts * 1000);
             broadcast({ type: 'contract_bar', symbol: bar.symbol, data: enriched });
+
+            // Detect HMA crosses on option contracts and emit channelized signals
+            detectContractSignals(enriched);
           }
         } catch (e) {
           console.warn('[price-line] REST validation failed:', e);
@@ -359,6 +372,9 @@ function stopOptionStream(): void {
       });
       const enriched = { ...b, indicators: computeIndicators(b, 2) };
       upsertBars([enriched]);
+
+      // Detect HMA crosses on option contracts (end-of-day flush)
+      detectContractSignals(enriched);
     }
     priceLine = null;
   }
@@ -556,6 +572,96 @@ function detectHmaCrossSignal(bar: Bar): void {
 
   prevHmaFast = hmaFast;
   prevHmaSlow = hmaSlow;
+}
+
+/**
+ * Detect HMA crosses on option contract bars and emit channelized events.
+ *
+ * Emits signals to channels like "contract_signal:hma_3_12" so agents can
+ * subscribe only to the HMA pairs their config uses.
+ *
+ * Only broadcasts signals for strikes within ±SIGNAL_STRIKE_BAND of SPX
+ * to reduce noise (we typically trade ITM5/ATM/OTM5).
+ */
+function detectContractSignals(bar: Bar): void {
+  if (!activeHmaSignalEnabled) return;
+  if (!lastSpxPrice) return; // Need SPX price for distance filter
+
+  const symbol = bar.symbol;
+  const prevBars = getBars(symbol, '1m', 2);
+  if (prevBars.length < 2) return;
+  const prevBar = prevBars[prevBars.length - 2];
+
+  // Parse strike and expiry for the event
+  const parsed = parseSymbol(symbol);
+  if (!parsed) return;
+  const { strike, expiry, isCall } = parsed;
+  const side = isCall ? 'call' : 'put';
+
+  // Filter by strike distance from SPX (only trade near-the-money)
+  const strikeDistance = Math.abs(strike - lastSpxPrice);
+  if (strikeDistance > SIGNAL_STRIKE_BAND) return;
+
+  // Check all HMA pairs for this bar
+  for (const [hmaFastPeriod, hmaSlowPeriod] of HMA_PAIRS) {
+    const hmaFastKey = `hma${hmaFastPeriod}`;
+    const hmaSlowKey = `hma${hmaSlowPeriod}`;
+
+    const hmaFast = (bar.indicators as any)?.[hmaFastKey];
+    const hmaSlow = (bar.indicators as any)?.[hmaSlowKey];
+    if (hmaFast == null || hmaSlow == null) continue;
+
+    const prevHmaFast = (prevBar.indicators as any)?.[hmaFastKey];
+    const prevHmaSlow = (prevBar.indicators as any)?.[hmaSlowKey];
+    if (prevHmaFast == null || prevHmaSlow == null) continue;
+
+    const wasFastAbove = prevHmaFast > prevHmaSlow;
+    const isFastAbove = hmaFast > hmaSlow;
+
+    if (!wasFastAbove && isFastAbove) {
+      // Bullish cross
+      const signal = {
+        type: 'contract_signal',
+        channel: `hma_${hmaFastPeriod}_${hmaSlowPeriod}`,
+        data: {
+          symbol,
+          strike,
+          expiry,
+          side,
+          direction: 'bullish' as const,
+          hmaFastPeriod,
+          hmaSlowPeriod,
+          hmaFast,
+          hmaSlow,
+          price: bar.close,
+          timestamp: bar.ts * 1000,
+        },
+      };
+      console.log(`[signal] CONTRACT BULLISH HMA(${hmaFastPeriod})×HMA(${hmaSlowPeriod}) ${symbol} @ ${bar.close.toFixed(2)} (strike=$${strike}, ${side})`);
+      broadcast(signal);
+    } else if (wasFastAbove && !isFastAbove) {
+      // Bearish cross
+      const signal = {
+        type: 'contract_signal',
+        channel: `hma_${hmaFastPeriod}_${hmaSlowPeriod}`,
+        data: {
+          symbol,
+          strike,
+          expiry,
+          side,
+          direction: 'bearish' as const,
+          hmaFastPeriod,
+          hmaSlowPeriod,
+          hmaFast,
+          hmaSlow,
+          price: bar.close,
+          timestamp: bar.ts * 1000,
+        },
+      };
+      console.log(`[signal] CONTRACT BEARISH HMA(${hmaFastPeriod})×HMA(${hmaSlowPeriod}) ${symbol} @ ${bar.close.toFixed(2)} (strike=$${strike}, ${side})`);
+      broadcast(signal);
+    }
+  }
 }
 
 /** Aggregate 1m bars to all higher timeframes (3m, 5m, 15m, 1h) with indicator computation */
