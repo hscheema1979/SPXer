@@ -99,6 +99,41 @@
   }
   .header h1 { font-size: 15px; color: var(--primary); font-weight: 600; white-space: nowrap; }
 
+  /* ───────── Form & Toggle ── */
+  .form-group { display: flex; flex-direction: column; gap: 4px; }
+  .form-label { font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+  .form-hint { font-size: 11px; color: var(--muted-foreground); }
+  .form-input { background: var(--input); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 7px 10px; color: var(--foreground); font-family: var(--font-mono); font-size: 12px; width: 100%; }
+  .form-input:focus { outline: none; border-color: var(--primary); }
+  .toggle { position: relative; display: inline-block; width: 40px; height: 22px; }
+  .toggle input { opacity: 0; width: 0; height: 0; }
+  .toggle-slider { position: absolute; inset: 0; background: var(--input); border: 1px solid var(--border); border-radius: 22px; cursor: pointer; transition: background 0.2s; }
+  .toggle-slider::before { content: ''; position: absolute; width: 16px; height: 16px; left: 2px; bottom: 2px; background: var(--muted-foreground); border-radius: 50%; transition: transform 0.2s, background 0.2s; }
+  .toggle input:checked + .toggle-slider { background: var(--warning); border-color: var(--warning); }
+  .toggle input:checked + .toggle-slider::before { transform: translateX(18px); background: white; }
+
+  /* ───────── Config Sections ── */
+  .config-section-toggle { cursor: pointer; padding: 8px 12px; background: var(--card-elevated); border: 1px solid var(--border); border-radius: var(--radius-sm); display: flex; align-items: center; gap: 8px; }
+  .config-section-toggle:hover { border-color: var(--border-strong); }
+  .config-section-toggle .chevron { transition: transform 0.2s; font-size: 10px; color: var(--muted); }
+  .config-section-toggle.open .chevron { transform: rotate(90deg); }
+  .config-section-fields { display: none; padding: 6px 12px; }
+  .config-section-fields.open { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 4px 16px; }
+  .config-field { display: flex; gap: 6px; font-size: 11px; font-family: var(--font-mono); }
+  .config-field-label { color: var(--muted); min-width: 120px; }
+  .config-field-value { color: var(--foreground); word-break: break-all; }
+  .config-field-value.bool-true { color: var(--success); }
+  .config-field-value.bool-false { color: var(--destructive); }
+  .config-field-value.null-val { color: var(--muted-foreground); font-style: italic; }
+
+  /* ───────── Pending Banner ── */
+  #pending-banner { display: none; position: fixed; top: 0; left: 0; right: 0; z-index: 9999; background: var(--warning); color: #000; padding: 10px 16px; font-size: 13px; font-weight: 600; align-items: center; gap: 10px; }
+  #pending-banner.show { display: flex; }
+  #pending-banner button { padding: 4px 12px; border-radius: var(--radius-sm); font-size: 12px; font-weight: 600; cursor: pointer; border: none; }
+  .btn-apply { background: #000; color: var(--warning); }
+  .btn-revert { background: rgba(0,0,0,0.2); color: #000; }
+  body { padding-top: 44px; }
+
   /* ───────── Mini Tabs ───────── */
   .mini-tabs {
     display: flex;
@@ -558,6 +593,14 @@
 </head>
 <body>
 
+<!-- Pending Changes Banner -->
+<div id="pending-banner">
+  <span>⚠️ Pending changes — ecosystem.config.js modified but not applied</span>
+  <span style="flex:1"></span>
+  <button class="btn-revert" onclick="revertChanges()">Revert</button>
+  <button class="btn-apply" onclick="applyChanges()">Apply &amp; Restart</button>
+</div>
+
 <!-- Nav Bar -->
 <div class="nav-bar">
   <span class="nav-brand">SPXer</span>
@@ -614,13 +657,35 @@
   <div id="section-ecosystem" class="section">
     <div class="card">
       <div class="card-header">
-        <span class="card-title">ecosystem.config.js</span>
+        <span class="card-title">Event Handler</span>
         <div>
-          <button class="config-btn" onclick="downloadEcosystem()">⬇ Download</button>
-          <button class="run-btn" onclick="saveEcosystem()">💾 Save & Reload</button>
+          <button class="config-btn" onclick="toggleEcosystemRaw()">📄 View Raw</button>
+          <button class="run-btn" onclick="saveEcosystemForm()">💾 Save</button>
         </div>
       </div>
-      <textarea id="ecosystem-editor"></textarea>
+      <div id="ecosystem-form" style="display:grid;gap:14px;padding:4px 0">
+        <div class="form-group">
+          <label class="form-label">AGENT_CONFIG_ID</label>
+          <input class="form-input" id="env-agent-config-id" type="text" placeholder="e.g. spx-hma3x12-itm5-tp125x-sl20-3m-25c-$50000">
+          <span class="form-hint">Single config ID loaded on startup</span>
+        </div>
+        <div class="form-group">
+          <label class="form-label">AGENT_CONFIG_IDS</label>
+          <input class="form-input" id="env-agent-config-ids" type="text" placeholder="e.g. config1,config2,config3">
+          <span class="form-hint">Comma-separated. Overrides AGENT_CONFIG_ID.</span>
+        </div>
+        <div class="form-group" style="display:flex;align-items:center;gap:12px">
+          <label class="form-label" style="margin:0">AGENT_PAPER</label>
+          <label class="toggle">
+            <input type="checkbox" id="env-agent-paper" onchange="paperToggleChanged()">
+            <span class="toggle-slider"></span>
+          </label>
+          <span id="paper-mode-label" style="font-size:11px;font-family:var(--font-mono);color:var(--warning)">PAPER MODE</span>
+        </div>
+      </div>
+      <div id="ecosystem-raw-block" style="display:none;margin-top:10px">
+        <textarea id="ecosystem-editor" style="width:100%;min-height:400px;background:var(--input);color:var(--foreground);border:1px solid var(--border);border-radius:var(--radius);padding:10px;font-family:var(--font-mono);font-size:12px;resize:vertical" readonly></textarea>
+      </div>
     </div>
   </div>
 
@@ -834,8 +899,8 @@ function renderConfigs() {
   }
 
   list.innerHTML = configs.map(c => `
-    <div class="config-item">
-      <div class="config-info">
+    <div class="config-item" id="config-card-${escapeHtml(c.id)}">
+      <div class="config-info" style="cursor:pointer" onclick="toggleConfigDetail('${escapeHtml(c.id)}')">
         <div class="config-name">${escapeHtml(c.name)}</div>
         <div class="config-id" title="${escapeHtml(c.id)}">${escapeHtml(c.id)}</div>
       </div>
@@ -843,8 +908,73 @@ function renderConfigs() {
         <button class="config-btn" onclick="editConfig('${escapeHtml(c.id)}')">Edit</button>
         <button class="btn-danger" onclick="deleteConfig('${escapeHtml(c.id)}')">Delete</button>
       </div>
+      <div id="config-detail-${escapeHtml(c.id)}" class="config-detail" style="display:none"></div>
     </div>
   `).join('');
+}
+
+async function toggleConfigDetail(id) {
+  const detail = document.getElementById(`config-detail-${id}`);
+  if (detail.style.display !== 'none') {
+    detail.style.display = 'none';
+    return;
+  }
+  if (detail.innerHTML.trim()) {
+    detail.style.display = 'block';
+    return;
+  }
+  detail.style.display = 'block';
+  try {
+    const res = await fetch(`${API}/config/${encodeURIComponent(id)}/grouped`);
+    if (!res.ok) throw new Error('Failed to load config detail');
+    const sections = await res.json();
+    detail.innerHTML = sections.map(s => `
+      <div class="config-section">
+        <div class="config-section-toggle" onclick="this.classList.toggle('open');this.nextElementSibling.classList.toggle('open')">
+          <span class="chevron">▶</span>
+          <span>${s.title}</span>
+          <span style="margin-left:auto;font-size:10px;color:var(--muted-foreground)">${s.fields.length} fields</span>
+        </div>
+        <div class="config-section-fields">
+          ${s.fields.map(f => `
+            <div class="config-field">
+              <span class="config-field-label">${escapeHtml(f.label)}:</span>
+              <span class="config-field-value ${f.type === 'boolean' ? (f.value ? 'bool-true' : 'bool-false') : ''} ${f.value === null || f.value === undefined ? 'null-val' : ''}">${formatFieldValue(f)}</span>
+            </div>
+          `).join('')}
+        </div>
+      </div>
+    `).join('');
+    detail.innerHTML += `<div style="margin-top:8px"><button class="config-btn" onclick="viewConfigJson('${escapeHtml(id)}')">View Raw JSON</button></div>`;
+  } catch (e) {
+    detail.innerHTML = `<div style="color:var(--destructive);padding:8px">Error: ${escapeHtml(e.message)}</div>`;
+  }
+}
+
+function formatFieldValue(field) {
+  if (field.value === null || field.value === undefined) return '— (default)';
+  if (field.type === 'boolean') return field.value ? '✅' : '❌';
+  if (field.type === 'object') return JSON.stringify(field.value);
+  if (field.type === 'string') return field.value;
+  return String(field.value);
+}
+
+async function viewConfigJson(id) {
+  try {
+    const res = await fetch(`${API}/config/${encodeURIComponent(id)}`);
+    if (!res.ok) throw new Error('Failed to load config');
+    const data = await res.json();
+    const json = JSON.stringify(data, null, 2);
+    const blob = new Blob([json], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `config-${id}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    alert(`Error: ${e.message}`);
+  }
 }
 
 function openConfigModal(config = null) {
@@ -916,42 +1046,102 @@ async function saveConfig() {
   }
 }
 
-// ── Ecosystem ─────────────────────────────────────────────────────────────
+// ── Ecosystem (Structured Form) ─────────────────────────────────────────────
+let pendingChanges = false;
+
 async function loadEcosystem() {
   try {
-    const res = await fetch(`${API}/ecosystem`);
-    if (!res.ok) throw new Error('Failed to load ecosystem');
-    const data = await res.json();
-    document.getElementById('ecosystem-editor').value = data.content;
+    const [envRes, ecoRes] = await Promise.all([
+      fetch(`${API}/process/event-handler/env`),
+      fetch(`${API}/ecosystem`),
+    ]);
+    const envData = await envRes.json();
+    const ecoData = await ecoRes.json();
+
+    const env = envData.env || {};
+    document.getElementById('env-agent-config-id').value = env.AGENT_CONFIG_ID || '';
+    document.getElementById('env-agent-config-ids').value = env.AGENT_CONFIG_IDS || '';
+    const isPaper = env.AGENT_PAPER === 'true' || env.AGENT_PAPER === true;
+    document.getElementById('env-agent-paper').checked = isPaper;
+    updatePaperLabel(isPaper);
+    document.getElementById('ecosystem-editor').value = ecoData.content;
   } catch (e) {
     alert(`Error: ${e.message}`);
   }
 }
 
-async function saveEcosystem() {
-  const content = document.getElementById('ecosystem-editor').value;
+function paperToggleChanged() {
+  const isPaper = document.getElementById('env-agent-paper').checked;
+  updatePaperLabel(isPaper);
+}
+
+function updatePaperLabel(isPaper) {
+  const label = document.getElementById('paper-mode-label');
+  if (isPaper) {
+    label.textContent = 'PAPER MODE';
+    label.style.color = 'var(--warning)';
+  } else {
+    label.textContent = 'LIVE';
+    label.style.color = 'var(--success)';
+  }
+}
+
+async function saveEcosystemForm() {
+  const configId = document.getElementById('env-agent-config-id').value.trim();
+  const configIds = document.getElementById('env-agent-config-ids').value.trim();
+  const isPaper = document.getElementById('env-agent-paper').checked;
+
+  const envUpdates = {};
+  if (configId) envUpdates.AGENT_CONFIG_ID = configId;
+  if (configIds) envUpdates.AGENT_CONFIG_IDS = configIds;
+  envUpdates.AGENT_PAPER = isPaper ? 'true' : 'false';
+
   try {
-    const res = await fetch(`${API}/ecosystem`, {
+    const res = await fetch(`${API}/process/event-handler/env/save-only`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content }),
+      body: JSON.stringify({ envUpdates }),
     });
-    if (!res.ok) throw new Error('Failed to save ecosystem');
-    alert('Ecosystem config saved and PM2 reloaded!');
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to save');
+    pendingChanges = true;
+    document.getElementById('pending-banner').classList.add('show');
   } catch (e) {
     alert(`Error: ${e.message}`);
   }
 }
 
-function downloadEcosystem() {
-  const content = document.getElementById('ecosystem-editor').value;
-  const blob = new Blob([content], { type: 'text/javascript' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = 'ecosystem.config.js';
-  a.click();
-  URL.revokeObjectURL(url);
+async function applyChanges() {
+  try {
+    const res = await fetch(`${API}/process/event-handler/apply-restart`, { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to restart');
+    pendingChanges = false;
+    document.getElementById('pending-banner').classList.remove('show');
+    alert('Event handler restarted with new settings!');
+  } catch (e) {
+    alert(`Error: ${e.message}`);
+  }
+}
+
+async function revertChanges() {
+  try {
+    const res = await fetch(`${API}/ecosystem/revert`, { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to revert');
+    pendingChanges = false;
+    document.getElementById('pending-banner').classList.remove('show');
+    await loadEcosystem();
+  } catch (e) {
+    alert(`Error: ${e.message}`);
+  }
+}
+
+function toggleEcosystemRaw() {
+  const block = document.getElementById('ecosystem-raw-block');
+  const isVisible = block.style.display !== 'none';
+  block.style.display = isVisible ? 'none' : 'block';
+  if (!isVisible) loadEcosystem();
 }
 
 // ── Logs ─────────────────────────────────────────────────────────────────
