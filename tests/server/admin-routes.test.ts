@@ -3,6 +3,9 @@ import axios from 'axios';
 
 axios.defaults.timeout = 10000;
 
+const ECOSYSTEM_ORIGINAL = 'module.exports = { apps: [] };';
+const ECOSYSTEM_TEST = 'module.exports = { apps: [{ name: "test-process" }] };';
+
 const BASE = 'http://localhost:3600/admin/api';
 
 describe('Admin API - Processes', () => {
@@ -103,5 +106,48 @@ describe('Admin API - Handler State', () => {
     const { data, status } = await axios.get(`${BASE}/handler/routing?n=5`);
     expect(status).toBe(200);
     expect(Array.isArray(data)).toBe(true);
+  });
+});
+
+describe('Admin API - Integration', () => {
+  it('PUT /admin/api/process/event-handler/env/save-only writes env without restart', async () => {
+    const TEST_VALUE = 'true';
+    const { data, status } = await axios.put(
+      `${BASE}/process/event-handler/env/save-only`,
+      { envUpdates: { AGENT_PAPER: TEST_VALUE } },
+      { headers: { 'Content-Type': 'application/json' } }
+    );
+    expect(status).toBe(200);
+    expect(data).toHaveProperty('saved', true);
+    expect(data).toHaveProperty('pendingRestart', true);
+    expect(data.envUpdates.AGENT_PAPER).toBe(TEST_VALUE);
+  });
+
+  it('GET /admin/api/ecosystem/validate returns valid', async () => {
+    const { data, status } = await axios.get(`${BASE}/ecosystem/validate`);
+    expect(status).toBe(200);
+    expect(data).toHaveProperty('valid', true);
+  });
+
+  it('PUT /admin/api/ecosystem rejects invalid JS', async () => {
+    try {
+      await axios.put(
+        `${BASE}/ecosystem`,
+        { content: 'module.exports = { apps: ["' },
+        { headers: { 'Content-Type': 'application/json' } }
+      );
+    } catch (e: any) {
+      expect(e.response.status).toBe(400);
+      expect(e.response.data).toHaveProperty('error');
+    }
+  });
+
+  it('Config grouped endpoint returns 6 sections', async () => {
+    const { data, status } = await axios.get(`${BASE}/config/spx-hma3x12-itm5-tp5x-sl20-3m-50c-$5000/grouped`);
+    expect(status).toBe(200);
+    expect(data.length).toBe(6);
+    expect(data.map((s: any) => s.title)).toEqual([
+      'Signals', 'Risk & Position', 'Strike Selection', 'Time Windows', 'Exit Rules', 'Sizing & Fill',
+    ]);
   });
 });
