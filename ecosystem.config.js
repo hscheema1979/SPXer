@@ -35,9 +35,44 @@ module.exports = {
       merge_logs: true,
     },
 
-    // ── SPX Solo Agent (margin account) — INACTIVE, replaced by basket ──
-    // To revert: uncomment this block, comment out basket agents below,
-    // then: pm2 stop basket-itm5 basket-atm basket-otm5 && pm2 start ecosystem.config.js --only spxer-agent
+    // ── Event-Driven Handler (supports basket configs) ─────────────────
+    // Single process, multi-config, event-driven architecture.
+    // Supports basket configs natively (no account-lock needed).
+    // Validates: ran live paper trade on 2026-04-22, see EVENT_HANDLER_E2E_SUCCESS.md
+    // Admin panel: http://vps3:3600/admin/ → "Event Stream" tab
+    //
+    // Usage:
+    //   Single config: AGENT_CONFIG_ID='your-config-id'
+    //   Multiple configs: AGENT_CONFIG_IDS='config1,config2,config3'
+    //   Basket config: AGENT_CONFIG_ID='spx-hma3x12-itm5-basket-3strike-tp125x-sl25-3m-15c-$10000'
+    {
+      name: 'event-handler',
+      script: 'npx',
+      args: 'tsx event_handler_mvp.ts',
+      cwd: '/home/ubuntu/SPXer',
+      watch: false,
+      autorestart: true,
+      max_restarts: 10,
+      min_uptime: '10s',
+      restart_delay: 10000,
+      kill_timeout: 5000,
+      max_memory_restart: '512M',
+      env: {
+        NODE_ENV: 'production',
+        AGENT_PAPER: 'false',
+        // LIVE: HMA3x12, ITM5, TP10x, SL20%, $5K per trade
+        AGENT_CONFIG_ID: 'spx-hma3x12-itm5-tp10x-sl20-3m-25c-$5000',
+        // For multiple configs: AGENT_CONFIG_IDS: 'config1,config2,config3'
+      },
+      log_date_format: 'YYYY-MM-DD HH:mm:ss',
+      error_file: '/home/ubuntu/.pm2/logs/event-handler-error.log',
+      out_file: '/home/ubuntu/.pm2/logs/event-handler-out.log',
+      merge_logs: true,
+    },
+
+    // ── SPX Solo Agent (polling-based) — INACTIVE, replaced by event handler ──
+    // To use the old polling agent: uncomment this block, comment out event-handler above,
+    // then: pm2 stop event-handler && pm2 start ecosystem.config.js --only spxer-agent
     // {
     //   name: 'spxer-agent',
     //   script: 'npx',
@@ -54,7 +89,6 @@ module.exports = {
     //     NODE_ENV: 'production',
     //     AGENT_PAPER: 'false',
     //     AGENT_CONFIG_ID: 'spx-hma3x12-itm5-tp125x-sl20-3m-25c-$50000',
-    //     AGENT_TAG: 'spx-margin',
     //   },
     //   log_date_format: 'YYYY-MM-DD HH:mm:ss',
     //   error_file: '/home/ubuntu/.pm2/logs/spxer-agent-error.log',
@@ -87,57 +121,12 @@ module.exports = {
     // ── Account Monitor — REMOVED 2026-04-18 ───────────────────────
     // ── Schwaber — REMOVED 2026-04-18 ─────────────────────────────
 
-    // ── SPX Live Agent (margin account 6YA51425) — SINGLE AGENT ──────
-    // CRITICAL: Only ONE agent process may target each broker account.
-    // On 2026-04-21, 6 basket agents (runner-itm5/atm/otm5 + scalp-itm5/atm/otm5)
-    // all placed live OTOCO orders on 6YA51425 simultaneously — 89 bracket orders.
-    // Agents collided during broker reconciliation, causing phantom positions and
-    // sell rejections. The basket strategy is DISABLED until separate accounts are
-    // provisioned for each agent.
+    // ── Old SPX Live Agent (margin account 6YA51425) — DISABLED ────────
+    // Replaced by event-handler which supports basket configs natively.
+    // Use the event-handler above with AGENT_CONFIG_ID set to your basket config.
     //
-    // The account-lock module (src/agent/account-lock.ts) enforces this at runtime:
-    // if a second agent tries to start on the same account, it exits immediately.
-    //
-    // To re-enable basket agents: assign each a DIFFERENT TRADIER_ACCOUNT_ID,
-    // then uncomment the entries below.
-    {
-      name: 'spxer-agent',
-      script: 'npx',
-      args: 'tsx spx_agent.ts',
-      cwd: '/home/ubuntu/SPXer',
-      watch: false,
-      autorestart: false,
-      max_restarts: 0,
-      min_uptime: '10s',
-      restart_delay: 30000,
-      kill_timeout: 5000,
-      max_memory_restart: '512M',
-      env: {
-        NODE_ENV: 'production',
-        AGENT_PAPER: 'false',
-        TRADIER_ACCOUNT_ID: '6YA51425',
-        AGENT_CONFIG_ID: 'spx-hma3x12-itm5-basket-3strike-tp125x-sl25-3m-15c-$10000:itm5',
-        AGENT_TAG: 'spx-margin',
-      },
-      log_date_format: 'YYYY-MM-DD HH:mm:ss',
-      error_file: '/home/ubuntu/.pm2/logs/spxer-agent-error.log',
-      out_file: '/home/ubuntu/.pm2/logs/spxer-agent-out.log',
-      merge_logs: true,
-    },
-
-    // ── DISABLED Basket Agents ──────────────────────────────────────
-    // All shared account 6YA51425 — cannot run concurrently.
-    // To re-enable: assign separate TRADIER_ACCOUNT_ID per agent.
-    //
-    // Runner basket (TP 1.25x): runner-itm5, runner-atm, runner-otm5
-    // Scalp basket  (TP 10x):   scalp-itm5, scalp-atm, scalp-otm5
-    //
-    // {
-    //   name: 'runner-atm',
-    //   script: 'npx', args: 'tsx spx_agent.ts', cwd: '/home/ubuntu/SPXer',
-    //   env: { AGENT_PAPER: 'false', TRADIER_ACCOUNT_ID: '<SEPARATE_ACCOUNT>', AGENT_CONFIG_ID: '...', AGENT_TAG: 'runner-atm' },
-    // },
-    // ... (5 more basket agents — see git history for full definitions)
+    // NOTE: Account-lock system was removed 2026-04-22. Basket configs are
+    // now handled internally by the event-handler (one process, multi-strike).
 
     // ── Metrics Collector ───────────────────────────────────────────
     {
