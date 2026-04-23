@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
-  frictionEntry, frictionExit, frictionCommission, computeRealisticPnl,
+  frictionEntry, frictionCommission, computeRealisticPnl,
   frictionTpExit, frictionSlExit, frictionMarketExit,
 } from '../../src/core/friction';
 
@@ -11,13 +11,13 @@ describe('friction', () => {
   });
 
   it('adjusts exit price down by half-spread', () => {
-    expect(frictionExit(1.00)).toBeCloseTo(0.95);
-    expect(frictionExit(3.50)).toBeCloseTo(3.45);
+    expect(frictionMarketExit(1.00)).toBeCloseTo(0.95);
+    expect(frictionMarketExit(3.50)).toBeCloseTo(3.45);
   });
 
   it('exit price floors at $0.01', () => {
-    expect(frictionExit(0.03)).toBeCloseTo(0.01);
-    expect(frictionExit(0.01)).toBeCloseTo(0.01);
+    expect(frictionMarketExit(0.03)).toBeCloseTo(0.01);
+    expect(frictionMarketExit(0.01)).toBeCloseTo(0.01);
   });
 
   it('computes round-trip commission', () => {
@@ -93,9 +93,5 @@ describe('typed exit friction (Task 2.1)', () => {
     const defaulted = computeRealisticPnl(1.00, 2.00, 3);
     const explicit = computeRealisticPnl(1.00, 2.00, 3, 'market');
     expect(defaulted['pnl$']).toBeCloseTo(explicit['pnl$']);
-  });
-
-  it('deprecated frictionExit aliases frictionMarketExit', () => {
-    expect(frictionExit(2.00)).toBeCloseTo(frictionMarketExit(2.00));
   });
 });

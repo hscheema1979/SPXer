@@ -36,12 +36,11 @@ import { HealthGate } from '../../src/agent/health-gate';
 import { chooseOrderType } from '../../src/agent/trade-executor';
 import type { Bar, Contract } from '../../src/types';
 import type { Config } from '../../src/config/types';
-
-// ── Config ──────────────────────────────────────────────────────────────────
+import { todayET } from '../../src/utils/et-time';
 
 const TEST_DB_PATH = '/tmp/e2e-live-pipeline.db';
-const EXPIRY_TODAY = '2026-04-21';
-const EXPIRY_YYMMDD = '260421';
+const EXPIRY_TODAY = todayET();
+const EXPIRY_YYMMDD = EXPIRY_TODAY.slice(2).replace(/-/g, '');
 
 // How long to wait for ticks and candle closes
 const TICK_WAIT_MS = 30_000;       // 30s to see first tick
