@@ -13,13 +13,14 @@ import * as fs from 'fs';
 import * as path from 'path';
 import axios from 'axios';
 
-// ── Import real modules ─────────────────────────────────────────────────────
-
 import { HealthGate } from '../../src/agent/health-gate';
 import { chooseOrderType } from '../../src/agent/trade-executor';
 import { validateTradeQuality, DEFAULT_QUALITY_CONFIG } from '../../src/agent/quality-gate';
 import { parseOptionSymbol, openToCorePosition } from '../../src/agent/reconciliation';
-// Watchdog removed (2026-04-08) — was causing OCO bracket cancellations
+
+const ISOLATED_LOGS_DIR = path.resolve('./tests/fixtures/e2e-logs');
+process.env.LOGS_DIR = ISOLATED_LOGS_DIR;
+
 import {
   startDashboardServer,
   collectState,
@@ -27,10 +28,8 @@ import {
   isTradingPaused,
 } from '../../src/dashboard/server';
 
-// ── Test fixtures ───────────────────────────────────────────────────────────
-
 const TEST_DIR = path.resolve('./tests/fixtures/e2e');
-const LOGS_DIR = path.resolve('./logs');
+const LOGS_DIR = ISOLATED_LOGS_DIR;
 
 let dataApp: Express;
 let dataServer: Server;
@@ -79,7 +78,8 @@ afterAll(async () => {
   await dashboardCleanup();
   await new Promise<void>(resolve => dataServer.close(() => resolve()));
   fs.rmSync(TEST_DIR, { recursive: true, force: true });
-  delete process.env.SPXER_URL;
+  fs.rmSync(ISOLATED_LOGS_DIR, { recursive: true, force: true });
+  delete process.env.LOGS_DIR;
 });
 
 beforeEach(() => {
@@ -214,7 +214,7 @@ describe('E2E: Full stack integration', () => {
       expect(typeof state.tradingPaused).toBe('boolean');
     });
 
-    it.skip('pause → status paused → resume → status not paused [legacy polling agent — races with dashboard test]', async () => {
+    it('pause → status paused → resume → status not paused', async () => {
       // Clean any leftover flag from other tests
       try { fs.unlinkSync(path.join(LOGS_DIR, 'pause-trading.flag')); } catch {}
 

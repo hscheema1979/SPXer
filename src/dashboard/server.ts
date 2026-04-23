@@ -18,7 +18,7 @@ import { config as appConfig } from '../config';
 
 const SPXER_BASE = process.env.SPXER_URL || 'http://localhost:3600';
 const TRADIER_BASE = 'https://api.tradier.com/v1';
-const LOGS_DIR = path.resolve('./logs');
+function getLogsDir(): string { return process.env.LOGS_DIR || path.resolve('./logs'); }
 const DASHBOARD_PORT = parseInt(process.env.DASHBOARD_PORT || '3602');
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -123,7 +123,7 @@ function etDate(): string {
  */
 function readAgentStatus(): any | null {
   try {
-    const raw = fs.readFileSync(path.join(LOGS_DIR, 'agent-status.json'), 'utf-8');
+    const raw = fs.readFileSync(path.join(getLogsDir(), 'agent-status.json'), 'utf-8');
     return JSON.parse(raw);
   } catch {
     return null;
@@ -135,7 +135,7 @@ function readAgentStatus(): any | null {
  */
 function readWatchdogStatus(): any | null {
   try {
-    const raw = fs.readFileSync(path.join(LOGS_DIR, 'watchdog-status.json'), 'utf-8');
+    const raw = fs.readFileSync(path.join(getLogsDir(), 'watchdog-status.json'), 'utf-8');
     return JSON.parse(raw);
   } catch {
     return null;
@@ -147,7 +147,7 @@ function readWatchdogStatus(): any | null {
  */
 function readTodayTrades(): TradeInfo[] {
   try {
-    const raw = fs.readFileSync(path.join(LOGS_DIR, 'agent-audit.jsonl'), 'utf-8');
+    const raw = fs.readFileSync(path.join(getLogsDir(), 'agent-audit.jsonl'), 'utf-8');
     const lines = raw.trim().split('\n').filter(Boolean);
     const today = etDate();
     const trades: TradeInfo[] = [];
@@ -277,7 +277,7 @@ async function fetchOrders(accountId: string): Promise<OrderInfo[]> {
  */
 function isTradingPaused(): boolean {
   try {
-    return fs.existsSync(path.join(LOGS_DIR, 'pause-trading.flag'));
+    return fs.existsSync(path.join(getLogsDir(), 'pause-trading.flag'));
   } catch {
     return false;
   }
@@ -633,8 +633,8 @@ export function startDashboardServer(port: number = DASHBOARD_PORT): { app: Expr
 
   app.post('/api/pause', (_req, res) => {
     try {
-      fs.mkdirSync(LOGS_DIR, { recursive: true });
-      fs.writeFileSync(path.join(LOGS_DIR, 'pause-trading.flag'), new Date().toISOString());
+      fs.mkdirSync(getLogsDir(), { recursive: true });
+      fs.writeFileSync(path.join(getLogsDir(), 'pause-trading.flag'), new Date().toISOString());
       res.json({ paused: true });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
@@ -643,7 +643,7 @@ export function startDashboardServer(port: number = DASHBOARD_PORT): { app: Expr
 
   app.post('/api/resume', (_req, res) => {
     try {
-      const flagFile = path.join(LOGS_DIR, 'pause-trading.flag');
+      const flagFile = path.join(getLogsDir(), 'pause-trading.flag');
       if (fs.existsSync(flagFile)) fs.unlinkSync(flagFile);
       res.json({ paused: false });
     } catch (e: any) {
@@ -685,8 +685,8 @@ export function startDashboardServer(port: number = DASHBOARD_PORT): { app: Expr
       }
 
       // Set pause flag
-      fs.mkdirSync(LOGS_DIR, { recursive: true });
-      fs.writeFileSync(path.join(LOGS_DIR, 'pause-trading.flag'), new Date().toISOString());
+      fs.mkdirSync(getLogsDir(), { recursive: true });
+      fs.writeFileSync(path.join(getLogsDir(), 'pause-trading.flag'), new Date().toISOString());
 
       res.json({ killed: true, cancelledOrders: cancelled });
     } catch (e: any) {

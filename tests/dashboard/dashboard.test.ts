@@ -6,6 +6,10 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import axios from 'axios';
 import * as fs from 'fs';
 import * as path from 'path';
+
+const ISOLATED_LOGS_DIR = path.resolve('./tests/fixtures/dashboard-logs');
+process.env.LOGS_DIR = ISOLATED_LOGS_DIR;
+
 import {
   startDashboardServer,
   collectState,
@@ -15,7 +19,7 @@ import {
   isTradingPaused,
 } from '../../src/dashboard/server';
 
-const TEST_LOGS_DIR = path.resolve('./logs');
+const TEST_LOGS_DIR = ISOLATED_LOGS_DIR;
 
 // We'll start the dashboard on a random port
 let port: number;
@@ -35,8 +39,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (cleanup) await cleanup();
-  // Clean pause flag if we created one
-  try { fs.unlinkSync(path.join(TEST_LOGS_DIR, 'pause-trading.flag')); } catch {}
+  try { fs.rmSync(ISOLATED_LOGS_DIR, { recursive: true, force: true }); } catch {}
 });
 
 const BASE = () => `http://localhost:${port}`;
