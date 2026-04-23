@@ -11,6 +11,7 @@ dotenv.config();
 
 import express from 'express';
 import { createReplayRoutes } from './replay-routes';
+import { createAdminRoutes } from './admin-routes';
 
 const PORT = parseInt(process.env.REPLAY_PORT || '3601');
 
@@ -19,6 +20,9 @@ app.use(express.json());
 
 // Mount replay routes
 app.use('/replay', createReplayRoutes());
+
+// Mount admin routes
+app.use('/admin', createAdminRoutes());
 
 // Redirect root to replay viewer
 app.get('/', (_req, res) => res.redirect('/replay/'));

@@ -3,9 +3,10 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-<meta name="color-scheme" content="dark">
-<meta name="theme-color" content="#0a0a0f">
-<title>SPXer Config Leaderboard</title>
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#0a0a0f">
+  <title>SPXer Config Leaderboard</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <style>
   /* ───────── shadcn-style design tokens (dark) ───────── */
   :root {
@@ -607,6 +608,45 @@
   tr.is-live td { border-left: 2px solid var(--info); }
   tr.is-live td:first-child { border-left: 2px solid var(--info); }
 
+  /* ───────── Row selection checkboxes ───────── */
+  .row-select, #select-all {
+    width: 16px;
+    height: 16px;
+    accent-color: var(--primary);
+    cursor: pointer;
+  }
+  th .row-select, th #select-all {
+    margin: 0;
+    vertical-align: middle;
+  }
+  tr.selected td {
+    background: rgba(139,139,255,0.06) !important;
+  }
+
+  /* ───────── Bulk delete button ───────── */
+  .bulk-del-btn {
+    background: rgba(244,63,94,0.12);
+    color: var(--destructive);
+    border: 1px solid rgba(244,63,94,0.4);
+    padding: 6px 14px;
+    border-radius: var(--radius-sm);
+    font-family: inherit;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    display: none;
+    align-items: center;
+    gap: 6px;
+    min-height: 32px;
+    transition: background-color 0.15s, border-color 0.15s;
+    touch-action: manipulation;
+  }
+  .bulk-del-btn:hover {
+    background: rgba(244,63,94,0.2);
+    border-color: rgba(244,63,94,0.6);
+  }
+  .bulk-del-btn.active { display: inline-flex; }
+
   /* ───────── Symbol badge (SPX / NDX) ───────── */
   .sym-badge {
     display: inline-block;
@@ -621,6 +661,58 @@
   }
   .sym-badge.spx { background: rgba(139,139,255,0.14); color: #8b8bff; border: 1px solid rgba(139,139,255,0.35); }
   .sym-badge.ndx { background: rgba(251,146,60,0.14); color: #fb923c; border: 1px solid rgba(251,146,60,0.35); }
+
+  /* ───────── Column range filters ───────── */
+  .col-filters {
+    display: flex;
+    gap: 6px;
+    padding: 6px 12px;
+    background: var(--card-elevated);
+    border-bottom: 1px solid var(--border);
+    align-items: center;
+    flex-wrap: wrap;
+    font-size: 11px;
+  }
+  .col-filters > label {
+    font-size: 10px;
+    color: var(--muted-foreground);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    white-space: nowrap;
+    margin-right: 4px;
+  }
+  .col-filter-group {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    background: var(--input);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    padding: 2px 4px;
+    min-height: 26px;
+  }
+  .col-filter-group label {
+    font-size: 9px;
+    color: var(--muted-foreground);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    white-space: nowrap;
+    padding: 0 2px;
+  }
+  .col-filter-group input {
+    background: transparent;
+    border: none;
+    color: var(--foreground);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    width: 44px;
+    padding: 2px 4px;
+    text-align: right;
+    outline: none;
+  }
+  .col-filter-group input::placeholder { color: var(--muted-foreground); opacity: 0.5; }
+  .col-filter-group:focus-within { border-color: var(--primary); }
+  .col-filter-group.active { border-color: var(--primary); }
 
   /* ───────── Live indicator in header ───────── */
   .live-indicator {
@@ -648,6 +740,104 @@
   ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 10px; }
   ::-webkit-scrollbar-thumb:hover { background: #3a3a4a; }
+
+  /* ───────── Analytics Panel ───────── */
+  .analytics-panel { display: none; padding: 0 12px 24px; }
+  .analytics-panel.active { display: block; }
+  .analytics-section {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px;
+    margin-bottom: 16px;
+  }
+  .analytics-section h3 {
+    font-size: 13px;
+    color: var(--primary);
+    margin-bottom: 4px;
+    font-weight: 600;
+    font-family: var(--font-sans);
+  }
+  .analytics-section .section-desc {
+    font-size: 11px;
+    color: var(--muted-foreground);
+    margin-bottom: 14px;
+    line-height: 1.5;
+    font-family: var(--font-sans);
+  }
+  .analytics-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+  }
+  @media (max-width: 900px) { .analytics-grid { grid-template-columns: 1fr; } }
+  .param-group { margin-bottom: 12px; }
+  .param-group-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    background: var(--card-elevated);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--foreground);
+    user-select: none;
+    transition: border-color 0.15s;
+  }
+  .param-group-header:hover { border-color: var(--primary); }
+  .param-group-header .chevron { font-size: 10px; color: var(--muted-foreground); transition: transform 0.15s; }
+  .param-group-header.collapsed .chevron { transform: rotate(-90deg); }
+  .param-group-header .param-count { font-size: 10px; color: var(--muted-foreground); font-weight: 400; margin-left: auto; }
+  .param-group-body { padding: 6px 0 0 0; }
+  .param-group-body.collapsed { display: none; }
+  .impact-table { width: 100%; border-collapse: collapse; font-family: var(--font-mono); font-size: 11px; }
+  .impact-table th {
+    position: static;
+    background: var(--card-elevated);
+    padding: 6px 8px;
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--muted-foreground);
+    font-family: var(--font-sans);
+    font-weight: 600;
+    border-bottom: 1px solid var(--border-strong);
+    cursor: default;
+    white-space: nowrap;
+  }
+  .impact-table td { padding: 5px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  .impact-table tr:hover td { background: rgba(26,26,40,0.8); }
+  .impact-table .val-cell { color: var(--foreground); font-weight: 500; }
+  .impact-table .best-row td { background: rgba(16,185,129,0.06); }
+  .heatmap-wrap { overflow-x: auto; }
+  .heatmap { border-collapse: collapse; font-family: var(--font-mono); font-size: 11px; }
+  .heatmap th {
+    position: static;
+    background: var(--card-elevated);
+    padding: 6px 10px;
+    font-size: 10px;
+    color: var(--muted-foreground);
+    font-family: var(--font-sans);
+    font-weight: 600;
+    border: 1px solid var(--border);
+    cursor: default;
+    white-space: nowrap;
+  }
+  .heatmap td {
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    text-align: center;
+    min-width: 70px;
+    cursor: default;
+    transition: opacity 0.15s;
+  }
+  .heatmap td:hover { opacity: 0.85; }
+  .heatmap .edge-val { font-weight: 600; display: block; }
+  .heatmap .trade-cnt { font-size: 9px; color: var(--muted-foreground); display: block; }
+  .chart-box { background: var(--card-elevated); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px; }
 </style>
 </head>
 <body>
@@ -656,7 +846,8 @@
   <span class="nav-brand">SPXer</span>
   <a href="/replay/" data-path="/replay/">Replay</a>
   <a href="/replay/#live" data-path="/replay/#live">Live</a>
-  <a href="/replay/sweep" data-path="/replay/sweep" class="active">🏆 Leaderboard</a>
+  <a href="/replay/sweep" data-path="/replay/sweep" class="active" id="nav-leaderboard">🏆 Leaderboard</a>
+  <a href="/replay/analytics" data-path="/replay/analytics" id="nav-analytics">Analytics</a>
   <a href="/replay/backfill" data-path="/replay/backfill">Backfill</a>
   <a href="/replay/journal" data-path="/replay/journal">📓 Journal</a>
   <a href="/replay/account" data-path="/replay/account">💰 Account</a>
@@ -665,6 +856,9 @@
 <div class="header">
   <button class="refresh-btn" id="refresh-btn" onclick="refreshData()" title="Refresh leaderboard (preserves filters)">
     <span class="refresh-icon">↻</span> Refresh
+  </button>
+  <button class="bulk-del-btn" id="bulk-delete-btn" onclick="openBulkDeleteModal()" title="Delete selected configs">
+    🗑 Delete Selected (0)
   </button>
   <span class="live-indicator" id="live-indicator" style="display:none">
     <span class="dot"></span> Live: <span class="cfg-id" id="live-cfg-id">—</span>
@@ -753,6 +947,22 @@
   </select>
 </div>
 
+<div class="col-filters" id="col-filters">
+  <label>Col Filters</label>
+  <div class="col-filter-group" data-col="edge"><label>Edge%</label><input type="number" step="0.1" placeholder="min" onchange="onColFilter()" oninput="this.parentElement.classList.toggle('active',!!this.value)"><input type="number" step="0.1" placeholder="max" onchange="onColFilter()" oninput="this.parentElement.classList.toggle('active',!!this.value)"></div>
+  <div class="col-filter-group" data-col="rMultiple"><label>R-Mult</label><input type="number" step="0.1" placeholder="min" onchange="onColFilter()" oninput="this.parentElement.classList.toggle('active',!!this.value)"><input type="number" step="0.1" placeholder="max" onchange="onColFilter()" oninput="this.parentElement.classList.toggle('active',!!this.value)"></div>
+  <div class="col-filter-group" data-col="ev"><label>EV%</label><input type="number" step="0.1" placeholder="min" onchange="onColFilter()" oninput="this.parentElement.classList.toggle('active',!!this.value)"><input type="number" step="0.1" placeholder="max" onchange="onColFilter()" oninput="this.parentElement.classList.toggle('active',!!this.value)"></div>
+  <div class="col-filter-group" data-col="winRate"><label>WR%</label><input type="number" step="0.1" placeholder="min" onchange="onColFilter()" oninput="this.parentElement.classList.toggle('active',!!this.value)"><input type="number" step="0.1" placeholder="max" onchange="onColFilter()" oninput="this.parentElement.classList.toggle('active',!!this.value)"></div>
+  <div class="col-filter-group" data-col="breakEvenWR"><label>BE%</label><input type="number" step="0.1" placeholder="min" onchange="onColFilter()" oninput="this.parentElement.classList.toggle('active',!!this.value)"><input type="number" step="0.1" placeholder="max" onchange="onColFilter()" oninput="this.parentElement.classList.toggle('active',!!this.value)"></div>
+  <div class="col-filter-group" data-col="trades"><label>Trades</label><input type="number" step="1" placeholder="min" onchange="onColFilter()" oninput="this.parentElement.classList.toggle('active',!!this.value)"><input type="number" step="1" placeholder="max" onchange="onColFilter()" oninput="this.parentElement.classList.toggle('active',!!this.value)"></div>
+  <div class="col-filter-group" data-col="totalPnl"><label>P&amp;L</label><input type="number" step="100" placeholder="min" onchange="onColFilter()" oninput="this.parentElement.classList.toggle('active',!!this.value)"><input type="number" step="100" placeholder="max" onchange="onColFilter()" oninput="this.parentElement.classList.toggle('active',!!this.value)"></div>
+  <div class="col-filter-group" data-col="avgDailyPnl"><label>Avg/Day</label><input type="number" step="10" placeholder="min" onchange="onColFilter()" oninput="this.parentElement.classList.toggle('active',!!this.value)"><input type="number" step="10" placeholder="max" onchange="onColFilter()" oninput="this.parentElement.classList.toggle('active',!!this.value)"></div>
+  <div class="col-filter-group" data-col="worstDay"><label>Worst</label><input type="number" step="100" placeholder="min" onchange="onColFilter()" oninput="this.parentElement.classList.toggle('active',!!this.value)"><input type="number" step="100" placeholder="max" onchange="onColFilter()" oninput="this.parentElement.classList.toggle('active',!!this.value)"></div>
+  <div class="col-filter-group" data-col="profitDays"><label>Green</label><input type="number" step="1" placeholder="min" onchange="onColFilter()" oninput="this.parentElement.classList.toggle('active',!!this.value)"><input type="number" step="1" placeholder="max" onchange="onColFilter()" oninput="this.parentElement.classList.toggle('active',!!this.value)"></div>
+  <div class="col-filter-group" data-col="days"><label>Days</label><input type="number" step="1" placeholder="min" onchange="onColFilter()" oninput="this.parentElement.classList.toggle('active',!!this.value)"><input type="number" step="1" placeholder="max" onchange="onColFilter()" oninput="this.parentElement.classList.toggle('active',!!this.value)"></div>
+  <button class="filter-reset" onclick="resetColFilters()" style="padding:4px 10px;font-size:10px;min-height:26px">Reset</button>
+</div>
+
 <div class="table-wrap">
 <div class="loading-overlay" id="loading-overlay">
   <div class="spinner"></div>
@@ -760,6 +970,7 @@
 </div>
 <table>
   <thead><tr>
+    <th class="rank" style="width:32px;text-align:center"><input type="checkbox" id="select-all" onclick="toggleSelectAll()" title="Select all visible"></th>
     <th class="rank">#</th>
     <th>Config</th>
     <th data-col="edge" class="sorted" title="Edge = WinRate − Breakeven WR">Edge<span class="arrow">▼</span></th>
@@ -768,24 +979,71 @@
     <th data-col="winRate">WR%</th>
     <th data-col="breakEvenWR" title="Win rate needed to break even">BE WR%</th>
     <th data-col="trades">Trades</th>
-    <th data-col="totalPnl">P&L</th>
+    <th data-col="totalPnl">P&amp;L</th>
     <th data-col="avgDailyPnl">Avg/Day</th>
     <th data-col="worstDay">Worst</th>
     <th data-col="profitDays">Green</th>
     <th data-col="days">Days</th>
-    <th>P&L</th>
+    <th>P&amp;L</th>
     <th style="width:90px"></th>
   </tr></thead>
-  <tbody id="tbody"><tr><td colspan="15" style="text-align:center;padding:40px;color:#444">Loading...</td></tr></tbody>
+  <tbody id="tbody"><tr><td colspan="16" style="text-align:center;padding:40px;color:#444">Loading...</td></tr></tbody>
 </table>
 </div>
 <div class="footer" id="footer"></div>
 
+<!-- ── Analytics Panel ── -->
+<div class="analytics-panel" id="analytics-panel">
+  <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;padding-top:8px">
+    <h2 style="font-size:16px;color:var(--foreground);font-weight:700;font-family:var(--font-sans)">Parameter Analytics</h2>
+    <span style="font-size:11px;color:var(--muted-foreground)" id="analytics-subtitle"></span>
+    <button class="refresh-btn" onclick="renderAnalytics()" style="margin-left:auto;font-size:11px;padding:4px 12px">
+      <span class="refresh-icon">↻</span> Refresh
+    </button>
+  </div>
+
+  <!-- HMA Pair Heatmap -->
+  <div class="analytics-section">
+    <h3>HMA Period Combination Heatmap</h3>
+    <div class="section-desc">Which HMA fast/slow period combinations produce the best edge? Green cells = profitable on average. Red = losing money. Numbers show average edge% and trade count for all configs using that pair.</div>
+    <div class="heatmap-wrap" id="hma-heatmap-wrap"></div>
+  </div>
+
+  <!-- Scatter plots row -->
+  <div class="analytics-grid">
+    <div class="analytics-section">
+      <h3>Stop Loss % vs Edge</h3>
+      <div class="section-desc">Does a wider or tighter stop loss improve your statistical edge? Each dot is one config.</div>
+      <div class="chart-box"><canvas id="chart-sl-edge"></canvas></div>
+    </div>
+    <div class="analytics-section">
+      <h3>Take Profit Multiplier vs Edge</h3>
+      <div class="section-desc">Does a higher or lower profit target improve your edge? Each dot is one config.</div>
+      <div class="chart-box"><canvas id="chart-tp-edge"></canvas></div>
+    </div>
+  </div>
+
+  <!-- Edge vs EV scatter -->
+  <div class="analytics-section">
+    <h3>Edge vs Expected Value</h3>
+    <div class="section-desc">Configs in the top-right are the sweet spot — strong statistical edge AND high per-trade returns. Bottom-left = losing on both counts. Each dot is one config.</div>
+    <div class="chart-box"><canvas id="chart-edge-ev"></canvas></div>
+  </div>
+
+  <!-- Parameter Impact Tables -->
+  <div class="analytics-section">
+    <h3>Parameter Impact on Outcomes</h3>
+    <div class="section-desc">For each parameter, see which values produce the best average results across all configs. The top row (highlighted) has the highest average edge. Click a parameter to expand/collapse.</div>
+    <div id="param-impact-tables"></div>
+  </div>
+</div>
+
 <!-- Delete confirmation modal -->
 <div class="del-modal-overlay" id="del-overlay">
   <div class="del-modal">
-    <h3>🗑 Delete Config</h3>
-    <p>Permanently delete <span class="cfg-name" id="del-name"></span>?</p>
+    <h3 id="del-title">🗑 Delete Config</h3>
+    <p id="del-intro">Permanently delete <span class="cfg-name" id="del-name"></span>?</p>
+    <div id="del-list" style="max-height:200px;overflow-y:auto;margin-bottom:12px;display:none"></div>
     <p class="del-stats" id="del-stats"></p>
     <div class="del-modal-actions">
       <button class="del-cancel" onclick="closeDeleteModal()">Cancel</button>
@@ -1023,6 +1281,11 @@ function resetFilters() {
   document.querySelectorAll('#sym-filter-bar [data-basket]').forEach(btn => {
     btn.classList.toggle('active', !btn.dataset.basket);
   });
+  // Reset column filters
+  document.querySelectorAll('.col-filter-group input').forEach(input => {
+    input.value = '';
+    input.parentElement.classList.remove('active');
+  });
   applyFilters();
 }
 
@@ -1090,13 +1353,51 @@ function updateSymbolPillCounts() {
   if (ndx) ndx.textContent = ` (${counts.NDX})`;
 }
 
+function getColFilters() {
+  const ranges = {};
+  document.querySelectorAll('.col-filter-group').forEach(group => {
+    const col = group.dataset.col;
+    const inputs = group.querySelectorAll('input');
+    const min = parseFloat(inputs[0].value);
+    const max = parseFloat(inputs[1].value);
+    if (!isNaN(min) || !isNaN(max)) {
+      ranges[col] = { min: isNaN(min) ? null : min, max: isNaN(max) ? null : max };
+    }
+  });
+  return ranges;
+}
+
+function onColFilter() {
+  applyFilters();
+}
+
+function resetColFilters() {
+  document.querySelectorAll('.col-filter-group input').forEach(input => {
+    input.value = '';
+    input.parentElement.classList.remove('active');
+  });
+  applyFilters();
+}
+
 function applyFilters() {
+  const colFilters = getColFilters();
   filteredRows = allRows.filter(row => {
     // Always hide basket members (individual legs) unless viewing members explicitly
     if (basketFilter !== 'members' && row.isBasketMember) return false;
     if (basketFilter === 'baskets' && !row.isBasket) return false;
     if (basketFilter === 'singles' && (row.isBasket || row.isBasketMember)) return false;
     if (basketFilter === 'members' && !row.isBasketMember) return false;
+    // Column range filters (apply before param filters since they don't depend on params)
+    for (const [col, range] of Object.entries(colFilters)) {
+      const val = row[col];
+      if (val == null) return false;
+      let num = val;
+      if (['edge', 'winRate', 'breakEvenWR'].includes(col)) {
+        num = val * 100;
+      }
+      if (range.min !== null && num < range.min) return false;
+      if (range.max !== null && num > range.max) return false;
+    }
     if (!row.params) return true;
     // Single-select filters
     for (const [key, val] of Object.entries(filters)) {
@@ -1111,7 +1412,8 @@ function applyFilters() {
   });
   sortRows();
   renderTable();
-  const hasFilters = Object.keys(filters).length > 0 || Object.keys(multiFilters).length > 0;
+  const hasColFilters = Object.keys(colFilters).length > 0;
+  const hasFilters = Object.keys(filters).length > 0 || Object.keys(multiFilters).length > 0 || hasColFilters;
   document.getElementById('filter-count').textContent =
     hasFilters
       ? `${filteredRows.length} of ${allRows.length} configs match`
@@ -1135,7 +1437,7 @@ function renderTable() {
   const tbody = document.getElementById('tbody');
 
   if (rows.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="15" style="text-align:center;padding:40px;color:#444">No results match filters</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="16" style="text-align:center;padding:40px;color:#444">No results match filters</td></tr>';
     return;
   }
 
@@ -1176,7 +1478,9 @@ function renderTable() {
     const sym = (r.params?.symbol || (r.configId.startsWith('ndx-') ? 'NDX' : 'SPX')).toUpperCase();
     const symBadge = `<span class="sym-badge ${sym.toLowerCase()}" title="Underlying: ${sym}">${sym}</span>`;
 
-    return `<tr data-cid="${r.configId}" class="${liveClass}" onclick="toggleDaily('${r.configId}', this)">
+    const isSelected = selectedConfigIds.has(r.configId);
+    return `<tr data-cid="${r.configId}" class="${liveClass}${isSelected ? ' selected' : ''}" onclick="toggleDaily('${r.configId}', this)">
+      <td class="rank" style="text-align:center" onclick="event.stopPropagation()"><input type="checkbox" class="row-select" data-cid="${r.configId}" ${isSelected ? 'checked' : ''} onchange="onRowSelect()"></td>
       <td class="rank">${medal}</td>
       <td>${symBadge}<a class="cfg-link" href="#" target="_blank" onclick="event.stopPropagation();event.preventDefault();window.open(replayUrl('${r.configId}'),'_blank')">${sweepConfigLabel(r)}</a>${liveBadge}<br>${pills}</td>
       <td class="${r.edge > 0 ? 'pnl-pos' : 'pnl-neg'}"><b>${(r.edge * 100).toFixed(1)}%</b></td>
@@ -1226,7 +1530,7 @@ async function toggleDaily(configId, rowEl) {
   tr.className = 'daily-row';
   tr.dataset.config = configId;
   const td = document.createElement('td');
-  td.colSpan = 15;
+  td.colSpan = 16;
 
   // Build analysis summary if available
   let analysisHtml = '';
@@ -1386,24 +1690,119 @@ function replayUrl(configId, date) {
   return url;
 }
 
+// ── Row selection ──
+
+let selectedConfigIds = new Set();
+
+function toggleSelectAll() {
+  const allChecked = document.getElementById('select-all').checked;
+  document.querySelectorAll('.row-select').forEach(cb => {
+    cb.checked = allChecked;
+    if (allChecked) selectedConfigIds.add(cb.dataset.cid);
+    else selectedConfigIds.delete(cb.dataset.cid);
+  });
+  updateBulkDeleteUI();
+  // Re-render to apply selected styling
+  renderTable();
+}
+
+function onRowSelect() {
+  selectedConfigIds.clear();
+  document.querySelectorAll('.row-select:checked').forEach(cb => {
+    selectedConfigIds.add(cb.dataset.cid);
+  });
+  updateBulkDeleteUI();
+  renderTable();
+}
+
+function updateBulkDeleteUI() {
+  const count = selectedConfigIds.size;
+  const btn = document.getElementById('bulk-delete-btn');
+  if (btn) {
+    btn.classList.toggle('active', count > 0);
+    btn.textContent = `🗑 Delete Selected (${count})`;
+  }
+}
+
 // ── Delete config ──
 
 let pendingDeleteId = null;
+let pendingDeleteIds = null;
 
 function openDeleteModal(configId, name, days, trades) {
   pendingDeleteId = configId;
+  pendingDeleteIds = null;
+  document.getElementById('del-title').textContent = '🗑 Delete Config';
+  document.getElementById('del-intro').style.display = '';
   document.getElementById('del-name').textContent = `${name} (${configId})`;
+  document.getElementById('del-list').style.display = 'none';
+  document.getElementById('del-list').innerHTML = '';
   document.getElementById('del-stats').textContent = `This will permanently remove ${days} day(s) of results and ${trades} trade records.`;
+  document.getElementById('del-overlay').classList.add('active');
+  document.getElementById('del-confirm-btn').onclick = confirmDelete;
+}
+
+function openBulkDeleteModal() {
+  if (selectedConfigIds.size === 0) return;
+  pendingDeleteId = null;
+  pendingDeleteIds = [...selectedConfigIds];
+
+  const rows = allRows.filter(r => selectedConfigIds.has(r.configId));
+  const totalDays = rows.reduce((s, r) => s + (r.days || 0), 0);
+  const totalTrades = rows.reduce((s, r) => s + (r.trades || 0), 0);
+
+  document.getElementById('del-title').textContent = `🗑 Delete ${rows.length} Configs`;
+  document.getElementById('del-intro').style.display = 'none';
+  document.getElementById('del-name').textContent = '';
+
+  const listEl = document.getElementById('del-list');
+  listEl.style.display = 'block';
+  listEl.innerHTML = rows.map(r => {
+    const name = (r.name || r.configId).replace(/</g, '&lt;');
+    return `<div style="padding:4px 0;border-bottom:1px solid var(--border);font-size:12px;color:var(--foreground)">${name}</div>`;
+  }).join('');
+
+  document.getElementById('del-stats').textContent = `This will permanently remove ${totalDays} day(s) of results and ${totalTrades} trade records across ${rows.length} configs.`;
   document.getElementById('del-overlay').classList.add('active');
   document.getElementById('del-confirm-btn').onclick = confirmDelete;
 }
 
 function closeDeleteModal() {
   pendingDeleteId = null;
+  pendingDeleteIds = null;
   document.getElementById('del-overlay').classList.remove('active');
 }
 
 async function confirmDelete() {
+  // Batch delete
+  if (pendingDeleteIds && pendingDeleteIds.length > 0) {
+    const ids = pendingDeleteIds;
+    closeDeleteModal();
+
+    try {
+      const res = await fetch(`${API}/configs/batch`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        // Remove from in-memory data and re-render
+        allRows = allRows.filter(r => !ids.includes(r.configId));
+        selectedConfigIds.clear();
+        updateBulkDeleteUI();
+        applyFilters();
+        document.getElementById('total-count').textContent = allRows.length;
+      } else {
+        alert(`Batch delete failed: ${data.error || 'Unknown error'}`);
+      }
+    } catch (err) {
+      alert(`Batch delete failed: ${err.message}`);
+    }
+    return;
+  }
+
+  // Single delete
   if (!pendingDeleteId) return;
   const configId = pendingDeleteId;
   closeDeleteModal();
@@ -1414,6 +1813,8 @@ async function confirmDelete() {
     if (res.ok) {
       // Remove from in-memory data and re-render
       allRows = allRows.filter(r => r.configId !== configId);
+      selectedConfigIds.delete(configId);
+      updateBulkDeleteUI();
       applyFilters();
       document.getElementById('total-count').textContent = allRows.length;
     } else {
@@ -1517,8 +1918,18 @@ async function refreshData() {
 
     applyFilters();
 
-    // Show what changed
+    // Clean up selections for configs that no longer exist
     const newIds = new Set(allRows.map(r => r.configId));
+    let selectionChanged = false;
+    for (const id of selectedConfigIds) {
+      if (!newIds.has(id)) { selectedConfigIds.delete(id); selectionChanged = true; }
+    }
+    if (selectionChanged) {
+      updateBulkDeleteUI();
+      document.getElementById('select-all').checked = false;
+    }
+
+    // Show what changed
     const added = allRows.filter(r => !prevIds.has(r.configId)).length;
     const removed = [...prevIds].filter(id => !newIds.has(id)).length;
     const updated = allRows.filter(r => prevIds.has(r.configId)).length;
@@ -1687,7 +2098,7 @@ async function removeBasketFromEcosystem() {
 }
 
 async function setLiveConfig(configId, name, score) {
-  if (!confirm(`Set "${name}" (score: ${score}) as the live trading config?\n\nThis updates AGENT_CONFIG_ID in ecosystem.config.js.\nThe agent will use it on next restart.`)) {
+  if (!confirm(`Set "${name}" (score: ${score}) as the live trading config?\n\nThis will restart the event handler immediately.`)) {
     return;
   }
 
@@ -1703,12 +2114,17 @@ async function setLiveConfig(configId, name, score) {
     liveConfigId = configId;
     document.getElementById('live-indicator').style.display = 'inline-flex';
     document.getElementById('live-cfg-id').textContent = configId;
-    renderTable(); // re-render to update badges
+    renderTable();
 
     const statusEl = document.getElementById('refresh-status');
-    statusEl.textContent = `✓ Live config set to ${configId}`;
-    statusEl.style.color = '#3b82f6';
-    setTimeout(() => { statusEl.textContent = ''; }, 5000);
+    if (data.restarted) {
+      statusEl.textContent = `✓ Live config set to ${configId} — handler restarted`;
+      statusEl.style.color = '#22c55e';
+    } else {
+      statusEl.textContent = `⚠ Config updated but handler restart failed: ${data.restartError || 'unknown'}`;
+      statusEl.style.color = '#f59e0b';
+    }
+    setTimeout(() => { statusEl.textContent = ''; }, 8000);
   } catch (err) {
     alert('Failed to set live config: ' + err.message);
   }
@@ -1750,6 +2166,266 @@ async function loadData() {
 }
 
 fetchLiveConfigId().then(() => loadData());
+
+// ── Analytics Panel ──
+
+let analyticsCharts = [];
+let currentView = 'leaderboard';
+
+function showAnalytics() {
+  currentView = 'analytics';
+  document.getElementById('analytics-panel').classList.add('active');
+  document.querySelector('.table-wrap').style.display = 'none';
+  document.querySelector('.sort-bar').style.display = 'none';
+  document.querySelector('.sym-filter-bar').style.display = 'none';
+  document.querySelectorAll('.nav-bar a').forEach(a => a.classList.remove('active'));
+  document.getElementById('nav-analytics').classList.add('active');
+  renderAnalytics();
+}
+
+function showLeaderboard() {
+  currentView = 'leaderboard';
+  document.getElementById('analytics-panel').classList.remove('active');
+  document.querySelector('.table-wrap').style.display = '';
+  document.querySelector('.sort-bar').style.display = '';
+  document.querySelector('.sym-filter-bar').style.display = '';
+  document.querySelectorAll('.nav-bar a').forEach(a => a.classList.remove('active'));
+  document.querySelector('.nav-bar a[data-path="/replay/sweep"]').classList.add('active');
+}
+
+function renderAnalytics() {
+  const rows = allRows.filter(r => !r.isBasketMember && r.params);
+  document.getElementById('analytics-subtitle').textContent = `${rows.length} configs analyzed`;
+
+  analyticsCharts.forEach(c => c.destroy());
+  analyticsCharts = [];
+
+  renderHmaHeatmap(rows);
+  renderScatterSL(rows);
+  renderScatterTP(rows);
+  renderScatterEdgeEV(rows);
+  renderParamImpact(rows);
+}
+
+function groupBy(rows, key) {
+  const groups = {};
+  for (const r of rows) {
+    const v = r.params?.[key];
+    if (v === undefined || v === null) continue;
+    const k = String(v);
+    if (!groups[k]) groups[k] = [];
+    groups[k].push(r);
+  }
+  return groups;
+}
+
+function avg(arr, fn) {
+  if (!arr.length) return 0;
+  return arr.reduce((s, r) => s + fn(r), 0) / arr.length;
+}
+
+function edgeColor(edge, alpha = 1) {
+  if (edge > 0.15) return `rgba(16,185,129,${alpha})`;
+  if (edge > 0.05) return `rgba(52,211,153,${alpha})`;
+  if (edge > 0) return `rgba(110,231,183,${alpha})`;
+  if (edge > -0.05) return `rgba(251,113,133,${alpha})`;
+  return `rgba(244,63,94,${alpha})`;
+}
+
+function edgeCellBg(edge) {
+  if (edge >= 0) {
+    const intensity = Math.min(1, edge / 0.4);
+    return `background:rgba(16,185,129,${0.08 + intensity * 0.22})`;
+  }
+  const intensity = Math.min(1, Math.abs(edge) / 0.3);
+  return `background:rgba(244,63,94,${0.06 + intensity * 0.18})`;
+}
+
+function renderHmaHeatmap(rows) {
+  const groups = {};
+  for (const r of rows) {
+    const f = r.params?.hmaFast, s = r.params?.hmaSlow;
+    if (f == null || s == null) continue;
+    const k = `${f}x${s}`;
+    if (!groups[k]) groups[k] = { fast: f, slow: s, rows: [] };
+    groups[k].rows.push(r);
+  }
+  if (!Object.keys(groups).length) { document.getElementById('hma-heatmap-wrap').innerHTML = '<em style="color:var(--muted-foreground)">No HMA data available</em>'; return; }
+
+  const fastVals = [...new Set(Object.values(groups).map(g => g.fast))].sort((a, b) => a - b);
+  const slowVals = [...new Set(Object.values(groups).map(g => g.slow))].sort((a, b) => a - b);
+
+  let html = '<table class="heatmap"><thead><tr><th>HMA Fast \\ Slow</th>';
+  for (const s of slowVals) html += `<th>${s}</th>`;
+  html += '</tr></thead><tbody>';
+
+  for (const f of fastVals) {
+    html += `<tr><th>${f}</th>`;
+    for (const s of slowVals) {
+      const g = groups[`${f}x${s}`];
+      if (g) {
+        const aEdge = avg(g.rows, r => r.edge || 0);
+        const aEV = avg(g.rows, r => r.ev || 0);
+        const totalT = g.rows.reduce((s, r) => s + (r.trades || 0), 0);
+        const n = g.rows.length;
+        html += `<td style="${edgeCellBg(aEdge)}"><span class="edge-val" style="color:${aEdge >= 0 ? 'var(--success)' : 'var(--destructive)'}">${(aEdge * 100).toFixed(1)}%</span><span class="trade-cnt">${n} cfg / ${totalT}t<br>EV ${(aEV).toFixed(2)}%</span></td>`;
+      } else {
+        html += '<td style="color:var(--muted-foreground);opacity:0.3">—</td>';
+      }
+    }
+    html += '</tr>';
+  }
+  html += '</tbody></table>';
+  document.getElementById('hma-heatmap-wrap').innerHTML = html;
+}
+
+function chartOpts(xLabel, yLabel) {
+  return {
+    responsive: true,
+    plugins: { legend: { labels: { color: '#8b949e', font: { size: 11 } } } },
+    scales: {
+      x: { title: { display: true, text: xLabel, color: '#8b949e', font: { size: 11 } }, ticks: { color: '#8b949e' }, grid: { color: '#21262d' } },
+      y: { title: { display: true, text: yLabel, color: '#8b949e', font: { size: 11 } }, ticks: { color: '#8b949e' }, grid: { color: '#21262d' } },
+    }
+  };
+}
+
+function renderScatterSL(rows) {
+  const pos = [], neg = [];
+  for (const r of rows) {
+    const sl = r.params?.stopLoss;
+    if (sl == null) continue;
+    const pt = { x: sl, y: (r.edge || 0) * 100 };
+    (r.edge > 0 ? pos : neg).push(pt);
+  }
+  const ctx = document.getElementById('chart-sl-edge').getContext('2d');
+  analyticsCharts.push(new Chart(ctx, {
+    type: 'scatter',
+    data: {
+      datasets: [
+        { label: 'Positive Edge', data: pos, backgroundColor: 'rgba(16,185,129,0.55)', pointRadius: 5 },
+        { label: 'Negative Edge', data: neg, backgroundColor: 'rgba(244,63,94,0.4)', pointRadius: 5 },
+        { label: 'Zero Edge', data: [{x:0,y:0},{x:100,y:0}], type: 'line', borderColor: '#555', borderDash: [5,5], pointRadius: 0, borderWidth: 1 },
+      ]
+    },
+    options: chartOpts('Stop Loss %', 'Edge %')
+  }));
+}
+
+function renderScatterTP(rows) {
+  const pos = [], neg = [];
+  for (const r of rows) {
+    const tp = r.params?.tpMult;
+    if (tp == null) continue;
+    const pt = { x: tp, y: (r.edge || 0) * 100 };
+    (r.edge > 0 ? pos : neg).push(pt);
+  }
+  const ctx = document.getElementById('chart-tp-edge').getContext('2d');
+  analyticsCharts.push(new Chart(ctx, {
+    type: 'scatter',
+    data: {
+      datasets: [
+        { label: 'Positive Edge', data: pos, backgroundColor: 'rgba(16,185,129,0.55)', pointRadius: 5 },
+        { label: 'Negative Edge', data: neg, backgroundColor: 'rgba(244,63,94,0.4)', pointRadius: 5 },
+        { label: 'Zero Edge', data: [{x:0,y:0},{x:15,y:0}], type: 'line', borderColor: '#555', borderDash: [5,5], pointRadius: 0, borderWidth: 1 },
+      ]
+    },
+    options: chartOpts('Take Profit Multiplier', 'Edge %')
+  }));
+}
+
+function renderScatterEdgeEV(rows) {
+  const pts = rows.map(r => ({
+    x: (r.edge || 0) * 100,
+    y: r.ev || 0,
+    r: r,
+  }));
+  const gold = pts.filter(p => p.x > 5 && p.y > 0);
+  const risky = pts.filter(p => p.x <= 5 && p.y > 0);
+  const bleeding = pts.filter(p => p.y <= 0);
+
+  const ctx = document.getElementById('chart-edge-ev').getContext('2d');
+  analyticsCharts.push(new Chart(ctx, {
+    type: 'scatter',
+    data: {
+      datasets: [
+        { label: `Gold Zone (${gold.length})`, data: gold, backgroundColor: 'rgba(16,185,129,0.6)', pointRadius: 5 },
+        { label: `Marginal (${risky.length})`, data: risky, backgroundColor: 'rgba(245,158,11,0.5)', pointRadius: 4 },
+        { label: `Losing (${bleeding.length})`, data: bleeding, backgroundColor: 'rgba(244,63,94,0.4)', pointRadius: 4 },
+        { label: 'Zero Edge', data: [{x:0,y:Math.min(...pts.map(p=>p.y))},{x:0,y:Math.max(...pts.map(p=>p.y))}], type: 'line', borderColor: '#555', borderDash: [5,5], pointRadius: 0, borderWidth: 1 },
+        { label: 'Zero EV', data: [{x:Math.min(...pts.map(p=>p.x)),y:0},{x:Math.max(...pts.map(p=>p.x)),y:0}], type: 'line', borderColor: '#555', borderDash: [5,5], pointRadius: 0, borderWidth: 1 },
+      ]
+    },
+    options: chartOpts('Edge %', 'EV %')
+  }));
+}
+
+function renderParamImpact(rows) {
+  const params = [
+    { key: 'exitStrategy', label: 'Exit Strategy' },
+    { key: 'symbol', label: 'Instrument' },
+    { key: 'stopLoss', label: 'Stop Loss %' },
+    { key: 'tpMult', label: 'Take Profit Multiplier' },
+    { key: 'signalTf', label: 'Signal Timeframe' },
+    { key: 'dirTf', label: 'Direction Timeframe' },
+    { key: 'exitTf', label: 'Exit Timeframe' },
+    { key: 'requireDir', label: 'Require Direction' },
+    { key: 'maxPositions', label: 'Max Positions' },
+    { key: 'enableHma', label: 'HMA Signal' },
+    { key: 'enableRsi', label: 'RSI Signal' },
+    { key: 'enablePxHma', label: 'Price x HMA' },
+    { key: 'enableEma', label: 'EMA Signal' },
+  ];
+
+  let html = '';
+  for (const p of params) {
+    const groups = groupBy(rows, p.key);
+    const vals = Object.entries(groups);
+    if (vals.length <= 1) continue;
+
+    const aggregated = vals.map(([val, grp]) => {
+      const aEdge = avg(grp, r => r.edge || 0);
+      const aEV = avg(grp, r => r.ev || 0);
+      const aWR = avg(grp, r => r.winRate || 0);
+      const aPnl = avg(grp, r => r.totalPnl || 0);
+      const totalT = grp.reduce((s, r) => s + (r.trades || 0), 0);
+      const greenR = grp.reduce((s, r) => s + (r.profitDays || 0), 0);
+      const totalD = grp.reduce((s, r) => s + (r.days || 0), 0);
+      return { val, n: grp.length, aEdge, aEV, aWR, aPnl, totalT, greenR, totalD, greenPct: totalD > 0 ? greenR / totalD : 0 };
+    }).sort((a, b) => b.aEdge - a.aEdge);
+
+    const displayVal = v => v === 'true' ? 'On' : v === 'false' ? 'Off' : v;
+    const ec = v => v >= 0 ? 'pnl-pos' : 'pnl-neg';
+
+    html += `<div class="param-group">
+      <div class="param-group-header" onclick="this.classList.toggle('collapsed');this.nextElementSibling.classList.toggle('collapsed')">
+        <span class="chevron">▼</span> ${p.label}
+        <span class="param-count">${vals.length} values · best: ${(aggregated[0].aEdge * 100).toFixed(1)}% edge</span>
+      </div>
+      <div class="param-group-body">
+        <table class="impact-table">
+          <thead><tr><th>Value</th><th>Configs</th><th>Trades</th><th>Avg Edge</th><th>Avg EV</th><th>Avg WR</th><th>Avg P&L</th><th>Green Days</th></tr></thead>
+          <tbody>${aggregated.map((a, i) => `<tr class="${i === 0 ? 'best-row' : ''}">
+            <td class="val-cell">${displayVal(a.val)}</td>
+            <td>${a.n}</td>
+            <td>${a.totalT.toLocaleString()}</td>
+            <td class="${ec(a.aEdge)}"><b>${(a.aEdge * 100).toFixed(1)}%</b></td>
+            <td class="${ec(a.aEV)}">${a.aEV.toFixed(2)}%</td>
+            <td>${(a.aWR * 100).toFixed(1)}%</td>
+            <td class="${ec(a.aPnl)}">${fmtMoney(a.aPnl)}</td>
+            <td>${(a.greenPct * 100).toFixed(0)}%</td>
+          </tr>`).join('')}</tbody>
+        </table>
+      </div>
+    </div>`;
+  }
+
+  document.getElementById('param-impact-tables').innerHTML = html;
+}
+
+document.getElementById('nav-leaderboard').addEventListener('click', e => {
+  if (currentView === 'analytics') { e.preventDefault(); showLeaderboard(); }
+});
 </script>
 </body>
 </html>

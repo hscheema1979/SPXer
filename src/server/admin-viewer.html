@@ -665,19 +665,19 @@
       </div>
       <div id="ecosystem-form" style="display:grid;gap:14px;padding:4px 0">
         <div class="form-group">
-          <label class="form-label">AGENT_CONFIG_ID</label>
-          <input class="form-input" id="env-agent-config-id" type="text" placeholder="e.g. spx-hma3x12-itm5-tp125x-sl20-3m-25c-$50000">
+          <label class="form-label">Config ID (single)</label>
+          <input class="form-input" id="env-handler-config-id" type="text" placeholder="e.g. spx-hma3x12-itm5-tp125x-sl20-3m-25c-$50000">
           <span class="form-hint">Single config ID loaded on startup</span>
         </div>
         <div class="form-group">
-          <label class="form-label">AGENT_CONFIG_IDS</label>
-          <input class="form-input" id="env-agent-config-ids" type="text" placeholder="e.g. config1,config2,config3">
-          <span class="form-hint">Comma-separated. Overrides AGENT_CONFIG_ID.</span>
+          <label class="form-label">Config IDs (multi)</label>
+          <input class="form-input" id="env-handler-config-ids" type="text" placeholder="e.g. config1,config2,config3">
+          <span class="form-hint">Comma-separated. Overrides single config ID.</span>
         </div>
         <div class="form-group" style="display:flex;align-items:center;gap:12px">
-          <label class="form-label" style="margin:0">AGENT_PAPER</label>
+          <label class="form-label" style="margin:0">Paper Mode</label>
           <label class="toggle">
-            <input type="checkbox" id="env-agent-paper" onchange="paperToggleChanged()">
+            <input type="checkbox" id="env-handler-paper" onchange="paperToggleChanged()">
             <span class="toggle-slider"></span>
           </label>
           <span id="paper-mode-label" style="font-size:11px;font-family:var(--font-mono);color:var(--warning)">PAPER MODE</span>
@@ -1059,10 +1059,10 @@ async function loadEcosystem() {
     const ecoData = await ecoRes.json();
 
     const env = envData.env || {};
-    document.getElementById('env-agent-config-id').value = env.AGENT_CONFIG_ID || '';
-    document.getElementById('env-agent-config-ids').value = env.AGENT_CONFIG_IDS || '';
+    document.getElementById('env-handler-config-id').value = env.AGENT_CONFIG_ID || '';
+    document.getElementById('env-handler-config-ids').value = env.AGENT_CONFIG_IDS || '';
     const isPaper = env.AGENT_PAPER === 'true' || env.AGENT_PAPER === true;
-    document.getElementById('env-agent-paper').checked = isPaper;
+    document.getElementById('env-handler-paper').checked = isPaper;
     updatePaperLabel(isPaper);
     document.getElementById('ecosystem-editor').value = ecoData.content;
   } catch (e) {
@@ -1071,7 +1071,7 @@ async function loadEcosystem() {
 }
 
 function paperToggleChanged() {
-  const isPaper = document.getElementById('env-agent-paper').checked;
+  const isPaper = document.getElementById('env-handler-paper').checked;
   updatePaperLabel(isPaper);
 }
 
@@ -1087,9 +1087,9 @@ function updatePaperLabel(isPaper) {
 }
 
 async function saveEcosystemForm() {
-  const configId = document.getElementById('env-agent-config-id').value.trim();
-  const configIds = document.getElementById('env-agent-config-ids').value.trim();
-  const isPaper = document.getElementById('env-agent-paper').checked;
+  const configId = document.getElementById('env-handler-config-id').value.trim();
+  const configIds = document.getElementById('env-handler-config-ids').value.trim();
+  const isPaper = document.getElementById('env-handler-paper').checked;
 
   const envUpdates = {};
   if (configId) envUpdates.AGENT_CONFIG_ID = configId;

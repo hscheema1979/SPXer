@@ -10,6 +10,7 @@ import { circuitBreakers } from '../utils/resilience';
 import { getWsClientCount } from './ws';
 import { config } from '../config';
 import { createReplayRoutes } from './replay-routes';
+import { createAdminRoutes } from './admin-routes';
 import { refreshPipelineHealth } from '../ops/pipeline-health';
 import { getLatestMetrics, getMetricSeries, getMetricsSummary } from '../ops/metrics-api';
 import { getAlertHistory, getRules as getAlertRules } from '../ops/alert-rules';
@@ -186,6 +187,28 @@ export function startHttpServer(port: number): { app: Express; httpServer: Serve
     res.json(signal);
   });
 
+  app.get('/signals', (req, res) => {
+    const { getLatestSignals } = require('../storage/queries');
+    const signals = getLatestSignals({
+      offsetLabel: req.query.offset as string,
+      timeframe: req.query.timeframe as string,
+      hmaPair: req.query.hmaPair as string,
+      limit: Math.min(parseInt(req.query.limit as string) || 50, 500),
+    });
+    res.json(signals);
+  });
+
+  app.get('/signals', (req, res) => {
+    const { getLatestSignals } = require('../storage/queries');
+    const signals = getLatestSignals({
+      offsetLabel: req.query.offset as string | undefined,
+      timeframe: req.query.timeframe as string | undefined,
+      hmaPair: req.query.hmaPair as string | undefined,
+      limit: Math.min(Number(req.query.limit) || 50, 200),
+    });
+    res.json(signals);
+  });
+
   app.get('/agent/config', (req, res) => {
     // Serve the live agent config from the DB (same source the agents use)
     try {
@@ -329,6 +352,9 @@ export function startHttpServer(port: number): { app: Express; httpServer: Serve
 
   // ── Replay viewer ──
   app.use('/replay', createReplayRoutes());
+
+  // ── Admin management ──
+  app.use('/admin', createAdminRoutes());
 
   const httpServer = createServer(app);
   httpServer.listen(port, () => console.log(`[http] Listening on :${port}`));

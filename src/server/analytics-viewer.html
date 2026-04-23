@@ -158,8 +158,161 @@
   ::-webkit-scrollbar { width: 6px; height: 6px; }
   ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 10px; }
+  /* ───────── Analytics Section (shared with sweep-viewer) ───────── */
+  .analytics-section {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px;
+    margin-bottom: 16px;
+  }
+  .analytics-section h3 {
+    font-size: 13px; color: var(--primary); margin-bottom: 4px;
+    font-weight: 600; font-family: var(--font-sans);
+  }
+  .analytics-section .section-desc {
+    font-size: 11px; color: var(--muted-foreground); margin-bottom: 14px;
+    line-height: 1.5; font-family: var(--font-sans);
+  }
+  .analytics-grid {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 16px;
+  }
+  @media (max-width: 900px) { .analytics-grid { grid-template-columns: 1fr; } }
+  .param-group { margin-bottom: 12px; }
+  .param-group-header {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 10px; background: var(--card-elevated);
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    cursor: pointer; font-size: 12px; font-weight: 600;
+    color: var(--foreground); user-select: none; transition: border-color 0.15s;
+  }
+  .param-group-header:hover { border-color: var(--primary); }
+  .param-group-header .chevron { font-size: 10px; color: var(--muted-foreground); transition: transform 0.15s; }
+  .param-group-header.collapsed .chevron { transform: rotate(-90deg); }
+  .param-group-header .param-count { font-size: 10px; color: var(--muted-foreground); font-weight: 400; margin-left: auto; }
+  .param-group-body { padding: 6px 0 0 0; }
+  .param-group-body.collapsed { display: none; }
+  .impact-table { width: 100%; border-collapse: collapse; font-family: var(--font-mono); font-size: 11px; }
+  .impact-table th {
+    background: var(--card-elevated); padding: 6px 8px; font-size: 9px;
+    text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted-foreground);
+    font-family: var(--font-sans); font-weight: 600;
+    border-bottom: 1px solid var(--border-strong); cursor: default; white-space: nowrap;
+  }
+  .impact-table td { padding: 5px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  .impact-table tr:hover td { background: rgba(26,26,40,0.8); }
+  .impact-table .val-cell { color: var(--foreground); font-weight: 500; }
+  .impact-table .best-row td { background: rgba(16,185,129,0.06); }
+  .heatmap-wrap { overflow-x: auto; }
+  .heatmap { border-collapse: collapse; font-family: var(--font-mono); font-size: 11px; }
+  .heatmap th {
+    background: var(--card-elevated); padding: 6px 10px; font-size: 10px;
+    color: var(--muted-foreground); font-family: var(--font-sans); font-weight: 600;
+    border: 1px solid var(--border); cursor: default; white-space: nowrap;
+  }
+  .heatmap td {
+    padding: 8px 10px; border: 1px solid var(--border); text-align: center;
+    min-width: 70px; cursor: default; transition: opacity 0.15s;
+  }
+  .heatmap td:hover { opacity: 0.85; }
+  .heatmap .edge-val { font-weight: 600; display: block; }
+  .heatmap .trade-cnt { font-size: 9px; color: var(--muted-foreground); display: block; }
+  .chart-box { background: var(--card-elevated); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px; }
+  .pnl-pos { color: var(--success); }
+  .pnl-neg { color: var(--destructive); }
+
+  /* ───────── Filter bar ───────── */
+  .filters {
+    display: flex; gap: 8px; padding: 10px 12px;
+    background: var(--card-elevated); border-bottom: 1px solid var(--border);
+    align-items: center; flex-wrap: wrap;
+  }
+  .filter-group { display: flex; align-items: center; gap: 6px; }
+  .filter-group label {
+    font-size: 10px; color: var(--muted-foreground);
+    text-transform: uppercase; letter-spacing: 0.06em; white-space: nowrap;
+  }
+  .filter-group select {
+    background: var(--input); color: var(--foreground);
+    border: 1px solid var(--border-strong); padding: 6px 8px;
+    border-radius: var(--radius-sm); font-family: inherit;
+    font-size: 12px; cursor: pointer; min-height: 32px;
+  }
+  .filter-group select:focus { border-color: var(--primary); outline: none; }
+  .filter-group select.active { border-color: var(--primary); color: var(--primary); }
+
+  /* ───────── Multi-select dropdown ───────── */
+  .multi-select { position: relative; display: inline-block; }
+  .multi-select-btn {
+    background: var(--input); color: var(--foreground);
+    border: 1px solid var(--border-strong); padding: 6px 24px 6px 8px;
+    border-radius: var(--radius-sm); font-family: inherit;
+    font-size: 12px; cursor: pointer; min-height: 32px;
+    white-space: nowrap; position: relative; transition: border-color 0.15s;
+  }
+  .multi-select-btn::after {
+    content: '▾'; position: absolute; right: 6px; top: 50%;
+    transform: translateY(-50%); font-size: 10px; color: var(--muted);
+  }
+  .multi-select-btn:hover { border-color: var(--muted); }
+  .multi-select-btn.active { border-color: var(--primary); color: var(--primary); }
+  .multi-select-btn .ms-count {
+    background: var(--primary); color: var(--background);
+    font-size: 9px; font-weight: 700; padding: 0 5px;
+    border-radius: 999px; margin-left: 4px;
+  }
+  .multi-select-dropdown {
+    display: none; position: absolute; top: calc(100% + 4px); left: 0;
+    z-index: 100; background: var(--card); border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm); padding: 4px 0; min-width: 140px;
+    max-height: 260px; overflow-y: auto; box-shadow: 0 8px 24px rgba(0,0,0,.5);
+  }
+  .multi-select-dropdown.open { display: block; }
+  .multi-select-dropdown label {
+    display: flex; align-items: center; gap: 6px; padding: 5px 10px;
+    cursor: pointer; font-size: 12px; color: var(--foreground); white-space: nowrap;
+  }
+  .multi-select-dropdown label:hover { background: rgba(139,139,255,.08); }
+  .multi-select-dropdown input[type="checkbox"] { accent-color: var(--primary); width: 14px; height: 14px; cursor: pointer; }
+  .multi-select-dropdown .ms-divider { height: 1px; background: var(--border); margin: 4px 0; }
+  .multi-select-dropdown .ms-actions { display: flex; gap: 4px; padding: 4px 8px; }
+  .multi-select-dropdown .ms-actions button {
+    background: transparent; border: none; color: var(--primary);
+    font-size: 10px; cursor: pointer; padding: 2px 6px; border-radius: 3px;
+  }
+  .multi-select-dropdown .ms-actions button:hover { background: rgba(139,139,255,.12); }
+  .filter-sep { width: 1px; height: 20px; background: var(--border-strong); margin: 0 4px; }
+  .filter-reset {
+    background: transparent; border: 1px solid var(--border-strong);
+    color: var(--muted); padding: 6px 12px; border-radius: var(--radius-sm);
+    font-family: inherit; font-size: 11px; font-weight: 500; cursor: pointer;
+    min-height: 32px; transition: color 0.15s, border-color 0.15s;
+  }
+  .filter-reset:hover { color: var(--destructive); border-color: var(--destructive); }
+  .filter-count { font-size: 11px; color: var(--muted-foreground); margin-left: auto; }
+
+  /* ───────── Sort controls ───────── */
+  .sort-bar {
+    display: flex; gap: 8px; padding: 8px 12px;
+    background: var(--background); border-bottom: 1px solid var(--border);
+    align-items: center; flex-wrap: wrap;
+  }
+  .sort-bar > label {
+    font-size: 10px; color: var(--muted-foreground);
+    text-transform: uppercase; letter-spacing: 0.06em;
+  }
+  .sort-btn {
+    background: var(--input); color: var(--muted); border: 1px solid var(--border);
+    padding: 6px 12px; border-radius: var(--radius-sm); font-size: 11px;
+    font-weight: 500; cursor: pointer; font-family: inherit; min-height: 32px;
+    transition: color 0.15s, border-color 0.15s, background-color 0.15s;
+  }
+  .sort-btn:hover { border-color: #444; color: var(--foreground); }
+  .sort-btn.active { border-color: var(--primary); color: var(--primary); background: rgba(139,139,255,0.08); }
+
   @keyframes spin { to { transform: rotate(360deg); } }
 </style>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 </head>
 <body>
 
@@ -187,7 +340,6 @@
       <select id="axis-row" onchange="rebuild()">
         <option value="hmaSlow" selected>HMA Slow</option>
         <option value="hmaFast">HMA Fast</option>
-        <option value="signalTf">Signal TF</option>
         <option value="strikeOffset">Strike</option>
         <option value="tpMult">TP Mult</option>
         <option value="stopLoss">Stop Loss</option>
@@ -204,7 +356,6 @@
       <select id="axis-col" onchange="rebuild()">
         <option value="hmaSlow">HMA Slow</option>
         <option value="hmaFast">HMA Fast</option>
-        <option value="signalTf">Signal TF</option>
         <option value="strikeOffset" selected>Strike</option>
         <option value="tpMult">TP Mult</option>
         <option value="stopLoss">Stop Loss</option>
@@ -246,15 +397,10 @@
     <button class="preset-btn" onclick="applyPreset({maxContracts:'50'})" style="background:none;border:1px solid var(--border-strong);color:var(--muted);border-radius:14px;padding:4px 12px;font-size:11px;cursor:pointer;transition:all 0.15s" onmouseover="this.style.borderColor='var(--primary)';this.style.color='var(--primary)'" onmouseout="this.style.borderColor='';this.style.color='var(--muted)'">50c Only</button>
     <button class="preset-btn" onclick="applyPreset({symbol:'SPX'})" style="background:none;border:1px solid var(--border-strong);color:var(--muted);border-radius:14px;padding:4px 12px;font-size:11px;cursor:pointer;transition:all 0.15s" onmouseover="this.style.borderColor='var(--primary)';this.style.color='var(--primary)'" onmouseout="this.style.borderColor='';this.style.color='var(--muted)'">SPX Only</button>
     <button class="preset-btn" onclick="applyPreset({strikeOffset:'ITM5',maxContracts:'50'})" style="background:none;border:1px solid var(--border-strong);color:var(--muted);border-radius:14px;padding:4px 12px;font-size:11px;cursor:pointer;transition:all 0.15s" onmouseover="this.style.borderColor='var(--primary)';this.style.color='var(--primary)'" onmouseout="this.style.borderColor='';this.style.color='var(--muted)'">ITM5 50c</button>
-    <button class="preset-btn" onclick="clearPins()" style="background:none;border:1px solid var(--destructive);color:var(--destructive);border-radius:14px;padding:4px 12px;font-size:11px;cursor:pointer;opacity:0.6;transition:all 0.15s" onmouseover="this.style.opacity='1'" onmouseout="this.style.opacity='0.6'">Clear All</button>
+    <button class="preset-btn" onclick="resetFilters()" style="background:none;border:1px solid var(--destructive);color:var(--destructive);border-radius:14px;padding:4px 12px;font-size:11px;cursor:pointer;opacity:0.6;transition:all 0.15s" onmouseover="this.style.opacity='1'" onmouseout="this.style.opacity='0.6'">Clear All</button>
   </div>
 
-  <!-- Pin filters -->
-  <div class="controls" id="pin-filters" style="gap: 6px;">
-    <label style="margin-right:4px">Filter</label>
-    <span id="pin-filter-slots"></span>
-    <button onclick="clearPins()" style="background:none;border:1px solid var(--border-strong);color:var(--muted);border-radius:var(--radius-sm);padding:4px 10px;font-size:11px;cursor:pointer;">Clear All</button>
-  </div>
+  <div class="filters" id="filters"></div>
 
   <div class="panels">
     <!-- Heatmap -->
@@ -299,6 +445,72 @@
       <div id="best-container" style="overflow-x:auto"></div>
     </div>
 
+    <!-- Time-of-Day Chunks -->
+    <div class="panel panel-full" id="chunk-panel">
+      <div class="panel-title"><span class="icon">🕐</span> Time-of-Day — 30-min Chunks <span style="font-weight:400;color:var(--muted);font-size:11px" id="chunk-subtitle"></span></div>
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap">
+        <label style="font-size:11px;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:0.04em">Metric</label>
+        <div class="metric-pills" id="chunk-metric-pills">
+          <span class="metric-pill active" data-metric="avgPnlPerDay" onclick="setChunkMetric(this)">Avg/Day</span>
+          <span class="metric-pill" data-metric="edge" onclick="setChunkMetric(this)">Edge</span>
+          <span class="metric-pill" data-metric="winRate" onclick="setChunkMetric(this)">Win Rate</span>
+          <span class="metric-pill" data-metric="avgPnlPerTrade" onclick="setChunkMetric(this)">Avg/Trade</span>
+          <span class="metric-pill" data-metric="totalPnl" onclick="setChunkMetric(this)">Total P&L</span>
+        </div>
+        <span class="ctrl-sep" style="width:1px;height:20px;background:var(--border-strong);margin:0 4px"></span>
+        <label style="font-size:11px;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:0.04em">View</label>
+        <div class="metric-pills">
+          <span class="metric-pill active" data-view="aggregate" onclick="setChunkView(this)">Aggregate</span>
+          <span class="metric-pill" data-view="config" onclick="setChunkView(this)">By Config</span>
+        </div>
+      </div>
+      <div id="chunk-chart-container" style="overflow-x:auto"></div>
+      <div id="chunk-table-container" style="margin-top:12px;overflow-x:auto"></div>
+    </div>
+
+    <!-- Parameter Analytics -->
+    <div class="panel panel-full" id="analytics-panel">
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;padding-top:8px">
+        <h2 style="font-size:16px;color:var(--foreground);font-weight:700;font-family:var(--font-sans)">Parameter Analytics</h2>
+        <span style="font-size:11px;color:var(--muted-foreground)" id="analytics-subtitle"></span>
+      </div>
+
+      <!-- HMA Pair Heatmap -->
+      <div class="analytics-section">
+        <h3>HMA Period Combination Heatmap</h3>
+        <div class="section-desc">Which HMA fast/slow period combinations produce the best edge? Green cells = profitable on average. Red = losing money.</div>
+        <div class="heatmap-wrap" id="hma-heatmap-wrap"></div>
+      </div>
+
+      <!-- Scatter plots row -->
+      <div class="analytics-grid">
+        <div class="analytics-section">
+          <h3>Stop Loss % vs Edge</h3>
+          <div class="section-desc">Does a wider or tighter stop loss improve your statistical edge? Each dot is one config.</div>
+          <div class="chart-box"><canvas id="chart-sl-edge"></canvas></div>
+        </div>
+        <div class="analytics-section">
+          <h3>Take Profit Multiplier vs Edge</h3>
+          <div class="section-desc">Does a higher or lower profit target improve your edge? Each dot is one config.</div>
+          <div class="chart-box"><canvas id="chart-tp-edge"></canvas></div>
+        </div>
+      </div>
+
+      <!-- Edge vs EV scatter -->
+      <div class="analytics-section">
+        <h3>Edge vs Expected Value</h3>
+        <div class="section-desc">Configs in the top-right are the sweet spot — strong statistical edge AND high per-trade returns. Bottom-left = losing on both counts.</div>
+        <div class="chart-box"><canvas id="chart-edge-ev"></canvas></div>
+      </div>
+
+      <!-- Parameter Impact Tables -->
+      <div class="analytics-section">
+        <h3>Parameter Impact on Outcomes</h3>
+        <div class="section-desc">For each parameter, see which values produce the best average results across all configs. The top row (highlighted) has the highest average edge.</div>
+        <div id="param-impact-tables"></div>
+      </div>
+    </div>
+
     <!-- Distribution -->
     <div class="panel panel-full" id="distribution-panel">
       <div class="panel-title"><span class="icon">📈</span> Distribution by <span id="dist-axis-label">Row Axis</span></div>
@@ -322,7 +534,32 @@ if (_BASE) {
 
 let allRows = [];
 let currentMetric = 'avgDailyPnl';
-let pins = {};
+let chunkData = null;
+let currentChunkMetric = 'avgPnlPerDay';
+let currentChunkView = 'aggregate';
+
+// ── Sweep-style filter system ──
+let filters = {};
+let multiFilters = {};
+let basketFilter = '';
+
+const FILTER_KEYS = [
+  { key: 'symbol',       label: 'Symbol' },
+  { key: 'strikeOffset', label: 'Strike', multi: true },
+  { key: 'maxContracts', label: 'Max Contracts', multi: true },
+  { key: 'hmaFast',      label: 'HMA Fast' },
+  { key: 'hmaSlow',      label: 'HMA Slow' },
+  { key: 'exitStrategy', label: 'Exit Strat' },
+  { key: 'stopLoss',     label: 'Stop Loss' },
+  { key: 'tpMult',       label: 'TP Mult' },
+  { key: 'requireDir',   label: 'Req Dir' },
+  { key: 'enableHma',    label: 'HMA Sig' },
+  { key: 'enableRsi',    label: 'RSI Sig' },
+  { key: 'enablePxHma',  label: 'Px×HMA' },
+  { key: 'enableEma',    label: 'EMA Sig' },
+  { key: 'regimeEnabled', label: 'Regime' },
+  { key: 'scannersEnabled', label: 'Scanners' },
+];
 
 const METRIC_META = {
   avgDailyPnl:    { label: 'Avg Daily P&L',  fmt: fmtMoney, higher: true, unit: '$' },
@@ -342,11 +579,11 @@ const METRIC_META = {
 };
 
 const PARAM_LABELS = {
-  hmaSlow: 'HMA Slow', hmaFast: 'HMA Fast', signalTf: 'Signal TF', strikeOffset: 'Strike',
+  hmaSlow: 'HMA Slow', hmaFast: 'HMA Fast', strikeOffset: 'Strike',
   tpMult: 'TP Mult', stopLoss: 'Stop Loss', exitStrategy: 'Exit Strat',
   maxContracts: 'Max Contracts', baseDollarsPerTrade: '$ Per Trade', symbol: 'Symbol',
   reverseSignals: 'Reverse', enableHma: 'HMA Sig', enableEma: 'EMA Sig',
-  sizingValue: 'Sizing $', sizingMode: 'Sizing Mode', dirTf: 'Dir TF', exitTf: 'Exit TF',
+  sizingValue: 'Sizing $', sizingMode: 'Sizing Mode',
 };
 
 function fmtMoney(n) {
@@ -402,14 +639,17 @@ function setMetric(el) {
 function getFilteredRows() {
   const typeFilter = document.getElementById('ctrl-type').value;
   return allRows.filter(r => {
-    // Always hide basket members unless explicitly requested
     if (typeFilter !== 'members' && r.isBasketMember) return false;
     if (typeFilter === 'singles' && (r.isBasket || r.isBasketMember)) return false;
     if (typeFilter === 'baskets' && !r.isBasket) return false;
     if (typeFilter === 'members' && !r.isBasketMember) return false;
     if (!r.params) return false;
-    for (const [k, v] of Object.entries(pins)) {
-      if (String(r.params[k]) !== String(v)) return false;
+    for (const [key, val] of Object.entries(filters)) {
+      if (String(r.params[key]) !== val) return false;
+    }
+    for (const [key, selectedSet] of Object.entries(multiFilters)) {
+      if (selectedSet.size === 0) continue;
+      if (!selectedSet.has(String(r.params[key]))) return false;
     }
     return true;
   });
@@ -423,6 +663,169 @@ function getUniqueValues(rows, key) {
     }
   }
   return [...set].sort(smartSort);
+}
+
+// ── Sweep-style filter system ──
+function buildFilters() {
+  const valuesMap = {};
+  for (const f of FILTER_KEYS) valuesMap[f.key] = new Set();
+  for (const row of allRows) {
+    if (!row.params) continue;
+    for (const f of FILTER_KEYS) {
+      const v = row.params[f.key];
+      if (v !== undefined && v !== null) valuesMap[f.key].add(String(v));
+    }
+  }
+
+  const container = document.getElementById('filters');
+  let html = '';
+
+  for (const f of FILTER_KEYS) {
+    const vals = [...valuesMap[f.key]].sort((a, b) => {
+      const na = Number(a), nb = Number(b);
+      if (!isNaN(na) && !isNaN(nb)) return na - nb;
+      return a.localeCompare(b);
+    });
+    if (vals.length <= 1) continue;
+
+    if (f.multi) {
+      const selected = multiFilters[f.key] || new Set();
+      const count = selected.size;
+      const btnLabel = count === 0 ? 'All' : count === 1 ? [...selected][0] : `${count} selected`;
+      html += `<div class="filter-group">
+        <label>${f.label}</label>
+        <div class="multi-select" data-ms-key="${f.key}">
+          <button type="button" class="multi-select-btn${count > 0 ? ' active' : ''}" onclick="toggleMultiDropdown('${f.key}')">
+            ${btnLabel}${count > 0 ? `<span class="ms-count">${count}</span>` : ''}
+          </button>
+          <div class="multi-select-dropdown" id="ms-dd-${f.key}">
+            <div class="ms-actions">
+              <button onclick="msSelectAll('${f.key}')">All</button>
+              <button onclick="msClearAll('${f.key}')">Clear</button>
+            </div>
+            <div class="ms-divider"></div>
+            ${vals.map(v => {
+              const display = v === 'true' ? '✓' : v === 'false' ? '✗' : v;
+              const checked = selected.has(v) ? 'checked' : '';
+              return `<label><input type="checkbox" value="${v}" ${checked} onchange="onMultiFilter('${f.key}', this)">${display}</label>`;
+            }).join('')}
+          </div>
+        </div>
+      </div>`;
+    } else {
+      html += `<div class="filter-group">
+        <label>${f.label}</label>
+        <select data-filter="${f.key}" onchange="onFilter()">
+          <option value="">All</option>
+          ${vals.map(v => {
+            const display = v === 'true' ? '✓' : v === 'false' ? '✗' : v;
+            return `<option value="${v}">${display}</option>`;
+          }).join('')}
+        </select>
+      </div>`;
+    }
+  }
+
+  html += `<div class="filter-sep"></div>`;
+  html += `<button class="filter-reset" onclick="resetFilters()">Reset</button>`;
+  html += `<span class="filter-count" id="filter-count"></span>`;
+  container.innerHTML = html;
+
+  for (const [key, val] of Object.entries(filters)) {
+    const sel = document.querySelector(`[data-filter="${key}"]`);
+    if (sel) { sel.value = val; sel.classList.toggle('active', !!val); }
+  }
+}
+
+function onFilter() {
+  filters = {};
+  document.querySelectorAll('[data-filter]').forEach(sel => {
+    const key = sel.dataset.filter;
+    const val = sel.value;
+    if (val) filters[key] = val;
+    sel.classList.toggle('active', !!val);
+  });
+  applyFilters();
+}
+
+function toggleMultiDropdown(key) {
+  document.querySelectorAll('.multi-select-dropdown.open').forEach(dd => {
+    if (dd.id !== `ms-dd-${key}`) dd.classList.remove('open');
+  });
+  const dd = document.getElementById(`ms-dd-${key}`);
+  if (dd) dd.classList.toggle('open');
+}
+
+function onMultiFilter(key, checkbox) {
+  if (!multiFilters[key]) multiFilters[key] = new Set();
+  if (checkbox.checked) multiFilters[key].add(checkbox.value);
+  else multiFilters[key].delete(checkbox.value);
+  if (multiFilters[key].size === 0) delete multiFilters[key];
+  updateMultiSelectBtn(key);
+  applyFilters();
+}
+
+function msSelectAll(key) {
+  const dd = document.getElementById(`ms-dd-${key}`);
+  if (dd) dd.querySelectorAll('input[type="checkbox"]').forEach(cb => { cb.checked = false; });
+  delete multiFilters[key];
+  updateMultiSelectBtn(key);
+  applyFilters();
+}
+
+function msClearAll(key) {
+  const dd = document.getElementById(`ms-dd-${key}`);
+  if (dd) dd.querySelectorAll('input[type="checkbox"]').forEach(cb => { cb.checked = false; });
+  delete multiFilters[key];
+  updateMultiSelectBtn(key);
+  applyFilters();
+}
+
+function updateMultiSelectBtn(key) {
+  const container = document.querySelector(`[data-ms-key="${key}"]`);
+  if (!container) return;
+  const btn = container.querySelector('.multi-select-btn');
+  const selected = multiFilters[key];
+  const count = selected ? selected.size : 0;
+  if (count === 0) {
+    btn.innerHTML = 'All';
+    btn.classList.remove('active');
+  } else if (count === 1) {
+    const val = [...selected][0];
+    btn.innerHTML = `${val}<span class="ms-count">1</span>`;
+    btn.classList.add('active');
+  } else {
+    btn.innerHTML = `${count} selected<span class="ms-count">${count}</span>`;
+    btn.classList.add('active');
+  }
+}
+
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('.multi-select')) {
+    document.querySelectorAll('.multi-select-dropdown.open').forEach(dd => dd.classList.remove('open'));
+  }
+});
+
+function resetFilters() {
+  document.querySelectorAll('[data-filter]').forEach(sel => {
+    sel.value = '';
+    sel.classList.remove('active');
+  });
+  document.querySelectorAll('.multi-select-dropdown input[type="checkbox"]').forEach(cb => { cb.checked = false; });
+  for (const key of Object.keys(multiFilters)) updateMultiSelectBtn(key);
+  filters = {};
+  multiFilters = {};
+  buildFilters();
+  applyFilters();
+}
+
+function applyFilters() {
+  rebuild();
+  const hasFilters = Object.keys(filters).length > 0 || Object.keys(multiFilters).length > 0;
+  const filterCount = document.getElementById('filter-count');
+  if (filterCount) {
+    filterCount.textContent = hasFilters ? `${getFilteredRows().length} of ${allRows.length} configs match` : '';
+  }
 }
 
 function aggregate(rows, metric) {
@@ -440,80 +843,17 @@ function median(arr) {
 }
 
 // ── Pin filters ──
-function buildPinFilters(rows) {
-  const slot = document.getElementById('pin-filter-slots');
-  const axes = [
-    document.getElementById('axis-row').value,
-    document.getElementById('axis-col').value,
-  ];
-  const allParamKeys = Object.keys(PARAM_LABELS);
-  const allVals = {};
-  for (const k of allParamKeys) {
-    allVals[k] = getUniqueValues(allRows, k);
-  }
-  const useful = allParamKeys.filter(k => allVals[k].length > 1);
-
-  slot.innerHTML = useful.map(k => {
-    const vals = allVals[k];
-    const pinned = pins[k] !== undefined;
-    const isAxis = axes.includes(k);
-    return `<span class="ctrl-group" style="margin-right:2px">
-      <select data-pin="${k}" onchange="onPin(this)" style="font-size:11px;padding:3px 6px;${pinned ? 'border-color:var(--primary);color:var(--primary)' : ''}${isAxis ? ';opacity:0.4' : ''}">
-        <option value="">${PARAM_LABELS[k] || k}: All</option>
-        ${vals.map(v => {
-          const display = v === 'true' ? '✓' : v === 'false' ? '✗' : v;
-          return `<option value="${v}" ${pins[k] !== undefined && String(pins[k]) === String(v) ? 'selected' : ''}>${PARAM_LABELS[k] || k}: ${display}</option>`;
-        }).join('')}
-      </select>
-    </span>`;
-  }).join('');
-}
-
-function onPin(sel) {
-  const key = sel.dataset.pin;
-  if (sel.value) {
-    pins[key] = sel.value;
-    sel.style.borderColor = 'var(--primary)';
-    sel.style.color = 'var(--primary)';
-  } else {
-    delete pins[key];
-    sel.style.borderColor = '';
-    sel.style.color = '';
-  }
-  rebuild();
-}
-
-function clearPins() {
-  pins = {};
-  document.querySelectorAll('[data-pin]').forEach(s => {
-    s.value = '';
-    s.style.borderColor = '';
-    s.style.color = '';
-  });
-  rebuild();
-}
-
 function applyPreset(preset) {
-  // Clear existing pins first
-  pins = {};
-  // Apply preset pins
+  // Clear existing filters first
+  filters = {};
+  multiFilters = {};
+  // Apply preset filters
   for (const [k, v] of Object.entries(preset)) {
-    pins[k] = v;
+    filters[k] = String(v);
   }
-  // Update dropdown UI
-  document.querySelectorAll('[data-pin]').forEach(s => {
-    const key = s.dataset.pin;
-    if (pins[key] !== undefined) {
-      s.value = String(pins[key]);
-      s.style.borderColor = 'var(--primary)';
-      s.style.color = 'var(--primary)';
-    } else {
-      s.value = '';
-      s.style.borderColor = '';
-      s.style.color = '';
-    }
-  });
-  rebuild();
+  // Rebuild filter UI and apply
+  buildFilters();
+  applyFilters();
 }
 
 // ── Heatmap ──
@@ -669,7 +1009,7 @@ function buildBestTable(rows) {
   subtitle.textContent = `sorted by ${meta.label} — ${rows.length} configs in view`;
 
   let html = '<table class="comp-table"><thead><tr>' +
-    '<th>#</th><th>Config</th><th>HMA</th><th>TF</th><th>Strike</th><th>TP</th><th>SL</th>' +
+    '<th>#</th><th>Config</th><th>HMA</th><th>Strike</th><th>TP</th><th>SL</th>' +
     '<th>Avg/Day</th><th>Avg/Trade</th><th>Total P&L</th><th>WR%</th><th>Green</th>' +
     '<th>Worst</th><th>Best</th><th>Sharpe</th><th>Trades</th><th>Trd/Day</th><th>Days</th>' +
     '</tr></thead><tbody>';
@@ -683,7 +1023,6 @@ function buildBestTable(rows) {
       <td style="${isBest ? 'color:#fbbf24' : ''}">${isBest ? '👑' : i+1}</td>
       <td style="color:${isBest ? '#fbbf24' : 'var(--foreground)'};font-size:11px;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${r.configId}">${r.configId}</td>
       <td>${p.hmaFast||''}×${p.hmaSlow||''}</td>
-      <td>${p.signalTf||''}</td>
       <td>${p.strikeOffset||''}</td>
       <td>${p.tpMult||''}</td>
       <td>${p.stopLoss||''}</td>
@@ -799,24 +1138,420 @@ function rebuild() {
   const rowKey = document.getElementById('axis-row').value;
   const colKey = document.getElementById('axis-col').value;
 
-  buildPinFilters(rows);
   buildHeatmap(rows);
   buildImpactChart(rows, rowKey, 'impact-container', 'impact-axis-label');
   buildImpactChart(rows, colKey, 'col-impact-container', 'col-impact-axis-label');
   buildBestTable(rows);
   buildDistribution(rows);
+  renderChunkPanel();
+  renderAnalytics();
 
-  const pinCount = Object.keys(pins).length;
-  const pinStr = pinCount > 0 ? ` · ${pinCount} filter${pinCount > 1 ? 's' : ''} active` : '';
-  document.getElementById('data-status').textContent = `${rows.length} configs · ${allRows.length} total${pinStr}`;
+  const filterCount = Object.keys(filters).length + Object.keys(multiFilters).length;
+  const filterStr = filterCount > 0 ? ` · ${filterCount} filter${filterCount > 1 ? 's' : ''} active` : '';
+  document.getElementById('data-status').textContent = `${rows.length} configs · ${allRows.length} total${filterStr}`;
 
-  // Update URL params for sharing
   const params = new URLSearchParams();
   params.set('row', rowKey);
   params.set('col', colKey);
   params.set('metric', currentMetric);
-  for (const [k, v] of Object.entries(pins)) params.set('pin_' + k, v);
+  for (const [k, v] of Object.entries(filters)) params.set('filter_' + k, v);
+  for (const [k, vals] of Object.entries(multiFilters)) {
+    params.set('mfilter_' + k, [...vals].join(','));
+  }
   history.replaceState(null, '', '?' + params.toString());
+}
+
+async function loadChunkData() {
+  const minDays = document.getElementById('ctrl-min-days')?.value || '2';
+  try {
+    const res = await fetch(`${API}/sweep/chunks?minDays=${minDays}`);
+    chunkData = await res.json();
+    renderChunkPanel();
+  } catch(e) {
+    console.error('Failed to load chunk data:', e);
+  }
+}
+
+function setChunkMetric(el) {
+  document.querySelectorAll('#chunk-metric-pills .metric-pill').forEach(p => p.classList.remove('active'));
+  el.classList.add('active');
+  currentChunkMetric = el.dataset.metric;
+  renderChunkPanel();
+}
+
+function setChunkView(el) {
+  document.querySelectorAll('#chunk-panel [data-view]').forEach(p => p.classList.remove('active'));
+  el.classList.add('active');
+  currentChunkView = el.dataset.view;
+  renderChunkPanel();
+}
+
+function renderChunkPanel() {
+  if (!chunkData) return;
+  const subtitle = document.getElementById('chunk-subtitle');
+  subtitle.textContent = `${chunkData.marketHours} · ${chunkData.chunkSizeMinutes}-min chunks`;
+
+  const meta = {
+    avgPnlPerDay: { fmt: fmtMoney, higher: true },
+    edge: { fmt: v => v != null ? (v*100).toFixed(1)+'%' : '—', higher: true },
+    winRate: { fmt: v => (v*100).toFixed(1)+'%', higher: true },
+    avgPnlPerTrade: { fmt: fmtMoney, higher: true },
+    totalPnl: { fmt: fmtMoney, higher: true },
+  }[currentChunkMetric] || { fmt: fmtMoney, higher: true };
+
+  const chartContainer = document.getElementById('chunk-chart-container');
+  const tableContainer = document.getElementById('chunk-table-container');
+
+  // Filter configChunks by currently active configs
+  const activeIds = new Set(getFilteredRows().map(r => r.configId));
+  const cfgChunks = (chunkData.configChunks || []).filter(c => activeIds.has(c.configId) && c.tradeCount >= 5);
+
+  if (currentChunkView === 'aggregate') {
+    // Recompute aggregates from filtered configChunks
+    const chunkGroups = {};
+    for (const c of cfgChunks) {
+      if (!chunkGroups[c.chunk]) chunkGroups[c.chunk] = { chunk: c.chunk, chunkLabel: c.chunkLabel, totalPnl: 0, tradeCount: 0, dayCount: 0, wins: 0 };
+      chunkGroups[c.chunk].totalPnl += c.totalPnl || 0;
+      chunkGroups[c.chunk].tradeCount += c.tradeCount || 0;
+      chunkGroups[c.chunk].dayCount += c.dayCount || 0;
+      chunkGroups[c.chunk].wins += Math.round((c.winRate || 0) * (c.tradeCount || 0));
+    }
+    const chunks = Object.values(chunkGroups).map(g => ({
+      chunk: g.chunk,
+      chunkLabel: g.chunkLabel,
+      avgPnlPerDay: g.dayCount > 0 ? g.totalPnl / g.dayCount : 0,
+      winRate: g.tradeCount > 0 ? g.wins / g.tradeCount : 0,
+      totalPnl: g.totalPnl,
+      tradeCount: g.tradeCount,
+      dayCount: g.dayCount,
+      avgPnlPerTrade: g.tradeCount > 0 ? g.totalPnl / g.tradeCount : 0,
+    })).sort((a, b) => a.chunk.localeCompare(b.chunk));
+
+    if (!chunks.length) {
+      chartContainer.innerHTML = '<div class="empty">No chunk data for filtered configs</div>';
+      tableContainer.innerHTML = '';
+      return;
+    }
+
+    const maxAbs = Math.max(...chunks.map(c => Math.abs(c[currentChunkMetric] || 0)), 0.01);
+    const fmtFn = meta.fmt;
+
+    let chartHtml = '<div style="display:flex;flex-direction:column;gap:4px">';
+    for (const c of chunks) {
+      const val = c[currentChunkMetric] || 0;
+      const pct = Math.abs(val) / maxAbs * 100;
+      const isPos = val >= 0;
+      const cls = isPos ? 'pos' : 'neg';
+      const bar = `<div style="display:flex;align-items:center;gap:8px">
+        <span style="width:70px;font-size:11px;font-family:var(--font-mono);color:var(--muted);text-align:right;flex-shrink:0">${c.chunkLabel}</span>
+        <div style="flex:1;height:22px;background:var(--input);border-radius:4px;overflow:hidden;position:relative">
+          <div style="position:absolute;left:0;top:0;height:100%;width:${pct}%;background:${isPos ? 'linear-gradient(90deg,#059669,#10b981)' : 'linear-gradient(90deg,#f43f5e,#e11d48)'};border-radius:4px;display:flex;align-items:center;padding-left:6px">
+            <span style="font-size:10px;color:rgba(255,255,255,0.8)">${pct > 25 ? fmtFn(val) : ''}</span>
+          </div>
+        </div>
+        <span style="width:80px;font-size:11px;font-family:var(--font-mono);font-weight:600" class="${cls}">${fmtFn(val)}</span>
+      </div>`;
+      chartHtml += bar;
+    }
+    chartHtml += '</div>';
+    chartContainer.innerHTML = chartHtml;
+
+    let tableHtml = '<table class="comp-table"><thead><tr><th>Chunk</th><th>Avg/Day</th><th>Win Rate</th><th>Trades</th><th>Days</th><th>Total P&L</th><th>Avg/Trade</th></tr></thead><tbody>';
+    for (const c of chunks) {
+      tableHtml += `<tr>
+        <td style="font-family:var(--font-mono)">${c.chunkLabel}</td>
+        <td class="${c.avgPnlPerDay >= 0 ? 'pos' : 'neg'}">${fmtMoney(c.avgPnlPerDay)}</td>
+        <td>${(c.winRate*100).toFixed(1)}%</td>
+        <td>${c.tradeCount}</td>
+        <td>${c.dayCount}</td>
+        <td class="${c.totalPnl >= 0 ? 'pos' : 'neg'}">${fmtMoney(c.totalPnl)}</td>
+        <td class="${c.avgPnlPerTrade >= 0 ? 'pos' : 'neg'}">${fmtMoney(c.avgPnlPerTrade)}</td>
+      </tr>`;
+    }
+    tableHtml += '</tbody></table>';
+    tableContainer.innerHTML = tableHtml;
+  } else {
+    if (!cfgChunks.length) {
+      chartContainer.innerHTML = '<div class="empty">No per-config chunk data for filtered configs</div>';
+      tableContainer.innerHTML = '';
+      return;
+    }
+
+    const topChunks = cfgChunks.sort((a, b) => {
+      const va = a[currentChunkMetric] ?? -Infinity;
+      const vb = b[currentChunkMetric] ?? -Infinity;
+      return meta.higher ? vb - va : va - vb;
+    }).slice(0, 50);
+
+    const maxAbs = Math.max(...topChunks.map(c => Math.abs(c[currentChunkMetric] || 0)), 0.01);
+
+    let chartHtml = '<div style="display:flex;flex-direction:column;gap:4px">';
+    for (const c of topChunks) {
+      const val = c[currentChunkMetric] || 0;
+      const pct = Math.abs(val) / maxAbs * 100;
+      const isPos = val >= 0;
+      const cls = isPos ? 'pos' : 'neg';
+      const bar = `<div style="display:flex;align-items:center;gap:8px">
+        <span style="width:60px;font-size:10px;font-family:var(--font-mono);color:var(--muted);text-align:right;flex-shrink:0">${c.chunkLabel}</span>
+        <span style="width:200px;font-size:10px;font-family:var(--font-mono);color:var(--foreground);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${c.configId}">${c.name || c.configId}</span>
+        <div style="flex:1;height:18px;background:var(--input);border-radius:3px;overflow:hidden;position:relative">
+          <div style="position:absolute;left:0;top:0;height:100%;width:${pct}%;background:${isPos ? 'linear-gradient(90deg,#059669,#10b981)' : 'linear-gradient(90deg,#f43f5e,#e11d48)'};border-radius:3px"></div>
+        </div>
+        <span style="width:70px;font-size:10px;font-family:var(--font-mono);font-weight:600" class="${cls}">${meta.fmt(val)}</span>
+      </div>`;
+      chartHtml += bar;
+    }
+    chartHtml += '</div>';
+    chartContainer.innerHTML = chartHtml;
+
+    let tableHtml = '<table class="comp-table"><thead><tr><th>Config</th><th>Chunk</th><th>Avg/Day</th><th>Win Rate</th><th>Edge</th><th>Trades</th><th>Days</th><th>Avg/Trade</th></tr></thead><tbody>';
+    for (const c of topChunks) {
+      tableHtml += `<tr>
+        <td style="font-size:11px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${c.configId}">${c.name || c.configId}</td>
+        <td style="font-family:var(--font-mono)">${c.chunkLabel}</td>
+        <td class="${c.avgPnlPerDay >= 0 ? 'pos' : 'neg'}">${fmtMoney(c.avgPnlPerDay)}</td>
+        <td>${(c.winRate*100).toFixed(1)}%</td>
+        <td class="${c.edge >= 0 ? 'pos' : 'neg'}">${(c.edge*100).toFixed(1)}%</td>
+        <td>${c.tradeCount}</td>
+        <td>${c.dayCount}</td>
+        <td class="${c.avgPnlPerTrade >= 0 ? 'pos' : 'neg'}">${fmtMoney(c.avgPnlPerTrade)}</td>
+      </tr>`;
+    }
+    tableHtml += '</tbody></table>';
+    tableContainer.innerHTML = tableHtml;
+  }
+}
+
+// ── Analytics ──
+
+let analyticsCharts = [];
+
+function renderAnalytics() {
+  const rows = getFilteredRows().filter(r => !r.isBasketMember && r.params);
+  document.getElementById('analytics-subtitle').textContent = `${rows.length} configs analyzed`;
+
+  analyticsCharts.forEach(c => c.destroy());
+  analyticsCharts = [];
+
+  renderHmaHeatmap(rows);
+  renderScatterSL(rows);
+  renderScatterTP(rows);
+  renderScatterEdgeEV(rows);
+  renderParamImpact(rows);
+}
+
+function groupBy(rows, key) {
+  const groups = {};
+  for (const r of rows) {
+    const v = r.params?.[key];
+    if (v === undefined || v === null) continue;
+    const k = String(v);
+    if (!groups[k]) groups[k] = [];
+    groups[k].push(r);
+  }
+  return groups;
+}
+
+function avg(arr, fn) {
+  if (!arr.length) return 0;
+  return arr.reduce((s, r) => s + fn(r), 0) / arr.length;
+}
+
+function edgeColor(edge, alpha = 1) {
+  if (edge > 0.15) return `rgba(16,185,129,${alpha})`;
+  if (edge > 0.05) return `rgba(52,211,153,${alpha})`;
+  if (edge > 0) return `rgba(110,231,183,${alpha})`;
+  if (edge > -0.05) return `rgba(251,113,133,${alpha})`;
+  return `rgba(244,63,94,${alpha})`;
+}
+
+function edgeCellBg(edge) {
+  if (edge >= 0) {
+    const intensity = Math.min(1, edge / 0.4);
+    return `background:rgba(16,185,129,${0.08 + intensity * 0.22})`;
+  }
+  const intensity = Math.min(1, Math.abs(edge) / 0.3);
+  return `background:rgba(244,63,94,${0.06 + intensity * 0.18})`;
+}
+
+function renderHmaHeatmap(rows) {
+  const groups = {};
+  for (const r of rows) {
+    const f = r.params?.hmaFast, s = r.params?.hmaSlow;
+    if (f == null || s == null) continue;
+    const k = `${f}x${s}`;
+    if (!groups[k]) groups[k] = { fast: f, slow: s, rows: [] };
+    groups[k].rows.push(r);
+  }
+  if (!Object.keys(groups).length) {
+    document.getElementById('hma-heatmap-wrap').innerHTML = '<em style="color:var(--muted-foreground)">No HMA data available</em>';
+    return;
+  }
+
+  const fastVals = [...new Set(Object.values(groups).map(g => g.fast))].sort((a, b) => a - b);
+  const slowVals = [...new Set(Object.values(groups).map(g => g.slow))].sort((a, b) => a - b);
+
+  let html = '<table class="heatmap"><thead><tr><th>HMA Fast \\ Slow</th>';
+  for (const s of slowVals) html += `<th>${s}</th>`;
+  html += '</tr></thead><tbody>';
+
+  for (const f of fastVals) {
+    html += `<tr><th>${f}</th>`;
+    for (const s of slowVals) {
+      const g = groups[`${f}x${s}`];
+      if (g) {
+        const aEdge = avg(g.rows, r => r.edge || 0);
+        const aEV = avg(g.rows, r => r.ev || 0);
+        const totalT = g.rows.reduce((s, r) => s + (r.trades || 0), 0);
+        const n = g.rows.length;
+        html += `<td style="${edgeCellBg(aEdge)}"><span class="edge-val" style="color:${aEdge >= 0 ? 'var(--success)' : 'var(--destructive)'}">${(aEdge * 100).toFixed(1)}%</span><span class="trade-cnt">${n} cfg / ${totalT}t<br>EV ${(aEV).toFixed(2)}%</span></td>`;
+      } else {
+        html += '<td style="color:var(--muted-foreground);opacity:0.3">—</td>';
+      }
+    }
+    html += '</tr>';
+  }
+  html += '</tbody></table>';
+  document.getElementById('hma-heatmap-wrap').innerHTML = html;
+}
+
+function chartOpts(xLabel, yLabel) {
+  return {
+    responsive: true,
+    plugins: { legend: { labels: { color: '#8b949e', font: { size: 11 } } } },
+    scales: {
+      x: { title: { display: true, text: xLabel, color: '#8b949e', font: { size: 11 } }, ticks: { color: '#8b949e' }, grid: { color: '#21262d' } },
+      y: { title: { display: true, text: yLabel, color: '#8b949e', font: { size: 11 } }, ticks: { color: '#8b949e' }, grid: { color: '#21262d' } },
+    }
+  };
+}
+
+function renderScatterSL(rows) {
+  const pos = [], neg = [];
+  for (const r of rows) {
+    const sl = r.params?.stopLoss;
+    if (sl == null) continue;
+    const pt = { x: sl, y: (r.edge || 0) * 100 };
+    (r.edge > 0 ? pos : neg).push(pt);
+  }
+  const ctx = document.getElementById('chart-sl-edge').getContext('2d');
+  analyticsCharts.push(new Chart(ctx, {
+    type: 'scatter',
+    data: {
+      datasets: [
+        { label: 'Positive Edge', data: pos, backgroundColor: 'rgba(16,185,129,0.55)', pointRadius: 5 },
+        { label: 'Negative Edge', data: neg, backgroundColor: 'rgba(244,63,94,0.4)', pointRadius: 5 },
+        { label: 'Zero Edge', data: [{x:0,y:0},{x:100,y:0}], type: 'line', borderColor: '#555', borderDash: [5,5], pointRadius: 0, borderWidth: 1 },
+      ]
+    },
+    options: chartOpts('Stop Loss %', 'Edge %')
+  }));
+}
+
+function renderScatterTP(rows) {
+  const pos = [], neg = [];
+  for (const r of rows) {
+    const tp = r.params?.tpMult;
+    if (tp == null) continue;
+    const pt = { x: tp, y: (r.edge || 0) * 100 };
+    (r.edge > 0 ? pos : neg).push(pt);
+  }
+  const ctx = document.getElementById('chart-tp-edge').getContext('2d');
+  analyticsCharts.push(new Chart(ctx, {
+    type: 'scatter',
+    data: {
+      datasets: [
+        { label: 'Positive Edge', data: pos, backgroundColor: 'rgba(16,185,129,0.55)', pointRadius: 5 },
+        { label: 'Negative Edge', data: neg, backgroundColor: 'rgba(244,63,94,0.4)', pointRadius: 5 },
+        { label: 'Zero Edge', data: [{x:0,y:0},{x:15,y:0}], type: 'line', borderColor: '#555', borderDash: [5,5], pointRadius: 0, borderWidth: 1 },
+      ]
+    },
+    options: chartOpts('Take Profit Multiplier', 'Edge %')
+  }));
+}
+
+function renderScatterEdgeEV(rows) {
+  const pts = rows.map(r => ({
+    x: (r.edge || 0) * 100,
+    y: r.ev || 0,
+  }));
+  const gold = pts.filter(p => p.x > 5 && p.y > 0);
+  const risky = pts.filter(p => p.x <= 5 && p.y > 0);
+  const bleeding = pts.filter(p => p.y <= 0);
+  const ctx = document.getElementById('chart-edge-ev').getContext('2d');
+  analyticsCharts.push(new Chart(ctx, {
+    type: 'scatter',
+    data: {
+      datasets: [
+        { label: `Gold Zone (${gold.length})`, data: gold, backgroundColor: 'rgba(16,185,129,0.6)', pointRadius: 5 },
+        { label: `Marginal (${risky.length})`, data: risky, backgroundColor: 'rgba(245,158,11,0.5)', pointRadius: 4 },
+        { label: `Losing (${bleeding.length})`, data: bleeding, backgroundColor: 'rgba(244,63,94,0.4)', pointRadius: 4 },
+        { label: 'Zero Edge', data: [{x:0,y:Math.min(...pts.map(p=>p.y))},{x:0,y:Math.max(...pts.map(p=>p.y))}], type: 'line', borderColor: '#555', borderDash: [5,5], pointRadius: 0, borderWidth: 1 },
+        { label: 'Zero EV', data: [{x:Math.min(...pts.map(p=>p.x)),y:0},{x:Math.max(...pts.map(p=>p.x)),y:0}], type: 'line', borderColor: '#555', borderDash: [5,5], pointRadius: 0, borderWidth: 1 },
+      ]
+    },
+    options: chartOpts('Edge %', 'EV %')
+  }));
+}
+
+function renderParamImpact(rows) {
+  const params = [
+    { key: 'exitStrategy', label: 'Exit Strategy' },
+    { key: 'symbol', label: 'Instrument' },
+    { key: 'stopLoss', label: 'Stop Loss %' },
+    { key: 'tpMult', label: 'Take Profit Multiplier' },
+    { key: 'requireDir', label: 'Require Direction' },
+    { key: 'maxContracts', label: 'Max Contracts' },
+    { key: 'enableHma', label: 'HMA Signal' },
+    { key: 'enableRsi', label: 'RSI Signal' },
+    { key: 'enablePxHma', label: 'Price x HMA' },
+    { key: 'enableEma', label: 'EMA Signal' },
+  ];
+
+  let html = '';
+  for (const p of params) {
+    const groups = groupBy(rows, p.key);
+    const vals = Object.entries(groups);
+    if (vals.length <= 1) continue;
+
+    const aggregated = vals.map(([val, grp]) => {
+      const aEdge = avg(grp, r => r.edge || 0);
+      const aEV = avg(grp, r => r.ev || 0);
+      const aWR = avg(grp, r => r.winRate || 0);
+      const aPnl = avg(grp, r => r.totalPnl || 0);
+      const totalT = grp.reduce((s, r) => s + (r.trades || 0), 0);
+      const greenR = grp.reduce((s, r) => s + (r.profitDays || 0), 0);
+      const totalD = grp.reduce((s, r) => s + (r.days || 0), 0);
+      return { val, n: grp.length, aEdge, aEV, aWR, aPnl, totalT, greenR, totalD, greenPct: totalD > 0 ? greenR / totalD : 0 };
+    }).sort((a, b) => b.aEdge - a.aEdge);
+
+    const displayVal = v => v === 'true' ? 'On' : v === 'false' ? 'Off' : v;
+    const ec = v => v >= 0 ? 'pnl-pos' : 'pnl-neg';
+
+    html += `<div class="param-group">
+      <div class="param-group-header" onclick="this.classList.toggle('collapsed');this.nextElementSibling.classList.toggle('collapsed')">
+        <span class="chevron">▼</span> ${p.label}
+        <span class="param-count">${vals.length} values · best: ${(aggregated[0].aEdge * 100).toFixed(1)}% edge</span>
+      </div>
+      <div class="param-group-body">
+        <table class="impact-table">
+          <thead><tr><th>Value</th><th>Configs</th><th>Trades</th><th>Avg Edge</th><th>Avg EV</th><th>Avg WR</th><th>Avg P&L</th><th>Green Days</th></tr></thead>
+          <tbody>${aggregated.map((a, i) => `<tr class="${i === 0 ? 'best-row' : ''}">
+            <td class="val-cell">${displayVal(a.val)}</td>
+            <td>${a.n}</td>
+            <td>${a.totalT.toLocaleString()}</td>
+            <td class="${ec(a.aEdge)}"><b>${(a.aEdge * 100).toFixed(1)}%</b></td>
+            <td class="${ec(a.aEV)}">${a.aEV.toFixed(2)}%</td>
+            <td>${(a.aWR * 100).toFixed(1)}%</td>
+            <td class="${ec(a.aPnl)}">${fmtMoney(a.aPnl)}</td>
+            <td>${(a.greenPct * 100).toFixed(0)}%</td>
+          </tr>`).join('')}</tbody>
+        </table>
+      </div>
+    </div>`;
+  }
+
+  document.getElementById('param-impact-tables').innerHTML = html || '<em style="color:var(--muted-foreground)">No parameter variation found in dataset</em>';
 }
 
 async function reloadData() {
@@ -824,16 +1559,26 @@ async function reloadData() {
   document.getElementById('data-status').textContent = 'Loading...';
   try {
     const res = await fetch(`${API}/sweep?limit=5000&minDays=${minDays}`);
+    if (!res.ok) {
+      const text = await res.text();
+      document.getElementById('data-status').textContent = `Error ${res.status}: ${text}`;
+      console.error('Sweep API error', res.status, text);
+      return;
+    }
     const data = await res.json();
     allRows = (data.rows || []).map(r => ({
       ...r,
       avgPnlPerTrade: r.avgPnlPerTrade ?? (r.trades > 0 ? r.totalPnl / r.trades : 0),
       avgTradesPerDay: r.days > 0 ? r.trades / r.days : 0,
     }));
-    rebuild();
+    try { buildFilters(); } catch(e) { console.error('buildFilters:', e); }
+    try { rebuild(); } catch(e) { console.error('rebuild:', e); }
+    try { loadChunkData(); } catch(e) { console.error('loadChunkData:', e); }
+    try { renderAnalytics(); } catch(e) { console.error('renderAnalytics:', e); }
   } catch(e) {
-    document.getElementById('data-status').textContent = 'Error loading data';
-    console.error(e);
+    const msg = e instanceof Error ? e.message : String(e);
+    document.getElementById('data-status').textContent = 'Error loading data: ' + msg;
+    console.error('reloadData failed:', msg);
   }
 }
 
@@ -848,7 +1593,8 @@ if (urlP.get('metric')) {
   });
 }
 for (const [k, v] of urlP) {
-  if (k.startsWith('pin_')) pins[k.slice(4)] = v;
+  if (k.startsWith('filter_')) filters[k.slice(7)] = v;
+  if (k.startsWith('mfilter_')) multiFilters[k.slice(8)] = new Set(v.split(','));
 }
 
 reloadData();

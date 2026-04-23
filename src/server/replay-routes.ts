@@ -22,6 +22,13 @@ import {
   createBackfillJob, attachPid, getJob, listJobs, markCancelled,
 } from '../backfill/job-store';
 import type { ListJobsFilters } from '../backfill/job-store';
+import {
+  etToMs, filterTradesByWindow, filterTradesByStrike,
+  applySizingFilter, bucketTradesIntoChunks, aggregateChunkMetrics,
+  chunkLabel, detectKillZones, findBestConfigsPerChunk,
+  getPnl, SESSION_START_MS, SESSION_END_MS,
+  type TradeLike, type ConfigChunkData,
+} from './trade-query-helpers';
 
 import { REPLAY_DB_DEFAULT, REPLAY_META_DB } from '../storage/replay-db';
 import { listParquetDates, symbolToProfileId, anySymbolToProfileId, hasParquetDate } from '../storage/parquet-reader';
@@ -492,7 +499,7 @@ export function createReplayRoutes(): Router {
   });
 
   // ── POST /replay/api/set-live-config — update AGENT_CONFIG_ID in ecosystem.config.js
-  router.post('/api/set-live-config', (req, res) => {
+  router.post('/api/set-live-config', async (req, res) => {
     const { configId } = req.body as { configId?: string };
     if (!configId) return res.status(400).json({ error: 'configId required' });
 
@@ -515,13 +522,31 @@ export function createReplayRoutes(): Router {
         return res.status(500).json({ error: 'AGENT_CONFIG_ID not found in ecosystem.config.js' });
       }
       content = content.replace(regex, `AGENT_CONFIG_ID: '${configId}'`);
+      content = content.replace(/AGENT_PAPER:\s*'[^']*'/g, `AGENT_PAPER: 'false'`);
       fs.writeFileSync(ecoPath, content, 'utf-8');
 
       // Also update the current process env so /agent/config reflects it immediately
       process.env.AGENT_CONFIG_ID = configId;
 
+      // Restart the event handler to pick up the new config
+      let restarted = false;
+      let restartError: string | null = null;
+      try {
+        const { execSync } = await import('child_process');
+        execSync('pm2 delete event-handler 2>/dev/null; pm2 start ecosystem.config.js --only event-handler', {
+          cwd: process.cwd(),
+          timeout: 15000,
+          stdio: 'pipe',
+        });
+        restarted = true;
+        console.log(`[set-live-config] Restarted event-handler with config '${configId}'`);
+      } catch (restartErr: any) {
+        restartError = restartErr.message;
+        console.error(`[set-live-config] Failed to restart event-handler: ${restartErr.message}`);
+      }
+
       console.log(`[set-live-config] Updated AGENT_CONFIG_ID to '${configId}' (${matches.length} occurrences)`);
-      res.json({ ok: true, configId, updated: matches.length });
+      res.json({ ok: true, configId, updated: matches.length, restarted, restartError });
     } catch (err: any) {
       console.error('[set-live-config] Error:', err.message);
       res.status(500).json({ error: err.message });
@@ -1555,21 +1580,404 @@ export function createReplayRoutes(): Router {
     }
   });
 
-  // ── GET /replay/api/sweep/:configId/daily — per-day breakdown ────────────
-  router.get('/api/sweep/:configId/daily', (req, res) => {
+router.get('/api/sweep/:configId/daily', (req, res) => {
     const { configId } = req.params;
     const db = getDb();
     try {
       const rows = db.prepare(`
         SELECT date, trades, wins, winRate, totalPnl, avgPnlPerTrade, maxWin, maxLoss, sharpeRatio
-        FROM replay_results
-        WHERE configId = ?
-        ORDER BY date ASC
+        FROM replay_results WHERE configId = ? ORDER BY date ASC
       `).all(configId);
       res.json(rows);
-    } finally {
-      db.close();
+    } finally { db.close(); }
+  });
+
+router.get('/api/sweep/chunks', (req, res) => {
+    const { configId, minDays } = req.query as Record<string, string | undefined>;
+    const db = getDb();
+    const minDaysVal = Math.max(2, parseInt(minDays || '2'));
+    const CHUNK_MS = 30 * 60 * 1000;
+    const SESSION_START_MS = (9 * 60 + 30) * 60 * 1000;
+    const SESSION_END_MS = 16 * 60 * 60 * 1000;
+
+    interface ChunkResult {
+      chunk: string;
+      chunkLabel: string;
+      avgPnlPerDay: number;
+      winRate: number;
+      totalPnl: number;
+      tradeCount: number;
+      dayCount: number;
+      avgPnlPerTrade: number;
     }
+
+    interface ConfigChunkResult {
+      configId: string;
+      name: string;
+      chunk: string;
+      chunkLabel: string;
+      avgPnlPerDay: number;
+      winRate: number;
+      totalPnl: number;
+      tradeCount: number;
+      dayCount: number;
+      avgPnlPerTrade: number;
+      edge: number;
+    }
+
+    try {
+      const rows = db.prepare(`
+        SELECT r.configId, r.date, r.trades_json, c.name
+        FROM replay_results r
+        JOIN replay_configs c ON c.id = r.configId
+      `).all() as any[];
+
+      const configDays = new Map<string, number>();
+      for (const row of rows) {
+        configDays.set(row.configId, (configDays.get(row.configId) ?? 0) + 1);
+      }
+      const validSet = new Set([...configDays.entries()].filter(([, n]) => n >= minDaysVal).map(([id]) => id));
+
+      const dayChunkPnls = new Map<string, Map<string, number>>();
+      const dayChunkWins = new Map<string, Map<string, number>>();
+      const dayChunkTrades = new Map<string, Map<string, number>>();
+
+      const configDayChunkPnls = new Map<string, Map<string, Map<string, number>>>();
+      const configDayChunkWins = new Map<string, Map<string, Map<string, number>>>();
+      const configDayChunkTrades = new Map<string, Map<string, Map<string, number>>>();
+      const configNames = new Map<string, string>();
+
+      for (const row of rows) {
+        if (!validSet.has(row.configId)) continue;
+        if (configId && row.configId !== configId) continue;
+        configNames.set(row.configId, row.name || row.configId);
+        let trades: any[] = [];
+        try { trades = JSON.parse(row.trades_json || '[]'); } catch { continue; }
+
+        const dayChunks = new Map<string, number>();
+        const dayWins = new Map<string, number>();
+        const dayTrades = new Map<string, number>();
+
+        for (const t of trades) {
+          const entryET = t.entryET || t.exitET;
+          if (!entryET) continue;
+          const [h, m] = entryET.split(':').map(Number);
+          const entryMs = (h * 60 + m) * 60 * 1000;
+          if (entryMs < SESSION_START_MS || entryMs >= SESSION_END_MS) continue;
+
+          const offset = entryMs - SESSION_START_MS;
+          const chunkIdx = Math.floor(offset / CHUNK_MS);
+          const chunkStart = SESSION_START_MS + chunkIdx * CHUNK_MS;
+          const cs = Math.floor(chunkStart / (60 * 60 * 1000));
+          const cm = Math.floor((chunkStart % (60 * 60 * 1000)) / (60 * 1000));
+          const ce = Math.floor((chunkStart + CHUNK_MS) / (60 * 60 * 1000));
+          const cem = Math.floor(((chunkStart + CHUNK_MS) % (60 * 60 * 1000)) / (60 * 1000));
+          const chunk = `${String(cs).padStart(2,'0')}:${String(cm).padStart(2,'0')}-${String(ce).padStart(2,'0')}:${String(cem).padStart(2,'0')}`;
+          const pnl = t['pnl$'] ?? t.pnl$ ?? 0;
+
+          dayChunks.set(chunk, (dayChunks.get(chunk) ?? 0) + pnl);
+          dayTrades.set(chunk, (dayTrades.get(chunk) ?? 0) + 1);
+          if (pnl > 0) dayWins.set(chunk, (dayWins.get(chunk) ?? 0) + 1);
+        }
+
+        for (const [chunk, pnl] of dayChunks) {
+          if (!dayChunkPnls.has(chunk)) dayChunkPnls.set(chunk, new Map());
+          const dm = dayChunkPnls.get(chunk)!;
+          dm.set(row.date, (dm.get(row.date) ?? 0) + pnl);
+
+          if (!dayChunkTrades.has(chunk)) dayChunkTrades.set(chunk, new Map());
+          const dt = dayChunkTrades.get(chunk)!;
+          dt.set(row.date, (dt.get(row.date) ?? 0) + (dayTrades.get(chunk) ?? 0));
+
+          if (!dayChunkWins.has(chunk)) dayChunkWins.set(chunk, new Map());
+          const dw = dayChunkWins.get(chunk)!;
+          dw.set(row.date, (dw.get(row.date) ?? 0) + (dayWins.get(chunk) ?? 0));
+
+          if (!configDayChunkPnls.has(row.configId)) configDayChunkPnls.set(row.configId, new Map());
+          const cdm = configDayChunkPnls.get(row.configId)!;
+          if (!cdm.has(chunk)) cdm.set(chunk, new Map());
+          cdm.get(chunk)!.set(row.date, (cdm.get(chunk)!.get(row.date) ?? 0) + pnl);
+
+          if (!configDayChunkTrades.has(row.configId)) configDayChunkTrades.set(row.configId, new Map());
+          const cdt = configDayChunkTrades.get(row.configId)!;
+          if (!cdt.has(chunk)) cdt.set(chunk, new Map());
+          cdt.get(chunk)!.set(row.date, (cdt.get(chunk)!.get(row.date) ?? 0) + (dayTrades.get(chunk) ?? 0));
+
+          if (!configDayChunkWins.has(row.configId)) configDayChunkWins.set(row.configId, new Map());
+          const cdw = configDayChunkWins.get(row.configId)!;
+          if (!cdw.has(chunk)) cdw.set(chunk, new Map());
+          cdw.get(chunk)!.set(row.date, (cdw.get(chunk)!.get(row.date) ?? 0) + (dayWins.get(chunk) ?? 0));
+        }
+      }
+
+      const results: ChunkResult[] = [];
+      for (const chunk of [...dayChunkPnls.keys()].sort()) {
+        const dateMap = dayChunkPnls.get(chunk)!;
+        const tradeDateMap = dayChunkTrades.get(chunk)!;
+        const winDateMap = dayChunkWins.get(chunk)!;
+
+        const pnls = [...dateMap.values()];
+        const totalPnl = pnls.reduce((a, b) => a + b, 0);
+        const dayCount = pnls.length;
+        const avgPnlPerDay = dayCount > 0 ? totalPnl / dayCount : 0;
+
+        let tradeCount = 0, wins = 0;
+        for (const [, cnt] of tradeDateMap) tradeCount += cnt;
+        for (const [, cnt] of winDateMap) wins += cnt;
+        const winRate = tradeCount > 0 ? wins / tradeCount : 0;
+        const avgPnlPerTrade = tradeCount > 0 ? totalPnl / tradeCount : 0;
+
+        const [sh, sm] = chunk.split('-')[0].split(':').map(Number);
+        const ampm = sh >= 12 ? 'PM' : 'AM';
+        const sh12 = sh > 12 ? sh - 12 : sh === 0 ? 12 : sh;
+        const chunkLabel = `${sh12}:${String(sm).padStart(2,'0')} ${ampm}`;
+
+        results.push({ chunk, chunkLabel, avgPnlPerDay, winRate, totalPnl, tradeCount, dayCount, avgPnlPerTrade });
+      }
+
+      const configChunkResults: ConfigChunkResult[] = [];
+      for (const [cfgId, chunkMap] of configDayChunkPnls) {
+        for (const [chunk, dateMap] of chunkMap) {
+          const tradeDateMap = configDayChunkTrades.get(cfgId)?.get(chunk) ?? new Map();
+          const winDateMap = configDayChunkWins.get(cfgId)?.get(chunk) ?? new Map();
+
+          const pnls = [...dateMap.values()];
+          const totalPnl = pnls.reduce((a, b) => a + b, 0);
+          const dayCount = pnls.length;
+          const avgPnlPerDay = dayCount > 0 ? totalPnl / dayCount : 0;
+
+          let tradeCount = 0, wins = 0;
+          for (const [, cnt] of tradeDateMap) tradeCount += cnt;
+          for (const [, cnt] of winDateMap) wins += cnt;
+          const winRate = tradeCount > 0 ? wins / tradeCount : 0;
+          const avgPnlPerTrade = tradeCount > 0 ? totalPnl / tradeCount : 0;
+
+          const avgWinPct = winRate;
+          const avgLossPct = tradeCount > 0 && wins < tradeCount ? -(1 - winRate) * 1.5 : -0.5;
+          const edge = avgWinPct - (avgLossPct !== 0 ? Math.abs(avgLossPct) / (avgWinPct + Math.abs(avgLossPct)) : 0.5);
+
+          const [sh, sm] = chunk.split('-')[0].split(':').map(Number);
+          const ampm = sh >= 12 ? 'PM' : 'AM';
+          const sh12 = sh > 12 ? sh - 12 : sh === 0 ? 12 : sh;
+          const chunkLabel = `${sh12}:${String(sm).padStart(2,'0')} ${ampm}`;
+
+          configChunkResults.push({
+            configId: cfgId,
+            name: configNames.get(cfgId) || cfgId,
+            chunk,
+            chunkLabel,
+            avgPnlPerDay,
+            winRate,
+            totalPnl,
+            tradeCount,
+            dayCount,
+            avgPnlPerTrade,
+            edge,
+          });
+        }
+      }
+
+      configChunkResults.sort((a, b) => b.edge - a.edge);
+
+      res.json({
+        chunks: results,
+        configChunks: configChunkResults,
+        marketHours: '09:30–16:00 ET',
+        chunkSizeMinutes: 30,
+      });
+    } finally { db.close(); }
+  });
+
+  // ── GET /replay/api/hma-pairs — unique HMA pair combinations ──────────────
+  router.get('/api/hma-pairs', (_req, res) => {
+    const db = getDb();
+    try {
+      const rows = db.prepare('SELECT config_json FROM replay_configs').all() as { config_json: string }[];
+      const pairMap = new Map<string, { hmaFast: number; hmaSlow: number; count: number }>();
+      for (const row of rows) {
+        try {
+          const cfg = JSON.parse(row.config_json);
+          const hf = cfg.signals?.hmaCrossFast ?? 5;
+          const hs = cfg.signals?.hmaCrossSlow ?? 19;
+          const key = `${hf}-${hs}`;
+          const existing = pairMap.get(key);
+          if (existing) { existing.count++; } else { pairMap.set(key, { hmaFast: hf, hmaSlow: hs, count: 1 }); }
+        } catch { continue; }
+      }
+      const pairs = [...pairMap.values()]
+        .map((p) => ({ hmaFast: p.hmaFast, hmaSlow: p.hmaSlow, configCount: p.count, name: `HMA ${p.hmaFast}×${p.hmaSlow}` }))
+        .sort((a, b) => b.configCount - a.configCount);
+      res.json({ pairs });
+    } finally { db.close(); }
+  });
+
+  // ── GET /replay/api/trade-query — filtered trade data by HMA, time, sizing ─
+  router.get('/api/trade-query', (req, res) => {
+    const q = req.query as Record<string, string | undefined>;
+    const hmaFast = parseInt(q.hmaFast || '0') || undefined;
+    const hmaSlow = parseInt(q.hmaSlow || '0') || undefined;
+    const windowSize = parseInt(q.windowSize || '30') || 30;
+    const maxContracts = parseInt(q.maxContracts || '0') || undefined;
+    const maxDollars = parseInt(q.maxDollarsPerTrade || '0') || undefined;
+    const strikeMin = parseFloat(q.strikeMin || '0') || undefined;
+    const strikeMax = parseFloat(q.strikeMax || '0') || undefined;
+    const activeStart = q.activeStart;
+    const activeEnd = q.activeEnd;
+    const sizingMode = q.sizingMode === 'skip' || q.sizingMode === 'scale' ? q.sizingMode : 'both';
+
+    const db = getDb();
+    try {
+      // Step 1: Find configs matching HMA pair
+      const configRows = db.prepare('SELECT id, name, config_json FROM replay_configs').all() as { id: string; name: string; config_json: string }[];
+      const matchedConfigs: { id: string; name: string }[] = [];
+      for (const cr of configRows) {
+        try {
+          const cfg = JSON.parse(cr.config_json);
+          const hf = cfg.signals?.hmaCrossFast ?? 5;
+          const hs = cfg.signals?.hmaCrossSlow ?? 19;
+          if (hmaFast !== undefined && hf !== hmaFast) continue;
+          if (hmaSlow !== undefined && hs !== hmaSlow) continue;
+          matchedConfigs.push({ id: cr.id, name: cr.name || cr.id });
+        } catch { continue; }
+      }
+
+      if (matchedConfigs.length === 0) {
+        res.json({
+          filters: { hmaFast, hmaSlow, windowSize, maxContracts, maxDollarsPerTrade: maxDollars, sizingMode },
+          summary: { totalTrades: 0, wins: 0, winRate: 0, totalPnl: 0, avgPnlPerTrade: 0, avgPnlPerDay: 0, dayCount: 0 },
+          chunks: [],
+          bestConfigs: [],
+          killZones: [],
+          meta: { configsMatched: 0, datesCovered: 0, incompleteDataWarning: false },
+        });
+        return;
+      }
+
+      // Step 2: Load results for matched configs
+      const configIds = matchedConfigs.map((c) => c.id);
+      const placeholders = configIds.map(() => '?').join(',');
+      const resultRows = db.prepare(
+        `SELECT configId, date, trades_json FROM replay_results WHERE configId IN (${placeholders})`
+      ).all(...configIds) as { configId: string; date: string; trades_json: string }[];
+
+      const configNameMap = new Map(matchedConfigs.map((c) => [c.id, c.name]));
+
+      // Step 3: Parse trades and aggregate
+      const datesCovered = new Set<string>();
+      let incompleteData = false;
+
+      // Per-config per-chunk aggregation for bestConfigs + killZones
+      const configChunkData: ConfigChunkData[] = [];
+
+      const globalChunkPnl = new Map<string, Map<string, number>>();
+      const globalChunkTrades = new Map<string, number>();
+      const globalChunkWins = new Map<string, number>();
+
+      const skipChunkPnl = new Map<string, number>();
+      const skipChunkTrades = new Map<string, number>();
+      const scaleChunkPnl = new Map<string, number>();
+      const scaleChunkTrades = new Map<string, number>();
+
+      for (const row of resultRows) {
+        let trades: TradeLike[];
+        try { trades = JSON.parse(row.trades_json || '[]'); } catch { continue; }
+        if (!Array.isArray(trades) || trades.length === 0) continue;
+
+        datesCovered.add(row.date);
+
+        let filtered = filterTradesByWindow(trades, activeStart, activeEnd);
+        filtered = filterTradesByStrike(filtered, strikeMin, strikeMax);
+
+        if (filtered.length === 0) continue;
+
+        const buckets = bucketTradesIntoChunks(filtered, windowSize);
+
+        for (const [chunkKey, chunkTrades] of buckets) {
+          const metrics = aggregateChunkMetrics(chunkTrades);
+          configChunkData.push({
+            configId: row.configId,
+            name: configNameMap.get(row.configId) || row.configId,
+            chunk: chunkKey,
+            avgPnlPerDay: metrics.totalPnl,
+            winRate: metrics.winRate,
+            tradeCount: metrics.totalTrades,
+          });
+
+          if (!globalChunkPnl.has(chunkKey)) globalChunkPnl.set(chunkKey, new Map());
+          const dm = globalChunkPnl.get(chunkKey)!;
+          dm.set(row.date, (dm.get(row.date) ?? 0) + metrics.totalPnl);
+          globalChunkTrades.set(chunkKey, (globalChunkTrades.get(chunkKey) ?? 0) + metrics.totalTrades);
+          globalChunkWins.set(chunkKey, (globalChunkWins.get(chunkKey) ?? 0) + metrics.wins);
+
+          if (maxContracts || maxDollars) {
+            const skipResult = applySizingFilter(chunkTrades, 'skip', maxContracts, maxDollars);
+            skipChunkPnl.set(chunkKey, (skipChunkPnl.get(chunkKey) ?? 0) + skipResult.totalPnl);
+            skipChunkTrades.set(chunkKey, (skipChunkTrades.get(chunkKey) ?? 0) + skipResult.trades.length);
+
+            const scaleResult = applySizingFilter(chunkTrades, 'scale', maxContracts, maxDollars);
+            scaleChunkPnl.set(chunkKey, (scaleChunkPnl.get(chunkKey) ?? 0) + scaleResult.totalPnl);
+            scaleChunkTrades.set(chunkKey, (scaleChunkTrades.get(chunkKey) ?? 0) + scaleResult.trades.length);
+          }
+
+          for (const t of chunkTrades) {
+            if (!t.entryET && !t.exitET) incompleteData = true;
+          }
+        }
+      }
+
+      const chunks = [...globalChunkPnl.keys()].sort().map((chunkKey) => {
+        const dateMap = globalChunkPnl.get(chunkKey)!;
+        const pnls = [...dateMap.values()];
+        const totalPnl = pnls.reduce((a, b) => a + b, 0);
+        const dayCount = pnls.length;
+        const avgPnlPerDay = dayCount > 0 ? totalPnl / dayCount : 0;
+        const tradeCount = globalChunkTrades.get(chunkKey) ?? 0;
+        const wins = globalChunkWins.get(chunkKey) ?? 0;
+        const winRate = tradeCount > 0 ? wins / tradeCount : 0;
+
+        return {
+          chunk: chunkKey,
+          chunkLabel: chunkLabel(chunkKey),
+          totalTrades: tradeCount,
+          wins,
+          winRate,
+          totalPnl,
+          avgPnlPerTrade: tradeCount > 0 ? totalPnl / tradeCount : 0,
+          avgPnlPerDay,
+          dayCount,
+          skipView: {
+            totalTrades: skipChunkTrades.get(chunkKey) ?? tradeCount,
+            totalPnl: skipChunkPnl.get(chunkKey) ?? totalPnl,
+          },
+          scaleView: {
+            totalTrades: scaleChunkTrades.get(chunkKey) ?? tradeCount,
+            totalPnl: scaleChunkPnl.get(chunkKey) ?? totalPnl,
+          },
+        };
+      });
+
+      const allPnl = chunks.reduce((a, c) => a + c.totalPnl, 0);
+      const allTrades = chunks.reduce((a, c) => a + c.totalTrades, 0);
+      const allWins = chunks.reduce((a, c) => a + c.wins, 0);
+      const allDays = datesCovered.size;
+
+      res.json({
+        filters: { hmaFast, hmaSlow, windowSize, maxContracts, maxDollarsPerTrade: maxDollars, sizingMode },
+        summary: {
+          totalTrades: allTrades,
+          wins: allWins,
+          winRate: allTrades > 0 ? allWins / allTrades : 0,
+          totalPnl: allPnl,
+          avgPnlPerTrade: allTrades > 0 ? allPnl / allTrades : 0,
+          avgPnlPerDay: allDays > 0 ? allPnl / allDays : 0,
+          dayCount: allDays,
+        },
+        chunks,
+        bestConfigs: findBestConfigsPerChunk(configChunkData),
+        killZones: detectKillZones(configChunkData),
+        meta: { configsMatched: matchedConfigs.length, datesCovered: allDays, incompleteDataWarning: incompleteData },
+      });
+    } finally { db.close(); }
   });
 
   // ── Live View API proxy ─────────────────────────────────────────────────
@@ -1851,6 +2259,48 @@ export function createReplayRoutes(): Router {
     }
   });
 
+  // ── DELETE /replay/api/configs/batch — batch delete configs + all their results ──────
+  router.delete('/api/configs/batch', (req, res) => {
+    const { ids } = req.body as { ids?: string[] };
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ error: 'ids array required' });
+    }
+
+    const db = getWriteDb();
+    try {
+      let deleted = 0;
+      let resultsDeleted = 0;
+      let runsDeleted = 0;
+      const errors: { id: string; error: string }[] = [];
+      const deletedNames: string[] = [];
+
+      for (const configId of ids) {
+        const row = db.prepare('SELECT id, name FROM replay_configs WHERE id = ?').get(configId) as any;
+        if (!row) {
+          errors.push({ id: configId, error: 'Not found' });
+          continue;
+        }
+
+        const resultCount = (db.prepare('SELECT COUNT(*) as c FROM replay_results WHERE configId = ?').get(configId) as any).c;
+        const runCount = (db.prepare('SELECT COUNT(*) as c FROM replay_runs WHERE configId = ?').get(configId) as any).c;
+
+        db.prepare('DELETE FROM replay_results WHERE configId = ?').run(configId);
+        db.prepare('DELETE FROM replay_runs WHERE configId = ?').run(configId);
+        db.prepare('DELETE FROM replay_configs WHERE id = ?').run(configId);
+
+        deleted++;
+        resultsDeleted += resultCount;
+        runsDeleted += runCount;
+        deletedNames.push(row.name || configId);
+      }
+
+      console.log(`[replay] Batch deleted ${deleted} configs: ${resultsDeleted} results, ${runsDeleted} runs`);
+      res.json({ deleted, resultsDeleted, runsDeleted, deletedNames, errors });
+    } finally {
+      db.close();
+    }
+  });
+
   // ── POST /replay/api/backfill — backfill a date from Polygon ─────────────
   // Spawns a detached worker to fetch underlying + options data into replay_bars.
   // body: { date, profileId?: 'spx-0dte'|'ndx-0dte' }
@@ -1915,6 +2365,18 @@ export function createReplayRoutes(): Router {
       res.json(status);
     } catch {
       res.status(500).json({ error: 'Failed to read status file' });
+    }
+  });
+
+  // ── Serve the time analytics viewer HTML ──────────────────────────────
+  router.get('/time-analytics', (req, res) => {
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    const htmlPath = path.resolve(__dirname, 'time-analytics-viewer.html');
+    if (fs.existsSync(htmlPath)) {
+      serveWithBasePath(htmlPath, req, res);
+    } else {
+      const altPath = path.resolve(process.cwd(), 'src/server/time-analytics-viewer.html');
+      serveWithBasePath(altPath, req, res);
     }
   });
 
