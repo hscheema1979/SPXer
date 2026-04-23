@@ -10,7 +10,7 @@
  * In paper mode, logs the order without sending it.
  */
 import axios from 'axios';
-import { config, TRADIER_BASE } from '../config';
+import { config, TRADIER_BASE, TRADIER_SANDBOX_BASE } from '../config';
 import type { Config } from '../config/types';
 import type { AgentSignal, AgentDecision, OpenPosition } from './types';
 import { randomUUID } from 'crypto';
@@ -323,9 +323,55 @@ export async function openPosition(
     openedAt: Date.now(),
   };
 
+  // Paper mode: route to Tradier sandbox with real OTOCO orders
+  const paperAccountId = config.tradierPaperAccountId;
+  const paperBaseUrl = TRADIER_SANDBOX_BASE;
+  const paperHeaders = {
+    Authorization: `Bearer ${config.tradierPaperToken}`,
+    Accept: 'application/json',
+    'Content-Type': 'application/x-www-form-urlencoded',
+  };
+
+  if (paper && paperAccountId) {
+    const label = `[${rootSymbol}→${paperAccountId} SANDBOX]`;
+    const hasBracketPrices = decision.takeProfit != null && decision.takeProfit > 0 && decision.stopLoss > 0;
+    const bracketDisabled = execCfg?.disableBracketOrders === true;
+
+    if (hasBracketPrices && !bracketDisabled) {
+      try {
+        const result = await submitOtocoOrder(
+          rootSymbol, executedSymbol, paperAccountId, qty,
+          order, entryPrice, decision.takeProfit!, decision.stopLoss, spreadStr, agentTag,
+          paperBaseUrl, paperHeaders, 'PAPER',
+        );
+        position.bracketOrderId = result.bracketOrderId;
+        console.log(`[executor] PAPER OTOCO ${label} ${qty}x ${executedSymbol} @ $${entryPrice.toFixed(2)} | TP=$${decision.takeProfit!.toFixed(2)} SL=$${decision.stopLoss.toFixed(2)} — bracket #${result.bracketOrderId}`);
+        return { position, execution: { orderId: result.entryOrderId, fillPrice: entryPrice, paper: true, executedSymbol, orderType: order.type, spread: order.spread } };
+      } catch (e: any) {
+        console.error(`[executor] PAPER OTOCO FAILED ${label}: ${e.message} — falling back to bare order`);
+      }
+    }
+
+    // Bare market/limit order to sandbox
+    const orderParams: Record<string, string | number> = {
+      class: 'option', symbol: rootSymbol, option_symbol: executedSymbol,
+      side: 'buy_to_open', quantity: qty, type: order.type, duration: 'day',
+    };
+    if (order.type === 'limit' && entryPrice > 0) orderParams.price = entryPrice.toFixed(2);
+    try {
+      const { data } = await axios.post(`${paperBaseUrl}/accounts/${paperAccountId}/orders`, new URLSearchParams(orderParams as any).toString(), { headers: paperHeaders, timeout: 10000 });
+      const orderId = data?.order?.id;
+      console.log(`[executor] PAPER BUY ${label} ${qty}x ${executedSymbol} @ $${entryPrice.toFixed(2)} — order #${orderId}`);
+      return { position, execution: { orderId, fillPrice: entryPrice, paper: true, executedSymbol, orderType: order.type, spread: order.spread } };
+    } catch (e: any) {
+      console.error(`[executor] PAPER ORDER FAILED ${label}: ${e.message}`);
+      return { position, execution: { error: e.message, paper: true, executedSymbol, orderType: order.type, spread: order.spread } };
+    }
+  }
+
   if (paper) {
     const label = execCfg ? `[${rootSymbol}→${accountId}]` : '';
-    console.log(`[executor] PAPER BUY ${label} ${qty}x ${executedSymbol} @ $${entryPrice.toFixed(2)} (${order.type}, spread=${spreadStr}) | stop: $${decision.stopLoss.toFixed(2)}`);
+    console.log(`[executor] PAPER BUY (no sandbox) ${label} ${qty}x ${executedSymbol} @ $${entryPrice.toFixed(2)} (${order.type}, spread=${spreadStr}) | stop: $${decision.stopLoss.toFixed(2)}`);
     return { position, execution: { fillPrice: entryPrice, paper: true, executedSymbol, orderType: order.type, spread: order.spread } };
   }
 
@@ -443,6 +489,9 @@ async function submitOtocoOrder(
   slPrice: number,
   spreadStr: string,
   agentTag?: string,
+  baseUrl: string = TRADIER_BASE,
+  hdrs: Record<string, string> = headers(),
+  mode: 'LIVE' | 'PAPER' = 'LIVE',
 ): Promise<{ bracketOrderId: number; entryOrderId?: number; tpLegId?: number; slLegId?: number }> {
   // Build OTOCO params with indexed legs
   const params: Record<string, string | number> = {
@@ -475,9 +524,9 @@ async function submitOtocoOrder(
   const body = qs(params);
 
   const { data } = await axios.post(
-    `${TRADIER_BASE}/accounts/${accountId}/orders`,
+    `${baseUrl}/accounts/${accountId}/orders`,
     body,
-    { headers: headers(), timeout: 10000 },
+    { headers: hdrs, timeout: 10000 },
   );
 
   // Parse response: order.id = parent OTOCO, order.leg[].id = each leg
@@ -486,7 +535,7 @@ async function submitOtocoOrder(
   // DEBUG: check if tag came back in response
   const responseTag = parentOrder?.tag;
   console.log(`[executor] 🏷️  Response tag='${responseTag || 'NONE'}' (order ${parentOrder?.id})`);
-  if (agentTag && responseTag !== agentTag) {
+  if (agentTag && responseTag !== agentTag && mode === 'LIVE') {
     console.error(`[executor] 🚨 TAG MISMATCH: sent '${agentTag}' got '${responseTag || 'NONE'}'`);
   }
   const bracketOrderId = parentOrder?.id;
@@ -503,7 +552,7 @@ async function submitOtocoOrder(
     slLegId = legs[2]?.id;
   }
 
-  console.log(`[executor] LIVE OTOCO [${rootSymbol}→${accountId}] ${qty}x ${optionSymbol} @ ${order.type === 'market' ? 'MARKET' : '$' + entryPrice.toFixed(2)} (spread=${spreadStr}) | TP=$${tpPrice.toFixed(2)} SL=$${slPrice.toFixed(2)} — bracket #${bracketOrderId}`);
+  console.log(`[executor] ${mode} OTOCO [${rootSymbol}→${accountId}] ${qty}x ${optionSymbol} @ ${order.type === 'market' ? 'MARKET' : '$' + entryPrice.toFixed(2)} (spread=${spreadStr}) | TP=$${tpPrice.toFixed(2)} SL=$${slPrice.toFixed(2)} — bracket #${bracketOrderId}`);
 
   return { bracketOrderId, entryOrderId, tpLegId, slLegId };
 }
@@ -543,6 +592,24 @@ export async function closePosition(
 
   // Exits always use market orders — speed matters more than price on exit
   if (paper) {
+    const paperAccountId = config.tradierPaperAccountId;
+    if (paperAccountId) {
+      try {
+        const params: Record<string, string | number> = {
+          class: 'option', symbol: rootSymbol, option_symbol: position.symbol,
+          side: 'sell_to_close', quantity: position.quantity, type: 'market', duration: 'day',
+        };
+        const { data } = await axios.post(
+          `${TRADIER_SANDBOX_BASE}/accounts/${paperAccountId}/orders`,
+          new URLSearchParams(params as any).toString(),
+          { headers: { Authorization: `Bearer ${config.tradierPaperToken}`, Accept: 'application/json', 'Content-Type': 'application/x-www-form-urlencoded' }, timeout: 10000 },
+        );
+        console.log(`[executor] PAPER SELL [SANDBOX→${paperAccountId}] ${position.quantity}x ${position.symbol} @ $${currentPrice.toFixed(2)} MARKET (${reason}) — order #${data?.order?.id}`);
+        return { orderId: data?.order?.id, fillPrice: currentPrice, paper: true, orderType: 'market' };
+      } catch (e: any) {
+        console.error(`[executor] PAPER SELL FAILED (sandbox): ${e.message} — simulating`);
+      }
+    }
     console.log(`[executor] PAPER SELL ${position.quantity}x ${position.symbol} @ $${currentPrice.toFixed(2)} MARKET (${reason})`);
     return { fillPrice: currentPrice, paper: true, orderType: 'market' };
   }

@@ -5,12 +5,15 @@ export const config = {
   port: parseInt(process.env.PORT || '3600'),
   tradierToken: process.env.TRADIER_TOKEN || '',
   tradierAccountId: process.env.TRADIER_ACCOUNT_ID || '',
+  tradierPaperToken: process.env.TRADIER_PAPER_TOKEN || process.env.TRADIER_TOKEN || '',
+  tradierPaperAccountId: process.env.TRADIER_PAPER_ACCOUNT_ID || '',
   gdriveRemote: process.env.GDRIVE_REMOTE || 'gdrive:SPXer/archives',
   dbPath: process.env.DB_PATH || './data/spxer.db',
   logLevel: process.env.LOG_LEVEL || 'info',
 };
 
 export const TRADIER_BASE = 'https://api.tradier.com/v1';
+export const TRADIER_SANDBOX_BASE = 'https://sandbox.tradier.com/v1';
 
 export const MARKET_HOLIDAYS = new Set([
   '2025-01-01','2025-01-20','2025-02-17','2025-04-18',
