@@ -15,7 +15,7 @@ import type { Config } from './src/config/types';
 import type { OpenPosition } from './src/agent/types';
 import { PositionOrderManager, type EnrichedSignal } from './src/agent/position-order-manager';
 import { AccountStream } from './src/agent/account-stream';
-import { initAccountDb, closeAccountDb } from './src/storage/db';
+import { initAccountDb, closeAccountDb, getAccountDb } from './src/storage/db';
 import {
   initHandlerState,
   setConnected,
@@ -61,10 +61,204 @@ interface ConfigState {
 const configs = new Map<string, ConfigState>();
 let manager: PositionOrderManager;
 let ws: WebSocket | null = null;
+let wsConnected = false;
 let healthGate = new HealthGate();
 let spxPrice = 0;
 let running = true;
+let killSwitch = false;
 const perConfigPaper = new Map<string, boolean>();
+const REST_BASE = WS_URL.replace('ws://', 'http://').replace('wss://', 'https://');
+
+let orderMutex = false;
+
+async function handleContractSignal(signal: any): Promise<void> {
+  if (killSwitch) return;
+
+  const expectedOffset = [...configs.values()][0]?.config?.strikeSelector?.atmOffset;
+  if (expectedOffset != null && signal.offsetLabel) {
+    const expectedLabel = expectedOffset === 0 ? 'atm' : expectedOffset > 0 ? `otm${expectedOffset}` : `itm${-expectedOffset}`;
+    if (signal.offsetLabel !== expectedLabel) return;
+  }
+
+  const expectedTf = [...configs.values()][0]?.config?.signals?.signalTimeframe || '1m';
+  if (signal.timeframe && signal.timeframe !== expectedTf) return;
+
+  if (signal.timestamp) {
+    const signalAgeMs = Date.now() - signal.timestamp;
+    if (signalAgeMs > 30_000) return;
+  }
+
+  const now = Date.now() / 1000;
+  const routingDecisions: RoutingDecision['decisions'] = [];
+
+  const enriched: EnrichedSignal = {
+    symbol: signal.symbol,
+    strike: signal.strike,
+    expiry: signal.expiry,
+    side: signal.side,
+    direction: signal.direction,
+    price: signal.price,
+    hmaFastPeriod: signal.hmaFastPeriod,
+    hmaSlowPeriod: signal.hmaSlowPeriod,
+    channel: signal.channel || `${signal.hmaFastPeriod}_${signal.hmaSlowPeriod}`,
+    receivedTs: now,
+  };
+
+  for (const [configId, state] of configs) {
+    const cfg = state.config;
+    const handlerState = readHandlerState();
+    const configEnabled = handlerState?.configs[configId]?.enabled ?? true;
+
+    if (!configEnabled) {
+      routingDecisions.push({ configId, action: 'skipped', reason: 'disabled' });
+      continue;
+    }
+
+    if (cfg.signals.hmaCrossFast !== signal.hmaFastPeriod || cfg.signals.hmaCrossSlow !== signal.hmaSlowPeriod) {
+      routingDecisions.push({ configId, action: 'skipped', reason: 'hma_mismatch' });
+      continue;
+    }
+
+    const health = await healthGate.check();
+    if (!health.healthy) {
+      routingDecisions.push({ configId, action: 'skipped', reason: 'health_block', details: health.reason });
+      continue;
+    }
+
+    const decision = manager.evaluate(enriched, configId, cfg);
+
+    if (decision.action === 'skip') {
+      routingDecisions.push({ configId, action: 'skipped', reason: decision.reason });
+      continue;
+    }
+
+    if (orderMutex) {
+      routingDecisions.push({ configId, action: 'skipped', reason: 'order_in_progress' });
+      continue;
+    }
+
+    if (decision.action === 'flip') {
+      const existingPos = decision.position;
+      orderMutex = true;
+      try {
+        const openPos: OpenPosition = {
+          id: existingPos.id,
+          symbol: existingPos.symbol,
+          side: existingPos.side,
+          strike: existingPos.strike,
+          entryPrice: existingPos.entryPrice,
+          quantity: existingPos.quantity,
+          stopLoss: existingPos.stopLoss,
+          takeProfit: existingPos.takeProfit,
+          highWaterPrice: existingPos.highWater,
+          openedAt: existingPos.openedAt * 1000,
+          bracketOrderId: null,
+        };
+        await closePosition(openPos, 'signal_reversal', existingPos.entryPrice, perConfigPaper.get(configId) ?? AGENT_PAPER, EXECUTION);
+        console.log(`[handler] [${configId}] Flipped ${existingPos.symbol} (${existingPos.side} → ${signal.side})`);
+      } catch (e: any) {
+        console.error(`[handler] [${configId}] Flip close failed: ${e.message}`);
+        routingDecisions.push({ configId, action: 'skipped', reason: 'flip_error', details: e.message });
+        continue;
+      } finally {
+        orderMutex = false;
+      }
+    }
+
+    console.log(`[handler] [${configId}] Signal accepted, executing entry...`);
+
+    orderMutex = true;
+    try {
+      const positionSize = computeQty(signal.price, cfg, null);
+
+      const agentSignal = {
+        type: 'HMA_CROSS' as const,
+        symbol: signal.symbol,
+        side: signal.side as 'call' | 'put',
+        strike: signal.strike,
+        expiry: signal.expiry,
+        currentPrice: signal.price,
+        bid: signal.price * 0.98,
+        ask: signal.price,
+        indicators: {} as any,
+        recentBars: [],
+        signalBarLow: signal.price,
+        spxContext: {
+          price: spxPrice,
+          changePercent: 0,
+          trend: 'neutral' as const,
+          rsi14: null,
+          minutesToClose: 360,
+          mode: 'rth' as const,
+        },
+        ts: Date.now(),
+      };
+
+      const tradeDecision = {
+        action: 'buy' as const,
+        confidence: 1.0,
+        positionSize,
+        stopLoss: signal.price * (1 - cfg.position.stopLossPercent / 100),
+        takeProfit: signal.price * (1 + cfg.position.stopLossPercent / 100 * cfg.position.takeProfitMultiplier),
+        reasoning: `Event-driven HMA(${signal.hmaFastPeriod})xHMA(${signal.hmaSlowPeriod}) signal`,
+        concerns: [],
+        ts: Date.now(),
+      };
+
+      const configPaper = perConfigPaper.get(configId) ?? AGENT_PAPER;
+      const result = await openPosition(agentSignal, tradeDecision, configPaper, EXECUTION, 0, configId);
+
+      if (result.position.quantity > 0) {
+        const basketMember = cfg.id.includes('basket') ? `strike-${signal.strike}` : 'default';
+        const positionId = manager.openPosition(enriched, configId, cfg, result.position.quantity, basketMember);
+
+        const orderId = result.execution.orderId;
+        const bracketId = result.position.bracketOrderId;
+        console.log(`[handler] [${configId}] Position opened: ${result.position.symbol} x${result.position.quantity} @ $${result.execution.fillPrice?.toFixed(2)} | order=${orderId} bracket=${bracketId}`);
+
+        if (bracketId || orderId) {
+          try {
+            const db = getAccountDb();
+            const updated = db.prepare(`
+              UPDATE orders SET tradier_id = ?, bracket_id = ?, tp_leg_id = ?, sl_leg_id = ?, status = 'SUBMITTED'
+              WHERE position_id = ?
+            `).run(orderId || null, bracketId || null, result.position.tpLegId || null, result.position.slLegId || null, positionId);
+            console.log(`[handler] Bracket IDs persisted: tradier=${orderId} bracket=${bracketId} tp=${result.position.tpLegId} sl=${result.position.slLegId} rows=${updated.changes}`);
+          } catch (e: any) {
+            console.error(`[handler] Failed to persist bracket IDs: ${e.message}`);
+          }
+        }
+
+        routingDecisions.push({ configId, action: 'entered', details: `${result.position.symbol} x${result.position.quantity} @ $${result.execution.fillPrice?.toFixed(2)}` });
+        syncConfigPositions(configId, state);
+      }
+    } catch (e: any) {
+      console.error(`[handler] [${configId}] Entry failed: ${e.message}`);
+      routingDecisions.push({ configId, action: 'skipped', reason: 'entry_error', details: e.message });
+    } finally {
+      orderMutex = false;
+    }
+  }
+
+  if (routingDecisions.length > 0) {
+    const etNow = nowET();
+    recordRoutingDecision({
+      ts: Date.now(),
+      timeET: `${String(etNow.h).padStart(2, '0')}:${String(etNow.m).padStart(2, '0')}:${String(etNow.s).padStart(2, '0')}`,
+      signal: {
+        symbol: signal.symbol,
+        strike: signal.strike,
+        side: signal.side,
+        direction: signal.direction,
+        hmaFastPeriod: signal.hmaFastPeriod,
+        hmaSlowPeriod: signal.hmaSlowPeriod,
+        channel: signal.channel || `${signal.hmaFastPeriod}_${signal.hmaSlowPeriod}`,
+        price: signal.price,
+      },
+      decisions: routingDecisions,
+    });
+  }
+}
 
 function syncConfigPositions(configId: string, state: ConfigState): void {
   const positions = manager.getOpenPositions(configId).map(p => ({
@@ -136,172 +330,29 @@ function subscribeToChannels(): void {
     const fast = cfg.signals.hmaCrossFast;
     const slow = cfg.signals.hmaCrossSlow;
     const pair = `${fast}_${slow}`;
+    const offset = cfg.strikeSelector.atmOffset;
 
-    const channel = `contract_signal:${pair}`;
-    subscribedChannels.add(channel);
+    if (offset == null) {
+      console.warn(`[handler] Config missing atmOffset — cannot subscribe to signal channels`);
+      continue;
+    }
 
-    ws.send(JSON.stringify({
-      action: 'subscribe',
-      channel,
-    }));
+    const offsetLabel = offset === 0 ? 'atm' : offset > 0 ? `otm${offset}` : `itm${-offset}`;
+
+    for (const side of ['call', 'put']) {
+      const channel = `contract_signal:${offsetLabel}:${pair}:${side}`;
+      if (!subscribedChannels.has(channel)) {
+        subscribedChannels.add(channel);
+        ws.send(JSON.stringify({ action: 'subscribe', channel }));
+      }
+    }
   }
 
-  console.log(`[handler] Subscribed to ${subscribedChannels.size} HMA pair channels`);
+  console.log(`[handler] Subscribed to ${subscribedChannels.size} channels across ${configs.size} configs`);
   setSubscriptions(Array.from(subscribedChannels));
 
   ws.send(JSON.stringify({ action: 'subscribe', channel: 'spx_bar' }));
   ws.send(JSON.stringify({ action: 'subscribe', channel: 'hma_cross_signal' }));
-}
-
-// ── Contract Signal Handler (Entry) ───────────────────────────────────────────
-
-async function handleContractSignal(signal: any): Promise<void> {
-  const now = Date.now() / 1000;
-  const routingDecisions: RoutingDecision['decisions'] = [];
-
-  const enriched: EnrichedSignal = {
-    symbol: signal.symbol,
-    strike: signal.strike,
-    expiry: signal.expiry,
-    side: signal.side,
-    direction: signal.direction,
-    price: signal.price,
-    hmaFastPeriod: signal.hmaFastPeriod,
-    hmaSlowPeriod: signal.hmaSlowPeriod,
-    channel: signal.channel || `${signal.hmaFastPeriod}_${signal.hmaSlowPeriod}`,
-    receivedTs: now,
-  };
-
-  for (const [configId, state] of configs) {
-    const cfg = state.config;
-    const handlerState = readHandlerState();
-    const configEnabled = handlerState?.configs[configId]?.enabled ?? true;
-
-    if (!configEnabled) {
-      routingDecisions.push({ configId, action: 'skipped', reason: 'disabled' });
-      continue;
-    }
-
-    if (cfg.signals.hmaCrossFast !== signal.hmaFastPeriod || cfg.signals.hmaCrossSlow !== signal.hmaSlowPeriod) {
-      routingDecisions.push({ configId, action: 'skipped', reason: 'hma_mismatch' });
-      continue;
-    }
-
-    const health = await healthGate.check();
-    if (!health.healthy) {
-      routingDecisions.push({ configId, action: 'skipped', reason: 'health_block', details: health.reason });
-      continue;
-    }
-
-    const decision = manager.evaluate(enriched, configId, cfg);
-
-    if (decision.action === 'skip') {
-      routingDecisions.push({ configId, action: 'skipped', reason: decision.reason });
-      continue;
-    }
-
-    if (decision.action === 'flip') {
-      const existingPos = decision.position;
-      try {
-        const openPos: OpenPosition = {
-          id: existingPos.id,
-          symbol: existingPos.symbol,
-          side: existingPos.side,
-          strike: existingPos.strike,
-          entryPrice: existingPos.entryPrice,
-          quantity: existingPos.quantity,
-          stopLoss: existingPos.stopLoss,
-          takeProfit: existingPos.takeProfit,
-          highWaterPrice: existingPos.highWater,
-          openedAt: existingPos.openedAt * 1000,
-          bracketOrderId: null,
-        };
-        await closePosition(openPos, 'signal_reversal', existingPos.entryPrice, perConfigPaper.get(configId) ?? AGENT_PAPER, EXECUTION);
-        console.log(`[handler] [${configId}] Flipped ${existingPos.symbol} (${existingPos.side} → ${signal.side})`);
-      } catch (e: any) {
-        console.error(`[handler] [${configId}] Flip close failed: ${e.message}`);
-        routingDecisions.push({ configId, action: 'skipped', reason: 'flip_error', details: e.message });
-        continue;
-      }
-    }
-
-    console.log(`[handler] [${configId}] Signal accepted, executing entry...`);
-
-    try {
-      const positionSize = computeQty(signal.price, cfg, null);
-
-      const agentSignal = {
-        type: 'HMA_CROSS' as const,
-        symbol: signal.symbol,
-        side: signal.side as 'call' | 'put',
-        strike: signal.strike,
-        expiry: signal.expiry,
-        currentPrice: signal.price,
-        bid: signal.price * 0.98,
-        ask: signal.price,
-        indicators: {} as any,
-        recentBars: [],
-        signalBarLow: signal.price,
-        spxContext: {
-          price: spxPrice,
-          changePercent: 0,
-          trend: 'neutral' as const,
-          rsi14: null,
-          minutesToClose: 360,
-          mode: 'rth' as const,
-        },
-        ts: Date.now(),
-      };
-
-      const tradeDecision = {
-        action: 'buy' as const,
-        confidence: 1.0,
-        positionSize,
-        stopLoss: signal.price * (1 - cfg.position.stopLossPercent / 100),
-        takeProfit: signal.price * (1 + cfg.position.stopLossPercent / 100 * cfg.position.takeProfitMultiplier),
-        reasoning: `Event-driven HMA(${signal.hmaFastPeriod})xHMA(${signal.hmaSlowPeriod}) signal`,
-        concerns: [],
-        ts: Date.now(),
-      };
-
-      const configPaper = perConfigPaper.get(configId) ?? AGENT_PAPER;
-      const result = await openPosition(agentSignal, tradeDecision, configPaper, EXECUTION, 0, configId);
-
-      if (result.position.quantity > 0) {
-        const basketMember = cfg.id.includes('basket') ? `strike-${signal.strike}` : 'default';
-        manager.openPosition(enriched, configId, cfg, result.position.quantity, basketMember);
-
-        const orderId = result.execution.orderId;
-        const bracketId = result.position.bracketOrderId;
-        console.log(`[handler] [${configId}] Position opened: ${result.position.symbol} x${result.position.quantity} @ $${result.execution.fillPrice?.toFixed(2)} | order=${orderId} bracket=${bracketId}`);
-
-        routingDecisions.push({ configId, action: 'entered', details: `${result.position.symbol} x${result.position.quantity} @ $${result.execution.fillPrice?.toFixed(2)}` });
-        syncConfigPositions(configId, state);
-      }
-    } catch (e: any) {
-      console.error(`[handler] [${configId}] Entry failed: ${e.message}`);
-      routingDecisions.push({ configId, action: 'skipped', reason: 'entry_error', details: e.message });
-    }
-  }
-
-  if (routingDecisions.length > 0) {
-    const etNow = nowET();
-    recordRoutingDecision({
-      ts: Date.now(),
-      timeET: `${String(etNow.h).padStart(2, '0')}:${String(etNow.m).padStart(2, '0')}:${String(etNow.s).padStart(2, '0')}`,
-      signal: {
-        symbol: signal.symbol,
-        strike: signal.strike,
-        side: signal.side,
-        direction: signal.direction,
-        hmaFastPeriod: signal.hmaFastPeriod,
-        hmaSlowPeriod: signal.hmaSlowPeriod,
-        channel: signal.channel || `${signal.hmaFastPeriod}_${signal.hmaSlowPeriod}`,
-        price: signal.price,
-      },
-      decisions: routingDecisions,
-    });
-  }
 }
 
 // ── Reversal Handler (SPX HMA Cross) ───────────────────────────────────────────
@@ -339,6 +390,58 @@ async function handleReversal(event: any): Promise<void> {
     syncConfigPositions(configId, state);
 
     console.log(`[handler] [${configId}] Reversal complete. Waiting for ${event.direction} signals...`);
+  }
+}
+
+// ── REST Fallback (polls signals DB when WS is disconnected) ─────────────────
+
+let lastPolledSignalTs = 0;
+
+async function restFallbackPoll(): Promise<void> {
+  if (wsConnected || configs.size === 0) return;
+
+  try {
+    for (const [configId, state] of configs) {
+      const cfg = state.config;
+      const fast = cfg.signals.hmaCrossFast;
+      const slow = cfg.signals.hmaCrossSlow;
+      const offset = cfg.strikeSelector.atmOffset;
+      if (offset == null) continue;
+
+      const offsetLabel = offset === 0 ? 'atm' : offset > 0 ? `otm${offset}` : `itm${-offset}`;
+      const hmaPair = `${fast}_${slow}`;
+      const tf = cfg.signals?.timeframe || '1m';
+
+      const resp = await fetch(`${REST_BASE}/signals?offset=${offsetLabel}&timeframe=${tf}&hmaPair=${hmaPair}&limit=5`);
+      if (!resp.ok) continue;
+
+      const signals: any[] = await resp.json();
+      if (signals.length === 0) continue;
+
+      const latest = signals[0];
+      if (latest.ts <= lastPolledSignalTs) continue;
+
+      lastPolledSignalTs = latest.ts;
+
+      console.log(`[handler] REST fallback: ${latest.direction} ${latest.symbol} @ ${latest.price.toFixed(2)} (${latest.offset_label}, ${latest.timeframe})`);
+
+      await handleContractSignal({
+        symbol: latest.symbol,
+        strike: latest.strike,
+        expiry: latest.expiry,
+        side: latest.side,
+        direction: latest.direction,
+        hmaFastPeriod: latest.hma_fast,
+        hmaSlowPeriod: latest.hma_slow,
+        price: latest.price,
+        timestamp: latest.ts * 1000,
+        offsetLabel: latest.offset_label,
+        timeframe: latest.timeframe,
+        channel: `${latest.offset_label}:${latest.hma_fast}_${latest.hma_slow}:${latest.side}`,
+      });
+    }
+  } catch (e: any) {
+    console.error('[handler] REST fallback poll failed:', e.message);
   }
 }
 
@@ -516,6 +619,7 @@ async function main(): Promise<void> {
 
   ws.on('open', () => {
     console.log('[handler] WebSocket connected');
+    wsConnected = true;
     setConnected(true);
     subscribeToChannels();
   });
@@ -537,6 +641,7 @@ async function main(): Promise<void> {
 
   ws.on('close', () => {
     console.log('[handler] WebSocket closed, reconnecting in 5s...');
+    wsConnected = false;
     setConnected(false);
     setTimeout(() => {
       if (running) main();
@@ -552,8 +657,16 @@ async function main(): Promise<void> {
   }, 60_000);
 
   setInterval(() => {
+    manager.cleanupStaleOpening();
+  }, 5_000);
+
+  setInterval(() => {
     checkExits().catch(e => console.error('[handler] Exit check failed:', e));
   }, 10_000);
+
+  setInterval(() => {
+    restFallbackPoll().catch(e => console.error('[handler] REST fallback failed:', e));
+  }, 15_000);
 
   process.on('SIGINT', gracefulShutdown);
   process.on('SIGTERM', gracefulShutdown);
