@@ -27,7 +27,7 @@ module.exports = {
       env: {
         NODE_ENV: 'production',
         PORT: '3600',
-        AGENT_CONFIG_ID: 'spx-hma3x12-itm5-tp125x-sl20-3m-25c-$50000',
+        AGENT_CONFIG_ID: 'spx-hma3x12-itm5-tp30x-sl20-3m-50c-$5000',
       },
       log_date_format: 'YYYY-MM-DD HH:mm:ss',
       error_file: '/home/ubuntu/.pm2/logs/spxer-error.log',
@@ -59,20 +59,10 @@ module.exports = {
       max_memory_restart: '512M',
       env: {    AGENT_PAPER: 'true',
     AGENT_PAPER: 'true',
-    AGENT_PAPER: 'true',
-    AGENT_PAPER: 'true',
-    AGENT_PAPER: 'true',
-    AGENT_PAPER: 'true',
-    AGENT_PAPER: 'true',
-    AGENT_PAPER: 'true',
-    AGENT_PAPER: 'true',
-    AGENT_PAPER: 'true',
-    AGENT_PAPER: 'true',
 
         NODE_ENV: 'production',
-        AGENT_PAPER: 'false',  // Set to 'true' for paper mode
-        // LIVE: HMA3x12, ITM5, TP30x, SL20%, $5K per trade, 10:00-16:00 ET
-        AGENT_CONFIG_ID: 'spx-hma3x12-itm5-tp30x-sl20-3m-25c-$5000',
+        AGENT_PAPER: 'true',
+        AGENT_CONFIG_ID: 'spx-hma3x12-itm5-tp30x-sl20-3m-50c-$5000',
         // For multiple configs: AGENT_CONFIG_IDS: 'config1,config2,config3'
       },
       log_date_format: 'YYYY-MM-DD HH:mm:ss',
@@ -99,7 +89,7 @@ module.exports = {
     //   env: {
     //     NODE_ENV: 'production',
     //     AGENT_PAPER: 'false',
-    //     AGENT_CONFIG_ID: 'spx-hma3x12-itm5-tp125x-sl20-3m-25c-$50000',
+    //     AGENT_CONFIG_ID: 'spx-hma3x12-itm5-tp30x-sl20-3m-50c-$5000',
     //   },
     //   log_date_format: 'YYYY-MM-DD HH:mm:ss',
     //   error_file: '/home/ubuntu/.pm2/logs/spxer-agent-error.log',
