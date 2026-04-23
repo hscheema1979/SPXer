@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>SPXer Time Analytics</title>
+<style>
+  :root {
+    --background: #0a0a0f;
+    --foreground: #e0e0e0;
+    --muted: #888;
+    --muted-foreground: #555;
+    --card: #111118;
+    --border: #1a1a24;
+    --border-strong: #222;
+    --input: #1a1a24;
+    --primary: #8b8bff;
+    --primary-soft: #a78bfa;
+    --success: #10b981;
+    --destructive: #f43f5e;
+    --info: #3b82f6;
+    --warning: #f59e0b;
+    --radius: 8px;
+    --radius-sm: 6px;
+    --font-sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", "Fira Code", Consolas, monospace;
+  }
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: var(--background); color: var(--foreground); font-family: var(--font-sans); font-size: 13px; line-height: 1.45; min-height: 100dvh; -webkit-font-smoothing: antialiased; }
+  .nav-bar { display: flex; align-items: center; gap: 0; padding: 0 12px; background: var(--card); border-bottom: 1px solid var(--border); font-size: 12px; overflow-x: auto; white-space: nowrap; }
+  .nav-bar a { color: var(--muted-foreground); text-decoration: none; padding: 10px 14px; transition: color 0.15s; border-bottom: 2px solid transparent; flex-shrink: 0; }
+  .nav-bar a:hover { color: var(--primary-soft); }
+  .nav-bar a.active { color: var(--primary); border-bottom-color: var(--primary); }
+  .nav-brand { color: var(--primary)!important; font-weight: 700; font-size: 13px; padding-right: 16px!important; border: none!important; cursor: default; }
+  .page { padding: 12px; max-width: 1600px; margin: 0 auto; }
+  .controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 10px 14px; background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); margin-bottom: 12px; }
+  .controls label { font-size: 11px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
+  .controls select, .controls input { background: var(--input); color: var(--foreground); border: 1px solid var(--border-strong); border-radius: var(--radius-sm); padding: 5px 8px; font-size: 12px; font-family: var(--font-mono); }
+  .controls select:focus, .controls input:focus { border-color: var(--primary); outline: none; }
+  .ctrl-group { display: flex; align-items: center; gap: 6px; }
+  .ctrl-sep { width: 1px; height: 24px; background: var(--border-strong); margin: 0 4px; }
+  .metric-pills { display: flex; gap: 4px; flex-wrap: wrap; }
+  .metric-pill { background: var(--input); border: 1px solid var(--border-strong); color: var(--muted); padding: 4px 10px; border-radius: 14px; font-size: 11px; cursor: pointer; transition: all 0.15s; font-weight: 500; }
+  .metric-pill:hover { border-color: var(--primary-soft); color: var(--foreground); }
+  .metric-pill.active { background: var(--primary); color: #000; border-color: var(--primary); font-weight: 700; }
+  .panel { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); margin-bottom: 12px; }
+  .panel-title { font-size: 14px; font-weight: 700; padding: 12px 14px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px; }
+  .empty { color: var(--muted); text-align: center; padding: 24px; font-size: 13px; }
+  .loading { color: var(--muted); text-align: center; padding: 24px; font-size: 13px; }
+  button.analyze-btn { background: var(--primary); color: #000; border: none; padding: 6px 16px; border-radius: var(--radius-sm); font-weight: 700; cursor: pointer; font-size: 12px; transition: opacity 0.15s; }
+  button.analyze-btn:hover { opacity: 0.85; }
+  button.analyze-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+</style>
+</head>
+<body>
+
+<div class="nav-bar">
+  <a class="nav-brand" href="#">SPXer</a>
+  <a href="/replay/">Replay</a>
+  <a href="/replay/sweep">Sweep</a>
+  <a href="/replay/analytics">Analytics</a>
+  <a class="active" href="/replay/time-analytics">Time Analytics</a>
+</div>
+
+<div class="page">
+  <div class="panel">
+    <div class="panel-title">Trade Query Explorer</div>
+
+    <div class="controls">
+      <div class="ctrl-group">
+        <label>HMA Pair</label>
+        <select id="hma-pair" onchange="analyze()"></select>
+      </div>
+      <span class="ctrl-sep"></span>
+      <div class="ctrl-group">
+        <label>Window</label>
+        <div class="metric-pills">
+          <span class="metric-pill active" data-w="30" onclick="setWindow(this)">30 min</span>
+          <span class="metric-pill" data-w="60" onclick="setWindow(this)">60 min</span>
+        </div>
+      </div>
+      <span class="ctrl-sep"></span>
+      <div class="ctrl-group">
+        <label>Max Contracts</label>
+        <input type="number" id="max-contracts" placeholder="all" style="width:60px">
+      </div>
+      <div class="ctrl-group">
+        <label>Max $/Trade</label>
+        <input type="number" id="max-dollars" placeholder="all" style="width:80px">
+      </div>
+      <span class="ctrl-sep"></span>
+      <div class="ctrl-group">
+        <label>Strike</label>
+        <input type="number" id="strike-min" placeholder="min" style="width:70px">
+        <input type="number" id="strike-max" placeholder="max" style="width:70px">
+      </div>
+      <span class="ctrl-sep"></span>
+      <div class="ctrl-group">
+        <label>Sizing</label>
+        <div class="metric-pills">
+          <span class="metric-pill active" data-s="both" onclick="setSizing(this)">Both</span>
+          <span class="metric-pill" data-s="skip" onclick="setSizing(this)">Skip</span>
+          <span class="metric-pill" data-s="scale" onclick="setSizing(this)">Scale</span>
+        </div>
+      </div>
+      <span class="ctrl-sep"></span>
+      <div class="ctrl-group">
+        <label>Active</label>
+        <input type="text" id="active-start" value="09:30" style="width:55px;font-family:var(--font-mono)">
+        <span style="color:var(--muted)">to</span>
+        <input type="text" id="active-end" value="16:00" style="width:55px;font-family:var(--font-mono)">
+      </div>
+      <span class="ctrl-sep"></span>
+      <button class="analyze-btn" onclick="analyze()">Analyze</button>
+    </div>
+  </div>
+
+  <div id="summary-bar" style="display:none"></div>
+  <div id="kill-zone-bar" style="display:none"></div>
+
+  <div class="panel">
+    <div style="padding:10px 14px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+      <label style="font-size:11px;color:var(--muted);font-weight:600;text-transform:uppercase">View</label>
+      <div class="metric-pills">
+        <span class="metric-pill active" data-v="chunks" onclick="setView(this)">Chunk Performance</span>
+        <span class="metric-pill" data-v="best" onclick="setView(this)">Best Config</span>
+        <span class="metric-pill" data-v="sizing" onclick="setView(this)">Sizing Comparison</span>
+      </div>
+    </div>
+    <div id="chart" style="padding:0 14px 8px;overflow-x:auto"></div>
+    <div id="table" style="padding:0 14px 14px;overflow-x:auto"></div>
+  </div>
+</div>
+
+<script>
+const _B = document.querySelector('meta[name="base-path"]')?.content || '';
+const API = _B + '/replay/api';
+let data = null, win = 30, sizing = 'both', view = 'chunks';
+
+async function init() {
+  try {
+    const r = await fetch(`${API}/hma-pairs`);
+    const d = await r.json();
+    const s = document.getElementById('hma-pair');
+    s.innerHTML = d.pairs.map(p => `<option value="${p.hmaFast},${p.hmaSlow}">${p.name} (${p.configCount})</option>`).join('');
+  } catch(e) { console.error(e); }
+  const u = new URLSearchParams(location.search);
+  if (u.has('hmaFast') && u.has('hmaSlow')) s.value = `${u.get('hmaFast')},${u.get('hmaSlow')}`;
+  if (u.has('windowSize')) { win = +u.get('windowSize') || 30; document.querySelectorAll('[data-w]').forEach(p => p.classList.toggle('active', p.dataset.w === '' + win)); }
+  if (u.has('maxContracts')) document.getElementById('max-contracts').value = u.get('maxContracts');
+  if (u.has('maxDollarsPerTrade')) document.getElementById('max-dollars').value = u.get('maxDollarsPerTrade');
+  if (u.has('strikeMin')) document.getElementById('strike-min').value = u.get('strikeMin');
+  if (u.has('strikeMax')) document.getElementById('strike-max').value = u.get('strikeMax');
+  if (u.has('activeStart')) document.getElementById('active-start').value = u.get('activeStart');
+  if (u.has('activeEnd')) document.getElementById('active-end').value = u.get('activeEnd');
+  if (u.has('sizingMode')) { sizing = u.get('sizingMode'); document.querySelectorAll('[data-s]').forEach(p => p.classList.toggle('active', p.dataset.s === sizing)); }
+  if (u.has('view')) { view = u.get('view'); document.querySelectorAll('[data-v]').forEach(p => p.classList.toggle('active', p.dataset.v === view)); }
+  analyze();
+}
+
+function setWindow(el) { document.querySelectorAll('[data-w]').forEach(p => p.classList.remove('active')); el.classList.add('active'); win = +el.dataset.w; analyze(); }
+function setSizing(el) { document.querySelectorAll('[data-s]').forEach(p => p.classList.remove('active')); el.classList.add('active'); sizing = el.dataset.s; analyze(); }
+function setView(el) { document.querySelectorAll('[data-v]').forEach(p => p.classList.remove('active')); el.classList.add('active'); view = el.dataset.v; render(); }
+
+async function analyze() {
+  const [hf, hs] = (document.getElementById('hma-pair').value || '3,12').split(',').map(Number);
+  const params = new URLSearchParams({ hmaFast: hf, hmaSlow: hs, windowSize: win });
+  const mc = document.getElementById('max-contracts').value;
+  const md = document.getElementById('max-dollars').value;
+  const sm = document.getElementById('strike-min').value;
+  const sx = document.getElementById('strike-max').value;
+  const as = document.getElementById('active-start').value;
+  const ae = document.getElementById('active-end').value;
+  if (mc) params.set('maxContracts', mc);
+  if (md) params.set('maxDollarsPerTrade', md);
+  if (sm) params.set('strikeMin', sm);
+  if (sx) params.set('strikeMax', sx);
+  if (as) params.set('activeStart', as);
+  if (ae) params.set('activeEnd', ae);
+  params.set('sizingMode', sizing);
+
+  document.getElementById('chart').innerHTML = '<div class="loading">Loading...</div>';
+  document.getElementById('table').innerHTML = '';
+
+  try {
+    const r = await fetch(`${API}/trade-query?${params}`);
+    data = await r.json();
+    history.replaceState(null, '', '?' + params);
+    render();
+  } catch(e) {
+    document.getElementById('chart').innerHTML = `<div class="empty">Error: ${e.message}</div>`;
+  }
+}
+
+const pnl = v => v >= 0 ? 'var(--success)' : 'var(--destructive)';
+const fmtChunk = key => { const p = key.match(/^(\d{2}:\d{2})-(\d{2}:\d{2})$/); return p ? p[1]+'–'+p[2] : key; };
+const fmtChunkShort = key => { const p = key.match(/^(\d{2}:\d{2})-(\d{2}:\d{2})$/); return p ? p[1] : key; };
+
+function render() {
+  if (!data) return;
+  const s = data.summary;
+
+  document.getElementById('summary-bar').style.display = 'block';
+  document.getElementById('summary-bar').innerHTML = `<div style="display:flex;gap:20px;flex-wrap:wrap;padding:10px 14px;background:var(--card);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:8px">
+    <div><div style="color:var(--muted);font-size:10px;text-transform:uppercase">Total P&L</div><div style="font-family:var(--font-mono);font-weight:700;font-size:15px;color:${pnl(s.totalPnl)}">$${s.totalPnl.toFixed(0)}</div></div>
+    <div><div style="color:var(--muted);font-size:10px;text-transform:uppercase">Win Rate</div><div style="font-family:var(--font-mono);font-weight:700;font-size:15px">${(s.winRate*100).toFixed(1)}%</div></div>
+    <div><div style="color:var(--muted);font-size:10px;text-transform:uppercase">Avg/Trade</div><div style="font-family:var(--font-mono);font-weight:700;font-size:15px;color:${pnl(s.avgPnlPerTrade)}">$${s.avgPnlPerTrade.toFixed(1)}</div></div>
+    <div><div style="color:var(--muted);font-size:10px;text-transform:uppercase">Avg/Day</div><div style="font-family:var(--font-mono);font-weight:700;font-size:15px;color:${pnl(s.avgPnlPerDay)}">$${s.avgPnlPerDay.toFixed(1)}</div></div>
+    <div><div style="color:var(--muted);font-size:10px;text-transform:uppercase">Days</div><div style="font-family:var(--font-mono);font-weight:700;font-size:15px">${s.dayCount}</div></div>
+    <div style="font-size:11px;color:var(--muted)">${data.meta.configsMatched} configs · ${data.meta.datesCovered} dates${data.meta.incompleteDataWarning ? ' · <span style="color:var(--warning)">incomplete data</span>' : ''}</div>
+  </div>`;
+
+  const kz = document.getElementById('kill-zone-bar');
+  if (data.killZones.length) {
+    kz.style.display = 'block';
+    kz.innerHTML = `<div style="padding:8px 14px;background:rgba(244,63,94,0.08);border:1px solid rgba(244,63,94,0.25);border-radius:var(--radius);margin-bottom:8px;color:var(--destructive);font-size:12px">Kill Zones: ${data.killZones.join(', ')}</div>`;
+  } else { kz.style.display = 'none'; }
+
+  if (view === 'chunks') renderChunks();
+  else if (view === 'best') renderBest();
+  else renderSizing();
+}
+
+function renderChunks() {
+  const c = data.chunks;
+  if (!c.length) { document.getElementById('chart').innerHTML = '<div class="empty">No trades match filters</div>'; document.getElementById('table').innerHTML = ''; return; }
+  const mx = Math.max(...c.map(x => Math.abs(x.totalPnl)), 1);
+  const kzS = new Set(data.killZones);
+  document.getElementById('chart').innerHTML = c.map(x => {
+    const pct = (x.totalPnl / mx) * 50;
+    const kz = kzS.has(x.chunk);
+    const lo = x.totalTrades < 5;
+    const bg = kz ? 'rgba(244,63,94,0.25)' : x.totalPnl >= 0 ? 'var(--success)' : 'var(--destructive)';
+    return `<div style="display:flex;align-items:center;gap:8px;margin:2px 0">
+      <span style="width:70px;font-size:11px;font-family:var(--font-mono);color:var(--muted);text-align:right;flex-shrink:0">${x.chunkLabel}</span>
+      <div style="flex:1;background:var(--input);border-radius:3px;height:20px;position:relative;overflow:hidden">
+        <div style="position:absolute;${x.totalPnl>=0?'left:50%':'right:50%'};top:0;height:100%;width:${Math.abs(pct)}%;background:${bg};border-radius:3px"></div>
+      </div>
+      <span style="width:90px;font-size:11px;font-family:var(--font-mono);color:${pnl(x.totalPnl)};text-align:right;flex-shrink:0">${kz?'☠ ':''}$${x.totalPnl.toFixed(0)}${lo?' ⚠':''}</span>
+    </div>`;
+  }).join('');
+
+  document.getElementById('table').innerHTML = `<table style="width:100%;border-collapse:collapse;font-size:12px">
+    <tr style="border-bottom:1px solid var(--border-strong)">
+      <th style="text-align:left;padding:6px 8px;color:var(--muted);font-size:10px">Window</th>
+      <th style="text-align:right;padding:6px 8px;color:var(--muted);font-size:10px">Trades</th>
+      <th style="text-align:right;padding:6px 8px;color:var(--muted);font-size:10px">WR%</th>
+      <th style="text-align:right;padding:6px 8px;color:var(--muted);font-size:10px">P&L</th>
+      <th style="text-align:right;padding:6px 8px;color:var(--muted);font-size:10px">Avg/Trade</th>
+      <th style="text-align:right;padding:6px 8px;color:var(--muted);font-size:10px">Avg/Day</th>
+      <th style="text-align:right;padding:6px 8px;color:var(--muted);font-size:10px">Days</th>
+      <th style="text-align:center;padding:6px 8px;color:var(--muted);font-size:10px">Skip P&L</th>
+      <th style="text-align:center;padding:6px 8px;color:var(--muted);font-size:10px">Scale P&L</th>
+    </tr>
+    ${c.map(x => {
+      const kz = kzS.has(x.chunk); const lo = x.totalTrades < 5;
+      return `<tr style="${kz?'background:rgba(244,63,94,0.06)':''};border-bottom:1px solid var(--border)">
+        <td style="padding:5px 8px;font-family:var(--font-mono)">${x.chunkLabel}${kz?' ☠':''}${lo?' ⚠':''}</td>
+        <td style="padding:5px 8px;text-align:right;font-family:var(--font-mono)">${x.totalTrades}</td>
+        <td style="padding:5px 8px;text-align:right;font-family:var(--font-mono)">${(x.winRate*100).toFixed(1)}</td>
+        <td style="padding:5px 8px;text-align:right;font-family:var(--font-mono);color:${pnl(x.totalPnl)}">$${x.totalPnl.toFixed(0)}</td>
+        <td style="padding:5px 8px;text-align:right;font-family:var(--font-mono);color:${pnl(x.avgPnlPerTrade)}">$${x.avgPnlPerTrade.toFixed(1)}</td>
+        <td style="padding:5px 8px;text-align:right;font-family:var(--font-mono);color:${pnl(x.avgPnlPerDay)}">$${x.avgPnlPerDay.toFixed(1)}</td>
+        <td style="padding:5px 8px;text-align:right;font-family:var(--font-mono)">${x.dayCount}</td>
+        <td style="padding:5px 8px;text-align:right;font-family:var(--font-mono);color:${pnl(x.skipView.totalPnl)}">$${x.skipView.totalPnl.toFixed(0)}</td>
+        <td style="padding:5px 8px;text-align:right;font-family:var(--font-mono);color:${pnl(x.scaleView.totalPnl)}">$${x.scaleView.totalPnl.toFixed(0)}</td>
+      </tr>`;
+    }).join('')}
+  </table>`;
+}
+
+function renderBest() {
+  document.getElementById('chart').innerHTML = '';
+  const b = data.bestConfigs;
+  if (!b.length) { document.getElementById('table').innerHTML = '<div class="empty">No configs with 5+ trades</div>'; return; }
+  const byChunk = new Map(); for (const x of b) { if (!byChunk.has(x.chunk)) byChunk.set(x.chunk, []); byChunk.get(x.chunk).push(x); }
+
+  // Count windows won per config
+  const winsByConfig = new Map<string, number>();
+  for (const [, cfgs] of byChunk) { const top = cfgs[0]; winsByConfig.set(top.configId, (winsByConfig.get(top.configId) || 0) + 1); }
+  const configWins = [...winsByConfig.entries()].sort((a, b) => b[1] - a[1]);
+
+  // Config name lookup
+  const nameMap = new Map();
+  for (const x of b) nameMap.set(x.configId, x.name);
+
+  document.getElementById('chart').innerHTML = `<div style="margin-bottom:8px;padding:8px 14px;background:var(--card);border:1px solid var(--border);border-radius:var(--radius)">
+    <div style="font-size:11px;color:var(--muted);margin-bottom:6px;text-transform:uppercase;font-weight:600">Most Windows Won</div>
+    ${configWins.slice(0, 5).map(([id, cnt]) => `<span style="display:inline-flex;align-items:center;gap:4px;background:var(--input);border:1px solid var(--border-strong);border-radius:14px;padding:3px 10px;margin:2px 4px 2px 0;font-size:11px">
+      <span style="color:var(--success);font-weight:700">${nameMap.get(id) || id}</span>
+      <span style="color:var(--muted)">${cnt} windows</span>
+    </span>`).join('')}
+  </div>`;
+
+  document.getElementById('table').innerHTML = `<table style="width:100%;border-collapse:collapse;font-size:12px">
+    <tr style="border-bottom:1px solid var(--border-strong)">
+      <th style="text-align:left;padding:6px 8px;color:var(--muted);font-size:10px">Time Window</th>
+      <th style="text-align:left;padding:6px 8px;color:var(--muted);font-size:10px">Best Config In This Window</th>
+      <th style="text-align:right;padding:6px 8px;color:var(--muted);font-size:10px">Avg P&L/Day</th>
+      <th style="text-align:right;padding:6px 8px;color:var(--muted);font-size:10px">WR%</th>
+      <th style="text-align:right;padding:6px 8px;color:var(--muted);font-size:10px">Trades</th>
+      <th style="text-align:left;padding:6px 8px;color:var(--muted);font-size:10px">Runner-Up</th>
+    </tr>
+    ${[...byChunk.entries()].sort(([a],[b])=>a.localeCompare(b)).map(([chunk, cfgs]) => {
+      const t = cfgs[0]; const r = cfgs[1];
+      return `<tr style="border-bottom:1px solid var(--border)">
+        <td style="padding:5px 8px;font-family:var(--font-mono);font-weight:600">${fmtChunk(chunk)}</td>
+        <td><span style="color:var(--success);font-weight:700">${t.name}</span></td>
+        <td style="padding:5px 8px;text-align:right;font-family:var(--font-mono);color:${pnl(t.avgPnlPerDay)}">$${t.avgPnlPerDay.toFixed(1)}</td>
+        <td style="padding:5px 8px;text-align:right;font-family:var(--font-mono)">${(t.winRate*100).toFixed(1)}%</td>
+        <td style="padding:5px 8px;text-align:right;font-family:var(--font-mono)">${t.tradeCount}</td>
+        <td style="padding:5px 8px;color:var(--muted)">${r?`${r.name} ($${r.avgPnlPerDay.toFixed(1)}/d)`:'—'}</td>
+      </tr>`;
+    }).join('')}
+  </table>`;
+}
+
+function renderSizing() {
+  document.getElementById('chart').innerHTML = '';
+  const c = data.chunks;
+  if (!c.length) { document.getElementById('table').innerHTML = '<div class="empty">No trades</div>'; return; }
+
+  document.getElementById('table').innerHTML = `<table style="width:100%;border-collapse:collapse;font-size:12px">
+    <tr style="border-bottom:1px solid var(--border-strong)">
+      <th style="text-align:left;padding:6px 8px;color:var(--muted);font-size:10px">Window</th>
+      <th style="text-align:right;padding:6px 8px;color:var(--muted);font-size:10px">Skip Trades</th>
+      <th style="text-align:right;padding:6px 8px;color:var(--muted);font-size:10px">Skip P&L</th>
+      <th style="text-align:right;padding:6px 8px;color:var(--muted);font-size:10px">Scale Trades</th>
+      <th style="text-align:right;padding:6px 8px;color:var(--muted);font-size:10px">Scale P&L</th>
+      <th style="text-align:right;padding:6px 8px;color:var(--muted);font-size:10px">Delta</th>
+    </tr>
+    ${c.map(x => {
+      const d = x.skipView.totalPnl - x.scaleView.totalPnl;
+      return `<tr style="border-bottom:1px solid var(--border)">
+        <td style="padding:5px 8px;font-family:var(--font-mono)">${x.chunkLabel}</td>
+        <td style="padding:5px 8px;text-align:right;font-family:var(--font-mono)">${x.skipView.totalTrades}</td>
+        <td style="padding:5px 8px;text-align:right;font-family:var(--font-mono);color:${pnl(x.skipView.totalPnl)}">$${x.skipView.totalPnl.toFixed(0)}</td>
+        <td style="padding:5px 8px;text-align:right;font-family:var(--font-mono)">${x.scaleView.totalTrades}</td>
+        <td style="padding:5px 8px;text-align:right;font-family:var(--font-mono);color:${pnl(x.scaleView.totalPnl)}">$${x.scaleView.totalPnl.toFixed(0)}</td>
+        <td style="padding:5px 8px;text-align:right;font-family:var(--font-mono);color:${d>0?'var(--info)':d<0?'var(--warning)':'var(--muted)'}">${d>0?'+':''}$${d.toFixed(0)}</td>
+      </tr>`;
+    }).join('')}
+  </table>`;
+}
+
+init();
+</script>
+</body>
+</html>
