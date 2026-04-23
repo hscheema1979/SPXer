@@ -214,7 +214,7 @@ describe('E2E: Full stack integration', () => {
       expect(typeof state.tradingPaused).toBe('boolean');
     });
 
-    it.skip('pause → status paused → resume → status not paused', async () => {
+    it.skip('pause → status paused → resume → status not paused [legacy polling agent — races with dashboard test]', async () => {
       // Clean any leftover flag from other tests
       try { fs.unlinkSync(path.join(LOGS_DIR, 'pause-trading.flag')); } catch {}
 

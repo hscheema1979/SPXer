@@ -386,123 +386,118 @@ every 10 seconds:
 - Noisy warnings, repeated status messages
 - API load from continuous polling
 - 10-30 second latency on signal detection
+- In-memory position state lost on crash
 
-### After: Event-Driven Architecture (`event_handler_mvp.ts` — 350 lines, 78% reduction)
+### After: Event-Driven Architecture (`event_handler_mvp.ts` — ~570 lines)
 
 ```
 Data Service (src/index.ts):
-  - Detects HMA crosses on ALL contract bars
-  - Emits WebSocket events: `contract_signal:{hma_fast}_{hma_slow}`
-  - No filtering — agents decide what they want
+  - Detects HMA crosses on contract bars within ±$25 of SPX
+  - Emits offset-based channels: contract_signal:otm5:3_12:call
+  - Channel encodes offset label + HMA pair + side — no filtering needed in handler
 
 Event Handler (event_handler_mvp.ts):
-  - Subscribes to WebSocket channels for HMA pairs used by configs
+  - Subscribes to HMA pair channels (contract_signal:3_12)
   - Loads N configs (single or multiple via AGENT_CONFIG_ID/IDS)
-  - Each config filters signals independently:
-    • HMA pair match (hmaFast/hmaSlow)
-    • Direction match (call/put vs bullish/bearish)
-    • Risk gates (positions, daily loss, cooldown, time window, close cutoff)
-    • Health gate (data freshness)
-    • Max positions gate
-  - Executes entry via openPosition() when signal matches
-  - Tracks basket member per position (for basket configs)
-  - Polls exits every 10s (TP/SL) and P&L every 60s
+  - Delegates entry decisions to PositionOrderManager.evaluate()
+  - Uses checkEntryGates() from core (same as replay)
+  - Persists all state to data/account.db (crash-safe)
+  - Receives real-time fills via AccountStream (Tradier WS)
+
+PositionOrderManager (src/agent/position-order-manager.ts):
+  - evaluate(signal, configId, config) → Decision (open/flip/skip)
+  - openPosition(signal, configId, config, qty, basketMember) → positionId
+  - onOrderEvent(event) — real-time fill detection via AccountStream
+  - reconcileFromBroker(configId, config, brokerPositions) — startup sync
+  - All state persisted to data/account.db (positions, orders, config_state)
+
+AccountStream (src/agent/account-stream.ts):
+  - Connects to wss://ws.tradier.com/v1/accounts/events
+  - Pushes order fills in real-time (replaces polling waitForFill)
+  - Auto-reconnect with exponential backoff
 ```
 
 **Benefits**:
 - No hallucinations — only act on real state changes
 - Multi-config support — one process runs N strategies
 - ~1 second latency vs 10-30 second polling
-- Simpler state management — per-config Map<configId, ConfigState>
-- Clean separation — data service detects, handler executes
+- Crash-safe — all state in SQLite, survives PM2 restarts
+- Same entry gates as replay (checkEntryGates from core)
+- Real-time fills via Tradier account stream (no polling)
 
-### Per-Config State Tracking
+### Database Architecture
 
-Each config maintains independent state:
+Three separate databases, isolated by concern:
 
-```typescript
-interface ConfigState {
-  config: Config;
-  positions: Map<string, OpenPosition>;
-  lastEntryTs: number;
-  dailyPnl: number;
-  tradesCompleted: number;
-  sessionSignalCount: number;
-  basketMembers: Map<string, string>;  // positionId → basketMemberId
-}
-```
+| Database | Purpose | Tables |
+|----------|---------|--------|
+| `data/spxer.db` | Replay configs, runs, results, leaderboard | `replay_configs`, `replay_runs`, `replay_results`, `replay_jobs` |
+| `data/account.db` | Live trading state (positions, orders, config state) | `positions`, `orders`, `config_state` |
+| `data/live/YYYY-MM-DD.db` | Bar/indicator/signal data (sacred, never mixed) | `bars`, `contracts` |
 
-**Basket member tracking**: For basket configs (e.g., "spx-hma3x12-itm5-basket-3strike"), each position is tagged with which basket member (strike) it belongs to: `strike-7090`, `strike-7095`, `strike-7100`, etc. Non-basket configs use `"default"`.
+**Account DB schema** (`data/account.db`):
+- `positions`: id, config_id, symbol, side, strike, expiry, entry_price, quantity, stop_loss, take_profit, high_water, status (OPENING/OPEN/CLOSING/CLOSED/ORPHANED), opened_at, closed_at, close_reason, close_price, basket_member, reentry_depth
+- `orders`: id, position_id, tradier_id, bracket_id, tp_leg_id, sl_leg_id, side, order_type, status, fill_price, quantity, error, submitted_at, filled_at
+- `config_state`: config_id, daily_pnl, trades_completed, last_entry_ts, session_signal_count
 
-### Order ID Tracking
-
-Both internal and Tradier order IDs are tracked:
-
-- **Internal**: `position.id` (UUID from `randomUUID()`)
-- **Tradier IDs**: `tradierOrderId`, `bracketOrderId`, `tpLegId`, `slLegId`
-
-This enables reconciliation and debugging via `scripts/show-basket-positions.ts`.
-
-### WebSocket Channel Subscription
-
-Event handler subscribes only to HMA pair channels used by loaded configs:
+### Position Lifecycle
 
 ```
-contract_signal:hma_3_12
-contract_signal:hma_5_19
-...
+OPENING → (entry fill via AccountStream) → OPEN
+OPEN → (TP/SL/exit fill) → CLOSED
+OPENING → (order rejected) → CLOSED
+OPEN → (not found at broker on startup) → ORPHANED
 ```
 
-Message format:
-```json
-{
-  "type": "contract_signal",
-  "channel": "hma_3_12",
-  "data": {
-    "symbol": "SPXW260423P07090000",
-    "strike": 7090,
-    "expiry": "2026-04-23",
-    "side": "put",
-    "direction": "bearish",
-    "price": 13.50,
-    "hmaFastPeriod": 3,
-    "hmaSlowPeriod": 12,
-    "ts": 1713813600000
-  }
-}
+### Offset-Based Signal Channels
+
+The data service emits signals on channels that encode the strike offset, HMA pair, and side:
+
+```
+Channel format: {offsetLabel}:{hmaFast}_{hmaSlow}:{side}
+Examples:
+  otm5:3_12:call    — $25 OTM call, HMA(3)×HMA(12)
+  atm:5_19:put      — at-the-money put, HMA(5)×HMA(19)
+  itm3:3_12:call    — $15 ITM call, HMA(3)×HMA(12)
 ```
 
-### Implementation Status
+Offset label computation: `round((strike - spxPrice) / STRIKE_INTERVAL)` where positive = OTM, negative = ITM.
 
-| Component | Status |
-|-----------|--------|
-| Data service `contract_signal` emission | ✅ DONE |
-| Event handler MVP | ✅ DONE (`event_handler_mvp.ts`) |
-| Multi-config support | ✅ DONE |
-| Per-config position tracking | ✅ DONE |
-| Basket member tracking | ✅ DONE |
-| Risk gates (all) | ✅ DONE |
-| Exit polling (TP/SL) | ⏳ TODO — implement price fetch + evaluateExit() |
-| Strike filtering | ⏳ TODO — implement selectStrike() with candidates |
-| ecosystem.config.js | ⏳ TODO — add event handler process |
+The WS server supports both exact match (`contract_signal:otm5:3_12:call`) and HMA-pair-only match (`contract_signal:3_12`) for backward compatibility.
 
-**See `EVENT_HANDLER_E2E_SUCCESS.md`** for complete validation report with live trade execution proof.
+### Decision Flow
 
-### Comparison: Polling vs Event-Driven
+```
+Signal received on contract_signal:{pair}
+  → Health gate (data freshness)
+  → HMA pair match (config vs signal)
+  → PositionOrderManager.evaluate(signal, configId, config):
+      1. Wrong day? (expiry !== todayET) → skip
+      2. Transition in progress? (OPENING/CLOSING) → skip
+      3. Same direction open? → skip
+      4. Opposite direction open? → flip
+      5. Max positions? → skip
+      6. checkEntryGates() from core (risk, time window, cooldown) → skip/pass
+      7. All clear → open
+  → If open: execute via trade-executor + persist to account.db
+  → If flip: close existing via trade-executor, then open new
+```
 
-| Feature | Polling (`spx_agent.ts`) | Event-Driven (`event_handler_mvp.ts`) |
-|---------|------------------------|--------------------------------------|
-| Latency | 10-30 seconds | ~1 second |
-| Code size | 1585 lines | 350 lines (-78%) |
-| Signals | Polls contract bars | Reacts to WebSocket events |
-| Multi-config | One process per config | N configs in one process |
-| Hallucinations | Yes (transient states) | No (real state changes only) |
-| Signal detection | `detectSignals()` per poll | `detectSignals()` once in data service |
-| Entry logic | `evaluateEntry()` | `evaluateEntry()` (same) |
-| Exit logic | `evaluateExit()` | `evaluateExit()` (same) |
-| Risk gates | `isRiskBlocked()` | `isRiskBlocked()` (same) |
+### Startup Reconciliation
 
-**Key Point**: The same config produces identical signal detection and trade logic in both architectures. Test in replay → deploy to event handler with confidence.
+On boot, `reconcileFromBroker()` syncs broker state with account.db:
+1. Broker has open position not in DB → adopt as OPENING
+2. DB has OPEN position not at broker → mark ORPHANED
+3. Both agree → no-op
+
+### E2E Testing
+
+Integration tests use real infrastructure — no mocks:
+- **Data flow**: ThetaData WS stream → data service → offset-based signals
+- **Execution**: Tradier paper account (AGENT_PAPER=true)
+- **Verification**: account.db state + broker positions match
+
+Existing E2E test: `tests/e2e/integration.test.ts` covers the full pipeline.
 
 ## Scanning & Judgment Agents
 

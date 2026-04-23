@@ -246,6 +246,93 @@ function runMigrations(): void {
   }
 }
 
+let accountDb: DB | null = null;
+const ACCOUNT_DB_PATH = path.resolve('data', 'account.db');
+
+export function initAccountDb(dbPath?: string): void {
+  const p = dbPath || ACCOUNT_DB_PATH;
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  accountDb = new Database(p);
+  accountDb.pragma('journal_mode = WAL');
+  accountDb.pragma('foreign_keys = ON');
+  accountDb.pragma('wal_autocheckpoint = 1000');
+  accountDb.pragma('synchronous = NORMAL');
+  accountDb.pragma('busy_timeout = 5000');
+  accountDb.pragma('cache_size = -16000');
+  runAccountMigrations();
+}
+
+export function getAccountDb(): DB {
+  if (!accountDb) throw new Error('Account DB not initialized — call initAccountDb() first');
+  return accountDb;
+}
+
+export function closeAccountDb(): void {
+  if (accountDb) { accountDb.close(); accountDb = null; }
+}
+
+function runAccountMigrations(): void {
+  if (!accountDb) return;
+  accountDb.exec(`
+    CREATE TABLE IF NOT EXISTS positions (
+      id              TEXT PRIMARY KEY,
+      config_id       TEXT NOT NULL,
+      symbol          TEXT NOT NULL,
+      side            TEXT NOT NULL,
+      strike          REAL NOT NULL,
+      expiry          TEXT NOT NULL,
+      entry_price     REAL NOT NULL DEFAULT 0,
+      quantity        INTEGER NOT NULL DEFAULT 0,
+      stop_loss       REAL NOT NULL DEFAULT 0,
+      take_profit     REAL NOT NULL DEFAULT 0,
+      high_water      REAL NOT NULL DEFAULT 0,
+      status          TEXT NOT NULL DEFAULT 'OPENING',
+      opened_at       INTEGER NOT NULL,
+      closed_at       INTEGER,
+      close_reason    TEXT,
+      close_price     REAL,
+      basket_member   TEXT,
+      reentry_depth   INTEGER NOT NULL DEFAULT 0,
+      created_at      INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+    CREATE INDEX IF NOT EXISTS idx_positions_config_status
+      ON positions(config_id, status);
+    CREATE INDEX IF NOT EXISTS idx_positions_status
+      ON positions(status);
+
+    CREATE TABLE IF NOT EXISTS orders (
+      id              TEXT PRIMARY KEY,
+      position_id     TEXT NOT NULL,
+      tradier_id      INTEGER,
+      bracket_id      INTEGER,
+      tp_leg_id       INTEGER,
+      sl_leg_id       INTEGER,
+      side            TEXT NOT NULL,
+      order_type      TEXT NOT NULL,
+      status          TEXT NOT NULL DEFAULT 'PENDING',
+      fill_price      REAL,
+      quantity        INTEGER NOT NULL DEFAULT 0,
+      error           TEXT,
+      submitted_at    INTEGER NOT NULL,
+      filled_at       INTEGER,
+      created_at      INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+    CREATE INDEX IF NOT EXISTS idx_orders_position_id
+      ON orders(position_id);
+    CREATE INDEX IF NOT EXISTS idx_orders_tradier_id
+      ON orders(tradier_id);
+
+    CREATE TABLE IF NOT EXISTS config_state (
+      config_id       TEXT PRIMARY KEY,
+      daily_pnl       REAL NOT NULL DEFAULT 0,
+      trades_completed INTEGER NOT NULL DEFAULT 0,
+      last_entry_ts   INTEGER NOT NULL DEFAULT 0,
+      session_signal_count INTEGER NOT NULL DEFAULT 0,
+      updated_at      INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+  `);
+}
+
 // Replay tables (replay_configs, replay_runs, replay_results, replay_jobs,
 // leaderboard_reports, optimizer_results) are managed by src/storage/replay-db.ts
 // which provides migrations and connection helpers. All tables live in spxer.db.

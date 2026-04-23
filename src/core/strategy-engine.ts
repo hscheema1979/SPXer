@@ -336,10 +336,20 @@ export function isInActiveWindow(ts: number, config: Config): boolean {
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
-/**
- * Create a fresh initial state with no positions and no HMA history.
- * @deprecated Use createInitialSignalState() + caller-owned trade state.
- */
+/** Create a fresh signal state with no HMA history. */
+export function createInitialSignalState(): SignalState {
+  return {
+    directionCross: null,
+    prevDirectionHmaFast: null,
+    prevDirectionHmaSlow: null,
+    lastDirectionBarTs: null,
+    exitCross: null,
+    prevExitHmaFast: null,
+    prevExitHmaSlow: null,
+    lastExitBarTs: null,
+  };
+}
+
 export function createInitialState(): StrategyState {
   return {
     positions: new Map(),
@@ -354,20 +364,6 @@ export function createInitialState(): StrategyState {
     lastEntryTs: 0,
     dailyPnl: 0,
     tradesCompleted: 0,
-  };
-}
-
-/** Create a fresh signal state with no HMA history. */
-export function createInitialSignalState(): SignalState {
-  return {
-    directionCross: null,
-    prevDirectionHmaFast: null,
-    prevDirectionHmaSlow: null,
-    lastDirectionBarTs: null,
-    exitCross: null,
-    prevExitHmaFast: null,
-    prevExitHmaSlow: null,
-    lastExitBarTs: null,
   };
 }
 

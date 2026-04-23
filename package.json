@@ -10,6 +10,8 @@
     "dev": "tsx src/index.ts",
     "agent": "tsx spx_agent.ts",
     "agent:live": "AGENT_PAPER=false tsx spx_agent.ts",
+    "handler": "tsx event_handler_mvp.ts",
+    "handler:live": "AGENT_PAPER=false tsx event_handler_mvp.ts",
     "build": "tsc",
     "start": "node dist/index.js",
     "test": "vitest run",

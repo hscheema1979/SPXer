@@ -57,11 +57,22 @@ module.exports = {
       restart_delay: 10000,
       kill_timeout: 5000,
       max_memory_restart: '512M',
-      env: {
+      env: {    AGENT_PAPER: 'true',
+    AGENT_PAPER: 'true',
+    AGENT_PAPER: 'true',
+    AGENT_PAPER: 'true',
+    AGENT_PAPER: 'true',
+    AGENT_PAPER: 'true',
+    AGENT_PAPER: 'true',
+    AGENT_PAPER: 'true',
+    AGENT_PAPER: 'true',
+    AGENT_PAPER: 'true',
+    AGENT_PAPER: 'true',
+
         NODE_ENV: 'production',
-        AGENT_PAPER: 'false',
-        // LIVE: HMA3x12, ITM5, TP10x, SL20%, $5K per trade
-        AGENT_CONFIG_ID: 'spx-hma3x12-itm5-tp10x-sl20-3m-25c-$5000',
+        AGENT_PAPER: 'false',  // Set to 'true' for paper mode
+        // LIVE: HMA3x12, ITM5, TP30x, SL20%, $5K per trade, 10:00-16:00 ET
+        AGENT_CONFIG_ID: 'spx-hma3x12-itm5-tp30x-sl20-3m-25c-$5000',
         // For multiple configs: AGENT_CONFIG_IDS: 'config1,config2,config3'
       },
       log_date_format: 'YYYY-MM-DD HH:mm:ss',
@@ -96,30 +107,17 @@ module.exports = {
     //   merge_logs: true,
     // },
 
-    // ── Watchdog — DISABLED ────────────────────────────────────────
-    // Removed 2026-04-08: watchdog was cancelling OCO bracket orders
-    // and killing agents on normal data staleness, leaving positions
-    // unprotected. Caused ~$12K in avoidable losses over 2 days.
-    // Account-monitor also removed — was interfering with successful trades.
-    // If re-enabled, the rewritten version in src/watchdog/index.ts
-    // never cancels OCO orders and uses 5-min restart thresholds.
-    // {
-    //   name: 'spxer-watchdog',
-    //   script: 'npx',
-    //   args: 'tsx src/watchdog/index.ts',
-    //   cwd: '/home/ubuntu/SPXer',
-    //   watch: false,
-    //   autorestart: false,
-    //   ...
-    // },
-
     // ── Live Dashboard — REMOVED 2026-04-20 ─────────────────────────
     // Standalone dashboard on port 3602 was never integrated with replay/leaderboard.
     // Live view is now built into the replay viewer (port 3601) at /replay/#live.
     // src/dashboard/ directory retained for potential devops monitoring reuse.
 
+    // ── Watchdog — REMOVED 2026-04-08 ───────────────────────────────
+    // Was cancelling OCO bracket orders and killing agents on normal data staleness,
+    // leaving positions unprotected. Caused ~$12K in avoidable losses over 2 days.
+
     // ── Account Monitor — REMOVED 2026-04-18 ───────────────────────
-    // ── Schwaber — REMOVED 2026-04-18 ─────────────────────────────
+    // Was interfering with successful trades.
 
     // ── Old SPX Live Agent (margin account 6YA51425) — DISABLED ────────
     // Replaced by event-handler which supports basket configs natively.

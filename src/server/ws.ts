@@ -48,6 +48,19 @@ export function broadcast(message: object): void {
       ws.send(data);
     } else if (msg.type === 'hma_cross_signal' && (subs.has('signals') || subs.has('spx'))) {
       ws.send(data);
+    } else if (msg.type === 'contract_signal') {
+      const fullChannel = `contract_signal:${msg.channel}`;
+      if (subs.has(fullChannel)) {
+        ws.send(data);
+      } else {
+        const parts = String(msg.channel).split(':');
+        if (parts.length === 3) {
+          const pairOnly = `contract_signal:${parts[1]}`;
+          if (subs.has(pairOnly)) {
+            ws.send(data);
+          }
+        }
+      }
     } else if (['market_context', 'heartbeat', 'service_shutdown'].includes(msg.type)) {
       ws.send(data); // broadcast to all
     }

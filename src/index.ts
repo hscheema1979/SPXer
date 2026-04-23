@@ -577,11 +577,9 @@ function detectHmaCrossSignal(bar: Bar): void {
 /**
  * Detect HMA crosses on option contract bars and emit channelized events.
  *
- * Emits signals to channels like "contract_signal:hma_3_12" so agents can
- * subscribe only to the HMA pairs their config uses.
- *
- * Only broadcasts signals for strikes within ±SIGNAL_STRIKE_BAND of SPX
- * to reduce noise (we typically trade ITM5/ATM/OTM5).
+ * Emits signals to offset-based channels like "otm5:3_12:call" so agents
+ * subscribe only to the exact offset/HMA pair/side their config targets.
+ * No filtering needed in the event handler.
  */
 function detectContractSignals(bar: Bar): void {
   if (!activeHmaSignalEnabled) return;
@@ -598,9 +596,14 @@ function detectContractSignals(bar: Bar): void {
   const { strike, expiry, isCall } = parsed;
   const side = isCall ? 'call' : 'put';
 
-  // Filter by strike distance from SPX (only trade near-the-money)
+  const today = todayET();
+  if (expiry !== today) return;
+
   const strikeDistance = Math.abs(strike - lastSpxPrice);
   if (strikeDistance > SIGNAL_STRIKE_BAND) return;
+
+  const offsetRaw = Math.round((strike - lastSpxPrice) / STRIKE_INTERVAL);
+  const offsetLabel = offsetRaw === 0 ? 'atm' : offsetRaw > 0 ? `otm${offsetRaw}` : `itm${-offsetRaw}`;
 
   // Check all HMA pairs for this bar
   for (const [hmaFastPeriod, hmaSlowPeriod] of HMA_PAIRS) {
@@ -619,10 +622,10 @@ function detectContractSignals(bar: Bar): void {
     const isFastAbove = hmaFast > hmaSlow;
 
     if (!wasFastAbove && isFastAbove) {
-      // Bullish cross
+      const hmaChannel = `${offsetLabel}:${hmaFastPeriod}_${hmaSlowPeriod}:${side}`;
       const signal = {
         type: 'contract_signal',
-        channel: `hma_${hmaFastPeriod}_${hmaSlowPeriod}`,
+        channel: hmaChannel,
         data: {
           symbol,
           strike,
@@ -635,15 +638,16 @@ function detectContractSignals(bar: Bar): void {
           hmaSlow,
           price: bar.close,
           timestamp: bar.ts * 1000,
+          offsetLabel,
         },
       };
-      console.log(`[signal] CONTRACT BULLISH HMA(${hmaFastPeriod})×HMA(${hmaSlowPeriod}) ${symbol} @ ${bar.close.toFixed(2)} (strike=$${strike}, ${side})`);
+      console.log(`[signal] CONTRACT BULLISH HMA(${hmaFastPeriod})×HMA(${hmaSlowPeriod}) ${symbol} @ ${bar.close.toFixed(2)} (${offsetLabel}, ${side})`);
       broadcast(signal);
     } else if (wasFastAbove && !isFastAbove) {
-      // Bearish cross
+      const hmaChannel = `${offsetLabel}:${hmaFastPeriod}_${hmaSlowPeriod}:${side}`;
       const signal = {
         type: 'contract_signal',
-        channel: `hma_${hmaFastPeriod}_${hmaSlowPeriod}`,
+        channel: hmaChannel,
         data: {
           symbol,
           strike,
@@ -656,9 +660,10 @@ function detectContractSignals(bar: Bar): void {
           hmaSlow,
           price: bar.close,
           timestamp: bar.ts * 1000,
+          offsetLabel,
         },
       };
-      console.log(`[signal] CONTRACT BEARISH HMA(${hmaFastPeriod})×HMA(${hmaSlowPeriod}) ${symbol} @ ${bar.close.toFixed(2)} (strike=$${strike}, ${side})`);
+      console.log(`[signal] CONTRACT BEARISH HMA(${hmaFastPeriod})×HMA(${hmaSlowPeriod}) ${symbol} @ ${bar.close.toFixed(2)} (${offsetLabel}, ${side})`);
       broadcast(signal);
     }
   }

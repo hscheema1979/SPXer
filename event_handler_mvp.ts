@@ -1,30 +1,21 @@
 #!/usr/bin/env tsx
-/**
- * Event-Driven Trading Handler MVP
- *
- * Reacts to WebSocket contract signals and executes trades per config.
- * No polling loop — pure event-driven architecture.
- *
- * Usage:
- *   AGENT_CONFIG_IDS=runner,scalp AGENT_PAPER=true npx tsx event_handler_mvp.ts
- */
 
 import * as dotenv from 'dotenv';
 dotenv.config();
 
-// @ts-ignore - WebSocket default import works with tsx
 import WebSocket from 'ws';
 import { createStore } from './src/replay/store';
 import { openPosition, closePosition } from './src/agent/trade-executor';
 import { fetchDailyPnl } from './src/agent/broker-pnl';
-import { isRiskBlocked, type RiskState } from './src/core/risk-guard';
 import { computeQty } from './src/core/position-sizer';
-import { evaluateExit, type ExitDecision } from './src/core/trade-manager';
-import { selectStrike } from './src/core/strike-selector';
+import { evaluateExit } from './src/core/trade-manager';
 import { HealthGate } from './src/agent/health-gate';
 import { nowET, todayET, etTimeToUnixTs } from './src/utils/et-time';
 import type { Config } from './src/config/types';
 import type { OpenPosition } from './src/agent/types';
+import { PositionOrderManager, type EnrichedSignal } from './src/agent/position-order-manager';
+import { AccountStream } from './src/agent/account-stream';
+import { initAccountDb, closeAccountDb } from './src/storage/db';
 import {
   initHandlerState,
   setConnected,
@@ -49,7 +40,6 @@ const AGENT_PAPER = process.env.AGENT_PAPER === 'true';
 const WS_URL = process.env.SPXER_WS_URL || 'ws://localhost:3600/ws';
 const AGENT_TAG = process.env.AGENT_TAG || 'event-handler-mvp';
 
-// Execution target (same for all configs)
 const EXECUTION: Config['execution'] = {
   symbol: process.env.AGENT_SYMBOL || 'SPX',
   optionPrefix: process.env.AGENT_OPTION_PREFIX || 'SPXW',
@@ -63,19 +53,13 @@ const EXECUTION: Config['execution'] = {
 
 interface ConfigState {
   config: Config;
-  positions: Map<string, OpenPosition>;
-  lastEntryTs: number;
   dailyPnl: number;
-  tradesCompleted: number;
-  sessionSignalCount: number;
-  // Basket member tracking (for configs that trade multiple strikes)
-  basketMembers: Map<string, string>;  // positionId → basketMemberId (e.g., "itm5-1", "itm5-2", "itm5-3")
 }
 
 // ── Global State ─────────────────────────────────────────────────────────────
 
 const configs = new Map<string, ConfigState>();
-const pendingEntries = new Set<string>();  // Track in-flight position opens
+let manager: PositionOrderManager;
 let ws: WebSocket | null = null;
 let healthGate = new HealthGate();
 let spxPrice = 0;
@@ -83,7 +67,7 @@ let running = true;
 const perConfigPaper = new Map<string, boolean>();
 
 function syncConfigPositions(configId: string, state: ConfigState): void {
-  const positions = Array.from(state.positions.values()).map(p => ({
+  const positions = manager.getOpenPositions(configId).map(p => ({
     id: p.id,
     symbol: p.symbol,
     side: p.side,
@@ -93,52 +77,22 @@ function syncConfigPositions(configId: string, state: ConfigState): void {
     stopLoss: p.stopLoss,
     takeProfit: p.takeProfit,
     openedAt: p.openedAt,
-    basketMember: state.basketMembers.get(p.id) || undefined,
+    basketMember: p.basketMember,
   }));
+  const dbState = manager.getConfigState(configId);
   updateConfigState(configId, {
-    positionsOpen: state.positions.size,
-    tradesCompleted: state.tradesCompleted,
-    sessionSignalCount: state.sessionSignalCount,
-    lastEntryTs: state.lastEntryTs > 0 ? state.lastEntryTs : null,
-    cooldownRemainingSec: Math.max(0, (state.config.judges.entryCooldownSec || 0) - (Date.now() / 1000 - state.lastEntryTs)),
+    positionsOpen: positions.length,
+    tradesCompleted: dbState.tradesCompleted,
+    sessionSignalCount: dbState.sessionSignalCount,
+    lastEntryTs: dbState.lastEntryTs > 0 ? dbState.lastEntryTs : null,
+    cooldownRemainingSec: Math.max(0, (state.config.judges.entryCooldownSec || 0) - (Date.now() / 1000 - dbState.lastEntryTs)),
     positions,
   });
 }
 
-/**
- * Compute the close cutoff timestamp for today (entries blocked after this time).
- */
 function computeCloseCutoff(config: Config): number {
   const cutoffTime = config.risk.cutoffTimeET || '16:00';
   return etTimeToUnixTs(cutoffTime);
-}
-
-/**
- * Determine which basket member a position belongs to.
- * For non-basket configs, returns "default".
- * For basket configs, determines membership based on strike position relative to SPX.
- */
-function getBasketMemberId(signal: any, state: ConfigState): string {
-  const cfg = state.config;
-  const targetOtm = cfg.signals.targetOtmDistance ?? 0;
-
-  // Check if this is a basket config (name contains "basket")
-  if (!cfg.id.includes('basket')) {
-    return 'default';
-  }
-
-  // For basket configs, member is determined by the strike's moneyness
-  // Calculate actual OTM distance from SPX price
-  const spxRounded = Math.round(spxPrice / 5) * 5;  // Round to nearest 5
-  const actualOtm = signal.side === 'call'
-    ? (signal.strike - spxRounded) / 5  // Calls: positive = OTM
-    : (spxRounded - signal.strike) / 5; // Puts: positive = OTM
-
-  // Basket members: itm5-1, itm5-2, itm5-3 (sorted by strike)
-  // Or: strike-7090, strike-7095, strike-7100 (actual strikes)
-
-  // Use strike as member ID for clarity
-  return `strike-${signal.strike}`;
 }
 
 // ── Config Loading ───────────────────────────────────────────────────────────
@@ -155,12 +109,7 @@ async function loadConfigs(): Promise<void> {
 
     configs.set(configId, {
       config: cfg,
-      positions: new Map(),
-      lastEntryTs: 0,
       dailyPnl: 0,
-      tradesCompleted: 0,
-      sessionSignalCount: 0,
-      basketMembers: new Map(),
     });
 
     console.log(`[handler] Loaded config '${configId}':`);
@@ -180,49 +129,28 @@ async function loadConfigs(): Promise<void> {
 function subscribeToChannels(): void {
   if (!ws) return;
 
-  const subscribedPairs = new Set<string>();
+  const subscribedChannels = new Set<string>();
 
-  // Subscribe to HMA pairs used by configs
   for (const state of configs.values()) {
     const cfg = state.config;
-    const pair = `hma_${cfg.signals.hmaCrossFast}_${cfg.signals.hmaCrossSlow}`;
-    subscribedPairs.add(pair);
+    const fast = cfg.signals.hmaCrossFast;
+    const slow = cfg.signals.hmaCrossSlow;
+    const pair = `${fast}_${slow}`;
+
+    const channel = `contract_signal:${pair}`;
+    subscribedChannels.add(channel);
 
     ws.send(JSON.stringify({
       action: 'subscribe',
-      channel: `contract_signal:${pair}`
+      channel,
     }));
   }
 
-  console.log(`[handler] Subscribed to ${subscribedPairs.size} HMA pair channels:`, Array.from(subscribedPairs));
-  setSubscriptions(Array.from(subscribedPairs));
+  console.log(`[handler] Subscribed to ${subscribedChannels.size} HMA pair channels`);
+  setSubscriptions(Array.from(subscribedChannels));
 
   ws.send(JSON.stringify({ action: 'subscribe', channel: 'spx_bar' }));
   ws.send(JSON.stringify({ action: 'subscribe', channel: 'hma_cross_signal' }));
-}
-
-// ── Signal Filtering ─────────────────────────────────────────────────────────
-
-function signalMatchesConfig(signal: any, state: ConfigState): boolean {
-  const cfg = state.config;
-
-  // HMA pair filter
-  if (cfg.signals.hmaCrossFast !== signal.hmaFastPeriod) {
-    return false;
-  }
-  if (cfg.signals.hmaCrossSlow !== signal.hmaSlowPeriod) {
-    return false;
-  }
-
-  // Direction filter: call/put must match signal direction
-  if (signal.direction === 'bullish' && signal.side !== 'call') {
-    return false;
-  }
-  if (signal.direction === 'bearish' && signal.side !== 'put') {
-    return false;
-  }
-
-  return true;
 }
 
 // ── Contract Signal Handler (Entry) ───────────────────────────────────────────
@@ -231,12 +159,22 @@ async function handleContractSignal(signal: any): Promise<void> {
   const now = Date.now() / 1000;
   const routingDecisions: RoutingDecision['decisions'] = [];
 
-  // Process each config independently
-  const configStatesArray = Array.from(configs.entries());
-  for (const [configId, state] of configStatesArray) {
+  const enriched: EnrichedSignal = {
+    symbol: signal.symbol,
+    strike: signal.strike,
+    expiry: signal.expiry,
+    side: signal.side,
+    direction: signal.direction,
+    price: signal.price,
+    hmaFastPeriod: signal.hmaFastPeriod,
+    hmaSlowPeriod: signal.hmaSlowPeriod,
+    channel: signal.channel || `${signal.hmaFastPeriod}_${signal.hmaSlowPeriod}`,
+    receivedTs: now,
+  };
+
+  for (const [configId, state] of configs) {
     const cfg = state.config;
     const handlerState = readHandlerState();
-    const configPaper = handlerState?.configs[configId]?.paper ?? AGENT_PAPER;
     const configEnabled = handlerState?.configs[configId]?.enabled ?? true;
 
     if (!configEnabled) {
@@ -244,110 +182,50 @@ async function handleContractSignal(signal: any): Promise<void> {
       continue;
     }
 
-    if (!signalMatchesConfig(signal, state)) {
+    if (cfg.signals.hmaCrossFast !== signal.hmaFastPeriod || cfg.signals.hmaCrossSlow !== signal.hmaSlowPeriod) {
       routingDecisions.push({ configId, action: 'skipped', reason: 'hma_mismatch' });
-      continue;
-    }
-
-    const riskState: RiskState = {
-      openPositions: state.positions.size,
-      tradesCompleted: state.tradesCompleted,
-      dailyPnl: state.dailyPnl,
-      currentTs: now,
-      closeCutoffTs: computeCloseCutoff(cfg),
-      lastEscalationTs: state.lastEntryTs,
-      sessionSignalCount: state.sessionSignalCount,
-    };
-
-    const riskBlocked = isRiskBlocked(riskState, cfg);
-    if (riskBlocked.blocked) {
-      console.log(`[handler] [${configId}] Risk blocked: ${riskBlocked.reason}`);
-      routingDecisions.push({ configId, action: 'skipped', reason: riskBlocked.reason || 'risk_block' });
       continue;
     }
 
     const health = await healthGate.check();
     if (!health.healthy) {
-      console.log(`[handler] [${configId}] Health blocked: ${health.reason}`);
       routingDecisions.push({ configId, action: 'skipped', reason: 'health_block', details: health.reason });
       continue;
     }
 
-    const nowEt = nowET();
-    const [startH, startM] = cfg.timeWindows.activeStart.split(':').map(Number);
-    const [endH, endM] = cfg.timeWindows.activeEnd.split(':').map(Number);
-    const currentEtMin = nowEt.h * 60 + nowEt.m;
-    const startMin = startH * 60 + startM;
-    const endMin = endH * 60 + endM;
+    const decision = manager.evaluate(enriched, configId, cfg);
 
-    if (currentEtMin < startMin || currentEtMin >= endMin) {
-      console.log(`[handler] [${configId}] Time blocked: outside ${cfg.timeWindows.activeStart}-${cfg.timeWindows.activeEnd}`);
-      routingDecisions.push({ configId, action: 'skipped', reason: 'time_window', details: `${cfg.timeWindows.activeStart}-${cfg.timeWindows.activeEnd}` });
+    if (decision.action === 'skip') {
+      routingDecisions.push({ configId, action: 'skipped', reason: decision.reason });
       continue;
     }
 
-    const maxPositions = cfg.position.maxPositionsOpen ?? 1;
-    const totalPositions = state.positions.size + pendingEntries.size;
-    if (totalPositions >= maxPositions) {
-      console.log(`[handler] [${configId}] Max positions gate: ${totalPositions}/${maxPositions} (open=${state.positions.size}, pending=${pendingEntries.size})`);
-      routingDecisions.push({ configId, action: 'skipped', reason: 'max_positions', details: `${totalPositions}/${maxPositions}` });
-      continue;
+    if (decision.action === 'flip') {
+      const existingPos = decision.position;
+      try {
+        const openPos: OpenPosition = {
+          id: existingPos.id,
+          symbol: existingPos.symbol,
+          side: existingPos.side,
+          strike: existingPos.strike,
+          entryPrice: existingPos.entryPrice,
+          quantity: existingPos.quantity,
+          stopLoss: existingPos.stopLoss,
+          takeProfit: existingPos.takeProfit,
+          highWaterPrice: existingPos.highWater,
+          openedAt: existingPos.openedAt * 1000,
+          bracketOrderId: null,
+        };
+        await closePosition(openPos, 'signal_reversal', existingPos.entryPrice, perConfigPaper.get(configId) ?? AGENT_PAPER, EXECUTION);
+        console.log(`[handler] [${configId}] Flipped ${existingPos.symbol} (${existingPos.side} → ${signal.side})`);
+      } catch (e: any) {
+        console.error(`[handler] [${configId}] Flip close failed: ${e.message}`);
+        routingDecisions.push({ configId, action: 'skipped', reason: 'flip_error', details: e.message });
+        continue;
+      }
     }
 
-    // ── Strike Selection: validate signal strike matches config requirements ─────
-    try {
-      const contractsUrl = `${WS_URL.replace('ws://', 'http://')}/contracts/active`;
-      const contractsResp = await fetch(contractsUrl);
-      if (!contractsResp.ok) {
-        console.error(`[handler] [${configId}] Failed to fetch contracts: ${contractsResp.status}`);
-        continue;
-      }
-      const activeContracts = await contractsResp.json();
-
-      // Build candidates from active contracts
-      const candidates = activeContracts
-        .filter((c: any) => {
-          const expiryMatch = c.symbol.includes(signal.expiry);
-          const sideMatch = signal.side === 'call'
-            ? c.symbol.includes('C')
-            : c.symbol.includes('P');
-          return expiryMatch && sideMatch && c.last > 0;
-        })
-        .map((c: any) => ({
-          symbol: c.symbol,
-          side: signal.side as 'call' | 'put',
-          strike: c.strike,
-          price: c.last,
-          volume: 1, // Not available in active endpoint, use default
-        }));
-
-      if (candidates.length === 0) {
-        console.log(`[handler] [${configId}] No candidates for ${signal.side} ${signal.expiry}`);
-        continue;
-      }
-
-      const strikeResult = selectStrike(candidates, signal.direction, spxPrice, cfg);
-      if (!strikeResult) {
-        console.log(`[handler] [${configId}] No suitable strike found`);
-        continue;
-      }
-
-      // Only enter if signal strike matches selected strike
-      if (strikeResult.candidate.strike !== signal.strike) {
-        console.log(`[handler] [${configId}] Strike mismatch: signal=${signal.strike} (${signal.strike - spxPrice > 0 ? '+' : ''}${signal.strike - spxPrice}) vs selected=${strikeResult.candidate.strike} (${strikeResult.candidate.strike - spxPrice > 0 ? '+' : ''}${strikeResult.candidate.strike - spxPrice})`);
-        console.log(`[handler] [${configId}] Reason: ${strikeResult.reason}`);
-        continue;
-      }
-    } catch (e: any) {
-      console.error(`[handler] [${configId}] Strike selection error: ${e.message}`);
-      continue;
-    }
-
-    console.log(`[handler] [${configId}] Signal matches, executing entry...`);
-
-    // Track this entry as pending to prevent race conditions
-    const pendingKey = `${configId}:${signal.symbol}`;
-    pendingEntries.add(pendingKey);
+    console.log(`[handler] [${configId}] Signal accepted, executing entry...`);
 
     try {
       const positionSize = computeQty(signal.price, cfg, null);
@@ -355,7 +233,7 @@ async function handleContractSignal(signal: any): Promise<void> {
       const agentSignal = {
         type: 'HMA_CROSS' as const,
         symbol: signal.symbol,
-        side: (signal.direction === 'bullish' ? 'call' : 'put') as 'call' | 'put',
+        side: signal.side as 'call' | 'put',
         strike: signal.strike,
         expiry: signal.expiry,
         currentPrice: signal.price,
@@ -375,50 +253,34 @@ async function handleContractSignal(signal: any): Promise<void> {
         ts: Date.now(),
       };
 
-      const decision = {
+      const tradeDecision = {
         action: 'buy' as const,
         confidence: 1.0,
         positionSize,
         stopLoss: signal.price * (1 - cfg.position.stopLossPercent / 100),
-        takeProfit: signal.price * cfg.position.takeProfitMultiplier,
+        takeProfit: signal.price * (1 + cfg.position.stopLossPercent / 100 * cfg.position.takeProfitMultiplier),
         reasoning: `Event-driven HMA(${signal.hmaFastPeriod})xHMA(${signal.hmaSlowPeriod}) signal`,
         concerns: [],
         ts: Date.now(),
       };
 
-      const result = await openPosition(
-        agentSignal,
-        decision,
-        configPaper,
-        EXECUTION,
-        0,
-        configId
-      );
+      const configPaper = perConfigPaper.get(configId) ?? AGENT_PAPER;
+      const result = await openPosition(agentSignal, tradeDecision, configPaper, EXECUTION, 0, configId);
 
       if (result.position.quantity > 0) {
-        const posId = result.position.id;
-        result.position.highWaterPrice = result.position.entryPrice;
-        state.positions.set(posId, result.position);
-        const basketMemberId = getBasketMemberId(signal, state);
-        state.basketMembers.set(posId, basketMemberId);
-        state.lastEntryTs = now;
-        state.sessionSignalCount++;
+        const basketMember = cfg.id.includes('basket') ? `strike-${signal.strike}` : 'default';
+        manager.openPosition(enriched, configId, cfg, result.position.quantity, basketMember);
 
         const orderId = result.execution.orderId;
         const bracketId = result.position.bracketOrderId;
-        const basketInfo = basketMemberId !== 'default' ? ` [${basketMemberId}]` : '';
-        console.log(`[handler] [${configId}]${basketInfo} Position opened: ${result.position.symbol} x${result.position.quantity} @ $${result.execution.fillPrice?.toFixed(2)} | order=${orderId} bracket=${bracketId}`);
+        console.log(`[handler] [${configId}] Position opened: ${result.position.symbol} x${result.position.quantity} @ $${result.execution.fillPrice?.toFixed(2)} | order=${orderId} bracket=${bracketId}`);
 
         routingDecisions.push({ configId, action: 'entered', details: `${result.position.symbol} x${result.position.quantity} @ $${result.execution.fillPrice?.toFixed(2)}` });
-
         syncConfigPositions(configId, state);
       }
     } catch (e: any) {
       console.error(`[handler] [${configId}] Entry failed: ${e.message}`);
       routingDecisions.push({ configId, action: 'skipped', reason: 'entry_error', details: e.message });
-    } finally {
-      // Always remove from pending entries
-      pendingEntries.delete(pendingKey);
     }
   }
 
@@ -434,7 +296,7 @@ async function handleContractSignal(signal: any): Promise<void> {
         direction: signal.direction,
         hmaFastPeriod: signal.hmaFastPeriod,
         hmaSlowPeriod: signal.hmaSlowPeriod,
-        channel: signal.channel || `hma_${signal.hmaFastPeriod}_${signal.hmaSlowPeriod}`,
+        channel: signal.channel || `${signal.hmaFastPeriod}_${signal.hmaSlowPeriod}`,
         price: signal.price,
       },
       decisions: routingDecisions,
@@ -447,41 +309,41 @@ async function handleContractSignal(signal: any): Promise<void> {
 async function handleReversal(event: any): Promise<void> {
   console.log(`[handler] SPX reversal: ${event.direction}`);
 
-  // For EACH config with positions
-  const configStatesArray = Array.from(configs.entries());
-  for (const [configId, state] of configStatesArray) {
-    if (state.positions.size === 0) continue;
+  for (const [configId, state] of configs) {
+    const positions = manager.getOpenPositions(configId).filter(p => p.status === 'OPEN');
+    if (positions.length === 0) continue;
 
-    console.log(`[handler] [${configId}] Reversal: closing ${state.positions.size} position(s)`);
+    console.log(`[handler] [${configId}] Reversal: closing ${positions.length} position(s)`);
 
-    // Close all positions for this config
-    const positionsArray = Array.from(state.positions.entries());
-    for (const [posId, position] of positionsArray) {
+    for (const pos of positions) {
       try {
-        const basketMemberId = state.basketMembers.get(posId) || 'default';
-        // closePosition signature: (position, reason, currentPrice, paper, execCfg?)
-        await closePosition(position, 'signal_reversal', position.entryPrice, perConfigPaper.get(configId) ?? AGENT_PAPER, EXECUTION);
-        state.positions.delete(posId);
-        state.basketMembers.delete(posId);
-        console.log(`[handler] [${configId}] [${basketMemberId}] Closed ${position.symbol} x${position.quantity}`);
+        const openPos: OpenPosition = {
+          id: pos.id,
+          symbol: pos.symbol,
+          side: pos.side,
+          strike: pos.strike,
+          entryPrice: pos.entryPrice,
+          quantity: pos.quantity,
+          stopLoss: pos.stopLoss,
+          takeProfit: pos.takeProfit,
+          highWaterPrice: pos.highWater,
+          openedAt: pos.openedAt * 1000,
+          bracketOrderId: null,
+        };
+        await closePosition(openPos, 'signal_reversal', pos.entryPrice, perConfigPaper.get(configId) ?? AGENT_PAPER, EXECUTION);
+        console.log(`[handler] [${configId}] [${pos.basketMember}] Closed ${pos.symbol} x${pos.quantity}`);
       } catch (e: any) {
-        console.error(`[handler] [${configId}] Failed to close ${posId}:`, e.message);
+        console.error(`[handler] [${configId}] Failed to close ${pos.id}:`, e.message);
       }
     }
     syncConfigPositions(configId, state);
 
-    // Note: scannerReverse only closes positions on reversal.
-    // New entries will come from fresh contract signals in the new direction.
     console.log(`[handler] [${configId}] Reversal complete. Waiting for ${event.direction} signals...`);
   }
 }
 
 // ── Exit Check Loop (scannerReverse + broker reconciliation) ─────────────────────
 
-/**
- * Map OpenPosition to CorePosition for evaluateExit().
- * Tracks high-water price for trailing stops.
- */
 interface CorePositionWithHwm {
   id: string;
   symbol: string;
@@ -500,7 +362,6 @@ let spxHmaExitState: { direction: 'bullish' | 'bearish' | null; fresh: boolean }
 async function checkExits(): Promise<void> {
   const now = Date.now() / 1000;
 
-  // Fetch SPX HMA exit state from data service (for scannerReverse)
   try {
     const response = await fetch(`${WS_URL.replace('ws://', 'http://')}/signal/latest`);
     if (response.ok) {
@@ -514,46 +375,38 @@ async function checkExits(): Promise<void> {
         }
       }
     }
-  } catch (e) {
-    // Ignore fetch errors — SPX signal may not be available
-  }
+  } catch (e) {}
 
-  const configStatesArray = Array.from(configs.entries());
-  for (const [configId, state] of configStatesArray) {
+  for (const [configId, state] of configs) {
     const closeCutoffTs = computeCloseCutoff(state.config);
-    const positionsArray = Array.from(state.positions.entries());
-    const positionsToClose: Array<{ posId: string; position: OpenPosition; reason: string }> = [];
+    const positions = manager.getOpenPositions(configId).filter(p => p.status === 'OPEN');
+    const positionsToClose: Array<{ pos: typeof positions[0]; reason: string }> = [];
 
-    for (const [posId, position] of positionsArray) {
+    for (const pos of positions) {
       try {
-        // Fetch current price from data service
         let currentPrice: number | null = null;
         try {
-          const quoteUrl = `${WS_URL.replace('ws://', 'http://')}/contracts/${position.symbol}/latest`;
+          const quoteUrl = `${WS_URL.replace('ws://', 'http://')}/contracts/${pos.symbol}/latest`;
           const quoteResp = await fetch(quoteUrl);
           if (quoteResp.ok) {
             const bar = await quoteResp.json();
             currentPrice = bar.close || null;
           }
-        } catch (e) {
-          // No price data — continue with null (only time-based exits)
-        }
+        } catch (e) {}
 
-        // Map to CorePosition for evaluateExit
         const corePos: CorePositionWithHwm = {
-          id: position.id,
-          symbol: position.symbol,
-          side: position.side,
-          strike: position.strike,
-          qty: position.quantity,
-          entryPrice: position.entryPrice,
-          stopLoss: position.stopLoss,
-          takeProfit: position.takeProfit || null,
-          entryTs: position.openedAt / 1000,
-          highWaterPrice: position.highWaterPrice || position.entryPrice,
+          id: pos.id,
+          symbol: pos.symbol,
+          side: pos.side,
+          strike: pos.strike,
+          qty: pos.quantity,
+          entryPrice: pos.entryPrice,
+          stopLoss: pos.stopLoss,
+          takeProfit: pos.takeProfit,
+          entryTs: pos.openedAt,
+          highWaterPrice: pos.highWater,
         };
 
-        // Call evaluateExit (handles TP/SL/time_exit/scannerReverse)
         const exitDecision = evaluateExit(
           corePos,
           currentPrice,
@@ -565,25 +418,32 @@ async function checkExits(): Promise<void> {
         );
 
         if (exitDecision) {
-          positionsToClose.push({ posId, position, reason: exitDecision.reason });
+          positionsToClose.push({ pos, reason: exitDecision.reason });
         }
       } catch (e: any) {
-        console.error(`[handler] [${configId}] Error checking exit for ${posId}:`, e.message);
+        console.error(`[handler] [${configId}] Error checking exit for ${pos.id}:`, e.message);
       }
     }
 
-    // Execute exits
-    for (const { posId, position, reason } of positionsToClose) {
+    for (const { pos, reason } of positionsToClose) {
       try {
-        const basketMemberId = state.basketMembers.get(posId) || 'default';
-        // closePosition signature: (position, reason, currentPrice, paper, execCfg?)
-        // Use entryPrice as fallback if we don't have current price
-        await closePosition(position, reason, position.entryPrice, perConfigPaper.get(configId) ?? AGENT_PAPER, EXECUTION);
-        state.positions.delete(posId);
-        state.basketMembers.delete(posId);
-        console.log(`[handler] [${configId}] [${basketMemberId}] Closed ${position.symbol} x${position.quantity} (${reason})`);
+        const openPos: OpenPosition = {
+          id: pos.id,
+          symbol: pos.symbol,
+          side: pos.side,
+          strike: pos.strike,
+          entryPrice: pos.entryPrice,
+          quantity: pos.quantity,
+          stopLoss: pos.stopLoss,
+          takeProfit: pos.takeProfit,
+          highWaterPrice: pos.highWater,
+          openedAt: pos.openedAt * 1000,
+          bracketOrderId: null,
+        };
+        await closePosition(openPos, reason, pos.entryPrice, perConfigPaper.get(configId) ?? AGENT_PAPER, EXECUTION);
+        console.log(`[handler] [${configId}] [${pos.basketMember}] Closed ${pos.symbol} x${pos.quantity} (${reason})`);
       } catch (e: any) {
-        console.error(`[handler] [${configId}] Failed to close ${posId}:`, e.message);
+        console.error(`[handler] [${configId}] Failed to close ${pos.id}:`, e.message);
       }
     }
     if (positionsToClose.length > 0) {
@@ -601,6 +461,7 @@ async function updateBrokerPnl(): Promise<void> {
     const brokerPnl = await fetchDailyPnl(TRADIER_ACCOUNT_ID);
     for (const [configId, state] of configs) {
       state.dailyPnl = brokerPnl.pnl;
+      manager.setConfigState(configId, { dailyPnl: brokerPnl.pnl });
       updateConfigState(configId, { dailyPnl: brokerPnl.pnl });
     }
   } catch (e: any) {
@@ -619,7 +480,6 @@ function handleWebSocketMessage(data: any): void {
     spxPrice = data.data.close;
     updateSpxPrice(spxPrice);
   } else if (data.type === 'hma_cross_signal') {
-    // SPX HMA reversal - handle scannerReverse
     handleReversal(data).catch(e => console.error('[handler] Error handling reversal:', e));
   }
 }
@@ -627,10 +487,16 @@ function handleWebSocketMessage(data: any): void {
 // ── Main Entry Point ─────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
-  console.log('[handler] Event-Driven Trading Handler MVP starting...');
+  console.log('[handler] Event-Driven Trading Handler starting...');
   console.log(`[handler] Account: ${TRADIER_ACCOUNT_ID} (paper=${AGENT_PAPER})`);
   console.log(`[handler] Configs: ${CONFIG_IDS.join(', ')}`);
   console.log(`[handler] WebSocket: ${WS_URL}`);
+
+  initAccountDb();
+
+  const accountStream = new AccountStream();
+  manager = new PositionOrderManager(accountStream);
+  manager.start();
 
   await loadConfigs();
 
@@ -646,7 +512,6 @@ async function main(): Promise<void> {
     configIds: CONFIG_IDS,
   });
 
-  // Connect to WebSocket
   ws = new WebSocket(WS_URL);
 
   ws.on('open', () => {
@@ -701,16 +566,13 @@ function gracefulShutdown(): void {
   running = false;
   markStopped();
 
+  manager.stop();
+  closeAccountDb();
+
   if (ws) {
     ws.close();
   }
 
-  const lockPath = `data/account-${TRADIER_ACCOUNT_ID}.lock`;
-  try {
-    if (require('fs').existsSync(lockPath)) {
-      require('fs').unlinkSync(lockPath);
-    }
-  } catch (e) {}
   process.exit(0);
 }
 
@@ -747,19 +609,30 @@ async function processCommands(): Promise<void> {
         if ('configId' in cmd) {
           const cs = configs.get(cmd.configId as string);
           if (!cs) break;
-          const positionsArray = Array.from(cs.positions.entries());
-          for (const [posId, position] of positionsArray) {
+          const positions = manager.getOpenPositions(cmd.configId as string).filter(p => p.status === 'OPEN');
+          for (const pos of positions) {
             try {
+              const openPos: OpenPosition = {
+                id: pos.id,
+                symbol: pos.symbol,
+                side: pos.side,
+                strike: pos.strike,
+                entryPrice: pos.entryPrice,
+                quantity: pos.quantity,
+                stopLoss: pos.stopLoss,
+                takeProfit: pos.takeProfit,
+                highWaterPrice: pos.highWater,
+                openedAt: pos.openedAt * 1000,
+                bracketOrderId: null,
+              };
               await closePosition(
-                position,
+                openPos,
                 'manual',
-                position.entryPrice,
+                pos.entryPrice,
                 perConfigPaper.get(cmd.configId as string) ?? AGENT_PAPER,
                 EXECUTION,
               );
-              cs.positions.delete(posId);
-              cs.basketMembers.delete(posId);
-              console.log(`[handler] [${cmd.configId}] Force closed ${position.symbol} x${position.quantity}`);
+              console.log(`[handler] [${cmd.configId}] Force closed ${pos.symbol} x${pos.quantity}`);
             } catch (e: any) {
               console.error(`[handler] [${cmd.configId}] Force close failed: ${e.message}`);
             }
@@ -791,12 +664,7 @@ async function reloadConfig(configId: string): Promise<void> {
     }
     configs.set(configId, {
       config: cfg,
-      positions: configs.get(configId)?.positions || new Map(),
-      lastEntryTs: configs.get(configId)?.lastEntryTs || 0,
       dailyPnl: configs.get(configId)?.dailyPnl || 0,
-      tradesCompleted: configs.get(configId)?.tradesCompleted || 0,
-      sessionSignalCount: configs.get(configId)?.sessionSignalCount || 0,
-      basketMembers: configs.get(configId)?.basketMembers || new Map(),
     });
     registerConfig(configId, cfg.name || configId, `${cfg.signals.hmaCrossFast}x${cfg.signals.hmaCrossSlow}`);
     console.log(`[handler] [${configId}] Config reloaded: HMA ${cfg.signals.hmaCrossFast}x${cfg.signals.hmaCrossSlow}`);
