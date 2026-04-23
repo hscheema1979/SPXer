@@ -18,15 +18,21 @@ Data Pipeline (spxer, port 3600)
   TV Scrn ──┘    Indicators          HMA/RSI/BB/EMA/        /spx/bars
                  Contract Tracker     VWAP/ATR/MACD/...     /contracts/active
 
-Trading Agent (spxer-agent)
-───────────────────────────
-  Market Snapshot ──► HMA(3)×HMA(17) cross ──► Strike Selector ($15 OTM)
-       (from data      detection on 1m bars      computeQty (15% buying power)
-        service)              │                         │
-                        scannerReverse:           OTOCO bracket order
-                        exit + flip on              (entry + TP limit + SL stop)
-                        HMA reversal                    │
-                                                  Tradier API (live)
+Event-Driven Trading Handler (event-handler)
+─────────────────────────────────────────────
+  WebSocket ──► Contract Signal ──► PositionOrderManager ──► Strike Selector
+   subscribe      (HMA cross on        (entry decisions)       (OTM selection)
+   (real-time)    option bars)
+                        │
+                        ▼
+              ┌─────────────────┐
+              │ OTOCO Bracket   │◄── Real-time fills via
+              │ (TP + SL at     │    AccountStream (Tradier WS)
+              │  broker)        │
+              └────────┬────────┘
+                       │
+                       ▼
+              Tradier API (live)
 
 Replay (src/replay/)
 ─────────────────────
@@ -35,7 +41,9 @@ Replay (src/replay/)
   Config-driven backtesting
 ```
 
-**Shared core** (`src/core/`): Signal detection, exit conditions, risk checks, strike selection, position sizing, and trade friction — all imported by both the live agents and replay system. Test in replay → deploy live.
+**Event-driven architecture**: The trading handler subscribes to WebSocket channels and reacts to HMA cross signals in real-time (~1 second latency). This replaced the old polling-based agent (see `docs/EVENT_HANDLER_ARCHITECTURE.md`).
+
+**Shared core** (`src/core/`): Signal detection, exit conditions, risk checks, strike selection, position sizing, and trade friction — all imported by both the live handler and replay system. Test in replay → deploy live.
 
 ---
 
@@ -46,7 +54,7 @@ All processes managed via `ecosystem.config.js`:
 | Process | Description |
 |---------|-------------|
 | `spxer` | Data pipeline — SPX/ES bars, options contracts, indicators (port 3600) |
-| `spxer-agent` | SPX 0DTE agent — margin account, up to 10 contracts, 15% of buying power |
+| `event-handler` | Event-driven trading handler — margin account, supports basket configs, real-time WebSocket signals |
 | `replay-viewer` | Replay viewer web UI (port 3601) |
 
 ---
@@ -63,19 +71,22 @@ pm2 save
 
 # Start individual processes
 pm2 start ecosystem.config.js --only spxer
-pm2 start ecosystem.config.js --only spxer-agent
+pm2 start ecosystem.config.js --only event-handler
 
 # Dev mode (data service only)
 npm run dev
 
-# Agent in paper mode
-npm run agent          # SPX paper
+# Event handler in paper mode
+AGENT_CONFIG_ID="your-config-id" AGENT_PAPER=true npx tsx event_handler_mvp.ts
 
-# Agent live (AGENT_PAPER=false)
-npm run agent:live
+# Event handler live (AGENT_PAPER=false)
+AGENT_CONFIG_ID="your-config-id" AGENT_PAPER=false npx tsx event_handler_mvp.ts
+
+# Multiple configs in one process
+AGENT_CONFIG_IDS="config1,config2,config3" AGENT_PAPER=true npx tsx event_handler_mvp.ts
 
 # Monitor
-pm2 logs spxer-agent --lines 50
+pm2 logs event-handler --lines 50
 pm2 list
 ```
 

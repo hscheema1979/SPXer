@@ -8,11 +8,11 @@ SPXer is three systems sharing a unified core:
 
 1. **Data Service** (`npm run dev`) — An always-on 24/5 market data pipeline that polls SPX/ES futures, tracks ~250-480 SPXW 0DTE options contracts via a sticky band model, builds 1m OHLCV bars with a full indicator battery, and serves enriched data over REST + WebSocket on port 3600.
 
-2. **Trading Agent** (`npm run agent`) — Deterministic execution driven by option contract HMA crosses, live by default (`AGENT_PAPER=false`). 0DTE SPX options on margin account (6YA51425). $15 OTM, up to 10 contracts, 15% of buying power.
+2. **Trading Handler** (`npm run handler`) — Event-driven deterministic execution driven by option contract HMA crosses. Subscribes to WebSocket signals from the data service, executes via `PositionOrderManager`, persists state to `account.db`. 0DTE SPX options on margin account (6YA51425). Supports single configs and basket configs (multi-strike) in one process.
 
 3. **Replay System** (`npm run replay`) — A config-driven backtesting engine that replays historical days through the same signal detection → scanner → judge pipeline, using an in-memory bar cache for performance.
 
-**Critical architecture principle**: Both the live agent and replay system import core trading logic from `src/core/`. The same `Config` object fed to either system produces identical signal detection, strike selection, position exit, and risk evaluation. Test in replay → deploy to live with confidence.
+**Critical architecture principle**: Both the live handler and replay system import core trading logic from `src/core/`. The same `Config` object fed to either system produces identical signal detection, strike selection, position exit, and risk evaluation. Test in replay → deploy to live with confidence.
 
 **Signal source**: Both systems use `detectSignals()` from `src/core/signal-detector.ts`, which detects HMA crosses on **option contract bars** (not the SPX underlying). The SPX underlying is used only as a direction gate (`requireUnderlyingHmaCross`) and for `scannerReverse` exit monitoring.
 
@@ -22,18 +22,16 @@ SPXer is three systems sharing a unified core:
 # Data Service
 npm run dev              # Start data service (tsx src/index.ts) on port 3600
 
-# Trading Agents
-npm run agent            # SPX trading agent (polling-based, paper mode)
-npm run agent:live       # SPX agent with real orders (AGENT_PAPER=false)
+# Trading Handler (Event-Driven — PRIMARY)
+npm run handler          # Event-driven handler (paper mode)
+npm run handler:live     # Event-driven handler with real orders (AGENT_PAPER=false)
+# Or use aliases:
+npm run agent            # Same as handler (event-driven, paper mode)
+npm run agent:live       # Same as handler:live (event-driven, live mode)
 
-# Event-Driven Handler (WORKING — replaces polling agent)
-# Single config:
-AGENT_CONFIG_ID="your-config-id" AGENT_PAPER=true npx tsx event_handler_mvp.ts
-# Multiple configs in one process:
-AGENT_CONFIG_IDS="config1,config2,config3" AGENT_PAPER=true npx tsx event_handler_mvp.ts
-
-# Query Positions
-npx tsx scripts/show-basket-positions.ts  # Show all positions by basket member
+# Legacy Polling Agent (DEPRECATED — archived, do not use)
+npm run agent:legacy     # Old polling agent (paper mode)
+npm run agent:legacy:live # Old polling agent (live mode)
 
 # Query Positions
 npx tsx scripts/show-basket-positions.ts  # Show all positions by basket member
@@ -136,39 +134,42 @@ Note: `src/pipeline/indicator-engine.ts` is a re-export shim — actual indicato
 
 **Why PriceLine instead of candles**: SPX candles use full OHLCV (high-liquidity underlying). 0DTE options have sparse prints — H/L from quote-only bars are noise. PriceLine captures close-only which is all HMA needs. Full replay bars still come from historical parquet/SQLite with complete OHLCV data.
 
-### Trading Agent (`spx_agent.ts`)
+### Trading Agent (`event_handler_mvp.ts`) — EVENT-DRIVEN
 
-The live agent is **pure deterministic** — no LLM scanners or judges in the loop. The signal flow is:
+The live trading system uses an **event-driven architecture** that replaced the old polling-based `spx_agent.ts` (see [Event-Driven Handler](#event-driven-handler-working--replaces-polling-agent) section for migration details). It is **pure deterministic** — no LLM scanners or judges in the loop.
 
-1. **Entry trigger**: `detectSignals()` detects an HMA(fast)×HMA(slow) cross on **option contract bars** at `signalTimeframe`. A bullish cross on a call contract → buy that call. A bullish cross on a put contract → buy that put.
-2. **Direction gate** (optional): If `requireUnderlyingHmaCross` is set, the SPX underlying HMA direction must agree with the contract side (SPX bullish → calls only, SPX bearish → puts only).
-3. **Execution**: Strike selection → OTOCO bracket order (TP + SL at broker).
-4. **Exit**: SPX underlying HMA cross on `exitTimeframe` reverses → `scannerReverse` → cancel OCO legs → market sell → immediately flip to opposite side.
+**Signal flow:**
+1. **Entry trigger**: Data service detects HMA(fast)×HMA(slow) cross on **option contract bars** and emits WebSocket event
+2. **Event Handler receives**: Subscribes to `contract_signal:{hmaPair}` channels, routes to matching configs
+3. **PositionOrderManager.evaluate()**: Checks HMA pair match, direction, risk gates, cooldown
+4. **Execution**: Strike selection → OTOCO bracket order (TP + SL at broker)
+5. **Exit**: SPX underlying HMA cross on `exitTimeframe` reverses → `scannerReverse` → cancel OCO legs → market sell → immediately flip to opposite side
+6. **Real-time fills**: `AccountStream` (Tradier WS) pushes fills, updates `account.db` state
 
-**Basket agents (NOT WORKING)**: An experimental architecture using 6 specialized agents (runner-itm5/atm/otm5, scalp-itm5/atm/otm5) sharing account 6YA51425 via order tags was attempted. **Tradier's API does not persist the `tag` field**, breaking position separation. Basket agents are currently stopped. Use single-agent mode only.
-
-The agent shares `src/core/` logic with the replay system. This is identical to how `src/replay/machine.ts` operates.
-
-```
-spx_agent.ts (main loop — margin account 6YA51425)
-├── Uses detectSignals() from src/core/signal-detector.ts — SAME function replay uses
+**Basket configs** are fully supported — one process handles multiple strike offsets internally via `basketMembers` Map. No account-lock needed.
 
 ```
-spx_agent.ts (main loop — margin account 6YA51425)
-├── Uses detectSignals() from src/core/signal-detector.ts — SAME function replay uses
-├── Config loaded from DB by AGENT_CONFIG_ID — same config tested in replay
-├── Execution routing hardcoded: SPX/SPXW/account 6YA51425
-├── agent/market-feed.ts          — fetches full snapshot from data service
-├── agent/trade-executor.ts       — Tradier order execution (paper or live, OTOCO brackets)
-├── agent/position-manager.ts     — broker interaction layer (reconcile, cancel OCO)
-├── agent/risk-guard.ts           — RiskGuard class: daily loss state wrapper
-├── agent/account-balance.ts      — Fetches buying power from Tradier (cached 5 min)
-├── agent/price-stream.ts         — HTTP streaming for live tick prices
-├── agent/audit-log.ts            — JSON audit trail of all decisions
-└── agent/reporter.ts             — status file + activity log for monitoring
+event_handler_mvp.ts (main loop — margin account 6YA51425)
+├── WebSocket subscribe to contract_signal channels
+├── Load configs from DB (AGENT_CONFIG_ID or AGENT_CONFIG_IDS)
+├── PositionOrderManager.evaluate(signal, configId, config) — entry decisions
+│   └── checkEntryGates() from src/core/ — same as replay
+├── trade-executor.ts — Tradier order execution (OTOCO brackets)
+├── AccountStream — real-time fill detection via Tradier WS
+└── All state persisted to data/account.db (positions, orders, config_state)
 ```
 
-**Config**: Loaded from DB by `AGENT_CONFIG_ID` env var (same config tested in replay). Execution routing hardcoded in agent.
+**Config**: Loaded from DB by `AGENT_CONFIG_ID` (single) or `AGENT_CONFIG_IDS` (comma-separated) env var. Same config tested in replay → deploy live.
+
+#### Legacy Agent (ARCHIVED)
+
+The old polling-based `spx_agent.ts` has been **archived** (moved to `archive/removed-*/`). It has been replaced by the event-driven handler which is:
+- 78% smaller (~570 vs 1585 lines)
+- ~1 second latency vs 10-30 second polling
+- Crash-safe with SQLite persistence
+- Multi-config support in one process
+
+See `docs/EVENT_HANDLER_ARCHITECTURE.md` and `EVENT_HANDLER_E2E_SUCCESS.md` for full migration details.
 
 #### Modules still in codebase (used by replay, NOT by live agents)
 
