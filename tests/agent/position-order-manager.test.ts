@@ -634,13 +634,13 @@ describe('PositionOrderManager.reconcileFromBroker()', () => {
     expect(adopted).toHaveLength(1);
     const pos = manager.getOpenPositions('test-config');
     expect(pos).toHaveLength(1);
-    expect(pos[0].status).toBe('OPENING');
+    expect(pos[0].status).toBe('OPEN');
     expect(pos[0].symbol).toBe(symbol);
     expect(pos[0].quantity).toBe(2);
     expect(pos[0].basketMember).toBe('reconciled');
   });
 
-  it('marks DB position not at broker as ORPHANED', () => {
+  it('warns about OPEN position not at broker but does not close it', () => {
     const config = makeConfig();
     const today = TODAY();
     const expiryCode = today.replace(/-/g, '').slice(2);
@@ -659,7 +659,7 @@ describe('PositionOrderManager.reconcileFromBroker()', () => {
     expect(orphaned).toHaveLength(0);
     const db = getAccountDb();
     const pos = db.prepare("SELECT * FROM positions WHERE config_id = 'test-config'").get() as any;
-    expect(pos.status).toBe('ORPHANED');
+    expect(pos.status).toBe('OPEN');
   });
 
   it('does nothing when DB and broker agree', () => {

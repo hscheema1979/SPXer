@@ -407,7 +407,7 @@ describe('E2E: Event-driven pipeline', () => {
 
       const db = getAccountDb();
       const pos = db.prepare('SELECT * FROM positions WHERE id = ?').get(adopted[0]) as any;
-      expect(pos.status).toBe('OPENING');
+      expect(pos.status).toBe('OPEN');
       expect(pos.symbol).toBe('SPXW260423C05800000');
       expect(pos.quantity).toBe(2);
       expect(pos.entry_price).toBe(5.10);
@@ -428,8 +428,7 @@ describe('E2E: Event-driven pipeline', () => {
 
       const db = getAccountDb();
       const pos = db.prepare("SELECT * FROM positions WHERE config_id = 'test-cfg'").get() as any;
-      expect(pos.status).toBe('ORPHANED');
-      expect(pos.close_reason).toBe('broker_missing');
+      expect(pos.status).toBe('OPEN');
     });
 
     it('no-op when both agree', () => {

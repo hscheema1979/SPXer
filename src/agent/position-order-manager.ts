@@ -161,9 +161,33 @@ export class PositionOrderManager {
 
     const db = getAccountDb();
 
-    const order = db.prepare(
+    let order = db.prepare(
       `SELECT * FROM orders WHERE tradier_id = ? OR bracket_id = ? OR tp_leg_id = ? OR sl_leg_id = ?`
     ).get(event.id, event.id, event.id, event.id) as any;
+
+    if (!order && event.option_symbol && event.status === 'filled') {
+      const position = db.prepare(
+        `SELECT * FROM positions WHERE symbol = ? AND status = 'OPENING'`
+      ).get(event.option_symbol) as any;
+
+      if (position) {
+        db.prepare(
+          `UPDATE positions SET status = 'OPEN', entry_price = ?, high_water = ? WHERE id = ?`
+        ).run(event.avg_fill_price, event.avg_fill_price, position.id);
+
+        const orderId = randomUUID();
+        const now = Math.floor(Date.now() / 1000);
+        db.prepare(
+          `INSERT INTO orders (id, position_id, tradier_id, side, order_type, status, fill_price, quantity, submitted_at, filled_at) VALUES (?, ?, ?, 'buy_to_open', 'market', 'FILLED', ?, ?, ?, ?)`
+        ).run(orderId, position.id, event.id, event.avg_fill_price, event.executed_quantity || 0, now, now);
+
+        console.log(`[manager] FILL MATCHED BY SYMBOL: ${event.option_symbol} @ $${event.avg_fill_price.toFixed(2)} — OPENING→OPEN (order #${event.id})`);
+        return;
+      }
+
+      console.warn(`[manager] UNTRACKED FILL: order #${event.id} ${event.option_symbol} @ $${event.avg_fill_price.toFixed(2)} — no matching position`);
+      return;
+    }
 
     if (!order) return;
 
@@ -204,16 +228,19 @@ export class PositionOrderManager {
     const today = todayET();
     const adopted: string[] = [];
 
-    const dbPositions = db.prepare(
-      `SELECT * FROM positions WHERE config_id = ? AND status IN ('OPENING', 'OPEN', 'CLOSING')`
-    ).all(configId) as any[];
+    const allDbPositions = db.prepare(
+      `SELECT * FROM positions WHERE status IN ('OPENING', 'OPEN', 'CLOSING')`
+    ).all() as any[];
 
-    const dbSymbols = new Set(dbPositions.map(p => p.symbol));
+    const dbSymbols = new Set(allDbPositions.map(p => p.symbol));
     const brokerSymbols = new Set(brokerPositions.map(p => p.symbol));
 
     for (const bp of brokerPositions) {
       if (bp.expiry !== today) continue;
       if (dbSymbols.has(bp.symbol)) continue;
+
+      const existing = allDbPositions.find(p => p.symbol === bp.symbol);
+      if (existing) continue;
 
       const id = randomUUID();
       const now = Math.floor(Date.now() / 1000);
@@ -224,20 +251,27 @@ export class PositionOrderManager {
 
       db.prepare(`
         INSERT INTO positions (id, config_id, symbol, side, strike, expiry, entry_price, quantity, stop_loss, take_profit, high_water, status, opened_at, closed_at, close_reason, basket_member, reentry_depth)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPENING', ?, NULL, NULL, 'reconciled', 0)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, NULL, NULL, 'reconciled', 0)
       `).run(
         id, configId, bp.symbol, bp.side, bp.strike, bp.expiry,
         bp.entryPrice, bp.quantity, stopLoss, takeProfit, bp.entryPrice,
         now,
       );
 
+      console.warn(`[manager] ADOPTED: ${bp.symbol} x${bp.quantity} @ $${bp.entryPrice.toFixed(2)} (config=${configId}) — broker position not in DB`);
       adopted.push(id);
     }
 
-    for (const dp of dbPositions) {
+    for (const dp of allDbPositions) {
       if (!brokerSymbols.has(dp.symbol)) {
-        db.prepare(`UPDATE positions SET status = 'ORPHANED', closed_at = ?, close_reason = 'broker_missing' WHERE id = ?`)
-          .run(Math.floor(Date.now() / 1000), dp.id);
+        if (dp.config_id !== configId) continue;
+        if (dp.status === 'OPENING') {
+          console.warn(`[manager] STALE OPENING: ${dp.symbol} not at broker — cleaning up`);
+          db.prepare(`UPDATE positions SET status = 'CLOSED', closed_at = ?, close_reason = 'broker_missing' WHERE id = ?`)
+            .run(Math.floor(Date.now() / 1000), dp.id);
+        } else {
+          console.warn(`[manager] MISSING AT BROKER: ${dp.symbol} (${dp.status}, config=${dp.config_id}) — keeping, may be mid-transition`);
+        }
       }
     }
 
@@ -313,6 +347,26 @@ export class PositionOrderManager {
       id, params.configId, params.symbol, params.side, params.strike,
       params.status, params.openedAt ?? now, params.closedAt ?? null,
     );
+  }
+
+  cleanupStaleOpening(maxAgeSec = 10): number {
+    const db = getAccountDb();
+    const now = Math.floor(Date.now() / 1000);
+    const stale = db.prepare(
+      `SELECT id, symbol FROM positions WHERE status = 'OPENING' AND opened_at < ?`
+    ).all(now - maxAgeSec) as any[];
+
+    if (stale.length === 0) return 0;
+
+    for (const pos of stale) {
+      db.prepare(`UPDATE positions SET status = 'CLOSED', closed_at = ?, close_reason = 'fill_timeout' WHERE id = ?`)
+        .run(now, pos.id);
+      db.prepare(`UPDATE orders SET status = 'CANCELLED', error = 'fill_timeout' WHERE position_id = ? AND status NOT IN ('FILLED', 'CANCELLED')`)
+        .run(pos.id);
+      console.log(`[manager] FILL TIMEOUT: ${pos.symbol} — OPENING→CLOSED`);
+    }
+
+    return stale.length;
   }
 
 
