@@ -58,7 +58,6 @@ import { detectSignals, validateSignalConfig } from './src/core/signal-detector'
 import { evaluateExit, evaluateEntry, type ExitDecision } from './src/core/trade-manager';
 import { ensureHmaOnBars } from './src/core/hma-backfill';
 import { spawn } from 'child_process';
-import { acquireAccountLock, releaseAccountLock, installLockCleanup } from './src/agent/account-lock';
 
 // ── Load Config from DB ─────────────────────────────────────────────────────
 
@@ -124,6 +123,7 @@ let tradesTotal = 0;
 let winsTotal = 0;
 let dailyPnl = 0;
 let dailyDate = '';
+let lastSpxPrice = 0;
 let sessionSignalCount = 0;   // HMA cross signals this session (circuit breaker)
 let consecutiveRejections = 0;
 const MAX_REJECTIONS_BEFORE_BACKOFF = 3;
@@ -318,10 +318,9 @@ async function reconcileBrokerPositions(): Promise<void> {
       for (const order of allOrders) {
         const tag = order.tag as string | undefined;
         const isTaggedOurs = tag === AGENT_ID;
-        // Legacy untagged orders: adopt only if no other tagged orders exist on account
-        // (means this is a pre-tagging solo agent scenario).
-        // Basket members NEVER adopt untagged positions.
-        const isBasketMember = AGENT_ID.startsWith('basket') || AGENT_ID.includes(':') || AGENT_ID.includes('.');
+        // Basket members: any agent with an explicit AGENT_TAG env var.
+        // These agents NEVER adopt untagged legacy positions — only their own tagged orders.
+        const isBasketMember = !!process.env.AGENT_TAG;
         const isLegacyOurs = !tag && !allOrders.some((o: any) => o.tag) && !isBasketMember;
         if (!isTaggedOurs && !isLegacyOurs) continue;
 
@@ -847,6 +846,7 @@ async function runCycle(): Promise<number> {
   }
 
   const spxPrice = snap.spx.price;
+  lastSpxPrice = spxPrice;
   const openCount = positions.count();
   console.log(`\n[agent] ═══ #${cycleCount} @ ${ts} | SPX ${spxPrice.toFixed(2)} | ${snap.contracts.length} contracts | ${openCount} open | daily P&L: $${dailyPnl.toFixed(0)} ═══`);
 
@@ -1466,20 +1466,6 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  // ── Account lock — enforce single agent per broker account ──
-  // Prevents the 2026-04-21 incident where 4+ agents simultaneously placed
-  // 89 bracket orders on account 6YA51425, causing phantom positions and
-  // sell rejections from broker reconciliation collisions.
-  if (!isPaper) {
-    const lockAcquired = acquireAccountLock(EXECUTION.accountId, AGENT_ID, CONFIG_ID);
-    if (!lockAcquired) {
-      console.error(`[agent] FATAL: Cannot start — another agent already owns account ${EXECUTION.accountId}`);
-      console.error('[agent] Only ONE agent process may trade per broker account.');
-      process.exit(1);
-    }
-    installLockCleanup(EXECUTION.accountId);
-  }
-
   // Start price stream (connects on demand)
   await priceStream.start([]);
 
@@ -1556,6 +1542,20 @@ async function main(): Promise<void> {
     console.log('[agent] First cycle in 5s...\n');
     await new Promise(r => setTimeout(r, 5000));
 
+    // 5-minute status loop — runs independently of the trade cycle loop
+    const statusInterval = setInterval(() => {
+      const ts = new Date().toISOString();
+      const wr = tradesTotal > 0 ? (winsTotal / tradesTotal * 100).toFixed(0) : '-';
+      const mode = isPaper ? 'paper' : 'live';
+      const myOpen = positions.count();
+      console.log(
+        `[status] ${ts} | agent=${AGENT_ID} | mode=${mode} | cycle=${cycleCount} | ` +
+        `spx=${lastSpxPrice.toFixed(2)} | my_open=${myOpen} | ` +
+        `acct_pnl=$${dailyPnl.toFixed(0)} | acct_trades=${tradesTotal}(WR ${wr}%) | ` +
+        `pending=${pendingEntryCount} | next_check=${myOpen > 0 ? 5 : 30}s`
+      );
+    }, 5 * 60_000);
+
     // Inner loop: trade until market close
     while (isMarketOpen()) {
       let nextCheckSecs = 30;
@@ -1579,7 +1579,7 @@ async function main(): Promise<void> {
   }
 }
 
-process.on('SIGTERM', () => { priceStream.stop(); if (!isPaper) releaseAccountLock(EXECUTION.accountId); console.log('\n[agent] Shutting down (SIGTERM)'); process.exit(0); });
-process.on('SIGINT',  () => { priceStream.stop(); if (!isPaper) releaseAccountLock(EXECUTION.accountId); console.log('\n[agent] Shutting down (SIGINT)');  process.exit(0); });
+process.on('SIGTERM', () => { priceStream.stop(); console.log('\n[agent] Shutting down (SIGTERM)'); process.exit(0); });
+process.on('SIGINT',  () => { priceStream.stop(); console.log('\n[agent] Shutting down (SIGINT)');  process.exit(0); });
 
 main().catch(e => { console.error('[agent] Fatal:', e); process.exit(1); });

@@ -156,6 +156,44 @@ export function deleteBarsBySymbols(symbols: string[]): void {
   }
 }
 
+export function insertSignal(signal: {
+  symbol: string; strike: number; expiry: string; side: string;
+  direction: string; offsetLabel: string; hmaFast: number; hmaSlow: number;
+  hmaFastVal: number; hmaSlowVal: number; timeframe: string;
+  price: number; ts: number;
+}): void {
+  try {
+    getDb().prepare(`
+      INSERT INTO signals (symbol, strike, expiry, side, direction, offset_label,
+        hma_fast, hma_slow, hma_fast_val, hma_slow_val, timeframe, price, ts)
+      VALUES (@symbol, @strike, @expiry, @side, @direction, @offsetLabel,
+        @hmaFast, @hmaSlow, @hmaFastVal, @hmaSlowVal, @timeframe, @price, @ts)
+    `).run(signal);
+  } catch (err) {
+    console.error(`[db] insertSignal failed for ${signal.symbol}:`, err);
+  }
+}
+
+export function getLatestSignals(opts: {
+  offsetLabel?: string; timeframe?: string; hmaPair?: string; limit?: number;
+}): any[] {
+  const db = getDb();
+  const clauses: string[] = [];
+  const params: any[] = [];
+  if (opts.offsetLabel) { clauses.push('offset_label = ?'); params.push(opts.offsetLabel); }
+  if (opts.timeframe) { clauses.push('timeframe = ?'); params.push(opts.timeframe); }
+  if (opts.hmaPair) {
+    const [f, s] = opts.hmaPair.split('_');
+    clauses.push('hma_fast = ? AND hma_slow = ?');
+    params.push(Number(f), Number(s));
+  }
+  const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
+  const limit = opts.limit || 50;
+  return db.prepare(
+    `SELECT * FROM signals ${where} ORDER BY ts DESC LIMIT ?`
+  ).all(...params, limit);
+}
+
 export function getDbSizeMb(): number {
   const db = getDb();
   const result = db.prepare('SELECT page_count * page_size as size FROM pragma_page_count(), pragma_page_size()').get() as any;

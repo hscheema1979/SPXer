@@ -61,7 +61,7 @@ export interface SlFillContext {
  *
  * Model: `fillPrice = stopPrice - min(slSlipPerContract * qty, slSlipMax)`
  *
- * The caller is expected to apply friction.frictionExit() on top of this
+ * The caller is expected to apply friction.frictionSlExit() on top of this
  * for the half-spread; this function only models the EXTRA slippage beyond
  * a normal sell at the bid.
  *

@@ -126,14 +126,6 @@ export function frictionMarketExit(midPrice: number, model?: SpreadModel): numbe
 }
 
 /**
- * @deprecated Use frictionTpExit / frictionSlExit / frictionMarketExit.
- *   Preserved as an alias for frictionMarketExit() during migration.
- */
-export function frictionExit(midPrice: number, model?: SpreadModel): number {
-  return frictionMarketExit(midPrice, model);
-}
-
-/**
  * Round-trip commission cost in dollars for a given quantity.
  */
 export function frictionCommission(qty: number): number {

@@ -8,11 +8,18 @@ import { MARKET_HOLIDAYS } from '../config';
 
 let db: DB;
 let currentDbPath: string = '';
+let walTimers: ReturnType<typeof setInterval>[] = [];
 
 /** Returns the path of the currently opened DB (set by initDb). */
 export function getDbPath(): string { return currentDbPath; }
 
 export function initDb(dbPath: string): void {
+  if (db) {
+    try { db.close(); } catch {}
+  }
+  for (const t of walTimers) clearInterval(t);
+  walTimers = [];
+
   currentDbPath = dbPath;
   db = new Database(dbPath);
   db.pragma('journal_mode = WAL');
@@ -48,8 +55,7 @@ export function initDb(dbPath: string): void {
   // The old hourly TRUNCATE was always skipped because other processes (metrics,
   // dashboard, agents) hold open read connections. RESTART+TRUNCATE is more aggressive.
 
-  // Frequent PASSIVE flush — keeps WAL pages committed to main DB
-  setInterval(() => {
+  walTimers.push(setInterval(() => {
     try {
       const d = getDb();
       const result = d.pragma('wal_checkpoint(PASSIVE)') as Array<{busy: number; log: number; checkpointed: number}>;
@@ -60,10 +66,9 @@ export function initDb(dbPath: string): void {
     } catch (err) {
       console.error('[db] WAL passive checkpoint failed:', err);
     }
-  }, 15 * 60 * 1000); // every 15 min
+  }, 15 * 60 * 1000));
 
-  // Aggressive TRUNCATE — reclaim WAL disk space
-  setInterval(() => {
+  walTimers.push(setInterval(() => {
     try {
       const d = getDb();
       const before = getDbStats();
@@ -95,7 +100,7 @@ export function initDb(dbPath: string): void {
     } catch (err) {
       console.error('[db] WAL truncate cycle failed:', err);
     }
-  }, 2 * 60 * 60 * 1000); // every 2 hours
+  }, 2 * 60 * 60 * 1000));
 
   // Backups disabled (2026-04-18) — at 41GB the source DB is too large for
   // better-sqlite3's online backup. A single run bloated the backup WAL to
@@ -116,7 +121,10 @@ export function getCurrentDbPath(): string {
 }
 
 export function closeDb(): void {
+  for (const t of walTimers) clearInterval(t);
+  walTimers = [];
   if (db) db.close();
+  db = undefined as any;
 }
 
 // ── Day-scoped live DB helpers ──
@@ -232,6 +240,27 @@ function runMigrations(): void {
       last_bar_ts INTEGER,
       created_at  INTEGER NOT NULL DEFAULT (unixepoch())
     );
+    CREATE TABLE IF NOT EXISTS signals (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      symbol          TEXT NOT NULL,
+      strike          REAL NOT NULL,
+      expiry          TEXT NOT NULL,
+      side            TEXT NOT NULL,
+      direction       TEXT NOT NULL,
+      offset_label    TEXT NOT NULL,
+      hma_fast        INTEGER NOT NULL,
+      hma_slow        INTEGER NOT NULL,
+      hma_fast_val    REAL NOT NULL,
+      hma_slow_val    REAL NOT NULL,
+      timeframe       TEXT NOT NULL DEFAULT '1m',
+      price           REAL NOT NULL,
+      ts              INTEGER NOT NULL,
+      created_at      INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+    CREATE INDEX IF NOT EXISTS idx_signals_ts
+      ON signals(ts);
+    CREATE INDEX IF NOT EXISTS idx_signals_offset_tf
+      ON signals(offset_label, timeframe, ts);
   `);
 
   // Additive migration: bar-level bid-ask spread for friction modeling (Task 2.3a).

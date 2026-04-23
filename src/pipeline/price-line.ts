@@ -62,12 +62,13 @@ export class PriceLine {
     const minuteTs = ts - (ts % 60);
 
     const existing = this.points.get(symbol);
-    if (existing && existing.ts === minuteTs && existing.source === 'trade') {
-      // Already have a trade this minute — update if price changed
-      if (price !== existing.price) {
-        this.points.set(symbol, { price, ts: minuteTs, volume: existing.volume + volume, source: 'trade' });
-      } else {
+    if (existing && existing.ts === minuteTs) {
+      if (existing.source === 'trade' && price === existing.price) {
         existing.volume += volume;
+        this.points.set(symbol, { ...existing });
+      } else {
+        const prevVol = existing.source === 'trade' ? existing.volume : 0;
+        this.points.set(symbol, { price, ts: minuteTs, volume: prevVol + volume, source: 'trade' });
       }
     } else {
       this.points.set(symbol, { price, ts: minuteTs, volume, source: 'trade' });

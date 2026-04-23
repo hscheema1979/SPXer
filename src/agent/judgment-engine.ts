@@ -687,8 +687,9 @@ export async function assess(
     if (activeAssessment.action === 'buy' && activeAssessment.targetSymbol) {
       const gate = getSignalGate(regimeState.regime, spxRsi, regimeConfig);
       const sym = activeAssessment.targetSymbol.toUpperCase();
-      const isCallTrade = sym.includes('C0') || sym.match(/C\d{4,}/);
-      const isPutTrade = sym.includes('P0') || sym.match(/P\d{4,}/);
+      // Match both full format (SPXW...C06600000) and short format (C6600)
+      const isCallTrade = /C\d{4,}/.test(sym);
+      const isPutTrade = /P\d{4,}/.test(sym);
 
       const blocked =
         (isCallTrade && !gate.allowOversoldFade) ||

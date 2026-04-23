@@ -48,11 +48,8 @@ export interface Config {
     activeJudge: string;
     consensusRule: 'primary-decides' | 'majority' | 'unanimous' | 'first-agree';
     confidenceThreshold: number;
-    /** Entry cooldown in seconds between trades.
-     *  Renamed from escalationCooldownSec. Both names are supported for backward compat. */
+    /** Entry cooldown in seconds between trades. */
     entryCooldownSec: number;
-    /** @deprecated Use entryCooldownSec instead */
-    escalationCooldownSec?: number;
     /** Prompt ID for judge system prompt */
     promptId: string;
   };
@@ -364,8 +361,6 @@ export interface Config {
     baseDollarsPerTrade: number;
     sizeMultiplier: number;
     accountPercentPerTrade?: number | null;
-    /** @deprecated Use sizingMode='percent_of_account' instead */
-    riskPercentOfAccount?: number;
   };
 
   /** Execution target — controls which symbol/account orders are placed against.
@@ -451,5 +446,5 @@ export interface PromptRecord {
 /** Resolve the entry cooldown from config, supporting both old and new field names.
  *  Prefers `entryCooldownSec`, falls back to `escalationCooldownSec` for backward compat. */
 export function getEntryCooldownSec(config: Config): number {
-  return config.judges.entryCooldownSec ?? config.judges.escalationCooldownSec ?? 0;
+  return config.judges.entryCooldownSec ?? 0;
 }

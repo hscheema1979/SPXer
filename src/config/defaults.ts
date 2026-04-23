@@ -426,7 +426,7 @@ export function validateConfig(config: Config): { valid: boolean; errors: string
   }
 
   // Cooldown
-  const cooldown = config.judges.entryCooldownSec ?? config.judges.escalationCooldownSec ?? 0;
+  const cooldown = config.judges.entryCooldownSec ?? 0;
   if (cooldown < 0) {
     errors.push('entryCooldownSec must be >= 0');
   }

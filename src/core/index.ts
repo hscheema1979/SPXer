@@ -18,7 +18,6 @@ export { selectStrike, type StrikeCandidate, type StrikeResult } from './strike-
 export { computeIndicators, seedIndicatorState, resetVWAP } from './indicator-engine';
 export {
   tick,
-  createInitialState,
   stripFormingCandle,
   detectSignal,
   createInitialSignalState,

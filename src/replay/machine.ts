@@ -599,9 +599,31 @@ function getPosPrice(
 }
 
 function parseOptionSymbol(sym: string): { isCall: boolean; strike: number } | null {
-  const m = sym.replace(/\s+/g, '').match(/([CP])(\d{4,5})(?:000)?$/i);
-  if (!m) return null;
-  return { isCall: m[1].toUpperCase() === 'C', strike: parseInt(m[2]) };
+  // Match both short format (C6600) and full format (SPXW260319C06600000)
+  // Short: C/P followed by 4-5 digits, optionally ending in 000
+  // Full: prefix + date + C/P + 8-digit strike
+  const cleaned = sym.replace(/\s+/g, '').toUpperCase();
+
+  // Try short format first (e.g., "C6600", "P6570")
+  const shortMatch = cleaned.match(/^([CP])(\d{4,5})(?:000)?$/);
+  if (shortMatch) {
+    return {
+      isCall: shortMatch[1].toUpperCase() === 'C',
+      strike: parseInt(shortMatch[2])
+    };
+  }
+
+  // Try full format (e.g., "SPXW260319C06600000")
+  const fullMatch = cleaned.match(/[CP](\d{8})$/);
+  if (fullMatch) {
+    const cpChar = fullMatch[0].charAt(0);
+    return {
+      isCall: cpChar === 'C',
+      strike: parseInt(fullMatch[1]) / 1000
+    };
+  }
+
+  return null;
 }
 
 function extractJSON(text: string): string {

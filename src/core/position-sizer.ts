@@ -23,8 +23,8 @@ function resolveSizing(config: Config): { mode: string; value: number } {
     return { mode: s.sizingMode, value: s.sizingValue };
   }
 
-  // Legacy: accountPercentPerTrade / riskPercentOfAccount
-  const pct = s.accountPercentPerTrade ?? s.riskPercentOfAccount;
+  // Legacy: accountPercentPerTrade
+  const pct = s.accountPercentPerTrade;
   if (pct && pct > 0) {
     return { mode: 'percent_of_account', value: pct };
   }
