@@ -1,5 +1,5 @@
 import { initDb, getDb, closeDb, dayDbPath, previousTradingDay, copyWarmupBars } from './storage/db';
-import { getAllActiveContracts, upsertBar, upsertBars, upsertContract, getDbSizeMb, getBars, getLatestBar, expireContractsBefore, expireContractsOnDate } from './storage/queries';
+import { getAllActiveContracts, upsertBar, upsertBars, upsertContract, getDbSizeMb, getBars, getLatestBar, expireContractsBefore, expireContractsOnDate, insertSignal } from './storage/queries';
 import { fetchSpxQuote, fetchOptionsChain, fetchExpirations, fetchSpxTimesales, fetchBatchQuotes, fetchTimesales } from './providers/tradier';
 import { fetchScreenerSnapshot } from './providers/tv-screener';
 import { buildBars, fillGaps, rawToBar } from './pipeline/bar-builder';
@@ -38,6 +38,7 @@ const SIGNAL_STRIKE_BAND = 25;
 const tracker = new ContractTracker(STRIKE_BAND, STRIKE_INTERVAL);
 let lastSpxPrice: number | null = null;
 let prevMode: string | null = null; // tracks mode transitions for VWAP reset
+let currentDbDate: string = '';
 
 // Per-symbol 1m candle state for options — built incrementally from quote snapshots
 // optionBarState removed — batch-quote bar building permanently disabled (corrupted HMA signals)
@@ -322,8 +323,23 @@ async function initOptionStream(): Promise<void> {
             healthTracker.recordBar(bar.symbol, bar.ts * 1000);
             broadcast({ type: 'contract_bar', symbol: bar.symbol, data: enriched });
 
-            // Detect HMA crosses on option contracts and emit channelized signals
             detectContractSignals(enriched);
+
+            const barMin = new Date(bar.ts * 1000).getUTCMinutes();
+            if (barMin % 3 === 0) {
+              const agg3m = aggregate(recent1m, '3m', 180);
+              if (agg3m.length > 0) {
+                const latest3m = { ...agg3m[agg3m.length - 1], indicators: computeIndicators(agg3m[agg3m.length - 1], 2) };
+                detectContractSignals(latest3m, '3m');
+              }
+            }
+            if (barMin % 5 === 0) {
+              const agg5m = aggregate(recent1m, '5m', 300);
+              if (agg5m.length > 0) {
+                const latest5m = { ...agg5m[agg5m.length - 1], indicators: computeIndicators(agg5m[agg5m.length - 1], 2) };
+                detectContractSignals(latest5m, '5m');
+              }
+            }
           }
         } catch (e) {
           console.warn('[price-line] REST validation failed:', e);
@@ -581,16 +597,15 @@ function detectHmaCrossSignal(bar: Bar): void {
  * subscribe only to the exact offset/HMA pair/side their config targets.
  * No filtering needed in the event handler.
  */
-function detectContractSignals(bar: Bar): void {
+function detectContractSignals(bar: Bar, timeframe: Timeframe = '1m'): void {
   if (!activeHmaSignalEnabled) return;
-  if (!lastSpxPrice) return; // Need SPX price for distance filter
+  if (!lastSpxPrice) return;
 
   const symbol = bar.symbol;
-  const prevBars = getBars(symbol, '1m', 2);
+  const prevBars = getBars(symbol, timeframe, 2);
   if (prevBars.length < 2) return;
   const prevBar = prevBars[prevBars.length - 2];
 
-  // Parse strike and expiry for the event
   const parsed = parseSymbol(symbol);
   if (!parsed) return;
   const { strike, expiry, isCall } = parsed;
@@ -605,7 +620,6 @@ function detectContractSignals(bar: Bar): void {
   const offsetRaw = Math.round((strike - lastSpxPrice) / STRIKE_INTERVAL);
   const offsetLabel = offsetRaw === 0 ? 'atm' : offsetRaw > 0 ? `otm${offsetRaw}` : `itm${-offsetRaw}`;
 
-  // Check all HMA pairs for this bar
   for (const [hmaFastPeriod, hmaSlowPeriod] of HMA_PAIRS) {
     const hmaFastKey = `hma${hmaFastPeriod}`;
     const hmaSlowKey = `hma${hmaSlowPeriod}`;
@@ -621,7 +635,8 @@ function detectContractSignals(bar: Bar): void {
     const wasFastAbove = prevHmaFast > prevHmaSlow;
     const isFastAbove = hmaFast > hmaSlow;
 
-    if (!wasFastAbove && isFastAbove) {
+    if (wasFastAbove !== isFastAbove) {
+      const direction = isFastAbove ? 'bullish' as const : 'bearish' as const;
       const hmaChannel = `${offsetLabel}:${hmaFastPeriod}_${hmaSlowPeriod}:${side}`;
       const signal = {
         type: 'contract_signal',
@@ -631,7 +646,7 @@ function detectContractSignals(bar: Bar): void {
           strike,
           expiry,
           side,
-          direction: 'bullish' as const,
+          direction,
           hmaFastPeriod,
           hmaSlowPeriod,
           hmaFast,
@@ -639,31 +654,16 @@ function detectContractSignals(bar: Bar): void {
           price: bar.close,
           timestamp: bar.ts * 1000,
           offsetLabel,
+          timeframe,
         },
       };
-      console.log(`[signal] CONTRACT BULLISH HMA(${hmaFastPeriod})×HMA(${hmaSlowPeriod}) ${symbol} @ ${bar.close.toFixed(2)} (${offsetLabel}, ${side})`);
-      broadcast(signal);
-    } else if (wasFastAbove && !isFastAbove) {
-      const hmaChannel = `${offsetLabel}:${hmaFastPeriod}_${hmaSlowPeriod}:${side}`;
-      const signal = {
-        type: 'contract_signal',
-        channel: hmaChannel,
-        data: {
-          symbol,
-          strike,
-          expiry,
-          side,
-          direction: 'bearish' as const,
-          hmaFastPeriod,
-          hmaSlowPeriod,
-          hmaFast,
-          hmaSlow,
-          price: bar.close,
-          timestamp: bar.ts * 1000,
-          offsetLabel,
-        },
-      };
-      console.log(`[signal] CONTRACT BEARISH HMA(${hmaFastPeriod})×HMA(${hmaSlowPeriod}) ${symbol} @ ${bar.close.toFixed(2)} (${offsetLabel}, ${side})`);
+      console.log(`[signal] CONTRACT ${direction.toUpperCase()} HMA(${hmaFastPeriod})×HMA(${hmaSlowPeriod}) ${symbol} @ ${bar.close.toFixed(2)} (${offsetLabel}, ${side}, ${timeframe})`);
+      insertSignal({
+        symbol, strike, expiry, side, direction, offsetLabel,
+        hmaFast: hmaFastPeriod, hmaSlow: hmaSlowPeriod,
+        hmaFastVal: hmaFast, hmaSlowVal: hmaSlow,
+        timeframe, price: bar.close, ts: bar.ts,
+      });
       broadcast(signal);
     }
   }
@@ -675,7 +675,9 @@ function aggregateAndStore(bars1m: Bar[], tier: 1 | 2 = 1): void {
     const agg = aggregate(bars1m, tf, secs).map(b => ({
       ...b, indicators: computeIndicators(b, tier)
     }));
-    if (agg.length > 0) upsertBars(agg);
+    if (agg.length > 0) {
+      upsertBars(agg);
+    }
   }
 }
 
@@ -960,6 +962,7 @@ async function main(): Promise<void> {
   // If DB_PATH is set explicitly, honor it (escape hatch / backwards compat).
   const today = todayET();
   const liveDbPath = process.env.DB_PATH || dayDbPath(today);
+  currentDbDate = today;
   console.log(`[startup] Live DB: ${liveDbPath}`);
 
   for (let attempt = 1; attempt <= 3; attempt++) {
@@ -1127,6 +1130,14 @@ async function main(): Promise<void> {
     }
     prevMode = mode;
     pipelineHealth.currentMode = mode;
+
+    if (!process.env.DB_PATH) {
+      const now = todayET();
+      if (currentDbDate && now !== currentDbDate) {
+        console.log(`[rotation] Day changed: ${currentDbDate} → ${now}, restarting for DB rotation`);
+        process.exit(0);
+      }
+    }
   }, 60_000));
 
   // Periodic health check — log warnings when providers are degraded or data is stale
