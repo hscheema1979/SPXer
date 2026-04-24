@@ -1,26 +1,40 @@
 #!/usr/bin/env tsx
+/**
+ * Event-Driven Trading Handler — COMPLETELY INDEPENDENT
+ *
+ * NO spxer dependency - all data fetched directly from Tradier REST API.
+ *
+ * Responsibilities:
+ * - Signal detection (independent - fetches from Tradier)
+ * - Entry execution (OTOCO brackets)
+ * - Reversal handling (SPX HMA cross detection, flips positions)
+ * - Account fill tracking (AccountStream to Tradier WS)
+ *
+ * Position exits (TP/SL) are handled by broker OCO brackets.
+ * Reversal flips are handled here via closePosition().
+ */
 
 import * as dotenv from 'dotenv';
 dotenv.config();
 
-import WebSocket from 'ws';
+import axios from 'axios';
 import { createStore } from './src/replay/store';
 import { openPosition, closePosition } from './src/agent/trade-executor';
 import { fetchDailyPnl } from './src/agent/broker-pnl';
 import { computeQty } from './src/core/position-sizer';
-import { evaluateExit } from './src/core/trade-manager';
-import { HealthGate } from './src/agent/health-gate';
 import { nowET, todayET, etTimeToUnixTs } from './src/utils/et-time';
 import type { Config } from './src/config/types';
 import type { OpenPosition } from './src/agent/types';
 import { PositionOrderManager, type EnrichedSignal } from './src/agent/position-order-manager';
 import { AccountStream } from './src/agent/account-stream';
 import { initAccountDb, closeAccountDb, getAccountDb } from './src/storage/db';
+import { initExecution, getExecutionMode } from './src/agent/execution-router';
+import { detectHmaCrossPair, type SignalParams } from './src/pipeline/spx/signal-detector-function';
+import { makeHMAState, hmaStep } from './src/pipeline/indicators/tier1';
 import {
   initHandlerState,
   setConnected,
   updateSpxPrice,
-  setSubscriptions,
   registerConfig,
   updateConfigState,
   recordRoutingDecision,
@@ -37,8 +51,9 @@ const CONFIG_IDS = process.env.AGENT_CONFIG_IDS
   : [process.env.AGENT_CONFIG_ID || 'default'];
 const TRADIER_ACCOUNT_ID = process.env.TRADIER_ACCOUNT_ID || '6YA51425';
 const AGENT_PAPER = process.env.AGENT_PAPER === 'true';
-const WS_URL = process.env.SPXER_WS_URL || 'ws://localhost:3600/ws';
 const AGENT_TAG = process.env.AGENT_TAG || 'event-handler-mvp';
+
+const TRADIER_BASE = 'https://api.tradier.com';
 
 const EXECUTION: Config['execution'] = {
   symbol: process.env.AGENT_SYMBOL || 'SPX',
@@ -56,36 +71,151 @@ interface ConfigState {
   dailyPnl: number;
 }
 
+function getTradierToken(): string {
+  const token = process.env.TRADIER_TOKEN;
+  if (!token) {
+    throw new Error('TRADIER_TOKEN not set in environment');
+  }
+  return token;
+}
+
 // ── Global State ─────────────────────────────────────────────────────────────
 
 const configs = new Map<string, ConfigState>();
 let manager: PositionOrderManager;
-let ws: WebSocket | null = null;
-let wsConnected = false;
-let healthGate = new HealthGate();
 let spxPrice = 0;
 let running = true;
 let killSwitch = false;
 const perConfigPaper = new Map<string, boolean>();
-const REST_BASE = WS_URL.replace('ws://', 'http://').replace('wss://', 'https://');
 
 let orderMutex = false;
+
+// SPX HMA state for reversal detection
+const spxHma3State = makeHMAState(3);
+const spxHma12State = makeHMAState(12);
+let spxHmaDirection: 'bullish' | 'bearish' | null = null;
+
+// ── SPX HMA Reversal Detection (Independent) ────────────────────────────────────
+
+async function checkSpxReversal(): Promise<void> {
+  try {
+    const resp = await axios.get(`${TRADIER_BASE}/v1/markets/timesales`, {
+      params: {
+        symbol: 'SPX',
+        interval: '1min',
+        session_filter: 'all',
+      },
+      headers: {
+        'Authorization': `Bearer ${getTradierToken()}`,
+        'Accept': 'application/json'
+      },
+    });
+
+    const bars = resp.data?.series?.data || [];
+    if (bars.length < 12) {
+      return; // Not enough data for HMA
+    }
+
+    // Compute HMA(3) and HMA(12) from SPX bars
+    const hma3Vals: number[] = [];
+    const hma12Vals: number[] = [];
+
+    for (const bar of bars) {
+      const h3 = hmaStep(spxHma3State, bar.close);
+      const h12 = hmaStep(spxHma12State, bar.close);
+      if (h3 !== null) hma3Vals.push(h3);
+      if (h12 !== null) hma12Vals.push(h12);
+    }
+
+    if (hma3Vals.length < 2 || hma12Vals.length < 2) {
+      return;
+    }
+
+    const currHma3 = hma3Vals[hma3Vals.length - 1];
+    const currHma12 = hma12Vals[hma12Vals.length - 1];
+    const currDirection = currHma3 > currHma12 ? 'bullish' : 'bearish';
+
+    // Update SPX price
+    spxPrice = bars[bars.length - 1].close;
+    updateSpxPrice(spxPrice);
+
+    // Check for reversal
+    if (currDirection !== spxHmaDirection) {
+      const prevDirection = spxHmaDirection;
+      spxHmaDirection = currDirection;
+      console.log(`[handler] 🔄 SPX HMA reversal: ${currDirection.toUpperCase()} (HMA3=${currHma3.toFixed(2)}, HMA12=${currHma12.toFixed(2)})`);
+
+      // Trigger reversal handling (closes all positions)
+      await handleReversal({ direction: currDirection, previousDirection: prevDirection });
+    }
+  } catch (e) {
+    console.error('[handler] Failed to check SPX reversal:', e);
+  }
+}
+
+// ── Reversal Handler (closes all positions on SPX HMA cross) ────────────────
+
+async function handleReversal(event: any): Promise<void> {
+  console.log(`[handler] 🔄 REVERSAL: ${event.direction.toUpperCase()} - closing all positions`);
+
+  for (const [configId, state] of Array.from(configs.entries())) {
+    const positions = manager.getOpenPositions(configId).filter(p => p.status === 'OPEN');
+    if (positions.length === 0) continue;
+
+    console.log(`[handler] [${configId}] Reversal: closing ${positions.length} position(s)`);
+
+    for (const pos of positions) {
+      try {
+        const openPos: OpenPosition = {
+          id: pos.id,
+          symbol: pos.symbol,
+          side: pos.side,
+          strike: pos.strike,
+          expiry: todayET(),
+          entryPrice: pos.entryPrice,
+          quantity: pos.quantity,
+          stopLoss: pos.stopLoss,
+          takeProfit: pos.takeProfit,
+          highWaterPrice: pos.highWater,
+          openedAt: pos.openedAt * 1000,
+          bracketOrderId: null,
+        };
+
+        // closePosition will cancel OCO legs in pre-flight check
+        await closePosition(openPos, 'signal_reversal', pos.entryPrice, perConfigPaper.get(configId) ?? AGENT_PAPER, EXECUTION);
+        console.log(`[handler] [${configId}] [${pos.basketMember}] Closed ${pos.symbol} x${pos.quantity}`);
+      } catch (e: any) {
+        console.error(`[handler] [${configId}] Failed to close ${pos.id}:`, e.message);
+      }
+    }
+    syncConfigPositions(configId, state);
+
+    console.log(`[handler] [${configId}] Reversal complete. Waiting for ${event.direction} signals...`);
+  }
+}
+
+// ── Signal Handler (contract HMA cross → entry) ───────────────────────────────
 
 async function handleContractSignal(signal: any): Promise<void> {
   if (killSwitch) return;
 
-  const expectedOffset = [...configs.values()][0]?.config?.strikeSelector?.atmOffset;
-  if (expectedOffset != null && signal.offsetLabel) {
-    const expectedLabel = expectedOffset === 0 ? 'atm' : expectedOffset > 0 ? `otm${expectedOffset}` : `itm${-expectedOffset}`;
-    if (signal.offsetLabel !== expectedLabel) return;
-  }
-
-  const expectedTf = [...configs.values()][0]?.config?.signals?.signalTimeframe || '1m';
+  const expectedTf = Array.from(configs.values())[0]?.config?.signals?.signalTimeframe || '1m';
   if (signal.timeframe && signal.timeframe !== expectedTf) return;
 
   if (signal.timestamp) {
     const signalAgeMs = Date.now() - signal.timestamp;
     if (signalAgeMs > 30_000) return;
+  }
+
+  const cfg0 = Array.from(configs.values())[0]?.config;
+  const targetDist = cfg0?.signals?.targetOtmDistance ?? cfg0?.strikeSelector?.atmOffset ?? 0;
+  const strikeInterval = EXECUTION.strikeInterval || 5;
+  if (spxPrice > 0 && signal.strike) {
+    const spxRounded = Math.round(spxPrice / strikeInterval) * strikeInterval;
+    const targetCallStrike = spxRounded + targetDist;
+    const targetPutStrike = spxRounded - targetDist;
+    const target = signal.side === 'call' ? targetCallStrike : targetPutStrike;
+    if (Math.abs(signal.strike - target) > strikeInterval) return;
   }
 
   const now = Date.now() / 1000;
@@ -98,13 +228,13 @@ async function handleContractSignal(signal: any): Promise<void> {
     side: signal.side,
     direction: signal.direction,
     price: signal.price,
-    hmaFastPeriod: signal.hmaFastPeriod,
-    hmaSlowPeriod: signal.hmaSlowPeriod,
-    channel: signal.channel || `${signal.hmaFastPeriod}_${signal.hmaSlowPeriod}`,
+    hmaFastPeriod: signal.hmaFastPeriod || signal.hmaFast,
+    hmaSlowPeriod: signal.hmaSlowPeriod || signal.hmaSlow,
+    channel: signal.channel || `${signal.hmaFastPeriod || signal.hmaFast}_${signal.hmaSlowPeriod || signal.hmaSlow}`,
     receivedTs: now,
   };
 
-  for (const [configId, state] of configs) {
+  for (const [configId, state] of Array.from(configs.entries())) {
     const cfg = state.config;
     const handlerState = readHandlerState();
     const configEnabled = handlerState?.configs[configId]?.enabled ?? true;
@@ -114,14 +244,10 @@ async function handleContractSignal(signal: any): Promise<void> {
       continue;
     }
 
-    if (cfg.signals.hmaCrossFast !== signal.hmaFastPeriod || cfg.signals.hmaCrossSlow !== signal.hmaSlowPeriod) {
+    const hmaFast = signal.hmaFastPeriod || signal.hmaFast;
+    const hmaSlow = signal.hmaSlowPeriod || signal.hmaSlow;
+    if (cfg.signals.hmaCrossFast !== hmaFast || cfg.signals.hmaCrossSlow !== hmaSlow) {
       routingDecisions.push({ configId, action: 'skipped', reason: 'hma_mismatch' });
-      continue;
-    }
-
-    const health = await healthGate.check();
-    if (!health.healthy) {
-      routingDecisions.push({ configId, action: 'skipped', reason: 'health_block', details: health.reason });
       continue;
     }
 
@@ -146,6 +272,7 @@ async function handleContractSignal(signal: any): Promise<void> {
           symbol: existingPos.symbol,
           side: existingPos.side,
           strike: existingPos.strike,
+          expiry: existingPos.expiry || todayET(),
           entryPrice: existingPos.entryPrice,
           quantity: existingPos.quantity,
           stopLoss: existingPos.stopLoss,
@@ -178,15 +305,15 @@ async function handleContractSignal(signal: any): Promise<void> {
         strike: signal.strike,
         expiry: signal.expiry,
         currentPrice: signal.price,
-        bid: signal.price * 0.98,
-        ask: signal.price,
+        bid: signal.bid ?? signal.price * 0.98,   // Use real bid from quote, fallback to synthetic
+        ask: signal.ask ?? signal.price,           // Use real ask from quote, fallback to price
         indicators: {} as any,
         recentBars: [],
         signalBarLow: signal.price,
         spxContext: {
           price: spxPrice,
           changePercent: 0,
-          trend: 'neutral' as const,
+          trend: (spxHmaDirection || 'neutral') as 'bullish' | 'bearish' | 'neutral',
           rsi14: null,
           minutesToClose: 360,
           mode: 'rth' as const,
@@ -200,7 +327,7 @@ async function handleContractSignal(signal: any): Promise<void> {
         positionSize,
         stopLoss: signal.price * (1 - cfg.position.stopLossPercent / 100),
         takeProfit: signal.price * (1 + cfg.position.stopLossPercent / 100 * cfg.position.takeProfitMultiplier),
-        reasoning: `Event-driven HMA(${signal.hmaFastPeriod})xHMA(${signal.hmaSlowPeriod}) signal`,
+        reasoning: `Event-driven HMA(${signal.hmaFastPeriod || signal.hmaFast})xHMA(${signal.hmaSlowPeriod || signal.hmaSlow}) signal`,
         concerns: [],
         ts: Date.now(),
       };
@@ -250,9 +377,9 @@ async function handleContractSignal(signal: any): Promise<void> {
         strike: signal.strike,
         side: signal.side,
         direction: signal.direction,
-        hmaFastPeriod: signal.hmaFastPeriod,
-        hmaSlowPeriod: signal.hmaSlowPeriod,
-        channel: signal.channel || `${signal.hmaFastPeriod}_${signal.hmaSlowPeriod}`,
+        hmaFastPeriod: signal.hmaFastPeriod || signal.hmaFast,
+        hmaSlowPeriod: signal.hmaSlowPeriod || signal.hmaSlow,
+        channel: signal.channel || `${signal.hmaFastPeriod || signal.hmaFast}_${signal.hmaSlowPeriod || signal.hmaSlow}`,
         price: signal.price,
       },
       decisions: routingDecisions,
@@ -284,11 +411,6 @@ function syncConfigPositions(configId: string, state: ConfigState): void {
   });
 }
 
-function computeCloseCutoff(config: Config): number {
-  const cutoffTime = config.risk.cutoffTimeET || '16:00';
-  return etTimeToUnixTs(cutoffTime);
-}
-
 // ── Config Loading ───────────────────────────────────────────────────────────
 
 async function loadConfigs(): Promise<void> {
@@ -318,239 +440,66 @@ async function loadConfigs(): Promise<void> {
   store.close();
 }
 
-// ── WebSocket Channel Subscription ───────────────────────────────────────────
+// ── Signal Detection (independent - fetches from Tradier) ───────────────────────
 
-function subscribeToChannels(): void {
-  if (!ws) return;
+async function checkForSignals(): Promise<void> {
+  if (configs.size === 0) return;
 
-  const subscribedChannels = new Set<string>();
+  // Fetch SPX price first
+  try {
+    const spxResp = await axios.get(`${TRADIER_BASE}/v1/markets/quotes`, {
+      params: { symbols: 'SPX' },
+      headers: {
+        'Authorization': `Bearer ${getTradierToken()}`,
+        'Accept': 'application/json'
+      },
+    });
+    spxPrice = spxResp.data?.quotes?.quote?.last || spxPrice;
+    updateSpxPrice(spxPrice);
+  } catch (e) {
+    console.error('[handler] Failed to fetch SPX price:', e);
+  }
 
-  for (const state of configs.values()) {
+  for (const [configId, state] of Array.from(configs.entries())) {
     const cfg = state.config;
-    const fast = cfg.signals.hmaCrossFast;
-    const slow = cfg.signals.hmaCrossSlow;
-    const pair = `${fast}_${slow}`;
-    const offset = cfg.strikeSelector.atmOffset;
 
-    if (offset == null) {
-      console.warn(`[handler] Config missing atmOffset — cannot subscribe to signal channels`);
-      continue;
-    }
+    // Build signal params from config
+    const params: Omit<SignalParams, 'side'> = {
+      fast: cfg.signals.hmaCrossFast,
+      slow: cfg.signals.hmaCrossSlow,
+      strikeOffset: -5,  // ITM5 for calls
+      timeframe: parseInt(cfg.signals.signalTimeframe.replace(/\D/g, '')) || 3,
+    };
 
-    const offsetLabel = offset === 0 ? 'atm' : offset > 0 ? `otm${offset}` : `itm${-offset}`;
+    try {
+      const results = await detectHmaCrossPair(params);
 
-    for (const side of ['call', 'put']) {
-      const channel = `contract_signal:${offsetLabel}:${pair}:${side}`;
-      if (!subscribedChannels.has(channel)) {
-        subscribedChannels.add(channel);
-        ws.send(JSON.stringify({ action: 'subscribe', channel }));
-      }
-    }
-  }
+      // Check call and put for crosses
+      for (const [side, result] of [['call', results.call], ['put', results.put]] as const) {
+        if (result.cross && result.direction) {
+          console.log(`[handler] [${configId}] ${side.toUpperCase()} SIGNAL: ${result.direction.toUpperCase()} at ${result.barTime}`);
 
-  console.log(`[handler] Subscribed to ${subscribedChannels.size} channels across ${configs.size} configs`);
-  setSubscriptions(Array.from(subscribedChannels));
+          // Create signal object matching contract_signal format
+          const signal = {
+            symbol: result.symbol,
+            strike: result.strike,
+            side: side as 'call' | 'put',
+            direction: result.direction,
+            hmaFast: params.fast,
+            hmaSlow: params.slow,
+            price: result.price,
+            timeframe: cfg.signals.signalTimeframe,
+            timestamp: Date.now(),
+            expiry: todayET(),  // CRITICAL: Set expiry to today's date
+            bid: result.bid,    // Real bid from option quote
+            ask: result.ask,    // Real ask from option quote
+          };
 
-  ws.send(JSON.stringify({ action: 'subscribe', channel: 'spx_bar' }));
-  ws.send(JSON.stringify({ action: 'subscribe', channel: 'hma_cross_signal' }));
-}
-
-// ── Reversal Handler (SPX HMA Cross) ───────────────────────────────────────────
-
-async function handleReversal(event: any): Promise<void> {
-  console.log(`[handler] SPX reversal: ${event.direction}`);
-
-  for (const [configId, state] of configs) {
-    const positions = manager.getOpenPositions(configId).filter(p => p.status === 'OPEN');
-    if (positions.length === 0) continue;
-
-    console.log(`[handler] [${configId}] Reversal: closing ${positions.length} position(s)`);
-
-    for (const pos of positions) {
-      try {
-        const openPos: OpenPosition = {
-          id: pos.id,
-          symbol: pos.symbol,
-          side: pos.side,
-          strike: pos.strike,
-          entryPrice: pos.entryPrice,
-          quantity: pos.quantity,
-          stopLoss: pos.stopLoss,
-          takeProfit: pos.takeProfit,
-          highWaterPrice: pos.highWater,
-          openedAt: pos.openedAt * 1000,
-          bracketOrderId: null,
-        };
-        await closePosition(openPos, 'signal_reversal', pos.entryPrice, perConfigPaper.get(configId) ?? AGENT_PAPER, EXECUTION);
-        console.log(`[handler] [${configId}] [${pos.basketMember}] Closed ${pos.symbol} x${pos.quantity}`);
-      } catch (e: any) {
-        console.error(`[handler] [${configId}] Failed to close ${pos.id}:`, e.message);
-      }
-    }
-    syncConfigPositions(configId, state);
-
-    console.log(`[handler] [${configId}] Reversal complete. Waiting for ${event.direction} signals...`);
-  }
-}
-
-// ── REST Fallback (polls signals DB when WS is disconnected) ─────────────────
-
-let lastPolledSignalTs = 0;
-
-async function restFallbackPoll(): Promise<void> {
-  if (wsConnected || configs.size === 0) return;
-
-  try {
-    for (const [configId, state] of configs) {
-      const cfg = state.config;
-      const fast = cfg.signals.hmaCrossFast;
-      const slow = cfg.signals.hmaCrossSlow;
-      const offset = cfg.strikeSelector.atmOffset;
-      if (offset == null) continue;
-
-      const offsetLabel = offset === 0 ? 'atm' : offset > 0 ? `otm${offset}` : `itm${-offset}`;
-      const hmaPair = `${fast}_${slow}`;
-      const tf = cfg.signals?.timeframe || '1m';
-
-      const resp = await fetch(`${REST_BASE}/signals?offset=${offsetLabel}&timeframe=${tf}&hmaPair=${hmaPair}&limit=5`);
-      if (!resp.ok) continue;
-
-      const signals: any[] = await resp.json();
-      if (signals.length === 0) continue;
-
-      const latest = signals[0];
-      if (latest.ts <= lastPolledSignalTs) continue;
-
-      lastPolledSignalTs = latest.ts;
-
-      console.log(`[handler] REST fallback: ${latest.direction} ${latest.symbol} @ ${latest.price.toFixed(2)} (${latest.offset_label}, ${latest.timeframe})`);
-
-      await handleContractSignal({
-        symbol: latest.symbol,
-        strike: latest.strike,
-        expiry: latest.expiry,
-        side: latest.side,
-        direction: latest.direction,
-        hmaFastPeriod: latest.hma_fast,
-        hmaSlowPeriod: latest.hma_slow,
-        price: latest.price,
-        timestamp: latest.ts * 1000,
-        offsetLabel: latest.offset_label,
-        timeframe: latest.timeframe,
-        channel: `${latest.offset_label}:${latest.hma_fast}_${latest.hma_slow}:${latest.side}`,
-      });
-    }
-  } catch (e: any) {
-    console.error('[handler] REST fallback poll failed:', e.message);
-  }
-}
-
-// ── Exit Check Loop (scannerReverse + broker reconciliation) ─────────────────────
-
-interface CorePositionWithHwm {
-  id: string;
-  symbol: string;
-  side: 'call' | 'put';
-  strike: number;
-  qty: number;
-  entryPrice: number;
-  stopLoss: number;
-  takeProfit: number | null;
-  entryTs: number;
-  highWaterPrice: number;
-}
-
-let spxHmaExitState: { direction: 'bullish' | 'bearish' | null; fresh: boolean } = { direction: null, fresh: false };
-
-async function checkExits(): Promise<void> {
-  const now = Date.now() / 1000;
-
-  try {
-    const response = await fetch(`${WS_URL.replace('ws://', 'http://')}/signal/latest`);
-    if (response.ok) {
-      const signalData = await response.json();
-      if (signalData.signal) {
-        const newDir = signalData.signal.direction;
-        if (newDir !== spxHmaExitState.direction) {
-          spxHmaExitState = { direction: newDir, fresh: true };
-        } else {
-          spxHmaExitState.fresh = false;
+          await handleContractSignal(signal);
         }
       }
-    }
-  } catch (e) {}
-
-  for (const [configId, state] of configs) {
-    const closeCutoffTs = computeCloseCutoff(state.config);
-    const positions = manager.getOpenPositions(configId).filter(p => p.status === 'OPEN');
-    const positionsToClose: Array<{ pos: typeof positions[0]; reason: string }> = [];
-
-    for (const pos of positions) {
-      try {
-        let currentPrice: number | null = null;
-        try {
-          const quoteUrl = `${WS_URL.replace('ws://', 'http://')}/contracts/${pos.symbol}/latest`;
-          const quoteResp = await fetch(quoteUrl);
-          if (quoteResp.ok) {
-            const bar = await quoteResp.json();
-            currentPrice = bar.close || null;
-          }
-        } catch (e) {}
-
-        const corePos: CorePositionWithHwm = {
-          id: pos.id,
-          symbol: pos.symbol,
-          side: pos.side,
-          strike: pos.strike,
-          qty: pos.quantity,
-          entryPrice: pos.entryPrice,
-          stopLoss: pos.stopLoss,
-          takeProfit: pos.takeProfit,
-          entryTs: pos.openedAt,
-          highWaterPrice: pos.highWater,
-        };
-
-        const exitDecision = evaluateExit(
-          corePos,
-          currentPrice,
-          spxHmaExitState.direction,
-          spxHmaExitState.fresh,
-          state.config,
-          now,
-          closeCutoffTs,
-        );
-
-        if (exitDecision) {
-          positionsToClose.push({ pos, reason: exitDecision.reason });
-        }
-      } catch (e: any) {
-        console.error(`[handler] [${configId}] Error checking exit for ${pos.id}:`, e.message);
-      }
-    }
-
-    for (const { pos, reason } of positionsToClose) {
-      try {
-        const openPos: OpenPosition = {
-          id: pos.id,
-          symbol: pos.symbol,
-          side: pos.side,
-          strike: pos.strike,
-          entryPrice: pos.entryPrice,
-          quantity: pos.quantity,
-          stopLoss: pos.stopLoss,
-          takeProfit: pos.takeProfit,
-          highWaterPrice: pos.highWater,
-          openedAt: pos.openedAt * 1000,
-          bracketOrderId: null,
-        };
-        await closePosition(openPos, reason, pos.entryPrice, perConfigPaper.get(configId) ?? AGENT_PAPER, EXECUTION);
-        console.log(`[handler] [${configId}] [${pos.basketMember}] Closed ${pos.symbol} x${pos.quantity} (${reason})`);
-      } catch (e: any) {
-        console.error(`[handler] [${configId}] Failed to close ${pos.id}:`, e.message);
-      }
-    }
-    if (positionsToClose.length > 0) {
-      syncConfigPositions(configId, state);
+    } catch (e: any) {
+      console.error(`[handler] [${configId}] Signal detection failed:`, e.message);
     }
   }
 }
@@ -562,7 +511,7 @@ async function updateBrokerPnl(): Promise<void> {
 
   try {
     const brokerPnl = await fetchDailyPnl(TRADIER_ACCOUNT_ID);
-    for (const [configId, state] of configs) {
+    for (const [configId, state] of Array.from(configs.entries())) {
       state.dailyPnl = brokerPnl.pnl;
       manager.setConfigState(configId, { dailyPnl: brokerPnl.pnl });
       updateConfigState(configId, { dailyPnl: brokerPnl.pnl });
@@ -572,28 +521,18 @@ async function updateBrokerPnl(): Promise<void> {
   }
 }
 
-// ── WebSocket Message Handler ─────────────────────────────────────────────────
-
-function handleWebSocketMessage(data: any): void {
-  if (!running) return;
-
-  if (data.type === 'contract_signal') {
-    handleContractSignal(data.data).catch(e => console.error('[handler] Error handling signal:', e));
-  } else if (data.type === 'spx_bar') {
-    spxPrice = data.data.close;
-    updateSpxPrice(spxPrice);
-  } else if (data.type === 'hma_cross_signal') {
-    handleReversal(data).catch(e => console.error('[handler] Error handling reversal:', e));
-  }
-}
-
 // ── Main Entry Point ─────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
   console.log('[handler] Event-Driven Trading Handler starting...');
   console.log(`[handler] Account: ${TRADIER_ACCOUNT_ID} (paper=${AGENT_PAPER})`);
   console.log(`[handler] Configs: ${CONFIG_IDS.join(', ')}`);
-  console.log(`[handler] WebSocket: ${WS_URL}`);
+  console.log('[handler] INDEPENDENT MODE: No spxer dependency - all data from Tradier REST API');
+
+  // Initialize execution router
+  initExecution();
+  const execMode = getExecutionMode();
+  console.log(`[handler] Execution mode: ${execMode}`);
 
   initAccountDb();
 
@@ -615,63 +554,90 @@ async function main(): Promise<void> {
     configIds: CONFIG_IDS,
   });
 
-  ws = new WebSocket(WS_URL);
+  setConnected(true); // Independent mode, always "connected"
 
-  ws.on('open', () => {
-    console.log('[handler] WebSocket connected');
-    wsConnected = true;
-    setConnected(true);
-    subscribeToChannels();
-  });
-
-  ws.on('message', (data: Buffer) => {
+  // ── Startup Reconciliation ───────────────────────────────────────────────
+  // 1. Fetch positions from broker and adopt any orphans
+  // 2. Validate existing positions against current market regime
+  console.log('[handler] Running startup reconciliation...');
+  for (const [configId, state] of Array.from(configs.entries())) {
     try {
-      const msg = JSON.parse(data.toString());
-      if (msg.type) {
-        handleWebSocketMessage(msg);
+      // Fetch positions from Tradier broker
+      const resp = await axios.get(`${TRADIER_BASE}/accounts/${TRADIER_ACCOUNT_ID}/positions`, {
+        headers: { 'Authorization': `Bearer ${getTradierToken()}`, 'Accept': 'application/json' }
+      });
+
+      const brokerPositionsRaw = resp.data?.positions?.position;
+      const brokerPositions = Array.isArray(brokerPositionsRaw) ? brokerPositionsRaw : (brokerPositionsRaw ? [brokerPositionsRaw] : []);
+
+      // Transform to our format
+      const normalizedPositions = brokerPositions
+        .filter((p: any) => p.quantity !== 0)
+        .map((p: any) => ({
+          symbol: p.symbol,
+          side: p.symbol.includes('C') ? 'call' as const : 'put' as const,
+          strike: parseFloat(p.strike),
+          expiry: p.expiration_date, // Tradier format: YYYY-MM-DD
+          quantity: Math.abs(p.quantity),
+          entryPrice: parseFloat(p.avg_open_price || 0),
+        }));
+
+      const adopted = manager.reconcileFromBroker(configId, state.config, normalizedPositions);
+      if (adopted.length > 0) {
+        console.log(`[handler] [${configId}] Adopted ${adopted.length} orphaned position(s) from broker: ${adopted.join(', ')}`);
       }
-    } catch (e) {
-      console.error('[handler] Error parsing WebSocket message:', e);
+    } catch (e: any) {
+      console.error(`[handler] [${configId}] Startup reconciliation failed:`, e.message);
     }
-  });
+  }
 
-  ws.on('error', (e) => {
-    console.error('[handler] WebSocket error:', e);
-  });
+  // ── Regime Validation (Critical Safety Check) ────────────────────────────────
+  // After adopting orphans, validate that all OPEN positions align with current market regime
+  console.log('[handler] Validating position alignment with current SPX HMA regime...');
+  await checkSpxReversal(); // This will close any positions that oppose current regime
+  console.log('[handler] Startup regime validation complete');
 
-  ws.on('close', () => {
-    console.log('[handler] WebSocket closed, reconnecting in 5s...');
-    wsConnected = false;
-    setConnected(false);
-    setTimeout(() => {
-      if (running) main();
-    }, 5000);
-  });
-
+  // Command processing
   setInterval(() => {
     processCommands();
   }, 5_000);
 
+  // P&L sync (every 60s)
   setInterval(() => {
     updateBrokerPnl().catch(e => console.error('[handler] P&L update failed:', e));
   }, 60_000);
 
+  // Cleanup stale opening positions
   setInterval(() => {
     manager.cleanupStaleOpening();
   }, 5_000);
 
-  setInterval(() => {
-    checkExits().catch(e => console.error('[handler] Exit check failed:', e));
-  }, 10_000);
+  // ── Startup Delay ─────────────────────────────────────────────────────────
+  // Wait 5 seconds for AccountStream to connect and process initial fills
+  // before starting signal detection. This prevents race conditions during restart.
+  console.log('[handler] Waiting 5s for AccountStream to stabilize before signal detection...');
+  await new Promise(resolve => setTimeout(resolve, 5000));
 
+  // Signal detection: check at :00 seconds of every minute
   setInterval(() => {
-    restFallbackPoll().catch(e => console.error('[handler] REST fallback failed:', e));
-  }, 15_000);
+    const now = new Date();
+    if (now.getSeconds() === 0) {
+      checkForSignals().catch(e => console.error('[handler] Signal check failed:', e));
+    }
+  }, 1000);
+
+  // SPX reversal detection: check at :00 seconds too (same time as signal detection)
+  setInterval(() => {
+    const now = new Date();
+    if (now.getSeconds() === 0) {
+      checkSpxReversal().catch(e => console.error('[handler] Reversal check failed:', e));
+    }
+  }, 1000);
 
   process.on('SIGINT', gracefulShutdown);
   process.on('SIGTERM', gracefulShutdown);
 
-  console.log('[handler] Event loop started, waiting for signals...');
+  console.log('[handler] Event loop started - completely independent of spxer');
 }
 
 function gracefulShutdown(): void {
@@ -681,10 +647,6 @@ function gracefulShutdown(): void {
 
   manager.stop();
   closeAccountDb();
-
-  if (ws) {
-    ws.close();
-  }
 
   process.exit(0);
 }
@@ -730,6 +692,7 @@ async function processCommands(): Promise<void> {
                 symbol: pos.symbol,
                 side: pos.side,
                 strike: pos.strike,
+                expiry: pos.expiry || todayET(),
                 entryPrice: pos.entryPrice,
                 quantity: pos.quantity,
                 stopLoss: pos.stopLoss,

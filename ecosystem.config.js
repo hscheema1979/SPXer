@@ -27,6 +27,7 @@ module.exports = {
       env: {
         NODE_ENV: 'production',
         PORT: '3600',
+        DB_PATH: '/home/ubuntu/SPXer/data/spxer.db',
         AGENT_CONFIG_ID: 'spx-hma3x12-itm5-tp30x-sl20-3m-50c-$5000',
       },
       log_date_format: 'YYYY-MM-DD HH:mm:ss',
@@ -40,6 +41,9 @@ module.exports = {
     // Supports basket configs natively (no account-lock needed).
     // Validates: ran live paper trade on 2026-04-22, see EVENT_HANDLER_E2E_SUCCESS.md
     // Admin panel: http://vps3:3600/admin/ → "Event Stream" tab
+    //
+    // Responsibility: Signal detection → Entry execution ONLY
+    // Does NOT handle position exits (that's position-monitor's job)
     //
     // Usage:
     //   Single config: AGENT_CONFIG_ID='your-config-id'
@@ -57,17 +61,50 @@ module.exports = {
       restart_delay: 10000,
       kill_timeout: 5000,
       max_memory_restart: '512M',
-      env: {    AGENT_PAPER: 'true',
-    AGENT_PAPER: 'true',
-
+      env: {
         NODE_ENV: 'production',
-        AGENT_PAPER: 'true',
+        AGENT_PAPER: 'false',
+        DB_PATH: '/home/ubuntu/SPXer/data/spxer.db',
         AGENT_CONFIG_ID: 'spx-hma3x12-itm5-tp30x-sl20-3m-50c-$5000',
-        // For multiple configs: AGENT_CONFIG_IDS: 'config1,config2,config3'
       },
       log_date_format: 'YYYY-MM-DD HH:mm:ss',
       error_file: '/home/ubuntu/.pm2/logs/event-handler-error.log',
       out_file: '/home/ubuntu/.pm2/logs/event-handler-out.log',
+      merge_logs: true,
+    },
+
+    // ── Position Monitor (observer only) ───────────────────────────────────
+    // Independent service that monitors open positions and logs state.
+    // Does NOT execute trades — event handler handles all actions (entries, flips, exits).
+    //
+    // Responsibilities:
+    // - Poll account.db for open positions every 10 seconds
+    // - Fetch current prices from Tradier REST API
+    // - Fetch SPX HMA state from Tradier REST API
+    // - Evaluate and LOG exit conditions (TP/SL, time, reversal)
+    // - Update high water marks in DB
+    //
+    // Observer only — event handler executes all trades via OTOCO brackets + flips.
+    {
+      name: 'position-monitor',
+      script: 'npx',
+      args: 'tsx position_monitor.ts',
+      cwd: '/home/ubuntu/SPXer',
+      watch: false,
+      autorestart: true,
+      max_restarts: 10,
+      min_uptime: '10s',
+      restart_delay: 10000,
+      kill_timeout: 5000,
+      max_memory_restart: '256M',
+      env: {
+        NODE_ENV: 'production',
+        DB_PATH: '/home/ubuntu/SPXer/data/spxer.db',
+        AGENT_CONFIG_ID: 'spx-hma3x12-itm5-tp30x-sl20-3m-50c-$5000',
+      },
+      log_date_format: 'YYYY-MM-DD HH:mm:ss',
+      error_file: '/home/ubuntu/.pm2/logs/position-monitor-error.log',
+      out_file: '/home/ubuntu/.pm2/logs/position-monitor-out.log',
       merge_logs: true,
     },
 
@@ -89,6 +126,7 @@ module.exports = {
     //   env: {
     //     NODE_ENV: 'production',
     //     AGENT_PAPER: 'false',
+    //     DB_PATH: '/home/ubuntu/SPXer/data/spxer.db',
     //     AGENT_CONFIG_ID: 'spx-hma3x12-itm5-tp30x-sl20-3m-50c-$5000',
     //   },
     //   log_date_format: 'YYYY-MM-DD HH:mm:ss',

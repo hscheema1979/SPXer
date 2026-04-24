@@ -10,6 +10,8 @@ import { validateSignalConfig, parseSymbol } from './core/signal-detector';
 import { createStore } from './replay/store';
 import { ContractTracker } from './pipeline/spx/contract-tracker';
 import { getMarketMode, getActiveExpirations } from './pipeline/spx/scheduler';
+import { SignalPoller } from './pipeline/spx/signal-poller';
+import { initSignalsDb, closeSignalsDb } from './storage/signals-db';
 import { startHttpServer, setLastSpxPrice, setTrackerCountFn, setOptionStreamStatusFn } from './server/http';
 import { startWsServer, broadcast } from './server/ws';
 import { config, STRIKE_BAND, STRIKE_INTERVAL, POLL_UNDERLYING_MS, POLL_OPTIONS_RTH_MS, POLL_OPTIONS_OVERNIGHT_MS, POLL_SCREENER_MS, OPTION_STREAM_WAKE_ET, OPTION_STREAM_CLOSE_ET, OPTION_STREAM_THETA_STALE_MS } from './config';
@@ -33,9 +35,11 @@ const HMA_PAIRS: [number, number][] = [
 ];
 
 // Only broadcast contract signals for strikes within ±$25 of SPX (covers ITM5/ATM/OTM5 range)
-const SIGNAL_STRIKE_BAND = 25;
+const SIGNAL_STRIKE_BAND = 30;
 
 const tracker = new ContractTracker(STRIKE_BAND, STRIKE_INTERVAL);
+const signalPoller = new SignalPoller();
+export { signalPoller };
 let lastSpxPrice: number | null = null;
 let prevMode: string | null = null; // tracks mode transitions for VWAP reset
 let currentDbDate: string = '';
@@ -75,6 +79,7 @@ function initSpxStream(): void {
     // Update last price for contract tracking
     lastSpxPrice = last;
     setLastSpxPrice(last);
+    signalPoller.setSpxPrice(last);
   });
 
   // Safety: close candle on minute boundary even if no new ticks arrive
@@ -308,12 +313,13 @@ async function initOptionStream(): Promise<void> {
           }
           const bars = priceLine.snapshotAndFlush(restMids, 5);
           for (const bar of bars) {
+            const clampedClose = Math.min(Math.max(bar.close, bar.low), bar.high);
             const b = rawToBar(bar.symbol, '1m', {
               ts: bar.ts,
               open: bar.open,
               high: bar.high,
               low: bar.low,
-              close: bar.close,
+              close: clampedClose,
               volume: bar.volume,
             });
             const enriched = { ...b, indicators: computeIndicators(b, 2) };
@@ -500,7 +506,12 @@ let prevHmaFast: number | null = null;
 let prevHmaSlow: number | null = null;
 let activeHmaFastPeriod = 3;
 let activeHmaSlowPeriod = 17;
-let activeHmaSignalEnabled = true;
+// DISABLED: Tick-based signal detection is too fragile (bar validator, aggregation issues,
+// indicator state, dedup, catchup). Migrating to absurdly simple poll-based detection.
+// See docs/SIGNAL-SOURCE-PROBLEM.md for context.
+let activeHmaSignalEnabled = false;
+
+const emittedSignals = new Set<string>();
 let lastHmaSignal:
   | { type: string; direction: string; ts: number; price: number; hmaFast: number; hmaSlow: number; hmaFastPeriod: number; hmaSlowPeriod: number }
   | null = null;
@@ -617,8 +628,11 @@ function detectContractSignals(bar: Bar, timeframe: Timeframe = '1m'): void {
   const strikeDistance = Math.abs(strike - lastSpxPrice);
   if (strikeDistance > SIGNAL_STRIKE_BAND) return;
 
-  const offsetRaw = Math.round((strike - lastSpxPrice) / STRIKE_INTERVAL);
-  const offsetLabel = offsetRaw === 0 ? 'atm' : offsetRaw > 0 ? `otm${offsetRaw}` : `itm${-offsetRaw}`;
+  const offsetRaw = Math.round((strike - lastSpxPrice) / STRIKE_INTERVAL) * STRIKE_INTERVAL;
+  // ITM/OTM depends on side: calls ITM = strike < SPX, puts ITM = strike > SPX
+  const isItm = isCall ? offsetRaw < 0 : offsetRaw > 0;
+  const offsetDollar = Math.abs(offsetRaw);
+  const offsetLabel = offsetDollar === 0 ? 'atm' : isItm ? `itm${offsetDollar}` : `otm${offsetDollar}`;
 
   for (const [hmaFastPeriod, hmaSlowPeriod] of HMA_PAIRS) {
     const hmaFastKey = `hma${hmaFastPeriod}`;
@@ -636,6 +650,14 @@ function detectContractSignals(bar: Bar, timeframe: Timeframe = '1m'): void {
     const isFastAbove = hmaFast > hmaSlow;
 
     if (wasFastAbove !== isFastAbove) {
+      const dedupKey = `${symbol}:${hmaFastPeriod}_${hmaSlowPeriod}:${timeframe}:${bar.ts}`;
+      if (emittedSignals.has(dedupKey)) continue;
+      emittedSignals.add(dedupKey);
+      if (emittedSignals.size > 50000) {
+        const oldest = [...emittedSignals].slice(0, 25000);
+        oldest.forEach(k => emittedSignals.delete(k));
+      }
+
       const direction = isFastAbove ? 'bullish' as const : 'bearish' as const;
       const hmaChannel = `${offsetLabel}:${hmaFastPeriod}_${hmaSlowPeriod}:${side}`;
       const signal = {
@@ -738,6 +760,7 @@ async function warmup(): Promise<void> {
       if (quote && quote.last > 0) {
         lastSpxPrice = quote.last;
         setLastSpxPrice(lastSpxPrice);
+        signalPoller.setSpxPrice(lastSpxPrice);
         console.log(`[startup] Primed SPX price from Tradier quote: $${lastSpxPrice}`);
       }
     } catch (e) {
@@ -768,6 +791,7 @@ async function pollUnderlying(): Promise<void> {
       if (quote && quote.last > 0) {
         lastSpxPrice = quote.last;
         setLastSpxPrice(lastSpxPrice);
+        signalPoller.setSpxPrice(lastSpxPrice);
         healthTracker.recordBar('SPX', Date.now());
       }
     }
@@ -783,6 +807,7 @@ async function pollUnderlying(): Promise<void> {
 
       lastSpxPrice = enriched[enriched.length - 1].close;
       setLastSpxPrice(lastSpxPrice);
+      signalPoller.setSpxPrice(lastSpxPrice);
       const lastBar = enriched[enriched.length - 1];
       healthTracker.recordBar('SPX', lastBar.ts * 1000);
       broadcast({ type: 'spx_bar', data: lastBar });
@@ -903,6 +928,12 @@ async function shutdown(signal: string): Promise<void> {
   shuttingDown = true;
   console.log(`[shutdown] ${signal} received, cleaning up...`);
 
+  // Stop signal poller
+  signalPoller.stop();
+
+  // Close signals DB
+  try { closeSignalsDb(); } catch {}
+
   // Safety timeout — force exit after 5s if cleanup hangs
   setTimeout(() => {
     console.log('[shutdown] forced exit after 5s timeout');
@@ -952,6 +983,7 @@ process.on('SIGINT', () => shutdown('SIGINT'));
 
 async function main(): Promise<void> {
   console.log('[SPXer] Starting...');
+  console.warn('[SPXer] ⚠️ TICK-BASED SIGNALS DISABLED — Migrating to poll-based detection (see docs/SIGNAL-SOURCE-PROBLEM.md)');
 
   if (!config.tradierToken) {
     console.warn('[SPXer] TRADIER_TOKEN not set — running in degraded mode (no live data)');
@@ -968,6 +1000,8 @@ async function main(): Promise<void> {
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
       initDb(liveDbPath);
+      // Initialize signals DB (separate persistent DB for EOD review)
+      initSignalsDb();
       break;
     } catch (e) {
       console.error(`[startup] initDb failed (attempt ${attempt}/3):`, e);
@@ -1035,6 +1069,12 @@ async function main(): Promise<void> {
       console.warn('[startup] warmup failed (provider down?), starting without history:', e);
     }
 
+    // Start signal poller after SPX price is set (stateful detection)
+    if (lastSpxPrice) {
+      signalPoller.setSpxPrice(lastSpxPrice);
+    }
+    signalPoller.start();
+
     // ── Initial pollOptions + backfillOptionBars — non-fatal ──
     try {
       await pollOptions();
@@ -1073,6 +1113,75 @@ async function main(): Promise<void> {
     }
   } catch (e) {
     console.warn('[startup] seedIndicatorState failed, indicators will warm up from incoming bars:', e);
+  }
+
+  // ── Catch-up scan: detect signals from recent DB bars missed during restart ──
+  try {
+    const catchupContracts = tracker.getActive().concat(tracker.getSticky());
+    const catchupTfs: [Timeframe, number][] = [['3m', 180], ['5m', 300]];
+    let catchupSignals = 0;
+    for (const contract of catchupContracts) {
+      for (const [tf] of catchupTfs) {
+        const recentBars = getBars(contract.symbol, tf, 3);
+        if (recentBars.length >= 2) {
+          const latest = recentBars[recentBars.length - 1];
+          const prev = recentBars[recentBars.length - 2];
+          const parsed = parseSymbol(latest.symbol);
+          if (!parsed) continue;
+          for (const [hmaFastPeriod, hmaSlowPeriod] of HMA_PAIRS) {
+            const fastKey = `hma${hmaFastPeriod}`;
+            const slowKey = `hma${hmaSlowPeriod}`;
+            const currFast = (latest.indicators as any)?.[fastKey];
+            const currSlow = (latest.indicators as any)?.[slowKey];
+            const prevFast = (prev.indicators as any)?.[fastKey];
+            const prevSlow = (prev.indicators as any)?.[slowKey];
+            if (currFast == null || currSlow == null || prevFast == null || prevSlow == null) continue;
+            const wasAbove = prevFast > prevSlow;
+            const isAbove = currFast > currSlow;
+            if (wasAbove !== isAbove) {
+              const direction = isAbove ? 'bullish' as const : 'bearish' as const;
+              const side = parsed.isCall ? 'call' : 'put';
+              const offsetRaw = Math.round((parsed.strike - (lastSpxPrice ?? 0)) / STRIKE_INTERVAL) * STRIKE_INTERVAL;
+              const isItm = parsed.isCall ? offsetRaw < 0 : offsetRaw > 0;
+              const offsetDollar = Math.abs(offsetRaw);
+              const offsetLabel = offsetDollar === 0 ? 'atm' : isItm ? `itm${offsetDollar}` : `otm${offsetDollar}`;
+              const hmaChannel = `${offsetLabel}:${hmaFastPeriod}_${hmaSlowPeriod}:${side}`;
+              const signal = {
+                type: 'contract_signal',
+                channel: hmaChannel,
+                data: {
+                  symbol: latest.symbol,
+                  strike: parsed.strike,
+                  expiry: parsed.expiry,
+                  side,
+                  direction,
+                  hmaFastPeriod,
+                  hmaSlowPeriod,
+                  hmaFast: currFast,
+                  hmaSlow: currSlow,
+                  price: latest.close,
+                  timestamp: latest.ts * 1000,
+                  offsetLabel,
+                  timeframe: tf,
+                },
+              };
+              insertSignal({
+                symbol: latest.symbol, strike: parsed.strike, expiry: parsed.expiry ?? '', side, direction, offsetLabel,
+                hmaFast: hmaFastPeriod, hmaSlow: hmaSlowPeriod,
+                hmaFastVal: currFast, hmaSlowVal: currSlow,
+                timeframe: tf, price: latest.close, ts: latest.ts,
+              });
+              broadcast(signal);
+              catchupSignals++;
+              console.log(`[catchup] ${direction.toUpperCase()} HMA(${hmaFastPeriod})xHMA(${hmaSlowPeriod}) ${latest.symbol} @ ${latest.close.toFixed(2)} (${offsetLabel}, ${side}, ${tf})`);
+            }
+          }
+        }
+      }
+    }
+    if (catchupSignals > 0) console.log(`[catchup] Emitted ${catchupSignals} missed signals from DB bars`);
+  } catch (e) {
+    console.warn('[startup] catchup signal scan failed:', e);
   }
 
   const { httpServer } = startHttpServer(config.port);

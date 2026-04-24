@@ -51,6 +51,11 @@ export function broadcast(message: object): void {
     } else if (msg.type === 'contract_signal') {
       if (subs.has(`contract_signal:${msg.channel}`)) {
         ws.send(data);
+      } else {
+        const parts = msg.channel?.split(':');
+        if (parts && parts.length === 3 && subs.has(`contract_signal:${parts[1]}`)) {
+          ws.send(data);
+        }
       }
     } else if (['market_context', 'heartbeat', 'service_shutdown'].includes(msg.type)) {
       ws.send(data); // broadcast to all

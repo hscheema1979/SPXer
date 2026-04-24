@@ -140,11 +140,14 @@ async function fetchAccountData(range) {
   const today = todayET();
   const start = rangeToStartDate(range);
 
-  // Always fetch balance, positions, agent status
-  const [bal, pos, status] = await Promise.all([
+  // Always fetch balance, positions, agent status, service status, and execution mode
+  const apiBase = window.location.pathname.includes('/spxer/') ? '/spxer' : '';
+  const [bal, pos, status, services, execMode] = await Promise.all([
     fetch(`${API}/account/balance`).then(r => r.json()).catch(() => null),
     fetch(`${API}/account/positions`).then(r => r.json()).catch(() => []),
     fetch(`${API}/account/agent-status`).then(r => r.json()).catch(() => null),
+    fetch(`${apiBase}/admin/api/processes`).then(r => r.json()).catch(() => []),
+    fetch(`${apiBase}/agent/mode`).then(r => r.json()).catch(() => null),
   ]);
 
   // Fetch today's live trades (always needed for today section)
@@ -161,7 +164,7 @@ async function fetchAccountData(range) {
     gainloss = raw.filter(p => (p.close_date || '').slice(0, 10) >= EARLIEST_DATE);
   }
 
-  return { bal, pos, status, todayTrades, gainloss, range };
+  return { bal, pos, status, todayTrades, gainloss, range, services, execMode };
 }
 
 // ── Rendering ──────────────────────────────────────────────────────────
@@ -188,19 +191,66 @@ function formatDate(dateStr) {
 
 async function render() {
   const data = await fetchAccountData(currentRange);
-  const { bal, pos, status, todayTrades, gainloss, range } = data;
+  const { bal, pos, status, todayTrades, gainloss, range, services, execMode } = data;
   const c = document.getElementById('content');
   let h = '';
 
-  // Agent status row
-  const isOnline = status && status.cycle > 0;
+  // ── Service Status Row (v2.0 Independent Services) ────────────────────────
+  const svcMap = {};
+  if (Array.isArray(services)) {
+    services.forEach(s => { svcMap[s.name] = s; });
+  }
+
+  const eventHandler = svcMap['event-handler'];
+  const positionMonitor = svcMap['position-monitor'];
+  const spxer = svcMap['spxer'];
+
+  // Execution mode display
+  let modeStr = 'LIVE';
+  let modeColor = 'var(--red)';
+  if (execMode?.mode === 'SIMULATION') {
+    modeStr = 'SIMULATION';
+    modeColor = 'var(--blue)';
+  } else if (execMode?.mode === 'PAPER' || execMode?.paper) {
+    modeStr = 'PAPER';
+    modeColor = 'var(--orange)';
+  }
+
   h += `<div class="status-row">`;
-  h += `<div class="status-pill ${isOnline ? 'status-online' : 'status-offline'}"><span class="dot"></span>${isOnline ? 'Agent Online' : 'Agent Offline'}</div>`;
-  if (status) {
+
+  // Execution mode (first - most important)
+  h += `<div class="status-pill" style="background:rgba(139,139,255,.1);color:${modeColor};border:1px solid ${modeColor}"><strong>${modeStr}</strong></div>`;
+
+  // Event Handler (PRIMARY)
+  if (eventHandler?.status === 'online') {
+    h += `<div class="status-pill status-online" title="Signal detection + entry execution (100% independent)"><span class="dot"></span>event-handler <span style="font-size:10px;opacity:0.7">(PRIMARY)</span></div>`;
+  } else {
+    h += `<div class="status-pill status-offline" title="Signal detection + entry execution (100% independent)">event-handler <span style="font-size:10px;opacity:0.7">(PRIMARY)</span></div>`;
+  }
+
+  // Position Monitor (RECOMMENDED)
+  if (positionMonitor?.status === 'online') {
+    h += `<div class="status-pill status-online" title="Exit observer - pure logger (100% independent)"><span class="dot"></span>position-monitor <span style="font-size:10px;opacity:0.7">(RECOMMENDED)</span></div>`;
+  } else {
+    h += `<div class="status-pill status-offline" title="Exit observer - pure logger (100% independent)">position-monitor <span style="font-size:10px;opacity:0.7">(RECOMMENDED)</span></div>`;
+  }
+
+  // SPXer (OPTIONAL)
+  if (spxer?.status === 'online') {
+    h += `<div class="status-pill status-online" title="Data service + replay viewer (OPTIONAL for live trading)"><span class="dot"></span>spxer <span style="font-size:10px;opacity:0.7">(OPTIONAL)</span></div>`;
+  } else if (spxer) {
+    h += `<div class="status-pill status-offline" title="Data service + replay viewer (OPTIONAL for live trading)">spxer <span style="font-size:10px;opacity:0.7">(OPTIONAL)</span></div>`;
+  }
+
+  h += `</div>`;
+
+  // Agent cycle info (if available from old polling agent)
+  if (status && status.cycle > 0) {
+    h += `<div class="status-row">`;
     h += `<div class="status-pill" style="background:rgba(139,139,255,.1);color:var(--purple)">Cycle #${status.cycle} | SPX $${(status.spxPrice||0).toFixed(2)}</div>`;
     if (status.lastReasoning) h += `<div class="status-pill" style="background:var(--card);color:var(--muted);border:1px solid var(--border)">${esc(status.lastReasoning)}</div>`;
+    h += `</div>`;
   }
-  h += `</div>`;
 
   // Today P&L from broker balance (sole source of truth)
   const todayPnl = bal?.close_pl ?? 0;

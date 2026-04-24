@@ -21,8 +21,8 @@ import * as path from 'path';
 
 let replayDb: DB | null = null;
 
-/** All replay data lives in spxer.db — bar data, configs, results, runs. */
-export const REPLAY_DB_DEFAULT = path.resolve(process.cwd(), process.env.DB_PATH || 'data/spxer.db');
+/** All replay data lives in replay.db — bar data, configs, results, runs. */
+export const REPLAY_DB_DEFAULT = path.resolve(process.cwd(), process.env.DB_PATH || process.env.REPLAY_DB_PATH || 'data/replay.db');
 
 /** Alias — same DB. Kept for call-site clarity (configs/results vs bar queries). */
 export const REPLAY_META_DB = REPLAY_DB_DEFAULT;

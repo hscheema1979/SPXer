@@ -24,6 +24,8 @@ import {
   startTokenRefresher,
 } from '../providers/schwab';
 import { createSchwaberRoutes } from './schwaber-routes';
+import { createDevopsRoutes } from './devops-routes';
+import { signalPoller } from '../index';
 
 let lastSpxPrice: number | null = null;
 export function setLastSpxPrice(p: number) { lastSpxPrice = p; }
@@ -142,7 +144,7 @@ export function startHttpServer(port: number): { app: Express; httpServer: Serve
       const chain = await fetchOptionsChain('SPX', expiry);
       res.json(chain);
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      res.status(500).json({ error: (e as Error).message });
     }
   });
 
@@ -152,7 +154,7 @@ export function startHttpServer(port: number): { app: Express; httpServer: Serve
       const dates = await fetchExpirations('SPX');
       res.json(dates);
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      res.status(500).json({ error: (e as Error).message });
     }
   });
 
@@ -163,7 +165,7 @@ export function startHttpServer(port: number): { app: Express; httpServer: Serve
       const snap = await fetchScreenerSnapshot();
       res.json(snap);
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      res.status(500).json({ error: (e as Error).message });
     }
   });
 
@@ -198,16 +200,6 @@ export function startHttpServer(port: number): { app: Express; httpServer: Serve
     res.json(signals);
   });
 
-  app.get('/signals', (req, res) => {
-    const { getLatestSignals } = require('../storage/queries');
-    const signals = getLatestSignals({
-      offsetLabel: req.query.offset as string | undefined,
-      timeframe: req.query.timeframe as string | undefined,
-      hmaPair: req.query.hmaPair as string | undefined,
-      limit: Math.min(Number(req.query.limit) || 50, 200),
-    });
-    res.json(signals);
-  });
 
   app.get('/agent/config', (req, res) => {
     // Serve the live agent config from the DB (same source the agents use)
@@ -217,29 +209,85 @@ export function startHttpServer(port: number): { app: Express; httpServer: Serve
       const configId = process.env.AGENT_CONFIG_ID || (req.query.id as string);
       if (!configId) return res.json({ error: 'No AGENT_CONFIG_ID configured' });
       const cfg = store.getConfig(configId);
-      store.close();
-      if (!cfg) return res.json({ error: `Config '${configId}' not found in DB` });
+      if (!cfg) return res.json({ error: `Config ${configId} not found` });
+      res.json(cfg.config);
+    } catch (e) {
+      res.status(500).json({ error: (e as Error).message });
+    }
+  });
+
+  // ── Agent Simulation Mode endpoints ─────────────────────────────────────
+
+  app.get('/agent/simulation', (_req, res) => {
+    try {
+      const { getExecutionMode, getSimulationStats, getFakeBroker } = require('../agent/execution-router');
+      const mode = getExecutionMode();
+      const stats = getSimulationStats();
+      const fakeBroker = getFakeBroker();
+
+      let positions = [];
+      if (fakeBroker) {
+        positions = fakeBroker.getSimulatedPositions();
+      }
+
       res.json({
-        id: cfg.id,
-        name: cfg.name,
-        signals: {
-          hmaCrossFast: cfg.signals?.hmaCrossFast,
-          hmaCrossSlow: cfg.signals?.hmaCrossSlow,
-          targetOtmDistance: cfg.signals?.targetOtmDistance,
-          enableHmaCrosses: cfg.signals?.enableHmaCrosses,
-          enableEmaCrosses: cfg.signals?.enableEmaCrosses,
-          requireUnderlyingHmaCross: cfg.signals?.requireUnderlyingHmaCross,
-          signalTimeframe: cfg.signals?.signalTimeframe,
+        active: mode === 'SIMULATION',
+        mode,
+        stats: {
+          ordersSubmitted: stats.ordersSubmitted,
+          ordersFilled: stats.ordersFilled,
+          pendingOrders: stats.pendingOrders,
         },
-        position: cfg.position,
-        strikeSelector: cfg.strikeSelector,
-        risk: cfg.risk,
-        exit: cfg.exit,
-        sizing: cfg.sizing,
-        timeWindows: cfg.timeWindows,
+        positions,
       });
-    } catch {
-      res.json({ error: 'Config not available' });
+    } catch (e) {
+      res.status(500).json({ error: (e as Error).message });
+    }
+  });
+
+  app.post('/agent/simulation/toggle', (req, res) => {
+    // Toggle simulation mode (requires restart to take effect)
+    const enabled = req.body.enabled;
+    if (typeof enabled !== 'boolean') {
+      return res.status(400).json({ error: 'enabled must be boolean' });
+    }
+
+    // For now, this just returns what WOULD happen
+    // Actual toggle requires changing AGENT_EXECUTION_MODE env var and restarting
+    res.json({
+      message: enabled
+        ? 'To enable simulation mode: set AGENT_EXECUTION_MODE=SIMULATION and restart handler'
+        : 'To disable simulation mode: unset AGENT_EXECUTION_MODE or set to LIVE and restart handler',
+      currentMode: process.env.AGENT_EXECUTION_MODE || 'LIVE',
+      requiresRestart: true,
+    });
+  });
+
+  app.get('/agent/mode', (_req, res) => {
+    // Get current execution mode
+    try {
+      const { getExecutionMode } = require('../agent/execution-router');
+      res.json({
+        mode: getExecutionMode(),
+        simulation: getExecutionMode() === 'SIMULATION',
+        paper: process.env.AGENT_PAPER === 'true',
+      });
+    } catch (e) {
+      res.status(500).json({ error: (e as Error).message });
+    }
+  });
+
+  // ── Signal Poller Status ───────────────────────────────────────────────────────
+
+  app.get('/signal-poller/status', (_req, res) => {
+    try {
+      const result = signalPoller.getLastPollResult();
+      if (!result) {
+        return res.json({ status: 'no_poll_yet' });
+      }
+      res.json(result);
+    } catch (e) {
+      res.status(500).json({ error: (e as Error).message });
     }
   });
 
@@ -252,7 +300,7 @@ export function startHttpServer(port: number): { app: Express; httpServer: Serve
       const url = buildAuthUrl();
       res.redirect(url);
     } catch (e: any) {
-      res.status(500).send(`Schwab auth error: ${e.message}`);
+      res.status(500).send(`Schwab auth error: ${(e as Error).message}`);
     }
   });
 
@@ -279,8 +327,8 @@ export function startHttpServer(port: number): { app: Express; httpServer: Serve
         </body></html>
       `);
     } catch (e: any) {
-      console.error('[schwab] Callback error:', e.message);
-      res.status(500).send(`Schwab token exchange failed: ${e.message}`);
+      console.error('[schwab] Callback error:', (e as Error).message);
+      res.status(500).send(`Schwab token exchange failed: ${(e as Error).message}`);
     }
   });
 
@@ -309,7 +357,7 @@ export function startHttpServer(port: number): { app: Express; httpServer: Serve
       if (!mdb) return res.status(503).json({ error: 'metrics DB not available' });
       res.json(getLatestMetrics(mdb));
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      res.status(500).json({ error: (e as Error).message });
     }
   });
 
@@ -320,7 +368,7 @@ export function startHttpServer(port: number): { app: Express; httpServer: Serve
       const hours = parseInt(req.query.hours as string) || 24;
       res.json(getMetricsSummary(mdb, hours));
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      res.status(500).json({ error: (e as Error).message });
     }
   });
 
@@ -334,7 +382,7 @@ export function startHttpServer(port: number): { app: Express; httpServer: Serve
       const tags = req.query.tags as string | undefined;
       res.json(getMetricSeries(mdb, req.params.name, from, to, step, tags));
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      res.status(500).json({ error: (e as Error).message });
     }
   });
 
@@ -349,6 +397,9 @@ export function startHttpServer(port: number): { app: Express; httpServer: Serve
 
   // ── Schwaber viewer ──
   app.use('/schwaber', createSchwaberRoutes());
+
+  // ── DevOps monitoring ──
+  app.use('/devops', createDevopsRoutes());
 
   // ── Replay viewer ──
   app.use('/replay', createReplayRoutes());

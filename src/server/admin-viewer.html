@@ -624,6 +624,8 @@
     <button data-section="events">Event Stream</button>
     <button data-section="ecosystem">Ecosystem</button>
     <button data-section="logs">Logs</button>
+    <button data-section="checklist">Checklist</button>
+    <button data-section="monitoring">Monitoring</button>
   </div>
   <div style="flex:1;min-width:0"></div>
   <button class="config-btn" onclick="refreshCurrent()">🔄 Refresh</button>
@@ -633,6 +635,38 @@
 <div class="content-area">
   <!-- Processes Section -->
   <div id="section-processes" class="section active">
+    <!-- Service Architecture Info -->
+    <div class="card" style="border-color:rgba(139,139,255,0.3);background:rgba(139,139,255,0.05)">
+      <div class="card-header">
+        <span class="card-title" style="color:var(--primary)">📐 Service Architecture (v2.0 — Independent Services)</span>
+        <div id="current-execution-mode" style="font-family:var(--font-mono)">Loading...</div>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px;font-size:12px">
+        <div>
+          <div style="font-weight:600;color:var(--success)">event-handler (PRIMARY)</div>
+          <div style="color:var(--muted-foreground);margin-top:4px">Signal detection + entry execution</div>
+          <div style="color:var(--muted);font-size:11px;margin-top:4px">✓ 100% independent — direct Tradier API</div>
+          <div style="color:var(--muted);font-size:11px">✓ Required for live trading</div>
+        </div>
+        <div>
+          <div style="font-weight:600;color:var(--info)">position-monitor (RECOMMENDED)</div>
+          <div style="color:var(--muted-foreground);margin-top:4px">Exit observer — pure logger</div>
+          <div style="color:var(--muted);font-size:11px;margin-top:4px">✓ 100% independent — direct Tradier API</div>
+          <div style="color:var(--muted);font-size:11px">✓ Does NOT execute trades</div>
+        </div>
+        <div>
+          <div style="font-weight:600;color:var(--muted)">spxer (OPTIONAL)</div>
+          <div style="color:var(--muted-foreground);margin-top:4px">Data service + replay viewer</div>
+          <div style="color:var(--muted);font-size:11px;margin-top:4px">⚠️ NOT required for live trading</div>
+          <div style="color:var(--muted);font-size:11px">⚠️ Only needed for replay viewer</div>
+        </div>
+      </div>
+      <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border);font-size:11px;color:var(--muted-foreground)">
+        <strong>Key Principle:</strong> Live trading continues even if spxer crashes. Event-handler and position-monitor have direct Tradier API connections.
+        <a href="https://github.com/anthropics/SPXer/blob/main/SERVICE-ARCHITECTURE.md" target="_blank" style="color:var(--primary);text-decoration:none;margin-left:8px">View Architecture →</a>
+      </div>
+    </div>
+
     <div class="card">
       <div class="card-header">
         <span class="card-title">PM2 Processes</span>
@@ -674,13 +708,24 @@
           <input class="form-input" id="env-handler-config-ids" type="text" placeholder="e.g. config1,config2,config3">
           <span class="form-hint">Comma-separated. Overrides single config ID.</span>
         </div>
+        <div class="form-group">
+          <label class="form-label">Execution Mode</label>
+          <select id="env-handler-execution-mode" class="form-input" onchange="executionModeChanged()">
+            <option value="">Default (PAPER/LIVE based on AGENT_PAPER)</option>
+            <option value="SIMULATION">SIMULATION (live signals, local orders)</option>
+            <option value="PAPER">PAPER (Tradier paper trading)</option>
+            <option value="LIVE">LIVE (real trading)</option>
+          </select>
+          <span class="form-hint">SIMULATION is safest for testing — live signals with locally-simulated orders</span>
+        </div>
         <div class="form-group" style="display:flex;align-items:center;gap:12px">
-          <label class="form-label" style="margin:0">Paper Mode</label>
+          <label class="form-label" style="margin:0">Paper Mode (Legacy)</label>
           <label class="toggle">
             <input type="checkbox" id="env-handler-paper" onchange="paperToggleChanged()">
             <span class="toggle-slider"></span>
           </label>
           <span id="paper-mode-label" style="font-size:11px;font-family:var(--font-mono);color:var(--warning)">PAPER MODE</span>
+          <span class="form-hint" style="margin-left:auto;font-size:10px;color:var(--muted-foreground)">Ignored if AGENT_EXECUTION_MODE is set</span>
         </div>
       </div>
       <div id="ecosystem-raw-block" style="display:none;margin-top:10px">
@@ -734,6 +779,94 @@
       </div>
     </div>
   </div>
+
+  <!-- Checklist Section -->
+  <div id="section-checklist" class="section">
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">System Startup Checklist</span>
+        <button class="run-btn" onclick="runAllTiers()">▶ Run All Tiers</button>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px;margin-bottom:16px">
+        <button class="tier-btn" onclick="runTier(null)" style="padding:10px;background:var(--card-elevated);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--foreground);cursor:pointer">
+          <div style="font-weight:600">All Tiers</div>
+          <div style="font-size:11px;color:var(--muted)">Complete check</div>
+        </button>
+        <button class="tier-btn" onclick="runTier('0')" style="padding:10px;background:var(--card-elevated);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--foreground);cursor:pointer">
+          <div style="font-weight:600">Tier 0</div>
+          <div style="font-size:11px;color:var(--muted)">Machine Fundamentals</div>
+        </button>
+        <button class="tier-btn" onclick="runTier('1')" style="padding:10px;background:var(--card-elevated);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--foreground);cursor:pointer">
+          <div style="font-weight:600">Tier 1</div>
+          <div style="font-size:11px;color:var(--muted)">Service Setup</div>
+        </button>
+        <button class="tier-btn" onclick="runTier('6-10')" style="padding:10px;background:var(--card-elevated);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--foreground);cursor:pointer">
+          <div style="font-weight:600">Tiers 6-10</div>
+          <div style="font-size:11px;color:var(--muted)">Data Pipeline</div>
+        </button>
+        <button class="tier-btn" onclick="runTier('11-17')" style="padding:10px;background:var(--card-elevated);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--foreground);cursor:pointer">
+          <div style="font-weight:600">Tiers 11-17</div>
+          <div style="font-size:11px;color:var(--muted)">Pre-Market</div>
+        </button>
+      </div>
+      <div id="checklist-results" style="display:grid;gap:12px">
+        <div style="color:var(--muted);padding:40px;text-align:center">
+          Click a tier button above to run checks
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Monitoring Section -->
+  <div id="section-monitoring" class="section">
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px;margin-bottom:12px">
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">Last Check</span>
+        </div>
+        <div id="monitoring-last-check" style="font-size:24px;font-weight:600;color:var(--primary)">--</div>
+        <div id="monitoring-stale" style="font-size:12px;color:var(--muted)"></div>
+      </div>
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">Status</span>
+        </div>
+        <div id="monitoring-status" style="font-size:24px;font-weight:600">--</div>
+        <div id="monitoring-summary" style="font-size:12px;color:var(--muted)"></div>
+      </div>
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">24h Checks</span>
+        </div>
+        <div id="monitoring-total-checks" style="font-size:24px;font-weight:600">--</div>
+        <div id="monitoring-uptime" style="font-size:12px;color:var(--muted)"></div>
+      </div>
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">Issues (24h)</span>
+        </div>
+        <div id="monitoring-issues" style="font-size:24px;font-weight:600">--</div>
+        <div style="font-size:12px;color:var(--muted)">Avg per check: <span id="monitoring-avg-issues">--</span></div>
+      </div>
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">Success Rate</span>
+        </div>
+        <div id="monitoring-success-rate" style="font-size:24px;font-weight:600">--</div>
+        <div style="font-size:12px;color:var(--muted)"><span id="monitoring-clean-checks">--</span> clean checks</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">Recent Checks</span>
+        <button class="run-btn" onclick="triggerMonitoring()">▶ Run Now</button>
+      </div>
+      <div id="monitoring-timeline" style="display:grid;gap:8px;max-height:500px;overflow-y:auto">
+        <div style="color:var(--muted);padding:20px;text-align:center">No monitoring data yet</div>
+      </div>
+    </div>
+  </div>
 </div>
 
 <!-- Config Modal -->
@@ -769,7 +902,17 @@
 </div>
 
 <script>
-const API = '/admin/api';
+// Detect API path based on current URL to work with proxy mounting
+const getCurrentPath = () => {
+  const path = window.location.pathname;
+  // If we're at /spxer/admin/ or similar, use the full mounted path
+  if (path.includes('/spxer/admin')) {
+    return '/spxer/admin/api';
+  }
+  // Otherwise fall back to direct access
+  return '/admin/api';
+};
+const API = getCurrentPath();
 let currentSection = 'processes';
 let processes = [];
 let configs = [];
@@ -792,11 +935,42 @@ document.querySelectorAll('#section-tabs button').forEach(btn => {
 });
 
 function refreshCurrent() {
-  if (currentSection === 'processes') refreshProcesses();
+  if (currentSection === 'processes') {
+    refreshProcesses();
+    loadExecutionMode();
+  }
   else if (currentSection === 'configs') refreshConfigs();
   else if (currentSection === 'events') refreshEventHandler();
   else if (currentSection === 'ecosystem') loadEcosystem();
   else if (currentSection === 'logs') loadLogProcessList();
+  else if (currentSection === 'checklist') loadChecklistSummary();
+  else if (currentSection === 'monitoring') loadMonitoring();
+}
+
+// ── Execution Mode Display ─────────────────────────────────────────────────────
+async function loadExecutionMode() {
+  try {
+    const res = await fetch('/agent/mode');
+    if (!res.ok) return;
+    const data = await res.json();
+
+    const modeDiv = document.getElementById('current-execution-mode');
+    if (!modeDiv) return;
+
+    const mode = data.mode || (data.paper ? 'PAPER' : 'LIVE');
+    const color = mode === 'SIMULATION' ? 'var(--info)' :
+                  mode === 'LIVE' ? 'var(--destructive)' :
+                  mode === 'PAPER' ? 'var(--warning)' : 'var(--muted)';
+
+    modeDiv.innerHTML = `
+      <span style="font-size:11px;color:var(--muted-foreground)">Current Mode:</span>
+      <span style="font-size:13px;font-weight:600;color:${color};margin-left:8px">${mode}</span>
+      ${data.simulation ? '<span style="font-size:10px;color:var(--info);margin-left:8px">(simulated orders)</span>' : ''}
+    `;
+  } catch (e) {
+    // Silently fail if endpoint not available
+    console.debug('Could not load execution mode:', e);
+  }
 }
 
 // ── Processes ──────────────────────────────────────────────────────────────
@@ -1061,18 +1235,52 @@ async function loadEcosystem() {
     const env = envData.env || {};
     document.getElementById('env-handler-config-id').value = env.AGENT_CONFIG_ID || '';
     document.getElementById('env-handler-config-ids').value = env.AGENT_CONFIG_IDS || '';
+    document.getElementById('env-handler-execution-mode').value = env.AGENT_EXECUTION_MODE || '';
     const isPaper = env.AGENT_PAPER === 'true' || env.AGENT_PAPER === true;
     document.getElementById('env-handler-paper').checked = isPaper;
     updatePaperLabel(isPaper);
+    updateExecutionModeLabel(env.AGENT_EXECUTION_MODE || '', isPaper);
     document.getElementById('ecosystem-editor').value = ecoData.content;
   } catch (e) {
     alert(`Error: ${e.message}`);
   }
 }
 
+function executionModeChanged() {
+  const mode = document.getElementById('env-handler-execution-mode').value;
+  updateExecutionModeLabel(mode, document.getElementById('env-handler-paper').checked);
+}
+
+function updateExecutionModeLabel(mode, isPaper) {
+  const label = document.getElementById('paper-mode-label');
+  if (mode === 'SIMULATION') {
+    label.textContent = 'SIMULATION';
+    label.style.color = 'var(--info)';
+  } else if (mode === 'LIVE') {
+    label.textContent = 'LIVE';
+    label.style.color = 'var(--destructive)';
+  } else if (mode === 'PAPER') {
+    label.textContent = 'PAPER (TRADIER)';
+    label.style.color = 'var(--warning)';
+  } else {
+    // Fall back to AGENT_PAPER
+    if (isPaper) {
+      label.textContent = 'PAPER MODE';
+      label.style.color = 'var(--warning)';
+    } else {
+      label.textContent = 'LIVE';
+      label.style.color = 'var(--success)';
+    }
+  }
+}
+
 function paperToggleChanged() {
-  const isPaper = document.getElementById('env-handler-paper').checked;
-  updatePaperLabel(isPaper);
+  const mode = document.getElementById('env-handler-execution-mode').value;
+  if (!mode) {
+    // Only update paper label if execution mode is not set
+    const isPaper = document.getElementById('env-handler-paper').checked;
+    updatePaperLabel(isPaper);
+  }
 }
 
 function updatePaperLabel(isPaper) {
@@ -1089,12 +1297,19 @@ function updatePaperLabel(isPaper) {
 async function saveEcosystemForm() {
   const configId = document.getElementById('env-handler-config-id').value.trim();
   const configIds = document.getElementById('env-handler-config-ids').value.trim();
+  const executionMode = document.getElementById('env-handler-execution-mode').value.trim();
   const isPaper = document.getElementById('env-handler-paper').checked;
 
   const envUpdates = {};
   if (configId) envUpdates.AGENT_CONFIG_ID = configId;
   if (configIds) envUpdates.AGENT_CONFIG_IDS = configIds;
-  envUpdates.AGENT_PAPER = isPaper ? 'true' : 'false';
+  if (executionMode) {
+    envUpdates.AGENT_EXECUTION_MODE = executionMode;
+  }
+  // Only set AGENT_PAPER if AGENT_EXECUTION_MODE is not set
+  if (!executionMode) {
+    envUpdates.AGENT_PAPER = isPaper ? 'true' : 'false';
+  }
 
   try {
     const res = await fetch(`${API}/process/event-handler/env/save-only`, {
@@ -1379,6 +1594,165 @@ function forceClose(configId) {
 
 function reloadConfig(configId) {
   sendHandlerCommand({ action: 'reload_config', configId });
+}
+
+// ── Checklist Functions ─────────────────────────────────────────────────────
+async function runTier(tier) {
+  const resultsDiv = document.getElementById('checklist-results');
+  resultsDiv.innerHTML = '<div style="padding:20px;text-align:center"><span style="color:var(--info)">Running checks...</span></div>';
+
+  try {
+    const url = tier ? `${API}/checklist/run?tier=${tier}` : `${API}/checklist/run`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error('Failed to run checks');
+    const data = await res.json();
+    renderChecklistResults(data.results);
+  } catch (e) {
+    resultsDiv.innerHTML = `<div style="color:var(--destructive);padding:20px">Error: ${e.message}</div>`;
+  }
+}
+
+async function runAllTiers() {
+  runTier(null);
+}
+
+function renderChecklistResults(results) {
+  const resultsDiv = document.getElementById('checklist-results');
+
+  if (!results || results.length === 0) {
+    resultsDiv.innerHTML = '<div style="color:var(--muted);padding:20px;text-align:center">No results</div>';
+    return;
+  }
+
+  resultsDiv.innerHTML = results.map(r => `
+    <div class="card" style="border-left: 3px solid ${
+      r.status === 'pass' ? 'var(--success)' : r.status === 'warn' ? 'var(--warning)' : 'var(--destructive)'
+    }">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+        <strong style="flex:1">${r.name}</strong>
+        <span style="font-size:11px;padding:2px 8px;border-radius:4px;background:${
+          r.status === 'pass' ? 'rgba(16,185,129,0.2)' : r.status === 'warn' ? 'rgba(245,158,11,0.2)' : 'rgba(244,63,94,0.2)'
+        };color:${
+          r.status === 'pass' ? 'var(--success)' : r.status === 'warn' ? 'var(--warning)' : 'var(--destructive)'
+        }">${r.status.toUpperCase()}</span>
+      </div>
+      <pre style="font-size:11px;font-family:var(--font-mono);white-space:pre-wrap;word-break:break-all;color:var(--muted-foreground);max-height:200px;overflow-y:auto;background:var(--input);padding:8px;border-radius:4px">${r.output}</pre>
+    </div>
+  `).join('');
+}
+
+async function loadChecklistSummary() {
+  // Show initial state
+  document.getElementById('checklist-results').innerHTML =
+    '<div style="color:var(--muted);padding:40px;text-align:center">Click a tier button above to run checks</div>';
+}
+
+// ── Monitoring Functions ───────────────────────────────────────────────────
+async function loadMonitoring() {
+  try {
+    const [latestRes, statsRes] = await Promise.all([
+      fetch(`${API}/monitoring/latest`),
+      fetch(`${API}/monitoring/stats`),
+    ]);
+
+    const latest = await latestRes.json();
+    const stats = await statsRes.json();
+
+    // Update summary cards
+    if (latest.result) {
+      const timestamp = latest.result.timestamp ? new Date(latest.result.timestamp).toLocaleTimeString() : '--';
+      document.getElementById('monitoring-last-check').textContent = timestamp;
+
+      const staleMinutes = latest.result.timestamp
+        ? Math.floor((Date.now() - new Date(latest.result.timestamp).getTime()) / 60000)
+        : 0;
+      document.getElementById('monitoring-stale').textContent = staleMinutes > 0 ? `${staleMinutes}m ago` : 'Just now';
+
+      let status = 'unknown';
+      let statusColor = 'var(--muted)';
+      if (latest.result.issues > 0) {
+        status = 'CRITICAL';
+        statusColor = 'var(--destructive)';
+      } else if (latest.result.warnings > 3) {
+        status = 'DEGRADED';
+        statusColor = 'var(--warning)';
+      } else if (latest.result.warnings > 0) {
+        status = 'WARNING';
+        statusColor = 'var(--warning)';
+      } else {
+        status = 'HEALTHY';
+        statusColor = 'var(--success)';
+      }
+
+      document.getElementById('monitoring-status').textContent = status;
+      document.getElementById('monitoring-status').style.color = statusColor;
+      document.getElementById('monitoring-summary').textContent = latest.result.summary || '--';
+    }
+
+    if (stats.stats) {
+      document.getElementById('monitoring-total-checks').textContent = stats.stats.totalChecks;
+      document.getElementById('monitoring-uptime').textContent = `Uptime: ${stats.stats.uptime}`;
+      document.getElementById('monitoring-issues').textContent = stats.stats.totalIssues;
+      document.getElementById('monitoring-issues').style.color = stats.stats.totalIssues > 0 ? 'var(--destructive)' : 'var(--success)';
+      document.getElementById('monitoring-avg-issues').textContent = stats.stats.avgIssuesPerCheck;
+      document.getElementById('monitoring-success-rate').textContent =
+        stats.stats.totalChecks > 0 ? Math.round((stats.stats.cleanChecks / stats.stats.totalChecks) * 100) + '%' : '--';
+      document.getElementById('monitoring-clean-checks').textContent =
+        `${stats.stats.cleanChecks}/${stats.stats.totalChecks}`;
+    }
+
+    // Load timeline
+    const timelineRes = await fetch(`${API}/monitoring/results`);
+    const timelineData = await timelineRes.json();
+    renderMonitoringTimeline(timelineData.results);
+  } catch (e) {
+    console.error('Error loading monitoring:', e);
+  }
+}
+
+function renderMonitoringTimeline(results) {
+  const timeline = document.getElementById('monitoring-timeline');
+
+  if (!results || results.length === 0) {
+    timeline.innerHTML = '<div style="color:var(--muted);padding:20px;text-align:center">No monitoring data yet</div>';
+    return;
+  }
+
+  timeline.innerHTML = results.slice(0, 20).map(r => {
+    const time = r.timestamp ? new Date(r.timestamp).toLocaleTimeString() : '--';
+    const statusColor = r.issues > 0 ? 'var(--destructive)' : r.warnings > 0 ? 'var(--warning)' : 'var(--success)';
+    const summary = r.summary || (r.issues > 0 ? `${r.issues} issue(s)` : r.warnings > 0 ? `${r.warnings} warning(s)` : 'All good');
+
+    return `
+      <div class="card" style="padding:10px;border-left:2px solid ${statusColor}">
+        <div style="display:flex;align-items:center;gap:10px;font-size:12px;font-family:var(--font-mono)">
+          <span style="color:var(--muted)">${time}</span>
+          <span style="flex:1;font-weight:600;color:${statusColor}">${summary}</span>
+          <span style="color:var(--muted)">${r.issues}i ${r.warnings}w</span>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+async function triggerMonitoring() {
+  try {
+    const btn = event.target;
+    btn.disabled = true;
+    btn.textContent = 'Running...';
+
+    const res = await fetch(`${API}/monitoring/trigger`, { method: 'POST' });
+    if (!res.ok) throw new Error('Failed to trigger monitoring');
+
+    alert('Monitoring check triggered!');
+    await loadMonitoring();
+  } catch (e) {
+    alert(`Error: ${e.message}`);
+  } finally {
+    const btn = event.target;
+    btn.disabled = false;
+    btn.textContent = '▶ Run Now';
+  }
 }
 
 // ── Init ───────────────────────────────────────────────────────────────────

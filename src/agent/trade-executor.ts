@@ -1,5 +1,5 @@
 /**
- * TradeExecutor: places orders via Tradier API.
+ * TradeExecutor: places orders via Tradier API or FakeBroker (simulation mode).
  * Supports SPX execution via Config.execution.
  *
  * Order type logic:
@@ -8,6 +8,7 @@
  *   - Exits always use market orders (speed > price on exit)
  *
  * In paper mode, logs the order without sending it.
+ * In simulation mode, routes to FakeBroker locally.
  */
 import axios from 'axios';
 import { config, TRADIER_BASE, TRADIER_SANDBOX_BASE } from '../config';
@@ -20,6 +21,8 @@ import {
   incrReentryProtected,
   incrReentryUnprotected,
 } from './execution-counters';
+import { isSimulationMode, getFakeBroker } from './execution-router';
+import type { FakeBroker } from './fake-broker';
 
 /** Maximum bid-ask spread to use a market order. Above this, use limit at ask. */
 const DEFAULT_MAX_SPREAD_FOR_MARKET = 0.50;
@@ -278,6 +281,69 @@ export async function openPosition(
   const qty = decision.positionSize;
   const isReentry = (reentryDepth ?? 0) >= 1;
   if (isReentry) incrReentryAttempted();
+
+  // ── SIMULATION MODE: Route to FakeBroker ────────────────────────────────
+  if (isSimulationMode()) {
+    const fakeBroker = getFakeBroker();
+    if (!fakeBroker) {
+      return {
+        position: {
+          id: randomUUID(),
+          symbol: signal.symbol,
+          side: signal.side,
+          strike: signal.strike,
+          expiry: signal.expiry || new Date().toISOString().split('T')[0],
+          entryPrice: 0,
+          quantity: 0,
+          stopLoss: decision.stopLoss,
+          takeProfit: decision.takeProfit,
+          openedAt: Date.now(),
+        },
+        execution: { error: 'FakeBroker not initialized', paper: true },
+      };
+    }
+
+    const side = signal.side === 'call' ? 'buy_to_open' : 'buy_to_open'; // Calls and puts both buy_to_open
+    const result = fakeBroker.submitOtocOrder({
+      symbol: signal.symbol,
+      side,
+      quantity: qty,
+      price: signal.ask ?? signal.currentPrice,
+      takeProfit: decision.takeProfit ?? signal.ask ?? signal.currentPrice,
+      stopLoss: decision.stopLoss,
+    });
+
+    console.log(`[executor] SIMULATION: OTOCO ${side} ${qty}x ${signal.symbol} @ $${(signal.ask ?? signal.currentPrice).toFixed(2)}`);
+    console.log(`[executor]             TP: $${decision.takeProfit?.toFixed(2)} | SL: $${decision.stopLoss.toFixed(2)}`);
+    console.log(`[executor]             Bracket: #${result.bracketId} | Entry: #${result.entryId} | TP: #${result.tpLegId} | SL: #${result.slLegId}`);
+
+    return {
+      position: {
+        id: randomUUID(),
+        symbol: signal.symbol,
+        side: signal.side,
+        strike: signal.strike,
+        expiry: signal.expiry || new Date().toISOString().split('T')[0],
+        entryPrice: signal.ask ?? signal.currentPrice,
+        quantity: qty,
+        stopLoss: decision.stopLoss,
+        takeProfit: decision.takeProfit,
+        openedAt: Date.now(),
+        bracketOrderId: result.bracketId,
+        tpLegId: result.tpLegId,
+        slLegId: result.slLegId,
+      },
+      execution: {
+        orderId: result.entryId,
+        fillPrice: signal.ask ?? signal.currentPrice,
+        paper: true,
+        executedSymbol: signal.symbol,
+        orderType: 'market',
+      },
+    };
+  }
+
+  // ── PAPER / LIVE MODE: Tradier API ───────────────────────────────────────
 
   // Determine order type from spread
   const order = chooseOrderType(signal.bid, signal.ask);
@@ -589,6 +655,20 @@ export async function closePosition(
 ): Promise<ExecutionResult> {
   const rootSymbol = getRootSymbol(execCfg);
   const accountId = getAccountId(execCfg);
+
+  // ── SIMULATION MODE: Log close (FakeBroker handles TP/SL fills automatically) ──
+  if (isSimulationMode()) {
+    const fakeBroker = getFakeBroker();
+    if (fakeBroker) {
+      // In simulation mode, FakeBroker monitors prices and executes TP/SL fills automatically
+      // We just need to log that the position was closed
+      console.log(`[executor] SIMULATION: Close ${position.quantity}x ${position.symbol} @ $${currentPrice.toFixed(2)} (${reason})`);
+      return { fillPrice: currentPrice, paper: true, orderType: 'market' };
+    }
+    return { error: 'FakeBroker not initialized', paper: true, orderType: 'market' };
+  }
+
+  // ── PAPER / LIVE MODE: Tradier API ───────────────────────────────────────
 
   // Exits always use market orders — speed matters more than price on exit
   if (paper) {

@@ -103,6 +103,12 @@ export interface Config {
      *  'puts' = short only (bearish signals only). */
     allowedSides: 'both' | 'calls' | 'puts';
 
+    /** Which contract side provides the HMA cross trigger.
+     *  'both' (default) = subscribe to call and put signals, trade direction directly.
+     *  'call' = only subscribe to call signals; bearish call cross → buy put at offset.
+     *  'put' = only subscribe to put signals; bullish put cross → buy call at offset. */
+    signalSource?: 'both' | 'call' | 'put';
+
     /** Reverse all signal directions — bullish becomes bearish, bearish becomes bullish.
      *  Useful for trading chop: fade every cross instead of following it. */
     reverseSignals: boolean;

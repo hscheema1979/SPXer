@@ -4,30 +4,77 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What is SPXer
 
-SPXer is three systems sharing a unified core:
+SPXer is a trading system with **independent services** sharing a unified core:
 
-1. **Data Service** (`npm run dev`) — An always-on 24/5 market data pipeline that polls SPX/ES futures, tracks ~250-480 SPXW 0DTE options contracts via a sticky band model, builds 1m OHLCV bars with a full indicator battery, and serves enriched data over REST + WebSocket on port 3600.
+### Service Architecture (v2.0 — Independent Services)
 
-2. **Trading Handler** (`npm run handler`) — Event-driven deterministic execution driven by option contract HMA crosses. Subscribes to WebSocket signals from the data service, executes via `PositionOrderManager`, persists state to `account.db`. 0DTE SPX options on margin account (6YA51425). Supports single configs and basket configs (multi-strike) in one process.
+**CRITICAL**: All services are now **100% independent** with direct Tradier API connections. The data service (`spxer`) is **OPTIONAL for live trading** — it's only needed for the replay viewer and historical data access.
 
-3. **Replay System** (`npm run replay`) — A config-driven backtesting engine that replays historical days through the same signal detection → scanner → judge pipeline, using an in-memory bar cache for performance.
+| Service | Purpose | Data Source | Required for Live Trading |
+|---------|---------|-------------|---------------------------|
+| **spxer** | Market data pipeline + replay viewer | Tradier REST, ThetaData WS | ❌ NO (only for replay) |
+| **event-handler** | Signal detection + entry execution | Tradier REST (independent) | ✅ YES |
+| **position-monitor** | Exit observer (pure logger) | Tradier REST (independent) | ✅ YES (recommended) |
+| **schwaber** | Schwab ETF trading (SPY/QQQ) | SPXer data service + Schwab API | ❌ NO (optional) |
+
+**Key principle**: Live trading continues even if `spxer` crashes. Both `event-handler` and `position-monitor` have direct Tradier API connections.
+
+### 1. Data Service (`npm run dev`) — OPTIONAL
+
+An always-on 24/5 market data pipeline that polls SPX/ES futures, tracks ~250-480 SPXW 0DTE options contracts via a sticky band model, builds 1m OHLCV bars with a full indicator battery, and serves enriched data over REST + WebSocket on port 3600.
+
+**Required for**: Replay viewer, historical data access, dashboard visualization
+**NOT required for**: Live trading (event-handler and position-monitor are independent)
+
+### 2. Event Handler (`npm run handler`) — PRIMARY
+
+Event-driven deterministic execution driven by option contract HMA crosses. **100% independent** — fetches data directly from Tradier REST API, executes via `PositionOrderManager`, persists state to `account.db`. 0DTE SPX options on margin account (6YA51425). Supports single configs and basket configs (multi-strike) in one process.
+
+**Three execution modes**:
+- **SIMULATION** (`AGENT_EXECUTION_MODE=SIMULATION`) — Live signals with locally-simulated orders (safest for testing)
+- **PAPER** (`AGENT_PAPER=true`) — Live signals + Tradier paper account (not recommended — often broken)
+- **LIVE** (`AGENT_PAPER=false`) — Live signals + Tradier production account
+
+### 3. Position Monitor (`position_monitor.ts`) — RECOMMENDED
+
+Pure observer service that monitors open positions and logs state. Polls `account.db` for positions, fetches prices from Tradier REST API, evaluates exit conditions (TP/SL, time, reversal), and logs broker state changes. Does NOT execute trades — event handler handles all actions.
+
+### 4. Schwaber (`npm run schwaber`) — OPTIONAL
+
+Schwab ETF trading agent for SPY/QQQ (or any equity). Uses the same HMA3×17 cross signal, polls SPX HMA bars from the SPXer data service, executes via Schwab Trader API (OAuth2).
+
+### 5. Replay System (`npm run replay`)
+
+A config-driven backtesting engine that replays historical days through the same signal detection → scanner → judge pipeline, using an in-memory bar cache for performance.
 
 **Critical architecture principle**: Both the live handler and replay system import core trading logic from `src/core/`. The same `Config` object fed to either system produces identical signal detection, strike selection, position exit, and risk evaluation. Test in replay → deploy to live with confidence.
 
-**Signal source**: Both systems use `detectSignals()` from `src/core/signal-detector.ts`, which detects HMA crosses on **option contract bars** (not the SPX underlying). The SPX underlying is used only as a direction gate (`requireUnderlyingHmaCross`) and for `scannerReverse` exit monitoring.
+**Signal source (v2.0 - independent architecture)**: The event handler is now 100% independent — it fetches all data directly from Tradier REST API and computes signals locally. It uses `detectHmaCrossPair()` from `src/pipeline/spx/signal-detector-function.ts`, which detects HMA crosses on **option contract bars** (not the SPX underlying). The SPX underlying is used only as a direction gate and for reversal detection.
+
+**Previous signal source (v1.0 - deprecated)**: The event handler used to subscribe to WebSocket signals emitted by the data service (`contract_signal:{hmaPair}` channels). This has been replaced with independent Tradier REST API polling for maximum fault isolation.
 
 ## Commands
 
 ```bash
-# Data Service
+# Data Service (OPTIONAL for live trading)
 npm run dev              # Start data service (tsx src/index.ts) on port 3600
 
 # Trading Handler (Event-Driven — PRIMARY)
-npm run handler          # Event-driven handler (paper mode)
+npm run handler          # Event-driven handler (uses AGENT_EXECUTION_MODE env var)
 npm run handler:live     # Event-driven handler with real orders (AGENT_PAPER=false)
 # Or use aliases:
 npm run agent            # Same as handler (event-driven, paper mode)
 npm run agent:live       # Same as handler:live (event-driven, live mode)
+
+# SIMULATION Mode (safest for testing — live signals, local simulated orders)
+AGENT_EXECUTION_MODE=SIMULATION npm run handler
+
+# Position Monitor (RECOMMENDED — pure observer, no execution)
+npx tsx position_monitor.ts  # Polls account.db, logs exit conditions
+
+# Schwaber (Schwab ETF trading — optional)
+npm run schwaber         # Schwab agent (paper mode)
+npm run schwaber:live    # Schwab agent (live mode)
 
 # Legacy Polling Agent (DEPRECATED — archived, do not use)
 npm run agent:legacy     # Old polling agent (paper mode)
@@ -138,13 +185,21 @@ Note: `src/pipeline/indicator-engine.ts` is a re-export shim — actual indicato
 
 The live trading system uses an **event-driven architecture** that replaced the old polling-based `spx_agent.ts` (see [Event-Driven Handler](#event-driven-handler-working--replaces-polling-agent) section for migration details). It is **pure deterministic** — no LLM scanners or judges in the loop.
 
-**Signal flow:**
-1. **Entry trigger**: Data service detects HMA(fast)×HMA(slow) cross on **option contract bars** and emits WebSocket event
-2. **Event Handler receives**: Subscribes to `contract_signal:{hmaPair}` channels, routes to matching configs
-3. **PositionOrderManager.evaluate()**: Checks HMA pair match, direction, risk gates, cooldown
-4. **Execution**: Strike selection → OTOCO bracket order (TP + SL at broker)
-5. **Exit**: SPX underlying HMA cross on `exitTimeframe` reverses → `scannerReverse` → cancel OCO legs → market sell → immediately flip to opposite side
-6. **Real-time fills**: `AccountStream` (Tradier WS) pushes fills, updates `account.db` state
+**IMPORTANT**: The event handler is now **100% independent** of the data service. It fetches all data directly from Tradier REST API — no WebSocket subscription needed.
+
+**Signal flow (independent architecture):**
+1. **Timer triggers**: At :00 seconds every minute
+2. **Fetch SPX timesales**: Direct from Tradier REST API
+3. **Compute HMA(3)×HMA(12)**: Locally from fetched timesales
+4. **Fetch option timesales**: Direct from Tradier REST API (ITM5 call/put)
+5. **Aggregate to 3m bars**: Locally
+6. **Detect HMA cross**: On last 2 bars
+7. **PositionOrderManager.evaluate()**: Checks HMA pair match, direction, risk gates, cooldown
+8. **Execution**: Strike selection → OTOCO bracket order (TP + SL at broker)
+9. **Exit**: SPX underlying HMA cross reverses → close all positions + flip to opposite direction
+10. **Real-time fills**: `AccountStream` (Tradier WS) pushes fills, updates `account.db` state
+
+**Previous WebSocket-based flow (deprecated)**: The event handler used to subscribe to `contract_signal:{hmaPair}` channels from the data service. This has been replaced with independent Tradier REST API polling for maximum fault isolation.
 
 **Basket configs** are fully supported — one process handles multiple strike offsets internally via `basketMembers` Map. No account-lock needed.
 
@@ -255,7 +310,12 @@ Required in `.env`:
 - `PORT` — Default 3600
 - `DB_PATH` — Default `./data/spxer.db`
 
-Agent-specific: `AGENT_PAPER` (controls paper/live mode — default `false` in production via `ecosystem.config.js`. Set to `true` for paper mode). `AGENT_CONFIG_ID` selects which config from `replay_configs` table to load.
+Agent execution modes (mutually exclusive):
+- `AGENT_EXECUTION_MODE=SIMULATION` — Live signals with locally-simulated orders (safest for testing)
+- `AGENT_PAPER=true` — Live signals + Tradier paper account (not recommended — often broken)
+- `AGENT_PAPER=false` — Live signals + Tradier production account (real trading)
+
+Agent config: `AGENT_CONFIG_ID` (single) or `AGENT_CONFIG_IDS` (comma-separated) selects which config(s) from `replay_configs` table to load.
 
 Third-party model keys: `KIMI_API_KEY`, `GLM_API_KEY`, `MINIMAX_API_KEY` (with corresponding `*_BASE_URL`)
 
@@ -280,6 +340,8 @@ Other: `POLYGON_API_KEY` (historical data backfill), `LITELLM_BASE_URL` + `LITEL
 ### Agent Endpoints (consumed by dashboard)
 - `GET /agent/status` — Current agent status (from status file)
 - `GET /agent/activity?n=50` — Recent agent activity log entries (max 200)
+- `GET /agent/mode` — Current execution mode (SIMULATION/PAPER/LIVE)
+- `GET /agent/simulation` — Simulation mode stats (orders, fills, positions)
 
 ### Replay Viewer (mounted at `/replay`)
 - `GET /replay` — Replay viewer HTML UI
@@ -391,14 +453,16 @@ every 10 seconds:
 
 ### After: Event-Driven Architecture (`event_handler_mvp.ts` — ~570 lines)
 
-```
-Data Service (src/index.ts):
-  - Detects HMA crosses on contract bars within ±$25 of SPX
-  - Emits offset-based channels: contract_signal:otm5:3_12:call
-  - Channel encodes offset label + HMA pair + side — no filtering needed in handler
+**CRITICAL**: The event handler is now **100% independent** of the data service. All data is fetched directly from Tradier REST API.
 
+```
 Event Handler (event_handler_mvp.ts):
-  - Subscribes to HMA pair channels (contract_signal:3_12)
+  - Timer fires at :00 seconds every minute
+  - Fetches SPX timesales from Tradier REST API (independent)
+  - Computes HMA(3)×HMA(12) locally
+  - Fetches option timesales from Tradier REST API (ITM5 call/put)
+  - Aggregates to 3m bars locally
+  - Detects HMA cross on last 2 bars
   - Loads N configs (single or multiple via AGENT_CONFIG_ID/IDS)
   - Delegates entry decisions to PositionOrderManager.evaluate()
   - Uses checkEntryGates() from core (same as replay)
@@ -417,6 +481,12 @@ AccountStream (src/agent/account-stream.ts):
   - Pushes order fills in real-time (replaces polling waitForFill)
   - Auto-reconnect with exponential backoff
 ```
+
+**Benefits of independence**:
+- No dependency on spxer data service — live trading continues even if spxer crashes
+- Single source of truth (Tradier API) for all market data
+- Simpler architecture — no WebSocket subscription management
+- Fault isolation — each service can fail independently
 
 **Benefits**:
 - No hallucinations — only act on real state changes
@@ -450,9 +520,9 @@ OPENING → (order rejected) → CLOSED
 OPEN → (not found at broker on startup) → ORPHANED
 ```
 
-### Offset-Based Signal Channels
+### Offset-Based Signal Channels (Historical — Informational Only)
 
-The data service emits signals on channels that encode the strike offset, HMA pair, and side:
+The data service still emits WebSocket signals for dashboards and monitors, but the event handler no longer uses them (it's now independent).
 
 ```
 Channel format: {offsetLabel}:{hmaFast}_{hmaSlow}:{side}
@@ -461,6 +531,8 @@ Examples:
   atm:5_19:put      — at-the-money put, HMA(5)×HMA(19)
   itm3:3_12:call    — $15 ITM call, HMA(3)×HMA(12)
 ```
+
+**Note**: These channels are consumed by dashboards and monitoring tools, but NOT by the live event handler (which fetches data directly from Tradier REST API).
 
 Offset label computation: `round((strike - spxPrice) / STRIKE_INTERVAL)` where positive = OTM, negative = ITM.
 
@@ -534,8 +606,10 @@ All processes managed via `ecosystem.config.js`. Start with `pm2 start ecosystem
 
 | Name | Purpose |
 |------|---------|
-| spxer | Data pipeline — collects SPX/ES/options bars, serves REST + WebSocket (port 3600) |
-| event-handler | Event-driven trading agent — supports basket configs (single process, multi-strike) |
+| spxer | Data pipeline — collects SPX/ES/options bars, serves REST + WebSocket (port 3600) — **OPTIONAL for live trading** |
+| event-handler | Event-driven trading agent — supports basket configs (single process, multi-strike) — **100% independent** |
+| position-monitor | Position exit observer — pure logger, does NOT execute trades — **100% independent** |
+| schwaber | Schwab ETF trading agent (SPY/QQQ) — optional |
 | metrics-collector | Ops metrics collection (Prometheus pushgateway) |
 | replay-viewer | Replay viewer web UI (port 3601) |
 | daily-journal | Cron job — generates trading journal at 4:15 PM ET |
@@ -612,3 +686,20 @@ AGENT_CONFIG_ID="spx-hma3x12-itm5-basket-3strike-tp125x-sl25-3m-15c-$10000" AGEN
 - **Configuration**: Use `src/config.ts` for environment-dependent values, `Config` type for trading strategy. Execution routing (symbol, account, option prefix) is hardcoded per-agent, NOT in Config.
 - **Logging**: Use `console.log` with timestamps for simple logging
 - **Timezone handling**: Server runs in UTC. All ET conversions use `src/utils/et-time.ts` helpers (`getETOffsetMs`, `todayET`, `nowET`, `etTimeToUnixTs`). **Never** use `new Date(date.toLocaleString('en-US', { timeZone: 'America/New_York' }))` — it silently misinterprets ET as UTC.
+
+## Operations Scripts (`scripts/ops/`)
+
+A comprehensive suite of scripts for monitoring and automation:
+
+| Script | Purpose |
+|--------|---------|
+| `check-environment.sh` | Environment verification (date/time, process status, resources) |
+| `check-data-pipeline.sh` | Data service health check |
+| `monitor-active-trading.sh` | Real-time active trading monitoring |
+| `monitor-operational.sh` | Operational status monitoring |
+| `monitor-signal-detection.sh` | Signal detection monitoring |
+| `setup-complete-automation.sh` | Complete automation setup |
+| `start-warmup.sh` | Pre-market warmup |
+| `transition-from-warmup.sh` | Transition from warmup to active trading |
+
+See `DAILY-OPS-CHECKLIST.md` for the complete operational checklist and `SERVICE-ARCHITECTURE.md` for details on the three-independent-services architecture.
