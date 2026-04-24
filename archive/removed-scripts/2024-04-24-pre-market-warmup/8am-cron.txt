@@ -1,0 +1,56 @@
+# SPXer Daily Automation - Cron Jobs
+# Add to crontab with: crontab -e
+#
+# All times are in ET (Eastern Time)
+# Use TZ='America/New_York' prefix for ET-based scheduling
+
+# ============================================================================
+# 08:00 AM ET - Pre-Market Warmup with 17-Tier Checklist
+# ============================================================================
+# Runs comprehensive E2E verification, then starts warmup mode
+# Only proceeds if checklist passes
+0 8 * * 1-5 export WARMUP_TARGET_MODE=SIMULATION && cd /home/ubuntu/SPXer && ./scripts/ops/start-warmup-with-checklist.sh >> logs/cron-0800-$(date +\%Y\%m\%d).log 2>&1
+
+# ============================================================================
+# 09:30 AM ET - Market Open Transition
+# ============================================================================
+# Transitions from WARMUP to SIMULATION/LIVE mode
+# Actual trading begins after this
+30 9 * * 1-5 export WARMUP_TARGET_MODE=SIMULATION && cd /home/ubuntu/SPXer && ./scripts/ops/transition-from-warmup.sh >> logs/cron-0930-$(date +\%Y\%m\%d).log 2>&1
+
+# ============================================================================
+# Alternative: Manual Control (Commented Out)
+# ============================================================================
+# If you prefer manual control over when to start warmup and transition,
+# comment out the above jobs and use these notification-only jobs:
+
+# 0 8 * * 1-5 echo "⏰ Time to start warmup: cd /home/ubuntu/SPXer && ./scripts/ops/start-warmup-with-checklist.sh" | logger -t spxer-reminder
+# 30 9 * * 1-5 echo "⏰ Time to transition to live: cd /home/ubuntu/SPXer && ./scripts/ops/transition-from-warmup.sh" | logger -t spxer-reminder
+
+# ============================================================================
+# Notes
+# ============================================================================
+# - 1-5 means Monday through Friday (excludes weekends)
+# - Logs are written to logs/cron-0800-YYYYMMDD.log and logs/cron-0930-YYYYMMDD.log
+# - Set WARMUP_TARGET_MODE to SIMULATION (default) or LIVE
+# - For LIVE mode, change the env var: export WARMUP_TARGET_MODE=LIVE
+# - Check logs with: tail -f logs/cron-0800-$(date +%Y%m%d).log
+
+# ============================================================================
+# How to Install
+# ============================================================================
+# 1. Copy this file to your home directory:
+#    cp scripts/ops/8am-cron.txt ~/spxer-cron.txt
+#
+# 2. Edit your crontab:
+#    crontab -e
+#
+# 3. Add the cron entries (or include the file):
+#    crontab ~/spxer-cron.txt
+#
+# 4. Verify the installation:
+#    crontab -l
+#
+# 5. Check cron logs:
+#    tail -f /var/log/syslog | grep CRON
+#    tail -f logs/cron-0800-$(date +%Y%m%d).log
