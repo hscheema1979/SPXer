@@ -159,7 +159,8 @@ async function handleReversal(event: any): Promise<void> {
   console.log(`[handler] 🔄 REVERSAL: ${event.direction.toUpperCase()} - closing all positions`);
 
   for (const [configId, state] of Array.from(configs.entries())) {
-    const positions = manager.getOpenPositions(configId).filter(p => p.status === 'OPEN');
+    // Include OPENING positions (fills may not have been detected via WebSocket yet)
+    const positions = manager.getOpenPositions(configId).filter(p => p.status === 'OPEN' || p.status === 'OPENING');
     if (positions.length === 0) continue;
 
     console.log(`[handler] [${configId}] Reversal: closing ${positions.length} position(s)`);
@@ -298,13 +299,18 @@ async function handleContractSignal(signal: any): Promise<void> {
     try {
       const positionSize = computeQty(signal.price, cfg, null);
 
+      // Use option mid-price for TP/SL calculation (NOT SPX underlying price)
+      const optionMidPrice = signal.bid && signal.ask
+        ? (signal.bid + signal.ask) / 2
+        : signal.price;  // Fallback to SPX price only if bid/ask unavailable
+
       const agentSignal = {
         type: 'HMA_CROSS' as const,
         symbol: signal.symbol,
         side: signal.side as 'call' | 'put',
         strike: signal.strike,
         expiry: signal.expiry,
-        currentPrice: signal.price,
+        currentPrice: optionMidPrice,  // Option price, not SPX price
         bid: signal.bid ?? signal.price * 0.98,   // Use real bid from quote, fallback to synthetic
         ask: signal.ask ?? signal.price,           // Use real ask from quote, fallback to price
         indicators: {} as any,
@@ -325,8 +331,8 @@ async function handleContractSignal(signal: any): Promise<void> {
         action: 'buy' as const,
         confidence: 1.0,
         positionSize,
-        stopLoss: signal.price * (1 - cfg.position.stopLossPercent / 100),
-        takeProfit: signal.price * (1 + cfg.position.stopLossPercent / 100 * cfg.position.takeProfitMultiplier),
+        stopLoss: optionMidPrice * (1 - cfg.position.stopLossPercent / 100),
+        takeProfit: optionMidPrice * (1 + cfg.position.stopLossPercent / 100 * cfg.position.takeProfitMultiplier),
         reasoning: `Event-driven HMA(${signal.hmaFastPeriod || signal.hmaFast})xHMA(${signal.hmaSlowPeriod || signal.hmaSlow}) signal`,
         concerns: [],
         ts: Date.now(),
@@ -536,7 +542,10 @@ async function main(): Promise<void> {
 
   initAccountDb();
 
-  const accountStream = new AccountStream();
+  // AccountStream WebSocket unreliable (error 1011) - using REST polling instead
+  // Fills detected via waitForFill() polling (1-minute timeout)
+  const accountStream = new AccountStream(TRADIER_ACCOUNT_ID);
+  // await accountStream.start(); // DISABLED - WebSocket not connecting reliably
   manager = new PositionOrderManager(accountStream);
   manager.start();
 
@@ -613,9 +622,9 @@ async function main(): Promise<void> {
   }, 5_000);
 
   // ── Startup Delay ─────────────────────────────────────────────────────────
-  // Wait 5 seconds for AccountStream to connect and process initial fills
-  // before starting signal detection. This prevents race conditions during restart.
-  console.log('[handler] Waiting 5s for AccountStream to stabilize before signal detection...');
+  // Wait 5 seconds for system stabilization before signal detection.
+  // Fill detection uses REST polling (1-min timeout), not WebSocket.
+  console.log('[handler] Waiting 5s for system stabilization before signal detection...');
   await new Promise(resolve => setTimeout(resolve, 5000));
 
   // Signal detection: check at :00 seconds of every minute

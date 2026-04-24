@@ -38,7 +38,7 @@ import type { Database as DB } from 'better-sqlite3';
 import type { StoredInstrumentProfile } from '../../src/instruments/profile-store';
 
 const LIVE_DB_PATH = path.resolve(__dirname, '../../data/spxer.db');
-const DB_PATH = path.resolve(process.env.DB_PATH || path.resolve(__dirname, '../../data/spxer.db'));
+const DB_PATH = path.resolve(process.env.DB_PATH || process.env.REPLAY_DB_PATH || path.resolve(__dirname, '../../data/replay.db'));
 
 // ── CLI args ─────────────────────────────────────────────────────────────────
 

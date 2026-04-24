@@ -80,12 +80,13 @@ export class PositionOrderManager {
     const positions = this.getOpenPositions(configId);
     const active = positions.filter(p => p.status === 'OPEN' || p.status === 'OPENING' || p.status === 'CLOSING');
 
-    const transitioning = active.filter(p => p.status === 'OPENING' || p.status === 'CLOSING');
+    const transitioning = active.filter(p => p.status === 'CLOSING');  // Only CLOSING blocks new entries
     if (transitioning.length > 0) {
-      return { action: 'skip', reason: `transition in progress: ${transitioning.length} position(s) in ${transitioning.map(p => p.status).join('/')}` };
+      return { action: 'skip', reason: `transition in progress: ${transitioning.length} position(s) in CLOSING` };
     }
 
-    const openPositions = active.filter(p => p.status === 'OPEN');
+    // OPENING positions count as OPEN for duplicate/flip checks (fills may not have been detected yet)
+    const openPositions = active.filter(p => p.status === 'OPEN' || p.status === 'OPENING');
 
     const sameDirection = openPositions.find(p => p.side === signal.side);
     if (sameDirection) {
@@ -352,21 +353,25 @@ export class PositionOrderManager {
   cleanupStaleOpening(maxAgeSec = 10): number {
     const db = getAccountDb();
     const now = Math.floor(Date.now() / 1000);
+
+    // CRITICAL: Do NOT mark positions CLOSED based on timeout.
+    // Orders can take much longer to fill, especially in slow markets.
+    // The AccountStream will detect fills when they happen.
+    // Only clean up positions that are actually rejected/cancelled by Tradier.
+    //
+    // Instead, just log how long they've been pending.
     const stale = db.prepare(
-      `SELECT id, symbol FROM positions WHERE status = 'OPENING' AND opened_at < ?`
+      `SELECT id, symbol, opened_at FROM positions WHERE status = 'OPENING' AND opened_at < ?`
     ).all(now - maxAgeSec) as any[];
 
     if (stale.length === 0) return 0;
 
     for (const pos of stale) {
-      db.prepare(`UPDATE positions SET status = 'CLOSED', closed_at = ?, close_reason = 'fill_timeout' WHERE id = ?`)
-        .run(now, pos.id);
-      db.prepare(`UPDATE orders SET status = 'CANCELLED', error = 'fill_timeout' WHERE position_id = ? AND status NOT IN ('FILLED', 'CANCELLED')`)
-        .run(pos.id);
-      console.log(`[manager] FILL TIMEOUT: ${pos.symbol} — OPENING→CLOSED`);
+      const pendingSeconds = now - (pos.opened_at || now);
+      console.log(`[manager] STILL WAITING: ${pos.symbol} — pending for ${pendingSeconds}s (order may still fill at Tradier)`);
     }
 
-    return stale.length;
+    return 0; // Always return 0 - don't count as "cleaned up"
   }
 
 

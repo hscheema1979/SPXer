@@ -45,7 +45,7 @@ function headers() {
 async function waitForFill(
   orderId: number,
   accountId: string,
-  maxWaitMs = 5000,
+  maxWaitMs = 60000,  // 1 minute - orders should fill within this time
 ): Promise<{ status: string; fillPrice: number | null; rejectedReason?: string }> {
   const start = Date.now();
   const pollMs = 500;

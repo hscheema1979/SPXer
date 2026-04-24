@@ -45,6 +45,11 @@ export class AccountStream {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private lastMessageTs = 0;
+  private accountId: string;
+
+  constructor(accountId: string) {
+    this.accountId = accountId;
+  }
 
   onEvent(cb: AccountEventCallback): void {
     this.callback = cb;
@@ -74,7 +79,7 @@ export class AccountStream {
   private async createSession(): Promise<string | null> {
     try {
       const resp = await axios.post(
-        `${TRADIER_BASE}/accounts/events/session`,
+        `${TRADIER_BASE}/accounts/events/session`,  // Generic endpoint (account-specific doesn't exist)
         null,
         {
           headers: {
@@ -115,6 +120,7 @@ export class AccountStream {
         this.ws!.send(JSON.stringify({
           events: ['order'],
           sessionid: this.sessionId,
+          linebreak: true,  // Tradier requires this for proper message formatting
         }));
         console.log('[account-stream] Connected — listening for order events');
         this.reconnectAttempts = 0;
