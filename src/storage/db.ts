@@ -328,6 +328,8 @@ function runAccountMigrations(): void {
       ON positions(config_id, status);
     CREATE INDEX IF NOT EXISTS idx_positions_status
       ON positions(status);
+    CREATE INDEX IF NOT EXISTS idx_positions_symbol_status
+      ON positions(symbol, status);
 
     CREATE TABLE IF NOT EXISTS orders (
       id              TEXT PRIMARY KEY,

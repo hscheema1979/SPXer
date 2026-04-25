@@ -10,7 +10,6 @@ import { validateSignalConfig, parseSymbol } from './core/signal-detector';
 import { createStore } from './replay/store';
 import { ContractTracker } from './pipeline/spx/contract-tracker';
 import { getMarketMode, getActiveExpirations } from './pipeline/spx/scheduler';
-import { SignalPoller } from './pipeline/spx/signal-poller';
 import { initSignalsDb, closeSignalsDb } from './storage/signals-db';
 import { startHttpServer, setLastSpxPrice, setTrackerCountFn, setOptionStreamStatusFn } from './server/http';
 import { startWsServer, broadcast } from './server/ws';
@@ -38,8 +37,6 @@ const HMA_PAIRS: [number, number][] = [
 const SIGNAL_STRIKE_BAND = 30;
 
 const tracker = new ContractTracker(STRIKE_BAND, STRIKE_INTERVAL);
-const signalPoller = new SignalPoller();
-export { signalPoller };
 let lastSpxPrice: number | null = null;
 let prevMode: string | null = null; // tracks mode transitions for VWAP reset
 let currentDbDate: string = '';
@@ -79,7 +76,7 @@ function initSpxStream(): void {
     // Update last price for contract tracking
     lastSpxPrice = last;
     setLastSpxPrice(last);
-    signalPoller.setSpxPrice(last);
+    // // signalPoller.setSpxPrice // Removed: signal-poller deprecated(last); // Removed: signal-poller deprecated
   });
 
   // Safety: close candle on minute boundary even if no new ticks arrive
@@ -760,7 +757,7 @@ async function warmup(): Promise<void> {
       if (quote && quote.last > 0) {
         lastSpxPrice = quote.last;
         setLastSpxPrice(lastSpxPrice);
-        signalPoller.setSpxPrice(lastSpxPrice);
+        // signalPoller.setSpxPrice // Removed: signal-poller deprecated(lastSpxPrice);
         console.log(`[startup] Primed SPX price from Tradier quote: $${lastSpxPrice}`);
       }
     } catch (e) {
@@ -791,7 +788,7 @@ async function pollUnderlying(): Promise<void> {
       if (quote && quote.last > 0) {
         lastSpxPrice = quote.last;
         setLastSpxPrice(lastSpxPrice);
-        signalPoller.setSpxPrice(lastSpxPrice);
+        // signalPoller.setSpxPrice // Removed: signal-poller deprecated(lastSpxPrice);
         healthTracker.recordBar('SPX', Date.now());
       }
     }
@@ -807,7 +804,7 @@ async function pollUnderlying(): Promise<void> {
 
       lastSpxPrice = enriched[enriched.length - 1].close;
       setLastSpxPrice(lastSpxPrice);
-      signalPoller.setSpxPrice(lastSpxPrice);
+      // signalPoller.setSpxPrice // Removed: signal-poller deprecated(lastSpxPrice);
       const lastBar = enriched[enriched.length - 1];
       healthTracker.recordBar('SPX', lastBar.ts * 1000);
       broadcast({ type: 'spx_bar', data: lastBar });
@@ -929,7 +926,7 @@ async function shutdown(signal: string): Promise<void> {
   console.log(`[shutdown] ${signal} received, cleaning up...`);
 
   // Stop signal poller
-  signalPoller.stop();
+  // signalPoller.stop(); // Removed: signal-poller deprecated
 
   // Close signals DB
   try { closeSignalsDb(); } catch {}
@@ -1070,10 +1067,11 @@ async function main(): Promise<void> {
     }
 
     // Start signal poller after SPX price is set (stateful detection)
-    if (lastSpxPrice) {
-      signalPoller.setSpxPrice(lastSpxPrice);
-    }
-    signalPoller.start();
+    // Removed: signal-poller deprecated in v2.0 independent architecture
+    // if (lastSpxPrice) {
+    //   signalPoller.setSpxPrice(lastSpxPrice);
+    // }
+    // signalPoller.start();
 
     // ── Initial pollOptions + backfillOptionBars — non-fatal ──
     try {

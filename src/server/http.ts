@@ -25,7 +25,7 @@ import {
 } from '../providers/schwab';
 import { createSchwaberRoutes } from './schwaber-routes';
 import { createDevopsRoutes } from './devops-routes';
-import { signalPoller } from '../index';
+// import { signalPoller } from '../index'; // Removed: signal-poller deprecated
 
 let lastSpxPrice: number | null = null;
 export function setLastSpxPrice(p: number) { lastSpxPrice = p; }
@@ -278,7 +278,8 @@ export function startHttpServer(port: number): { app: Express; httpServer: Serve
   });
 
   // ── Signal Poller Status ───────────────────────────────────────────────────────
-
+  // Removed: signal-poller deprecated in v2.0 independent architecture
+  /*
   app.get('/signal-poller/status', (_req, res) => {
     try {
       const result = signalPoller.getLastPollResult();
@@ -290,6 +291,7 @@ export function startHttpServer(port: number): { app: Express; httpServer: Serve
       res.status(500).json({ error: (e as Error).message });
     }
   });
+  */
 
   // ── Schwab OAuth ──
 

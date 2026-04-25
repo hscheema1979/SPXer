@@ -88,7 +88,19 @@ let running = true;
 let killSwitch = false;
 const perConfigPaper = new Map<string, boolean>();
 
-let orderMutex = false;
+// Per-config mutex for parallel execution (allows Config A and Config B to trade simultaneously)
+const perConfigMutex = new Map<string, Promise<void>>();
+
+async function withConfigLock(configId: string, fn: () => Promise<void>): Promise<void> {
+  const existing = perConfigMutex.get(configId);
+  const next = existing ? existing.then(fn).catch(() => {}) : fn();
+  perConfigMutex.set(configId, next);
+  await next;
+  // Clean up completed promises to prevent memory leak
+  if (perConfigMutex.get(configId) === next) {
+    perConfigMutex.delete(configId);
+  }
+}
 
 // SPX HMA state for reversal detection
 const spxHma3State = makeHMAState(3);
@@ -259,118 +271,110 @@ async function handleContractSignal(signal: any): Promise<void> {
       continue;
     }
 
-    if (orderMutex) {
-      routingDecisions.push({ configId, action: 'skipped', reason: 'order_in_progress' });
-      continue;
-    }
-
-    if (decision.action === 'flip') {
-      const existingPos = decision.position;
-      orderMutex = true;
-      try {
-        const openPos: OpenPosition = {
-          id: existingPos.id,
-          symbol: existingPos.symbol,
-          side: existingPos.side,
-          strike: existingPos.strike,
-          expiry: existingPos.expiry || todayET(),
-          entryPrice: existingPos.entryPrice,
-          quantity: existingPos.quantity,
-          stopLoss: existingPos.stopLoss,
-          takeProfit: existingPos.takeProfit,
-          highWaterPrice: existingPos.highWater,
-          openedAt: existingPos.openedAt * 1000,
-          bracketOrderId: null,
-        };
-        await closePosition(openPos, 'signal_reversal', existingPos.entryPrice, perConfigPaper.get(configId) ?? AGENT_PAPER, EXECUTION);
-        console.log(`[handler] [${configId}] Flipped ${existingPos.symbol} (${existingPos.side} → ${signal.side})`);
-      } catch (e: any) {
-        console.error(`[handler] [${configId}] Flip close failed: ${e.message}`);
-        routingDecisions.push({ configId, action: 'skipped', reason: 'flip_error', details: e.message });
-        continue;
-      } finally {
-        orderMutex = false;
-      }
-    }
-
-    console.log(`[handler] [${configId}] Signal accepted, executing entry...`);
-
-    orderMutex = true;
-    try {
-      const positionSize = computeQty(signal.price, cfg, null);
-
-      // Use option mid-price for TP/SL calculation (NOT SPX underlying price)
-      const optionMidPrice = signal.bid && signal.ask
-        ? (signal.bid + signal.ask) / 2
-        : signal.price;  // Fallback to SPX price only if bid/ask unavailable
-
-      const agentSignal = {
-        type: 'HMA_CROSS' as const,
-        symbol: signal.symbol,
-        side: signal.side as 'call' | 'put',
-        strike: signal.strike,
-        expiry: signal.expiry,
-        currentPrice: optionMidPrice,  // Option price, not SPX price
-        bid: signal.bid ?? signal.price * 0.98,   // Use real bid from quote, fallback to synthetic
-        ask: signal.ask ?? signal.price,           // Use real ask from quote, fallback to price
-        indicators: {} as any,
-        recentBars: [],
-        signalBarLow: signal.price,
-        spxContext: {
-          price: spxPrice,
-          changePercent: 0,
-          trend: (spxHmaDirection || 'neutral') as 'bullish' | 'bearish' | 'neutral',
-          rsi14: null,
-          minutesToClose: 360,
-          mode: 'rth' as const,
-        },
-        ts: Date.now(),
-      };
-
-      const tradeDecision = {
-        action: 'buy' as const,
-        confidence: 1.0,
-        positionSize,
-        stopLoss: optionMidPrice * (1 - cfg.position.stopLossPercent / 100),
-        takeProfit: optionMidPrice * (1 + cfg.position.stopLossPercent / 100 * cfg.position.takeProfitMultiplier),
-        reasoning: `Event-driven HMA(${signal.hmaFastPeriod || signal.hmaFast})xHMA(${signal.hmaSlowPeriod || signal.hmaSlow}) signal`,
-        concerns: [],
-        ts: Date.now(),
-      };
-
-      const configPaper = perConfigPaper.get(configId) ?? AGENT_PAPER;
-      const result = await openPosition(agentSignal, tradeDecision, configPaper, EXECUTION, 0, configId);
-
-      if (result.position.quantity > 0) {
-        const basketMember = cfg.id.includes('basket') ? `strike-${signal.strike}` : 'default';
-        const positionId = manager.openPosition(enriched, configId, cfg, result.position.quantity, basketMember);
-
-        const orderId = result.execution.orderId;
-        const bracketId = result.position.bracketOrderId;
-        console.log(`[handler] [${configId}] Position opened: ${result.position.symbol} x${result.position.quantity} @ $${result.execution.fillPrice?.toFixed(2)} | order=${orderId} bracket=${bracketId}`);
-
-        if (bracketId || orderId) {
-          try {
-            const db = getAccountDb();
-            const updated = db.prepare(`
-              UPDATE orders SET tradier_id = ?, bracket_id = ?, tp_leg_id = ?, sl_leg_id = ?, status = 'SUBMITTED'
-              WHERE position_id = ?
-            `).run(orderId || null, bracketId || null, result.position.tpLegId || null, result.position.slLegId || null, positionId);
-            console.log(`[handler] Bracket IDs persisted: tradier=${orderId} bracket=${bracketId} tp=${result.position.tpLegId} sl=${result.position.slLegId} rows=${updated.changes}`);
-          } catch (e: any) {
-            console.error(`[handler] Failed to persist bracket IDs: ${e.message}`);
-          }
+    // Use per-config locking - allows different configs to trade in parallel
+    await withConfigLock(configId, async () => {
+      if (decision.action === 'flip') {
+        const existingPos = decision.position;
+        try {
+          const openPos: OpenPosition = {
+            id: existingPos.id,
+            symbol: existingPos.symbol,
+            side: existingPos.side,
+            strike: existingPos.strike,
+            expiry: existingPos.expiry || todayET(),
+            entryPrice: existingPos.entryPrice,
+            quantity: existingPos.quantity,
+            stopLoss: existingPos.stopLoss,
+            takeProfit: existingPos.takeProfit,
+            highWaterPrice: existingPos.highWater,
+            openedAt: existingPos.openedAt * 1000,
+            bracketOrderId: null,
+          };
+          await closePosition(openPos, 'signal_reversal', existingPos.entryPrice, perConfigPaper.get(configId) ?? AGENT_PAPER, EXECUTION);
+          console.log(`[handler] [${configId}] Flipped ${existingPos.symbol} (${existingPos.side} → ${signal.side})`);
+        } catch (e: any) {
+          console.error(`[handler] [${configId}] Flip close failed: ${e.message}`);
+          routingDecisions.push({ configId, action: 'skipped', reason: 'flip_error', details: e.message });
+          return; // Exit early, don't proceed with entry
         }
-
-        routingDecisions.push({ configId, action: 'entered', details: `${result.position.symbol} x${result.position.quantity} @ $${result.execution.fillPrice?.toFixed(2)}` });
-        syncConfigPositions(configId, state);
       }
-    } catch (e: any) {
-      console.error(`[handler] [${configId}] Entry failed: ${e.message}`);
-      routingDecisions.push({ configId, action: 'skipped', reason: 'entry_error', details: e.message });
-    } finally {
-      orderMutex = false;
-    }
+
+      console.log(`[handler] [${configId}] Signal accepted, executing entry...`);
+
+      try {
+        const positionSize = computeQty(signal.price, cfg, null);
+
+        // Use option mid-price for TP/SL calculation (NOT SPX underlying price)
+        const optionMidPrice = signal.bid && signal.ask
+          ? (signal.bid + signal.ask) / 2
+          : signal.price;  // Fallback to SPX price only if bid/ask unavailable
+
+        const agentSignal = {
+          type: 'HMA_CROSS' as const,
+          symbol: signal.symbol,
+          side: signal.side as 'call' | 'put',
+          strike: signal.strike,
+          expiry: signal.expiry,
+          currentPrice: optionMidPrice,  // Option price, not SPX price
+          bid: signal.bid ?? signal.price * 0.98,   // Use real bid from quote, fallback to synthetic
+          ask: signal.ask ?? signal.price,           // Use real ask from quote, fallback to price
+          indicators: {} as any,
+          recentBars: [],
+          signalBarLow: signal.price,
+          spxContext: {
+            price: spxPrice,
+            changePercent: 0,
+            trend: (spxHmaDirection || 'neutral') as 'bullish' | 'bearish' | 'neutral',
+            rsi14: null,
+            minutesToClose: 360,
+            mode: 'rth' as const,
+          },
+          ts: Date.now(),
+        };
+
+        const tradeDecision = {
+          action: 'buy' as const,
+          confidence: 1.0,
+          positionSize,
+          stopLoss: optionMidPrice * (1 - cfg.position.stopLossPercent / 100),
+          takeProfit: optionMidPrice * (1 + cfg.position.stopLossPercent / 100 * cfg.position.takeProfitMultiplier),
+          reasoning: `Event-driven HMA(${signal.hmaFastPeriod || signal.hmaFast})xHMA(${signal.hmaSlowPeriod || signal.hmaSlow}) signal`,
+          concerns: [],
+          ts: Date.now(),
+        };
+
+        const configPaper = perConfigPaper.get(configId) ?? AGENT_PAPER;
+        const result = await openPosition(agentSignal, tradeDecision, configPaper, EXECUTION, 0, configId);
+
+        if (result.position.quantity > 0) {
+          const basketMember = cfg.id.includes('basket') ? `strike-${signal.strike}` : 'default';
+          const positionId = manager.openPosition(enriched, configId, cfg, result.position.quantity, basketMember);
+
+          const orderId = result.execution.orderId;
+          const bracketId = result.position.bracketOrderId;
+          console.log(`[handler] [${configId}] Position opened: ${result.position.symbol} x${result.position.quantity} @ $${result.execution.fillPrice?.toFixed(2)} | order=${orderId} bracket=${bracketId}`);
+
+          if (bracketId || orderId) {
+            try {
+              const db = getAccountDb();
+              const updated = db.prepare(`
+                UPDATE orders SET tradier_id = ?, bracket_id = ?, tp_leg_id = ?, sl_leg_id = ?, status = 'SUBMITTED'
+                WHERE position_id = ?
+              `).run(orderId || null, bracketId || null, result.position.tpLegId || null, result.position.slLegId || null, positionId);
+              console.log(`[handler] Bracket IDs persisted: tradier=${orderId} bracket=${bracketId} tp=${result.position.tpLegId} sl=${result.position.slLegId} rows=${updated.changes}`);
+            } catch (e: any) {
+              console.error(`[handler] Failed to persist bracket IDs: ${e.message}`);
+            }
+          }
+
+          routingDecisions.push({ configId, action: 'entered', details: `${result.position.symbol} x${result.position.quantity} @ $${result.execution.fillPrice?.toFixed(2)}` });
+          syncConfigPositions(configId, state);
+        }
+      } catch (e: any) {
+        console.error(`[handler] [${configId}] Entry failed: ${e.message}`);
+        routingDecisions.push({ configId, action: 'skipped', reason: 'entry_error', details: e.message });
+      }
+    });
   }
 
   if (routingDecisions.length > 0) {
@@ -616,10 +620,17 @@ async function main(): Promise<void> {
     updateBrokerPnl().catch(e => console.error('[handler] P&L update failed:', e));
   }, 60_000);
 
-  // Cleanup stale opening positions
-  setInterval(() => {
-    manager.cleanupStaleOpening();
-  }, 5_000);
+  // Cleanup stale opening positions (every 60 seconds)
+  setInterval(async () => {
+    try {
+      const cleaned = await manager.cleanupStaleOpening(300); // 5 minute timeout
+      if (cleaned > 0) {
+        console.log(`[handler] Cleaned up ${cleaned} stale OPENING position(s)`);
+      }
+    } catch (e) {
+      console.error('[handler] Stale position cleanup failed:', e);
+    }
+  }, 60_000);
 
   // ── Startup Delay ─────────────────────────────────────────────────────────
   // Wait 5 seconds for system stabilization before signal detection.

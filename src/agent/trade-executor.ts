@@ -510,27 +510,11 @@ export async function openPosition(
       { headers: headers(), timeout: 10000 },
     );
     const orderId = data?.order?.id;
-    console.log(`[executor] LIVE BUY [${rootSymbol}→${accountId}] ${qty}x ${executedSymbol} @ ${order.type === 'market' ? 'MARKET' : '$' + entryPrice.toFixed(2)} (spread=${spreadStr}) — order #${orderId}`);
+    console.log(`[executor] LIVE BUY [${rootSymbol}→${accountId}] ${qty}x ${executedSymbol} @ ${order.type === 'market' ? 'MARKET' : '$' + entryPrice.toFixed(2)} (spread=${spreadStr}) — order #${orderId} submitted, fill will arrive via AccountStream`);
     position.tradierOrderId = orderId;
 
-    // Wait for actual fill from broker
-    if (orderId) {
-      const fill = await waitForFill(orderId, accountId);
-      if (fill.status === 'filled' && fill.fillPrice != null) {
-        console.log(`[executor] ✅ Filled @ $${fill.fillPrice.toFixed(2)} (expected $${entryPrice.toFixed(2)})`);
-        position.entryPrice = fill.fillPrice;
-        return { position, execution: { orderId, fillPrice: fill.fillPrice, paper: false, executedSymbol, orderType: order.type, spread: order.spread } };
-      }
-      if (fill.status === 'rejected') {
-        console.error(`[executor] ❌ Order #${orderId} REJECTED: ${fill.rejectedReason}`);
-        return { position, execution: { error: `Rejected: ${fill.rejectedReason}`, paper: false, executedSymbol, orderType: order.type, spread: order.spread } };
-      }
-      if (fill.status === 'timeout') {
-        console.warn(`[executor] ⏳ Order #${orderId} still pending after 5s — using expected price`);
-      }
-    }
-
-    return { position, execution: { orderId, fillPrice: entryPrice, paper: false, executedSymbol, orderType: order.type, spread: order.spread } };
+    // Return immediately - AccountStream will handle fill detection asynchronously
+    return { position, execution: { orderId, fillPrice: undefined, paper: false, executedSymbol, orderType: order.type, spread: order.spread } };
   } catch (e: any) {
     const err = e?.response?.data?.errors?.error || e.message;
     console.error(`[executor] Order failed [${accountId}]: ${err}`);
@@ -772,25 +756,10 @@ export async function closePosition(
       { headers: headers(), timeout: 10000 },
     );
     const orderId = data?.order?.id;
-    console.log(`[executor] LIVE SELL [${rootSymbol}→${accountId}] ${position.quantity}x ${position.symbol} @ MARKET (${reason}) — order #${orderId}`);
+    console.log(`[executor] LIVE SELL [${rootSymbol}→${accountId}] ${position.quantity}x ${position.symbol} @ MARKET (${reason}) — order #${orderId} submitted, fill will arrive via AccountStream`);
 
-    // Wait for actual fill from broker
-    if (orderId) {
-      const fill = await waitForFill(orderId, accountId);
-      if (fill.status === 'filled' && fill.fillPrice != null) {
-        console.log(`[executor] ✅ Sold @ $${fill.fillPrice.toFixed(2)} (expected ~$${currentPrice.toFixed(2)})`);
-        return { orderId, fillPrice: fill.fillPrice, paper: false, orderType: 'market' };
-      }
-      if (fill.status === 'rejected') {
-        console.error(`[executor] ❌ Sell #${orderId} REJECTED: ${fill.rejectedReason}`);
-        return { error: `Sell rejected: ${fill.rejectedReason}`, paper: false, orderType: 'market' };
-      }
-      if (fill.status === 'timeout') {
-        console.warn(`[executor] ⏳ Sell #${orderId} still pending after 5s — using expected price`);
-      }
-    }
-
-    return { orderId, fillPrice: currentPrice, paper: false, orderType: 'market' };
+    // Return immediately - AccountStream will handle fill detection asynchronously
+    return { orderId, fillPrice: undefined, paper: false, orderType: 'market' };
   } catch (e: any) {
     const err = e?.response?.data?.errors?.error || e.message;
     console.error(`[executor] Close failed [${accountId}]: ${err}`);
