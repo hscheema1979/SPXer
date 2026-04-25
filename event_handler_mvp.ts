@@ -546,10 +546,10 @@ async function main(): Promise<void> {
 
   initAccountDb();
 
-  // AccountStream WebSocket unreliable (error 1011) - using REST polling instead
-  // Fills detected via waitForFill() polling (1-minute timeout)
+  // Fill detection via REST polling (every 10s)
+  // WebSocket NOT used to avoid conflicts with spxer service (single connection limit)
+  // Crash/restart reconciliation handles any edge cases
   const accountStream = new AccountStream(TRADIER_ACCOUNT_ID);
-  // await accountStream.start(); // DISABLED - WebSocket not connecting reliably
   manager = new PositionOrderManager(accountStream);
   manager.start();
 

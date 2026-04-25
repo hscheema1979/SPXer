@@ -57,18 +57,117 @@ export type Decision =
   | { action: 'skip'; reason: string };
 
 export class PositionOrderManager {
-  private accountStream: AccountStream;
+  private pollTimer: ReturnType<typeof setInterval> | null = null;
+  private polling = false;
 
-  constructor(accountStream: AccountStream) {
-    this.accountStream = accountStream;
+  constructor(private _accountStream: AccountStream) {
+    // AccountStream passed but NOT used (WebSocket conflicts with spxer)
+    // We use REST polling instead every 10 seconds
   }
 
   start(): void {
-    this.accountStream.onEvent((event) => this.onOrderEvent(event));
+    if (this.polling) return;
+    this.polling = true;
+
+    // Poll for fills every 10 seconds
+    this.pollTimer = setInterval(async () => {
+      await this.checkForFills();
+    }, 10_000);
+
+    console.log('[manager] Fill polling started (10s interval, REST-based)');
   }
 
   stop(): void {
-    this.accountStream.stop();
+    this.polling = false;
+    if (this.pollTimer) {
+      clearInterval(this.pollTimer);
+      this.pollTimer = null;
+    }
+    console.log('[manager] Fill polling stopped');
+  }
+
+  /**
+   * Poll Tradier for status of OPENING positions (REST-based, no WebSocket)
+   * Runs every 10 seconds via setInterval
+   */
+  private async checkForFills(): Promise<void> {
+    const db = getAccountDb();
+    const openingPositions = db.prepare(
+      `SELECT id, symbol FROM positions WHERE status = 'OPENING'`
+    ).all() as any[];
+
+    if (openingPositions.length === 0) return;
+
+    for (const pos of openingPositions) {
+      try {
+        await this.checkPositionFill(pos.id);
+      } catch (e: any) {
+        console.error(`[manager] Failed to check fill for ${pos.symbol}: ${e.message}`);
+      }
+    }
+  }
+
+  /**
+   * Check a single position's order status via Tradier REST API
+   */
+  private async checkPositionFill(positionId: string): Promise<void> {
+    const db = getAccountDb();
+    const position = db.prepare(`SELECT * FROM positions WHERE id = ?`).get(positionId) as any;
+    if (!position) return;
+
+    const order = db.prepare(`SELECT tradier_id FROM orders WHERE position_id = ?`).get(positionId) as any;
+    if (!order?.tradier_id) {
+      // No tradier_id yet - order might still be submitting
+      return;
+    }
+
+    // Poll Tradier for order status
+    const status = await this.pollOrderStatus(order.tradier_id);
+    const now = Math.floor(Date.now() / 1000);
+
+    if (status === 'filled') {
+      // Fetch order details to get fill price
+      const orderDetails = await this.fetchOrderDetails(order.tradier_id);
+      const fillPrice = orderDetails?.avg_fill_price || position.entry_price;
+
+      db.prepare(`UPDATE orders SET status = 'FILLED', fill_price = ?, filled_at = ? WHERE id = ?`)
+        .run(fillPrice, now, order.id);
+
+      db.prepare(`UPDATE positions SET status = 'OPEN', entry_price = ?, high_water = ? WHERE id = ?`)
+        .run(fillPrice, fillPrice, positionId);
+
+      console.log(`[manager] ✅ FILL DETECTED (poll): ${position.symbol} x${position.quantity} @ $${fillPrice.toFixed(2)} (${positionId.slice(0, 8)})`);
+    } else if (status === 'rejected' || status === 'canceled' || status === 'expired') {
+      db.prepare(`UPDATE orders SET status = 'REJECTED', error = ? WHERE id = ?`)
+        .run(`Order ${status}`, order.id);
+
+      db.prepare(`UPDATE positions SET status = 'CLOSED', closed_at = ?, close_reason = 'order_rejected' WHERE id = ?`)
+        .run(now, positionId);
+
+      console.warn(`[manager] ❌ ORDER ${status.toUpperCase()}: ${position.symbol} (${positionId.slice(0, 8)})`);
+    }
+    // 'open', 'pending' → still waiting, do nothing
+  }
+
+  /**
+   * Fetch full order details from Tradier
+   */
+  private async fetchOrderDetails(tradierId: number): Promise<{ avg_fill_price: number } | null> {
+    try {
+      const axios = (await import('axios')).default;
+      const token = process.env.TRADIER_TOKEN || '';
+      const accountId = process.env.TRADIER_ACCOUNT_ID || '';
+      const baseUrl = process.env.TRADIER_BASE_URL || 'https://api.tradier.com';
+
+      const resp = await axios.get(`${baseUrl}/v1/accounts/${accountId}/orders/${tradierId}`, {
+        headers: { 'Authorization': `Bearer ${token}`, 'Accept': 'application/json' },
+        timeout: 5000,
+      });
+
+      return resp.data?.order || null;
+    } catch (e) {
+      return null;
+    }
   }
 
   evaluate(signal: EnrichedSignal, configId: string, config: Config): Decision {
