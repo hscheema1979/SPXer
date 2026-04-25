@@ -623,7 +623,7 @@ async function main(): Promise<void> {
   // Cleanup stale opening positions (every 60 seconds)
   setInterval(async () => {
     try {
-      const cleaned = await manager.cleanupStaleOpening(300); // 5 minute timeout
+      const cleaned = await manager.cleanupStaleOpening(60); // 1 minute timeout (market orders fill in seconds)
       if (cleaned > 0) {
         console.log(`[handler] Cleaned up ${cleaned} stale OPENING position(s)`);
       }

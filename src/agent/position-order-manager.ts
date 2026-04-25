@@ -339,10 +339,10 @@ export class PositionOrderManager {
   /**
    * Clean up stale OPENING positions that have been pending too long.
    * Checks Tradier order status before closing to avoid false positives.
-   * @param maxAgeSec - Maximum age in seconds (default: 300 = 5 minutes)
+   * @param maxAgeSec - Maximum age in seconds (default: 60 = 1 minute, market orders should fill in seconds)
    * @returns Number of positions cleaned up
    */
-  async cleanupStaleOpening(maxAgeSec = 300): Promise<number> {
+  async cleanupStaleOpening(maxAgeSec = 60): Promise<number> {
     const db = getAccountDb();
     const now = Math.floor(Date.now() / 1000);
 
