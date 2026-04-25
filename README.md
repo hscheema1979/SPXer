@@ -81,44 +81,146 @@ All processes managed via `ecosystem.config.js`:
 
 ---
 
-## Quick Start
+## Directory Structure
 
-```bash
-# Prerequisites: Node.js, PM2, .env with TRADIER_TOKEN + TRADIER_ACCOUNT_ID
-npm install
-
-# Start live trading (event-handler + position-monitor)
-pm2 start ecosystem.config.js --only event-handler
-pm2 start ecosystem.config.js --only position-monitor
-pm2 save
-
-# Optional: Start data service for replay viewer
-pm2 start ecosystem.config.js --only spxer
-
-# Start everything
-pm2 start ecosystem.config.js
-
-# Dev mode (data service only)
-npm run dev
-
-# Event handler in SIMULATION mode (safest for testing)
-AGENT_CONFIG_ID="your-config-id" AGENT_EXECUTION_MODE=SIMULATION npx tsx event_handler_mvp.ts
-
-# Event handler in paper mode
-AGENT_CONFIG_ID="your-config-id" AGENT_PAPER=true npx tsx event_handler_mvp.ts
-
-# Event handler live
-AGENT_CONFIG_ID="your-config-id" AGENT_PAPER=false npx tsx event_handler_mvp.ts
-
-# Position monitor
-AGENT_CONFIG_ID="your-config-id" npx tsx position_monitor.ts
-
-# Monitor logs
-pm2 logs event-handler --lines 50
-pm2 logs position-monitor --lines 50
-pm2 logs spxer --lines 50
-pm2 list
 ```
+SPXer/
+├── src/                          # Source code
+│   ├── core/                     # Core trading logic (single source of truth)
+│   │   ├── types.ts              # Core types: Direction, Signal, Position, ExitCheck, etc.
+│   │   ├── signal-detector.ts    # Config-driven signal detection (HMA, RSI, EMA crosses)
+│   │   ├── position-manager.ts   # Pure exit logic: TP, SL, reversal, time
+│   │   ├── position-sizer.ts     # Position sizing from Config.sizing
+│   │   ├── risk-guard.ts         # Risk gates: positions, trades/day, daily loss, cooldown
+│   │   ├── regime-gate.ts        # Regime-based signal gating
+│   │   ├── strike-selector.ts    # OTM contract selection
+│   │   ├── indicator-engine.ts   # HMA, RSI, Bollinger, EMA, ATR, VWAP (incremental)
+│   │   ├── friction.ts           # $0.05 half-spread + $0.35 commission per side
+│   │   ├── fill-model.ts         # Order-type slippage on top of friction
+│   │   └── index.ts              # Barrel re-exports
+│   │
+│   ├── config/                   # Configuration system
+│   │   ├── types.ts              # Config type definition
+│   │   └── defaults.ts           # DEFAULT_CONFIG, mergeConfig(), validateConfig()
+│   │
+│   ├── pipeline/                 # Data pipeline (spxer service only)
+│   │   ├── spx/                  # SPX-specific pipeline
+│   │   │   ├── contract-tracker.ts   # Sticky band model for contract lifecycle
+│   │   │   ├── scheduler.ts          # Pre-market warmup, market close handling
+│   │   │   ├── signal-detector-function.ts  # HMA cross detection on contracts
+│   │   │   └── option-stream.ts      # Tradier WebSocket for options (backup)
+│   │   ├── bar-builder.ts        # Raw tick → OHLCV bar construction
+│   │   ├── indicator-engine.ts   # Re-export of src/core/indicator-engine.ts
+│   │   ├── aggregator.ts         # Higher timeframe aggregation
+│   │   └── price-line.ts         # Minimal price tracker for options
+│   │
+│   ├── agent/                    # Trading agent (event-handler service)
+│   │   ├── position-order-manager.ts   # Position lifecycle: evaluate, open, close, flip
+│   │   ├── account-stream.ts          # Tradier WebSocket for real-time fills
+│   │   ├── trade-executor.ts          # Tradier order execution (OTOCO brackets)
+│   │   ├── broker-pnl.ts              # Tradier P&L fetching
+│   │   ├── account-balance.ts         # Account balance caching
+│   │   └── price-stream.ts            # Tradier HTTP streaming for SPX
+│   │
+│   ├── replay/                   # Backtesting system
+│   │   ├── machine.ts             # Core replay engine (in-memory bar cache)
+│   │   ├── cli.ts                 # Unified CLI: run, backtest, results, days
+│   │   ├── store.ts               # SQLite store for runs/results
+│   │   ├── prompt-library.ts      # Scanner prompts (18 prompts)
+│   │   ├── metrics.ts             # Composite score computation
+│   │   └── framework.ts           # Cycle snapshot builder
+│   │
+│   ├── server/                   # HTTP/WebSocket servers (spxer service)
+│   │   ├── http.ts                # REST API (port 3600)
+│   │   ├── ws.ts                  # WebSocket server
+│   │   ├── admin-routes.ts        # Admin API endpoints
+│   │   ├── replay-server.ts       # Replay viewer server (port 3601)
+│   │   ├── admin-viewer.html      # Admin management UI
+│   │   ├── account-viewer.html    # Account viewer UI
+│   │   └── devops-viewer.html     # DevOps monitoring UI
+│   │
+│   ├── storage/                  # Database and queries
+│   │   ├── db.ts                  # SQLite connection
+│   │   ├── queries.ts             # High-level query functions
+│   │   ├── archiver.ts            # Parquet export + GDrive upload
+│   │   └── replay-db.ts           # Replay store
+│   │
+│   ├── providers/                # Market data providers
+│   │   ├── tradier.ts             # Tradier REST API
+│   │   ├── thetadata-stream.ts    # ThetaData WebSocket (primary)
+│   │   ├── yahoo.ts               # Yahoo Finance (disabled)
+│   │   └── tv-screener.ts         # TradingView screener (context)
+│   │
+│   ├── utils/                    # Utility functions
+│   │   ├── et-time.ts             # ET timezone helpers (CRITICAL for time handling)
+│   │   ├── health.ts              # HealthTracker for uptime monitoring
+│   │   └── resilience.ts          # Retry/backoff helpers
+│   │
+│   ├── data/                     # Static data
+│   │   └── economic-calendar.json # US economic calendar
+│   │
+│   ├── types.ts                  # Global types: Bar, Contract, Timeframe, etc.
+│   └── index.ts                  # Data service entry point (spxer)
+│
+├── scripts/                      # Utility scripts
+│   ├── autoresearch/             # Parameter optimization
+│   │   ├── verify-metric.ts      # Single-run parameter verification
+│   │   ├── param-search.ts       # Automated multi-parameter search
+│   │   └── config-optimizer.ts   # Config mutation helpers
+│   └── ops/                      # Operations scripts
+│       ├── check-environment.sh
+│       ├── monitor-active-trading.sh
+│       └── start-warmup.sh
+│
+├── tests/                        # Vitest tests (mirrors src/ structure)
+│   ├── core/                     # Core trading logic tests
+│   ├── pipeline/                 # Pipeline tests
+│   ├── providers/                # Provider tests
+│   ├── server/                   # API tests
+│   └── smoke.test.ts             # End-to-end smoke tests
+│
+├── deploy/                       # Deployment configurations
+│   └── vps5-spxer-nginx.conf     # Nginx proxy config for bitloom.cloud
+│
+├── docs/                         # Documentation
+│   ├── SIMULATION-MODE.md
+│   └── (other docs)
+│
+├── data/                         # Runtime data (gitignored)
+│   ├── spxer.db                  # Main SQLite database (bars, contracts, configs, results)
+│   ├── account.db                # Live trading state (positions, orders)
+│   ├── parquet/                  # Historical bar data (archival)
+│   └── live/                     # Daily bar databases
+│
+├── event_handler_mvp.ts          # Event handler entry point (PRIMARY - independent)
+├── position_monitor.ts           # Position monitor entry point (RECOMMENDED - independent)
+├── schwaber.ts                   # Schwab ETF trading entry point (optional)
+├── ecosystem.config.js           # PM2 process configuration
+├── package.json                  # Node.js dependencies and scripts
+├── tsconfig.json                 # TypeScript configuration
+├── .env                          # Environment variables (not in git)
+├── README.md                     # This file
+├── CLAUDE.md                     # Full technical documentation for AI agents
+├── SERVICE-ARCHITECTURE.md       # Independent services architecture details
+└── DAILY-OPS-CHECKLIST.md        # Daily operations procedures
+```
+
+### Key Files for Agent Navigation
+
+| Purpose | File Location |
+|---------|---------------|
+| **Event Handler Entry** | `event_handler_mvp.ts` (PRIMARY - independent) |
+| **Position Monitor Entry** | `position_monitor.ts` (RECOMMENDED - independent) |
+| **Data Service Entry** | `src/index.ts` (OPTIONAL - only for replay) |
+| **Core Trading Logic** | `src/core/` (single source of truth) |
+| **Config System** | `src/config/defaults.ts` |
+| **PM2 Configuration** | `ecosystem.config.js` |
+| **Environment Variables** | `.env` |
+| **Database Schema** | `src/storage/db.ts` |
+| **REST API Routes** | `src/server/http.ts` |
+| **Admin UI** | `src/server/admin-viewer.html` |
+| **Replay CLI** | `src/replay/cli.ts` |
+| **Tests** | `tests/` (mirrors `src/` structure) |
 
 ---
 
