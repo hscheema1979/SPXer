@@ -181,10 +181,21 @@ const SHARD_OUT = process.env.SWEEP_SHARD_OUT;
 const MERGE_DIR = process.env.SWEEP_MERGE;
 const STATE_FILE = process.env.SWEEP_STATE;
 let RUN_DATES = MERGE_DIR ? [] : shardDates(dates);
-// ── Incremental (SWEEP_STATE): load the persisted per-date stats, then
-// replay ONLY dates not already present (idempotent by date) — the nightly
-// run does 1 day in seconds instead of re-replaying all ~278. Single-process
-// only (mutually exclusive with shard/merge). State persisted at the end.
+// (Incremental SWEEP_STATE load happens AFTER `stats` is initialized, below.)
+console.log(`Processing ${RUN_DATES.length}/${dates.length} dates for ${TARGETS.length} variants${process.env.SWEEP_SHARD ? ` (shard ${process.env.SWEEP_SHARD})` : ''}...\n`);
+
+interface VariantStat {
+  // Per-day arrays of (concurrent count per minute) and per-day net P&L
+  perDayConcurrents: Map<string, number[]>;   // date → array of 345 minute samples
+  perDayPnl: Map<string, number>;
+}
+const stats = new Map<string, VariantStat>();
+for (const v of TARGETS) stats.set(v.label, { perDayConcurrents: new Map(), perDayPnl: new Map() });
+
+// ── Incremental (SWEEP_STATE): load persisted per-date stats, then replay
+// ONLY dates not already present (idempotent by date) — nightly does 1 day
+// in seconds instead of re-replaying ~278. Single-process only (mutually
+// exclusive with shard/merge). State is persisted at the very end.
 if (STATE_FILE && !MERGE_DIR && !SHARD_OUT && fs.existsSync(STATE_FILE)) {
   const o = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
   const bl = new Map(TARGETS.map(v => [v.label, v as any]));
@@ -200,15 +211,6 @@ if (STATE_FILE && !MERGE_DIR && !SHARD_OUT && fs.existsSync(STATE_FILE)) {
   RUN_DATES = RUN_DATES.filter(d => !known.has(d));
   console.log(`[incremental] state has ${known.size} dates; replaying ${RUN_DATES.length} NEW: ${RUN_DATES.join(',') || '(none)'}`);
 }
-console.log(`Processing ${RUN_DATES.length}/${dates.length} dates for ${TARGETS.length} variants${process.env.SWEEP_SHARD ? ` (shard ${process.env.SWEEP_SHARD})` : ''}...\n`);
-
-interface VariantStat {
-  // Per-day arrays of (concurrent count per minute) and per-day net P&L
-  perDayConcurrents: Map<string, number[]>;   // date → array of 345 minute samples
-  perDayPnl: Map<string, number>;
-}
-const stats = new Map<string, VariantStat>();
-for (const v of TARGETS) stats.set(v.label, { perDayConcurrents: new Map(), perDayPnl: new Map() });
 
 let processed = 0;
 const t0 = Date.now();
