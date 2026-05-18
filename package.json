@@ -24,7 +24,8 @@
     "backtest": "tsx src/replay/cli.ts backtest --no-scanners --no-judge",
     "viewer": "tsx src/server/replay-server.ts",
     "schwaber": "AGENT_PAPER=true tsx schwaber.ts",
-    "schwaber:live": "AGENT_PAPER=false tsx schwaber.ts"
+    "schwaber:live": "AGENT_PAPER=false tsx schwaber.ts",
+    "eod": "bash scripts/ops/eod-pipeline.sh --now"
   },
   "keywords": [],
   "author": "",
