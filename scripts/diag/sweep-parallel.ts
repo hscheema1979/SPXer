@@ -15,9 +15,18 @@
  *
  * Usage:
  *   npx tsx scripts/diag/sweep-parallel.ts --symbol SPX [--engine both|credit|iron]
- *                                          [--shards 8] [--dte 0] [--symbol passthru...]
+ *                                          [--shards 8] [--dte 0] [--no-post]
  *   engine=both runs credit THEN iron (they share the per-symbol dashboard
  *   JSON, so they must serialize; each is internally N-way parallel).
+ *
+ * Post-process (pipeline steps 4–5, mirrors sweep-manager.ts::cmdExecute):
+ *   when --engine both, after the sweeps it AUTOMATICALLY runs
+ *   curate-risk-targets.ts → concurrent-distribution.ts so the cap-variability
+ *   [1,2,3,5,8,10,12,15,uncap] + risk distribution is always fresh for the
+ *   dashboard. This is why a plain `--engine both` regen no longer leaves
+ *   stale cap/risk data. `--no-post` skips it; partial engine runs (credit-
+ *   or iron-only, e.g. sweep-parity) never trigger it (curate needs the
+ *   combined credit+iron sweep JSON).
  */
 import { spawn } from 'child_process';
 import * as os from 'os';
@@ -36,12 +45,13 @@ function flag(name: string, def?: string): string | undefined {
 
 const engineArg = (flag('engine', 'both') || 'both').toLowerCase();
 const shards = Math.max(1, parseInt(flag('shards', String(os.cpus().length)) || '8', 10));
+const noPost = argv.includes('--no-post');
 // Pass-through args for the worker (strip orchestrator-only flags, keep --symbol/--dte/etc.)
 const passthru: string[] = [];
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
   if (a === '--engine' || a === '--shards') { i++; continue; }
-  if (a.startsWith('--engine=') || a.startsWith('--shards=')) continue;
+  if (a.startsWith('--engine=') || a.startsWith('--shards=') || a === '--no-post') continue;
   passthru.push(a);
 }
 
@@ -83,5 +93,22 @@ function run(script: string, env: Record<string, string>, tag: string): Promise<
     fs.rmSync(tmp, { recursive: true, force: true });
     console.log(`[${eng}] merge+finalize in ${((Date.now() - tM) / 1000).toFixed(1)}s`);
   }
+
+  // ── Pipeline steps 4–5 (auto) — mirrors sweep-manager.ts::cmdExecute ──────
+  // Only after a FULL credit+iron regen (curate reads the combined sweep
+  // JSON). Keeps the cap-variability + risk distribution always fresh so a
+  // plain `--engine both` no longer leaves the dashboard with stale caps.
+  if (engineArg === 'both' && !noPost) {
+    const tP = Date.now();
+    console.log(`\n[post] curate-risk-targets → concurrent-distribution …`);
+    await run('scripts/diag/curate-risk-targets.ts', {}, 'curate');
+    await run('scripts/diag/concurrent-distribution.ts', {}, 'concurrent-distribution');
+    console.log(`[post] cap/risk refreshed in ${((Date.now() - tP) / 1000).toFixed(1)}s`);
+  } else if (noPost) {
+    console.log(`\n[post] skipped (--no-post)`);
+  } else {
+    console.log(`\n[post] skipped (engine=${engineArg}; curate needs combined credit+iron — use --engine both)`);
+  }
+
   console.log(`\n✓ sweep-parallel complete in ${((Date.now() - t0) / 1000).toFixed(1)}s (${shards}-way)`);
 })().catch(e => { console.error(`\n✗ ${e.message}`); process.exit(1); });
