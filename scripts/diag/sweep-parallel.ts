@@ -74,24 +74,30 @@ function run(script: string, env: Record<string, string>, tag: string): Promise<
   });
 }
 
+// Date-shard a script across `shards` cores: N workers (SWEEP_SHARD/
+// SWEEP_SHARD_OUT) in parallel, then one SWEEP_MERGE finalize. Used for the
+// sweep engines AND concurrent-distribution (all date-additive reducers).
+async function shardRun(script: string, tag: string): Promise<void> {
+  const tmp = path.join('/tmp/sweepshard', `${Date.now()}_${tag}`);
+  fs.rmSync(tmp, { recursive: true, force: true });
+  fs.mkdirSync(tmp, { recursive: true });
+  console.log(`\n[${tag}] ${shards} shard workers …`);
+  const tA = Date.now();
+  await Promise.all(
+    Array.from({ length: shards }, (_, i) =>
+      run(script, { SWEEP_SHARD: `${i}/${shards}`, SWEEP_SHARD_OUT: path.join(tmp, `shard_${i}.json`) }, `${tag}#${i}`)),
+  );
+  console.log(`[${tag}] shards done in ${((Date.now() - tA) / 1000).toFixed(1)}s → merging …`);
+  const tM = Date.now();
+  await run(script, { SWEEP_MERGE: tmp }, `${tag}#merge`);
+  fs.rmSync(tmp, { recursive: true, force: true });
+  console.log(`[${tag}] merge+finalize in ${((Date.now() - tM) / 1000).toFixed(1)}s`);
+}
+
 (async () => {
   const t0 = Date.now();
   for (const eng of order) {
-    const script = ENGINES[eng];
-    const tmp = path.join('/tmp/sweepshard', `${Date.now()}_${eng}`);
-    fs.rmSync(tmp, { recursive: true, force: true });
-    fs.mkdirSync(tmp, { recursive: true });
-    console.log(`\n[${eng}] ${shards} shard workers …`);
-    const tA = Date.now();
-    await Promise.all(
-      Array.from({ length: shards }, (_, i) =>
-        run(script, { SWEEP_SHARD: `${i}/${shards}`, SWEEP_SHARD_OUT: path.join(tmp, `shard_${i}.json`) }, `${eng}#${i}`)),
-    );
-    console.log(`[${eng}] shards done in ${((Date.now() - tA) / 1000).toFixed(1)}s → merging …`);
-    const tM = Date.now();
-    await run(script, { SWEEP_MERGE: tmp }, `${eng}#merge`);
-    fs.rmSync(tmp, { recursive: true, force: true });
-    console.log(`[${eng}] merge+finalize in ${((Date.now() - tM) / 1000).toFixed(1)}s`);
+    await shardRun(ENGINES[eng], eng);
   }
 
   // ── Pipeline steps 4–5 (auto) — mirrors sweep-manager.ts::cmdExecute ──────
@@ -100,9 +106,9 @@ function run(script: string, env: Record<string, string>, tag: string): Promise<
   // plain `--engine both` no longer leaves the dashboard with stale caps.
   if (engineArg === 'both' && !noPost) {
     const tP = Date.now();
-    console.log(`\n[post] curate-risk-targets → concurrent-distribution …`);
-    await run('scripts/diag/curate-risk-targets.ts', {}, 'curate');
-    await run('scripts/diag/concurrent-distribution.ts', {}, 'concurrent-distribution');
+    console.log(`\n[post] curate-risk-targets → concurrent-distribution (${shards}-way) …`);
+    await run('scripts/diag/curate-risk-targets.ts', {}, 'curate');     // ~2s, single
+    await shardRun('scripts/diag/concurrent-distribution.ts', 'concurrent-distribution');
     console.log(`[post] cap/risk refreshed in ${((Date.now() - tP) / 1000).toFixed(1)}s`);
   } else if (noPost) {
     console.log(`\n[post] skipped (--no-post)`);

@@ -18,6 +18,7 @@ import * as dotenv from 'dotenv'; dotenv.config({ quiet: true } as any);
 import * as fs from 'fs';
 import * as path from 'path';
 import { resolveSymbolTarget, listDatesFor, loadDay, outPath } from './sweep-symbol';
+import { shardDates } from './sweep-shard';
 
 // Profile resolution: --symbol SPX|SPY|QQQ|NDX [--dte 0|1].
 // SI = strike interval ($ between adjacent strikes: SPX 5, SPY/QQQ 1, NDX 10)
@@ -170,7 +171,16 @@ function applyExit(traj: Array<{ ts: number, V: number }>, endTs: number, legs: 
 
 // ─ Main ────────────────────────────────────────────────────────────────────────
 const dates = listDates();
-console.log(`Processing ${dates.length} dates for ${TARGETS.length} variants...\n`);
+// ── Parallel date-shard (same scheme as the sweep engines) ────────────────
+// SWEEP_SHARD="i/n" → this worker processes only its 1/n date slice and
+// dumps its per-date stats; SWEEP_MERGE=<dir> → skip the replay, load every
+// shard's stats, then run the (cheap) cap+distribution aggregation once.
+// Per-date state (perDayConcurrents / perDayPnl / _tradeMap) is disjoint
+// across shards, so the union is exact — identical to the serial run.
+const SHARD_OUT = process.env.SWEEP_SHARD_OUT;
+const MERGE_DIR = process.env.SWEEP_MERGE;
+const RUN_DATES = MERGE_DIR ? [] : shardDates(dates);
+console.log(`Processing ${RUN_DATES.length}/${dates.length} dates for ${TARGETS.length} variants${process.env.SWEEP_SHARD ? ` (shard ${process.env.SWEEP_SHARD})` : ''}...\n`);
 
 interface VariantStat {
   // Per-day arrays of (concurrent count per minute) and per-day net P&L
@@ -182,7 +192,7 @@ for (const v of TARGETS) stats.set(v.label, { perDayConcurrents: new Map(), perD
 
 let processed = 0;
 const t0 = Date.now();
-for (const date of dates) {
+for (const date of RUN_DATES) {
   let c1: any, p1: any;
   try { c1 = loadDay(TARGET, date, '1m') as any; p1 = loadDay(TARGET, prevDate(date), '1m') as any; } catch { continue; }
   if (!c1) continue;
@@ -319,9 +329,50 @@ for (const date of dates) {
   }
 
   processed++;
-  if (processed % 50 === 0) console.log(`  ${processed}/${dates.length} (${((Date.now() - t0) / 1000).toFixed(1)}s)`);
+  if (processed % 50 === 0) console.log(`  ${processed}/${RUN_DATES.length} (${((Date.now() - t0) / 1000).toFixed(1)}s)`);
 }
 console.log(`\nFinished ${processed} dates in ${((Date.now() - t0) / 1000).toFixed(1)}s\n`);
+
+// ── Shard dump / merge (array-safe; sweep-shard's encoder mangles arrays) ──
+const _byLabel = new Map(TARGETS.map(v => [v.label, v as any]));
+function _serializeStats(): string {
+  const o: Record<string, any> = {};
+  for (const v of TARGETS) {
+    const st = stats.get(v.label)!;
+    o[v.label] = {
+      pdc: [...st.perDayConcurrents],          // [[date, number[]], …]
+      pdp: [...st.perDayPnl],                  // [[date, number], …]
+      tm: [...(((v as any)._tradeMap as Map<string, any[]>) || new Map())], // [[date, spans[]], …]
+    };
+  }
+  return JSON.stringify(o);
+}
+function _mergeStatsFile(file: string) {
+  const o = JSON.parse(fs.readFileSync(file, 'utf8'));
+  for (const label of Object.keys(o)) {
+    const st = stats.get(label); if (!st) continue;
+    for (const [d, arr] of o[label].pdc) st.perDayConcurrents.set(d, arr);
+    for (const [d, n] of o[label].pdp) st.perDayPnl.set(d, n);
+    const vAny = _byLabel.get(label); if (vAny) {
+      if (!vAny._tradeMap) vAny._tradeMap = new Map();
+      for (const [d, spans] of o[label].tm) vAny._tradeMap.set(d, spans);
+    }
+  }
+}
+if (SHARD_OUT) {
+  fs.mkdirSync(path.dirname(SHARD_OUT), { recursive: true });
+  fs.writeFileSync(SHARD_OUT, _serializeStats());
+  console.log(`[shard] dumped ${RUN_DATES.length} dates → ${SHARD_OUT}`);
+  process.exit(0);
+}
+if (MERGE_DIR) {
+  const files = fs.readdirSync(MERGE_DIR).filter(f => f.endsWith('.json')).sort();
+  if (files.length === 0) throw new Error(`[concurrent-distribution] no shard dumps in ${MERGE_DIR}`);
+  for (const f of files) _mergeStatsFile(path.join(MERGE_DIR, f));
+  const merged = new Set<string>();
+  for (const st of stats.values()) for (const d of st.perDayConcurrents.keys()) merged.add(d);
+  console.log(`[merge] folded ${files.length} shards → ${merged.size} dates\n`);
+}
 
 function percentile(arr: number[], p: number): number {
   const sorted = [...arr].sort((a, b) => a - b);
