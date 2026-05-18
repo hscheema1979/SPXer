@@ -142,8 +142,12 @@ function expiryForDate(date: string, dte: number): string {
 
 export function loadDay(t: SymbolTarget, date: string, tf: string): any {
   if (t.symbol === 'SPX' && t.dte === 0) {
-    // Preserve the fast .brc cached path for SPX 0DTE only.
-    return readBarCacheFile(date, tf, true) as any;
+    // Fast path: use the prebuilt .brc cache when present & valid. When it's
+    // absent/stale/incompatible, DON'T return null — fall through to the same
+    // parquet loader every other profile uses (the engine aggregates 1m→TF on
+    // the fly, so parquet is sufficient; .brc is purely a speed cache).
+    const cached = readBarCacheFile(date, tf, true) as any;
+    if (cached && cached.spxBars && cached.spxBars.length) return cached;
   }
   const fp = path.join(process.cwd(), 'data/parquet/bars', t.profileId, `${date}.parquet`);
   if (!fs.existsSync(fp)) return null;
