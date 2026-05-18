@@ -15,6 +15,7 @@ import * as dotenv from 'dotenv';
 dotenv.config({ quiet: true } as any);
 import { readBarCacheFile } from '../../src/replay/bar-cache-file';
 import { resolveSymbolTarget, listDatesFor, loadDay, outPath } from './sweep-symbol';
+import { shardDates, dumpResults, loadShardsInto } from './sweep-shard';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -308,11 +309,16 @@ function rec(s:string,sp:string,ex:string, pnl:number, date:string, credit:numbe
 
 // ── Main ───────────────────────────────────────────────────────────────────
 const ALL_DATES = listDatesFor(TARGET);
-console.error(`[${TARGET.symbol}] Dates: ${ALL_DATES.length}`);
+// Parallel-shard hook: SWEEP_MERGE skips the loop (results come from shard
+// dumps); SWEEP_SHARD="i/n" runs only this worker's date subset. No env =
+// serial, identical behaviour. Each shard keeps every date's FULL bar
+// history, so this cannot introduce look-ahead.
+const SWEEP_DATES = process.env.SWEEP_MERGE ? [] : shardDates(ALL_DATES);
+console.error(`[${TARGET.symbol}] Dates: ${ALL_DATES.length}${process.env.SWEEP_SHARD ? ` (shard ${process.env.SWEEP_SHARD} → ${SWEEP_DATES.length})` : ''}`);
 
-for(let di=0; di<ALL_DATES.length; di++){
-  const date = ALL_DATES[di];
-  if(di%20===0) console.error(`  ${di}/${ALL_DATES.length}  ${date}`);
+for(let di=0; di<SWEEP_DATES.length; di++){
+  const date = SWEEP_DATES[di];
+  if(di%20===0) console.error(`  ${di}/${SWEEP_DATES.length}  ${date}`);
   let c1:any, p1:any;
   try { c1 = loadDay(TARGET,date,'1m') as any; p1 = loadDay(TARGET,prevDate(date),'1m') as any; }
   catch { continue; }
@@ -509,4 +515,11 @@ function summary(){
   console.log(`Daily merged: ${mergedDates.length} dates × ${Object.keys(mergedSeries).length} variants`);
   console.log('Saved to /tmp/credit_spread_*.json + scripts/autoresearch/output/spread-*.json');
 }
-summary();
+if (process.env.SWEEP_SHARD_OUT) {
+  // Worker: dump this shard's partial accumulator; do NOT run the
+  // dashboard-merge finalize (the merge run owns the final JSON).
+  dumpResults(results, process.env.SWEEP_SHARD_OUT);
+} else {
+  if (process.env.SWEEP_MERGE) loadShardsInto(process.env.SWEEP_MERGE, results);
+  summary();
+}

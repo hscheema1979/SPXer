@@ -26,6 +26,7 @@ import * as dotenv from 'dotenv';
 dotenv.config({ quiet: true } as any);
 import { readBarCacheFile } from '../../src/replay/bar-cache-file';
 import { resolveSymbolTarget, listDatesFor, loadDay, outPath, instrumentClass } from './sweep-symbol';
+import { shardDates, dumpResults, loadShardsInto } from './sweep-shard';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -357,11 +358,16 @@ function rec(sig:string,struct:string,ex:string, pnl_gross:number, date:string, 
 }
 
 const ALL_DATES = listDatesFor(TARGET);
-console.error(`[${TARGET.symbol}] Iron sweep — dates: ${ALL_DATES.length}, signals: ${SIGNALS.length}, structures: ${STRUCTURES.length}, exits: ${EXITS.length}`);
+// Parallel-shard hook (see sweep-shard.ts). SWEEP_MERGE → skip loop, results
+// come from shard dumps. SWEEP_SHARD="i/n" → only this worker's date subset.
+// No env = serial, identical. Each shard keeps every date's FULL bar history,
+// so this cannot introduce look-ahead and does not alter volume handling.
+const SWEEP_DATES = process.env.SWEEP_MERGE ? [] : shardDates(ALL_DATES);
+console.error(`[${TARGET.symbol}] Iron sweep — dates: ${ALL_DATES.length}${process.env.SWEEP_SHARD ? ` (shard ${process.env.SWEEP_SHARD} → ${SWEEP_DATES.length})` : ''}, signals: ${SIGNALS.length}, structures: ${STRUCTURES.length}, exits: ${EXITS.length}`);
 
-for(let di=0; di<ALL_DATES.length; di++){
-  const date = ALL_DATES[di];
-  if(di%20===0) console.error(`  ${di}/${ALL_DATES.length}  ${date}`);
+for(let di=0; di<SWEEP_DATES.length; di++){
+  const date = SWEEP_DATES[di];
+  if(di%20===0) console.error(`  ${di}/${SWEEP_DATES.length}  ${date}`);
   let c1:any, p1:any;
   try { c1 = loadDay(TARGET,date,'1m') as any; p1 = loadDay(TARGET,prevDate(date),'1m') as any; }
   catch { continue; }
@@ -464,6 +470,16 @@ for(let di=0; di<ALL_DATES.length; di++){
   }
   overlapMap.clear();
 }
+
+// Parallel-shard finalize hook. Worker: dump partial + exit BEFORE the inline
+// report/JSON-merge below (the merge run owns the dashboard JSON). Merge run:
+// fold every shard dump into `results`, then fall through to the normal
+// inline finalize so output is byte-identical to a serial run.
+if (process.env.SWEEP_SHARD_OUT) {
+  dumpResults(results, process.env.SWEEP_SHARD_OUT);
+  process.exit(0);
+}
+if (process.env.SWEEP_MERGE) loadShardsInto(process.env.SWEEP_MERGE, results);
 
 console.log(`\n=== IRON CONDOR/BUTTERFLY SWEEP — look-ahead protected, $${SLIPPAGE_PER_STRUCTURE}/RT slippage ===`);
 const rows:any[] = [];
