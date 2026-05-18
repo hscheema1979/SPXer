@@ -46,12 +46,18 @@ function flag(name: string, def?: string): string | undefined {
 const engineArg = (flag('engine', 'both') || 'both').toLowerCase();
 const shards = Math.max(1, parseInt(flag('shards', String(os.cpus().length)) || '8', 10));
 const noPost = argv.includes('--no-post');
+// --state-dir <dir>: a sharded run becomes a BOOTSTRAP — its merge finalize
+// also persists the per-(symbol,engine) accumulator so subsequent nightly
+// runs can go incremental (replay only the new day). Omit = no state seeded.
+const stateDir = flag('state-dir');
+const SYM = (flag('symbol', 'SPX') || 'SPX').toUpperCase();
+const stateFor = (eng: string) => stateDir ? path.join(stateDir, `${SYM}-${eng}.json`) : undefined;
 // Pass-through args for the worker (strip orchestrator-only flags, keep --symbol/--dte/etc.)
 const passthru: string[] = [];
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
-  if (a === '--engine' || a === '--shards') { i++; continue; }
-  if (a.startsWith('--engine=') || a.startsWith('--shards=') || a === '--no-post') continue;
+  if (a === '--engine' || a === '--shards' || a === '--state-dir') { i++; continue; }
+  if (a.startsWith('--engine=') || a.startsWith('--shards=') || a.startsWith('--state-dir=') || a === '--no-post') continue;
   passthru.push(a);
 }
 
@@ -77,10 +83,11 @@ function run(script: string, env: Record<string, string>, tag: string): Promise<
 // Date-shard a script across `shards` cores: N workers (SWEEP_SHARD/
 // SWEEP_SHARD_OUT) in parallel, then one SWEEP_MERGE finalize. Used for the
 // sweep engines AND concurrent-distribution (all date-additive reducers).
-async function shardRun(script: string, tag: string): Promise<void> {
+async function shardRun(script: string, tag: string, stateFile?: string): Promise<void> {
   const tmp = path.join('/tmp/sweepshard', `${Date.now()}_${tag}`);
   fs.rmSync(tmp, { recursive: true, force: true });
   fs.mkdirSync(tmp, { recursive: true });
+  if (stateFile) fs.mkdirSync(path.dirname(stateFile), { recursive: true });
   console.log(`\n[${tag}] ${shards} shard workers …`);
   const tA = Date.now();
   await Promise.all(
@@ -89,15 +96,17 @@ async function shardRun(script: string, tag: string): Promise<void> {
   );
   console.log(`[${tag}] shards done in ${((Date.now() - tA) / 1000).toFixed(1)}s → merging …`);
   const tM = Date.now();
-  await run(script, { SWEEP_MERGE: tmp }, `${tag}#merge`);
+  // Merge finalize: SWEEP_STATE (when bootstrapping) makes it persist the
+  // merged accumulator so the next nightly run can replay only the new day.
+  await run(script, stateFile ? { SWEEP_MERGE: tmp, SWEEP_STATE: stateFile } : { SWEEP_MERGE: tmp }, `${tag}#merge`);
   fs.rmSync(tmp, { recursive: true, force: true });
-  console.log(`[${tag}] merge+finalize in ${((Date.now() - tM) / 1000).toFixed(1)}s`);
+  console.log(`[${tag}] merge+finalize in ${((Date.now() - tM) / 1000).toFixed(1)}s${stateFile ? ` (state → ${stateFile})` : ''}`);
 }
 
 (async () => {
   const t0 = Date.now();
   for (const eng of order) {
-    await shardRun(ENGINES[eng], eng);
+    await shardRun(ENGINES[eng], eng, stateFor(eng));
   }
 
   // ── Pipeline steps 4–5 (auto) — mirrors sweep-manager.ts::cmdExecute ──────
@@ -108,7 +117,7 @@ async function shardRun(script: string, tag: string): Promise<void> {
     const tP = Date.now();
     console.log(`\n[post] curate-risk-targets → concurrent-distribution (${shards}-way) …`);
     await run('scripts/diag/curate-risk-targets.ts', {}, 'curate');     // ~2s, single
-    await shardRun('scripts/diag/concurrent-distribution.ts', 'concurrent-distribution');
+    await shardRun('scripts/diag/concurrent-distribution.ts', 'concurrent-distribution', stateFor('concdist'));
     console.log(`[post] cap/risk refreshed in ${((Date.now() - tP) / 1000).toFixed(1)}s`);
   } else if (noPost) {
     console.log(`\n[post] skipped (--no-post)`);

@@ -179,7 +179,27 @@ const dates = listDates();
 // across shards, so the union is exact — identical to the serial run.
 const SHARD_OUT = process.env.SWEEP_SHARD_OUT;
 const MERGE_DIR = process.env.SWEEP_MERGE;
-const RUN_DATES = MERGE_DIR ? [] : shardDates(dates);
+const STATE_FILE = process.env.SWEEP_STATE;
+let RUN_DATES = MERGE_DIR ? [] : shardDates(dates);
+// ── Incremental (SWEEP_STATE): load the persisted per-date stats, then
+// replay ONLY dates not already present (idempotent by date) — the nightly
+// run does 1 day in seconds instead of re-replaying all ~278. Single-process
+// only (mutually exclusive with shard/merge). State persisted at the end.
+if (STATE_FILE && !MERGE_DIR && !SHARD_OUT && fs.existsSync(STATE_FILE)) {
+  const o = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+  const bl = new Map(TARGETS.map(v => [v.label, v as any]));
+  for (const label of Object.keys(o)) {
+    const st = stats.get(label); if (!st) continue;
+    for (const [d, arr] of o[label].pdc) st.perDayConcurrents.set(d, arr);
+    for (const [d, n] of o[label].pdp) st.perDayPnl.set(d, n);
+    const vAny = bl.get(label);
+    if (vAny) { if (!vAny._tradeMap) vAny._tradeMap = new Map(); for (const [d, sp] of o[label].tm) vAny._tradeMap.set(d, sp); }
+  }
+  const known = new Set<string>();
+  for (const st of stats.values()) for (const d of st.perDayConcurrents.keys()) known.add(d);
+  RUN_DATES = RUN_DATES.filter(d => !known.has(d));
+  console.log(`[incremental] state has ${known.size} dates; replaying ${RUN_DATES.length} NEW: ${RUN_DATES.join(',') || '(none)'}`);
+}
 console.log(`Processing ${RUN_DATES.length}/${dates.length} dates for ${TARGETS.length} variants${process.env.SWEEP_SHARD ? ` (shard ${process.env.SWEEP_SHARD})` : ''}...\n`);
 
 interface VariantStat {
@@ -526,3 +546,12 @@ if (fs.existsSync(OUT_PATH)) {
 const merged = { ...existing, ...output };
 fs.writeFileSync(OUT_PATH, JSON.stringify(merged, null, 2));
 console.log(`\nWrote ${OUT_PATH} (${Object.keys(output).length} new/updated, ${Object.keys(merged).length} total)`);
+
+// Incremental / bootstrap: persist the merged per-date stats so the next
+// nightly run only replays the following day. (Also runs in the SWEEP_MERGE
+// finalize so a sharded bootstrap seeds the state file.)
+if (STATE_FILE && !SHARD_OUT) {
+  fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true });
+  fs.writeFileSync(STATE_FILE, _serializeStats());
+  console.log(`[incremental] state saved → ${STATE_FILE}`);
+}

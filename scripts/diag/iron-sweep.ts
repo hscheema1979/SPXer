@@ -633,10 +633,12 @@ for(const [k, v] of topRows){
   }
 }
 
-// Incremental: persist the merged (prior + new dates) accumulator so the next
-// nightly run replays only the following day. (SWEEP_SHARD_OUT path already
-// process.exit(0)'d above; guard mirrors the load condition.)
-if (STATE_FILE && !process.env.SWEEP_MERGE && !process.env.SWEEP_SHARD) {
+// Incremental / bootstrap: persist the merged accumulator so the next nightly
+// run replays only the following day. Runs for single-process incremental
+// AND the SWEEP_MERGE finalize (so a sharded bootstrap seeds state). Shard
+// workers SWEEP_SHARD_OUT'd + process.exit(0)'d above, so they never reach
+// here — guard just excludes that path.
+if (STATE_FILE && !process.env.SWEEP_SHARD_OUT) {
   dumpResults(results, STATE_FILE);
   console.error(`[incremental] state saved → ${STATE_FILE}`);
 }
