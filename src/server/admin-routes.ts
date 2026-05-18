@@ -12,8 +12,8 @@ import * as path from 'path';
 import { DEFAULT_CONFIG, mergeConfig, validateConfig } from '../config/defaults';
 import type { Config } from '../config/types';
 import { REPLAY_META_DB } from '../storage/replay-db';
-import { readHandlerState, readRoutingLog, writeCommand } from '../agent/handler-state';
 import { groupConfigSections } from './config-view';
+import { serveHtml } from './serve-html';
 import Database from 'better-sqlite3';
 
 const execAsync = promisify(exec);
@@ -89,15 +89,11 @@ const ECOSYSTEM_PATH = path.resolve(process.cwd(), 'ecosystem.config.js');
 
 /** SPXer process name prefixes — only these show in admin */
 const SPXER_PROCESS_NAMES = new Set([
-  'spxer',                    // Data service (OPTIONAL for live trading)
-  'spxer-agent',              // Legacy alias
-  'event-handler',            // Signal detection + entry execution (PRIMARY - independent)
-  'position-monitor',         // Exit observer (RECOMMENDED - independent)
-  'schwaber',                 // Schwab ETF trading (optional)
-  'runner-itm5', 'runner-atm', 'runner-otm5',    // Basket members
-  'scalp-itm5', 'scalp-atm', 'scalp-otm5',      // Scalp members
-  'replay-viewer', 'replay2-viewer', 'replay-sweep',
-  'status-monitor', 'daily-journal', 'daily-backfill',
+  'spxer',
+  'replay-viewer',
+  'gap-fill-backfill',
+  'intraday-backfill',
+  'daily-backfill',
   'metrics-collector',
 ]);
 
@@ -105,14 +101,14 @@ export function createAdminRoutes(): Router {
   const router = Router();
 
   // ── Serve the HTML admin viewer ───────────────────────────────────────────
+  // serveHtml is a static ESM import (top of file) — not a lazy
+  // require('./serve-html'), which fails under vitest (no tsx .ts require hook).
   router.get('/', (req, res) => {
     const htmlPath = path.resolve(__dirname, 'admin-viewer.html');
-    if (fsSync.existsSync(htmlPath)) {
-      res.sendFile(htmlPath);
-    } else {
-      const altPath = path.resolve(process.cwd(), 'src/server/admin-viewer.html');
-      res.sendFile(altPath);
-    }
+    const target = fsSync.existsSync(htmlPath)
+      ? htmlPath
+      : path.resolve(process.cwd(), 'src/server/admin-viewer.html');
+    serveHtml(target, req, res);
   });
 
   // ── Config Management ───────────────────────────────────────────────────
@@ -530,43 +526,8 @@ export function createAdminRoutes(): Router {
     }
   });
 
-  // ── Event Handler State ─────────────────────────────────────────────────────
-
-  /** GET /admin/api/handler/state — live event handler state from file */
-  router.get('/api/handler/state', (_req, res) => {
-    const state = readHandlerState();
-    if (!state) {
-      return res.json({ running: false, message: 'No handler process detected' });
-    }
-    res.json(state);
-  });
-
-  /** GET /admin/api/handler/routing — recent signal routing decisions */
-  router.get('/api/handler/routing', (req, res) => {
-    const n = Math.min(parseInt(req.query.n as string) || 50, 200);
-    const decisions = readRoutingLog(n);
-    res.json(decisions);
-  });
-
-  /** POST /admin/api/handler/command — send command to event handler */
-  router.post('/api/handler/command', (req, res) => {
-    const { action, configId, ...rest } = req.body;
-
-    const validActions = ['toggle_paper', 'toggle_enabled', 'force_close', 'shutdown'];
-    if (!validActions.includes(action)) {
-      return res.status(400).json({ error: `Invalid action: ${action}` });
-    }
-
-    if (configId) {
-      const state = readHandlerState();
-      if (state && !state.configs[configId]) {
-        return res.status(404).json({ error: `Config '${configId}' not found in handler` });
-      }
-    }
-
-    writeCommand({ action, configId, ...rest, ts: Date.now() });
-    res.json({ message: `Command '${action}' sent` });
-  });
+  // Event handler state/routing/command endpoints removed — live trading
+  // moved out of this repo. SPXer is replay-only.
 
   // ── System Checklist ────────────────────────────────────────────────────────
 

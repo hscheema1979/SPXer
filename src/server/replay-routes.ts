@@ -17,6 +17,7 @@ import type { Config, BasketMember } from '../config/types';
 import { listProfiles, loadProfile, saveProfile, deleteProfile } from '../instruments/profile-store';
 import type { StoredInstrumentProfile } from '../instruments/profile-store';
 import { discoverProfile, DiscoveryError } from '../instruments/discovery';
+import { serveHtml as serveWithBasePath } from './serve-html';
 import { findMissingDates, hasWorkPending } from '../backfill/missing-dates';
 import {
   createBackfillJob, attachPid, getJob, listJobs, markCancelled,
@@ -31,6 +32,10 @@ import {
 } from './trade-query-helpers';
 
 import { REPLAY_DB_DEFAULT, REPLAY_META_DB } from '../storage/replay-db';
+import { dayDbPath, previousTradingDay } from '../storage/db';
+import { ensureOrLevelsTable, getOrLevel, upsertOrLevel, getAllOrLevels } from '../storage/or-levels';
+import { ensurePivotLevelsTable, getPivotLevel } from '../storage/pivot-levels';
+import { readBarCacheFile } from '../replay/bar-cache-file';
 import { listParquetDates, symbolToProfileId, anySymbolToProfileId, hasParquetDate } from '../storage/parquet-reader';
 import { execFileSync } from 'child_process';
 
@@ -123,6 +128,123 @@ function getDataDb(): Database.Database {
   return new Database(DB_PATH, { readonly: true });
 }
 
+/** replay_bars is RETIRED (parquet-only). True iff the legacy table survives. */
+function barTableExists(db: Database.Database): boolean {
+  try {
+    return !!db.prepare(
+      `SELECT 1 FROM sqlite_master WHERE type='table' AND name=?`,
+    ).get(REPLAY_DATA_SOURCE);
+  } catch { return false; }
+}
+
+// ── Summary rebuild ──────────────────────────────────────────────────────────
+
+let summaryRebuildInProgress = false;
+
+/**
+ * Aggregate replay_results → replay_summary in one bulk SQL pass.
+ * forceAll=true  → upsert every config (full rebuild).
+ * forceAll=false → only upsert configs whose day-count changed (incremental).
+ * Returns number of rows written.
+ */
+function runSummaryRebuild(forceAll: boolean): number {
+  const db = getWriteDb();
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS replay_summary (
+        configId TEXT PRIMARY KEY, days INTEGER, totalTrades INTEGER, totalWins INTEGER,
+        totalPnl REAL, worstDay REAL, bestDay REAL, profitDays INTEGER,
+        sumWinPct REAL, cntWins INTEGER, sumLossPct REAL, cntLosses INTEGER,
+        updatedAt INTEGER, winRate REAL, avgDailyPnl REAL, avgPnlPerTrade REAL,
+        ev REAL, edge REAL, rMultiple REAL
+      )
+    `);
+
+    const staleJoin = forceAll ? '' : `
+      LEFT JOIN replay_summary s ON s.configId = a.configId`;
+    const staleWhere = forceAll ? '' : `
+      AND (s.configId IS NULL OR s.days != a.days)`;
+
+    const result = db.prepare(`
+      WITH agg AS (
+        SELECT
+          configId,
+          COUNT(*)   AS days,
+          SUM(trades)   AS tt,
+          SUM(wins)     AS tw,
+          SUM(totalPnl) AS tp,
+          MIN(totalPnl) AS wd,
+          MAX(totalPnl) AS bd,
+          SUM(CASE WHEN totalPnl > 0 THEN 1 ELSE 0 END) AS pd,
+          SUM(sumWinPct)  AS swp,
+          SUM(cntWins)    AS cw,
+          SUM(sumLossPct) AS slp,
+          SUM(cntLosses)  AS cl
+        FROM replay_results
+        GROUP BY configId
+      )
+      INSERT OR REPLACE INTO replay_summary
+        (configId, days, totalTrades, totalWins, totalPnl, worstDay, bestDay, profitDays,
+         sumWinPct, cntWins, sumLossPct, cntLosses, updatedAt,
+         winRate, avgDailyPnl, avgPnlPerTrade, ev, edge, rMultiple)
+      SELECT
+        a.configId, a.days, a.tt, a.tw, a.tp, a.wd, a.bd, a.pd,
+        a.swp, a.cw, a.slp, a.cl,
+        CAST(strftime('%s','now') AS INTEGER) * 1000,
+        CASE WHEN a.tt > 0 THEN CAST(a.tw AS REAL) / a.tt ELSE 0 END,
+        a.tp / a.days,
+        CASE WHEN a.tt > 0 THEN a.tp / a.tt ELSE 0 END,
+        CASE WHEN a.tt > 0 AND a.cw > 0 AND a.cl > 0 THEN
+          (CAST(a.tw AS REAL) / a.tt) * (a.swp / a.cw)
+          + (1.0 - CAST(a.tw AS REAL) / a.tt) * (a.slp / a.cl)
+        ELSE 0 END,
+        CASE WHEN a.tt > 0 AND a.cw > 0 AND a.cl > 0
+                  AND (a.swp / a.cw + ABS(a.slp / a.cl)) > 0 THEN
+          CAST(a.tw AS REAL) / a.tt
+          - ABS(a.slp / a.cl) / (a.swp / a.cw + ABS(a.slp / a.cl))
+        ELSE 0 END,
+        CASE WHEN a.cl > 0 AND a.slp != 0 AND a.cw > 0 THEN
+          (a.swp / a.cw) / ABS(a.slp / a.cl)
+        ELSE 0 END
+      FROM agg a${staleJoin}
+      WHERE a.days > 0${staleWhere}
+    `).run();
+
+    return result.changes;
+  } finally {
+    db.close();
+  }
+}
+
+/** Pull up to `n` bars before `dayStart` from the previous trading day's live DB.
+ *  Used to seed indicator warm-up for option contracts (which only exist for one
+ *  day in replay_bars/parquet, but get a 1DTE tail collected the prior afternoon). */
+function pullPriorDayWarmup(
+  symbol: string, timeframe: string, date: string, dayStart: number, n: number,
+): any[] {
+  try {
+    const prevDay = previousTradingDay(date);
+    const prevDbPath = dayDbPath(prevDay);
+    if (!fs.existsSync(prevDbPath)) return [];
+    const prevDb = new Database(prevDbPath, { readonly: true });
+    try {
+      const rows = prevDb.prepare(`
+        SELECT ts, open, high, low, close, volume, indicators
+        FROM bars
+        WHERE symbol = ? AND timeframe = ? AND ts < ?
+        ORDER BY ts DESC LIMIT ?
+      `).all(symbol, timeframe, dayStart, n) as any[];
+      rows.reverse();
+      return rows;
+    } finally {
+      prevDb.close();
+    }
+  } catch (e) {
+    console.warn(`[bars] prior-day warmup lookup failed for ${symbol}:`, e);
+    return [];
+  }
+}
+
 /**
  * Normalize config JSON for comparison — strip fields that differ between
  * saves but don't represent actual config changes (id, name, timestamps).
@@ -183,22 +305,53 @@ export function createReplayRoutes(): Router {
   const router = Router();
 
   // ── Serve the HTML viewer ────────────────────────────────────────────────
-  const envBasePath = process.env.BASE_PATH || '';
+  // `serveWithBasePath` (imported as serve-html#serveHtml at module top) is
+  // used by call sites throughout this file. The shared helper also rewrites
+  // /static/, /api/, /replay/, /admin/ absolute paths so <link>/<script> tags
+  // load correctly under the /spxer/ prefix. A static ESM import (not a lazy
+  // require('./serve-html')) keeps this resolvable under vitest, which does
+  // not run tsx's CJS .ts require hook.
 
-  function serveWithBasePath(htmlPath: string, req: Request, res: Response) {
-    const basePath = req.headers['x-forwarded-prefix'] as string || envBasePath;
-    if (!basePath) {
-      res.sendFile(htmlPath);
-      return;
+  // ── Static mount: per-contract HMA diagnostic reports ───────────────────
+  // Generated by scripts/diag/atm-strike-report.ts → data/reports/*.html
+  // URL: /replay/contracts/index_<YYYY-MM-DD>_<fast>x<slow>_<tf>.html
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const express = require('express') as typeof import('express');
+  const reportsDir = path.resolve(process.cwd(), 'data/reports');
+  router.use('/contracts', express.static(reportsDir, { extensions: ['html'] }));
+
+  // ── GET /replay/contracts — redirect to monthly viewer ───────────────────
+  router.get('/contracts', (_req, res) => {
+    res.redirect('/replay/contracts/monthly/index.html');
+  });
+
+  // ── POST /replay/api/monthly/generate — generate a day's report ──────────
+  // Body: { date: "YYYY-MM-DD" }
+  // Runs monthly-gen.ts --date <date>, returns { ok, date, contractCount }
+  router.post('/api/monthly/generate', (req, res) => {
+    const { date } = req.body as { date?: string };
+    if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return res.status(400).json({ error: 'date must be YYYY-MM-DD' });
     }
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { execFileSync } = require('child_process') as typeof import('child_process');
     try {
-      let html = fs.readFileSync(htmlPath, 'utf-8');
-      html = html.replace('<head>', `<head>\n  <meta name="base-path" content="${basePath}">`);
-      res.type('html').send(html);
-    } catch {
-      res.sendFile(htmlPath);
+      const out = execFileSync(
+        'npx', ['tsx', 'scripts/diag/monthly-gen.ts', '--date', date],
+        { cwd: process.cwd(), timeout: 60_000, encoding: 'utf-8' }
+      );
+      console.log('[monthly-gen]', out.trim());
+      // Read back the generated manifest entry
+      const manifestPath = path.resolve(process.cwd(), 'data/reports/monthly/manifest.json');
+      const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8')) as Array<{ date: string; contractCount: number }>;
+      const entry = manifest.find(e => e.date === date);
+      res.json({ ok: true, date, contractCount: entry?.contractCount ?? 0 });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('[monthly-gen] failed:', msg);
+      res.status(500).json({ error: msg });
     }
-  }
+  });
 
   router.get('/', (req, res) => {
     const htmlPath = path.resolve(__dirname, 'replay-viewer.html');
@@ -210,42 +363,196 @@ export function createReplayRoutes(): Router {
     }
   });
 
+  // ── Ensure or_levels + pivot_levels tables exist on first use ───────────
+  {
+    const _initDb = new Database(META_DB_PATH);
+    try { ensureOrLevelsTable(_initDb); ensurePivotLevelsTable(_initDb); } finally { _initDb.close(); }
+  }
+
+  // ── ET offset helper (local to routes) ───────────────────────────────────
+  function _etOffsetSec(date: string): number {
+    const noon = new Date(`${date}T17:00:00Z`);
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: false,
+    }).formatToParts(noon);
+    const etHour = +parts.find(p => p.type === 'hour')!.value;
+    let diff = etHour - noon.getUTCHours();
+    if (diff > 12) diff -= 24; if (diff < -12) diff += 24;
+    return diff * 3600;
+  }
+
+  // ── GET /replay/api/or-levels?date=&orMinutes= — fetch (or lazily compute) OR levels ──
+  router.get('/api/or-levels', (req, res) => {
+    const { date, orMinutes: mStr } = req.query as Record<string, string>;
+    if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return res.status(400).json({ error: 'date required (YYYY-MM-DD)' });
+    }
+    const orMinutes = Math.max(1, Math.min(120, parseInt(mStr ?? '30', 10) || 30));
+
+    // Check DB cache first
+    const rdb = new Database(META_DB_PATH, { readonly: true });
+    let cached: ReturnType<typeof getOrLevel>;
+    try { cached = getOrLevel(rdb, date, orMinutes); } finally { rdb.close(); }
+    if (cached) return res.json(cached);
+
+    // Lazy-compute from BRC cache
+    const cache = readBarCacheFile(date, '1m', false);
+    if (!cache) return res.status(404).json({ error: `no bar cache for ${date}` });
+
+    const etOff = _etOffsetSec(date);
+    const marketOpenUTC = Math.floor(new Date(`${date}T00:00:00Z`).getTime() / 1000) - etOff + 9*3600 + 30*60;
+    const dayEnd = marketOpenUTC + 6*3600 + 30*60;
+
+    const spxBars = cache.spxBars.filter(b => b.ts >= marketOpenUTC && b.ts <= dayEnd);
+    if (spxBars.length < 5) return res.status(404).json({ error: `insufficient SPX bars for ${date}` });
+
+    const spxAt10 = spxBars.find(b => Math.floor((b.ts + etOff) / 60) % (24*60) >= 600) ?? spxBars[0];
+    const atmStrike = Math.round((spxAt10?.open ?? 0) / 5) * 5;
+
+    const orEndTs = marketOpenUTC + orMinutes * 60;
+    const orBars  = spxBars.filter(b => b.ts >= marketOpenUTC && b.ts < orEndTs);
+    if (orBars.length < 2) return res.status(404).json({ error: `not enough OR bars for ${date}` });
+
+    const orHigh = orBars.reduce((m, b) => Math.max(m, b.high), -Infinity);
+    const orLow  = orBars.reduce((m, b) => Math.min(m, b.low),  Infinity);
+    const spxOpen = orBars[0].open;
+
+    const dateCode = date.slice(2).replace(/-/g, '');
+    const calls: { symbol: string; strike: number }[] = [];
+    const puts:  { symbol: string; strike: number }[] = [];
+
+    for (const [sym] of cache.contractBars) {
+      if (!sym.includes(dateCode)) continue;
+      const m = sym.match(/SPXW\d{6}([CP])(\d{8})/);
+      if (!m) continue;
+      const strike = cache.contractStrikes.get(sym) ?? parseInt(m[2]) / 1000;
+      if (Math.abs(Math.round((strike - atmStrike) / 5)) > 20) continue;
+      (m[1] === 'C' ? calls : puts).push({ symbol: sym, strike });
+    }
+
+    const nearest = (arr: { symbol: string; strike: number }[], target: number) =>
+      arr.reduce((b, c) => Math.abs(c.strike - target) < Math.abs(b.strike - target) ? c : b);
+
+    const level = {
+      date, orMinutes, orHigh, orLow, orEndTs, spxOpen,
+      anchorHighCall: calls.length ? nearest(calls, orHigh).symbol : null,
+      anchorHighPut:  puts.length  ? nearest(puts,  orHigh).symbol : null,
+      anchorLowCall:  calls.length ? nearest(calls, orLow).symbol  : null,
+      anchorLowPut:   puts.length  ? nearest(puts,  orLow).symbol  : null,
+    };
+
+    const wdb = new Database(META_DB_PATH);
+    try { upsertOrLevel(wdb, level); } finally { wdb.close(); }
+
+    return res.json(level);
+  });
+
+  // ── GET /replay/api/or-levels/all?orMinutes= — all dates for a given period ──
+  router.get('/api/or-levels/all', (req, res) => {
+    const orMinutes = Math.max(1, Math.min(120, parseInt((req.query.orMinutes as string) ?? '30', 10) || 30));
+    const rdb = new Database(META_DB_PATH, { readonly: true });
+    try {
+      const rows = getAllOrLevels(rdb, orMinutes);
+      res.json(rows);
+    } finally {
+      rdb.close();
+    }
+  });
+
+  // ── GET /replay/api/pivot-levels?date=YYYY-MM-DD — pre-computed pivot levels ──
+  router.get('/api/pivot-levels', (req, res) => {
+    const { date } = req.query as Record<string, string>;
+    if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return res.status(400).json({ error: 'date required (YYYY-MM-DD)' });
+    }
+    const rdb = new Database(META_DB_PATH, { readonly: true });
+    try {
+      const level = getPivotLevel(rdb, date);
+      if (!level) return res.status(404).json({ error: `no pivot data for ${date}` });
+      res.json(level);
+    } finally {
+      rdb.close();
+    }
+  });
+
   // ── GET /replay/api/dates?instrument=SPX|NDX — available replay dates ───
   router.get('/api/dates', (req, res) => {
     const instrument = ((req.query.instrument as string) || 'SPX').toUpperCase();
     const profileId = symbolToProfileId(instrument);
 
-    // Try parquet first (preferred — no 42GB SQLite scan)
-    const parquetDates = listParquetDates(profileId);
-    if (parquetDates.length > 0) {
-      return res.json(parquetDates);
+    const allDates = new Set<string>();
+
+    // 1. Parquet dates
+    for (const d of listParquetDates(profileId)) allDates.add(d);
+
+    // 2. BRC cache dates (data/cache/YYYY-MM-DD_1m.full.brc)
+    const brcCacheDir = path.join(process.cwd(), 'data/cache');
+    if (fs.existsSync(brcCacheDir)) {
+      const brcSuffix = instrument === 'SPX' ? '_1m.full.brc' : `_${instrument}_1m.full.brc`;
+      fs.readdirSync(brcCacheDir)
+        .filter(f => f.endsWith(brcSuffix))
+        .forEach(f => {
+          const d = f.replace(brcSuffix, '');
+          if (/^\d{4}-\d{2}-\d{2}$/.test(d)) allDates.add(d);
+        });
     }
 
-    // Fallback to SQLite (bar data DB)
+    // 3. SQLite replay_bars — option symbols encode the expiry date (e.g. SPXW260428C...)
+    //    Also covers the underlying via timestamp for instruments without option encoding.
+    const PREFIX_MAP: Record<string, string> = {
+      SPX: 'SPXW', NDX: 'NDXP', QQQ: 'QQQ', SPY: 'SPY', NVDA: 'NVDA', TSLA: 'TSLA',
+    };
+    const optPrefix = PREFIX_MAP[instrument] || instrument;
     const dataDb = getDataDb();
     try {
-      const rows = dataDb.prepare(`
-        SELECT DISTINCT date(ts, 'unixepoch') as d
-        FROM ${REPLAY_DATA_SOURCE} WHERE symbol=? AND timeframe='1m'
-        ORDER BY d
-      `).all(instrument) as { d: string }[];
-      res.json(rows.map(r => r.d));
+      if (!barTableExists(dataDb)) {
+        // replay_bars retired — parquet sources (#1/#2 above) are authoritative.
+        return res.json([...allDates].sort());
+      }
+      // Option symbols have the expiry encoded: SPXW YYMMDD C/P strike
+      // Extract distinct dates from symbol prefix pattern
+      const symRows = dataDb.prepare(`
+        SELECT DISTINCT symbol FROM ${REPLAY_DATA_SOURCE}
+        WHERE symbol LIKE ? AND timeframe='1m'
+      `).all(`${optPrefix}26%`) as { symbol: string }[];
+      for (const { symbol } of symRows) {
+        const m = symbol.match(new RegExp(`^${optPrefix}(\\d{2})(\\d{2})(\\d{2})`));
+        if (m) allDates.add(`20${m[1]}-${m[2]}-${m[3]}`);
+      }
+      // Also check underlying symbol by timestamp (covers non-option instruments)
+      if (allDates.size === 0) {
+        const tsRows = dataDb.prepare(`
+          SELECT DISTINCT date(ts, 'unixepoch') as d
+          FROM ${REPLAY_DATA_SOURCE} WHERE symbol=? AND timeframe='1m'
+          ORDER BY d
+        `).all(instrument) as { d: string }[];
+        for (const { d } of tsRows) allDates.add(d);
+      }
     } finally {
       dataDb.close();
     }
+
+    res.json([...allDates].sort());
   });
 
   // ── GET /replay/api/configs — saved configs ──────────────────────────────
-  // Only returns configs with ≥200 days of results (use ?all=1 to bypass)
+  // Never returns diag-% configs (sweep-only). Use ?all=1 to bypass day-count filter.
   router.get('/api/configs', (req, res) => {
     const db = getDb();
     try {
-      // CTE pre-computes day counts from replay_results without reading blob columns.
-      // Direct LEFT JOIN was scanning 82K trades_json blobs (~480MB I/O) → 5-6s.
-      // CTE approach: 0.15s.
+      // Use replay_summary for day counts (pre-aggregated, fast) when available.
+      // Fall back to CTE over replay_results if summary table is empty.
       const showAll = req.query.all === '1';
+      const summaryExists = !!(db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='replay_summary'`).get() as any);
+      const hasSummary = summaryExists && (db.prepare(`SELECT COUNT(*) as n FROM replay_summary`).get() as any)?.n > 0;
+      const dayCountExpr = hasSummary
+        ? `COALESCE(s.days, 0)`
+        : `COALESCE(dc.cnt, 0)`;
+      const dayCountJoin = hasSummary
+        ? `LEFT JOIN replay_summary s ON s.configId = c.id`
+        : `LEFT JOIN (SELECT configId, COUNT(*) as cnt FROM replay_results GROUP BY configId) dc ON c.id = dc.configId`;
+
       const sql = `
-        WITH dc AS (SELECT configId, COUNT(*) as cnt FROM replay_results GROUP BY configId)
         SELECT c.id, c.name, c.description,
                json_extract(c.config_json, '$.timeWindows.activeStart') as activeStart,
                COALESCE(
@@ -256,12 +563,13 @@ export function createReplayRoutes(): Router {
                    ELSE 'SPX'
                  END
                ) as symbol,
-               COALESCE(dc.cnt, 0) as dayCount
+               ${dayCountExpr} as dayCount
         FROM replay_configs c
-        LEFT JOIN dc ON c.id = dc.configId
-        ${showAll ? '' : `WHERE COALESCE(dc.cnt, 0) >= 200
+        ${dayCountJoin}
+        WHERE c.id NOT LIKE 'diag-%'
+        ${showAll ? '' : `AND (${dayCountExpr} >= 200
               OR c.id LIKE '%-default'
-              OR c.id LIKE '%-default-v%'`}
+              OR c.id LIKE '%-default-v%')`}
         ORDER BY c.createdAt DESC
       `;
       const rows = db.prepare(sql).all();
@@ -345,8 +653,12 @@ export function createReplayRoutes(): Router {
                WHERE symbol = '${symbol}' AND timeframe = '${timeframe}' AND ts >= ${dayStart} AND ts <= ${dayEnd}
                ORDER BY ts ASC`;
       }
-      const rows = duckQuery(sql);
+      let rows = duckQuery(sql);
       if (rows.length > 0) {
+        if (warmupBars > 0 && !rows.some((r: any) => r.ts < dayStart)) {
+          const warmupRows = pullPriorDayWarmup(symbol, timeframe, date, dayStart, warmupBars);
+          if (warmupRows.length) rows = [...warmupRows, ...rows];
+        }
         return res.json(rows.map((r: any) => ({
           ts: r.ts,
           o: r.open,
@@ -360,8 +672,11 @@ export function createReplayRoutes(): Router {
       // Fall through to SQLite if parquet returned empty
     }
 
-    // ── Fallback to SQLite (bar data DB) ──
+    // ── Fallback to SQLite (RETIRED) ──
+    // parquet is the sole bar store; if it had no data and the legacy table
+    // is gone, this date simply has no bars.
     const dataDb = getDataDb();
+    if (!barTableExists(dataDb)) { dataDb.close(); return res.json([]); }
     try {
       let rows: any[];
 
@@ -388,6 +703,13 @@ export function createReplayRoutes(): Router {
         `).all(symbol, timeframe, dayStart, dayEnd) as any[];
       }
 
+      // replay_bars only stores in-day option bars; the 1DTE tail collected
+      // the previous afternoon lives in data/live/{prevDay}.db.
+      if (warmupBars > 0 && !rows.some(r => r.ts < dayStart)) {
+        const warmupRows = pullPriorDayWarmup(symbol, timeframe, date, dayStart, warmupBars);
+        if (warmupRows.length) rows = [...warmupRows, ...rows];
+      }
+
       res.json(rows.map(r => ({
         ts: r.ts,
         o: r.open,
@@ -409,7 +731,12 @@ export function createReplayRoutes(): Router {
     if (!date) {
       return res.status(400).json({ error: 'date required' });
     }
-    const contractPrefix = instrument === 'NDX' ? 'NDXP' : 'SPXW';
+    // OCC root prefix per instrument. SPX uses SPXW (weeklys); other indices/equities
+    // use the underlying ticker as the prefix.
+    const PREFIX_MAP: Record<string, string> = {
+      SPX: 'SPXW', NDX: 'NDXP', QQQ: 'QQQ', SPY: 'SPY', NVDA: 'NVDA', TSLA: 'TSLA',
+    };
+    const contractPrefix = PREFIX_MAP[instrument] || instrument;
     const dayStart = Math.floor(new Date(date + 'T00:00:00Z').getTime() / 1000);
     const dayEnd = dayStart + 86400 + 3600;
 
@@ -470,7 +797,39 @@ export function createReplayRoutes(): Router {
     }
   });
 
-  // ── PUT /replay/api/config/:id — update config in-place (no versioning) ──
+  // ── POST /replay/api/config — create new config ──────────────────────────
+  router.post('/api/config', (req, res) => {
+    const body = req.body as Partial<Config>;
+    if (!body?.name) return res.status(400).json({ error: 'name required' });
+
+    const db = getWriteDb();
+    try {
+      // Build from DEFAULT_CONFIG, apply overrides, generate slug ID
+      const merged = mergeConfig(DEFAULT_CONFIG, body);
+      const slug   = (body.name as string)
+        .toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60);
+      // Find unique ID
+      let id = slug, suffix = 2;
+      while (db.prepare('SELECT 1 FROM replay_configs WHERE id = ?').get(id)) {
+        id = `${slug}-v${suffix++}`;
+      }
+      merged.id = id;
+      merged.name = body.name as string;
+      merged.createdAt = Date.now();
+      merged.updatedAt = Date.now();
+
+      db.prepare(`
+        INSERT INTO replay_configs (id, name, description, config_json, createdAt, updatedAt)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `).run(id, merged.name, merged.description || '', JSON.stringify(merged), merged.createdAt, merged.updatedAt);
+
+      res.json({ ok: true, id, name: merged.name });
+    } finally {
+      db.close();
+    }
+  });
+
+  // ── PUT /replay/api/config/:id — upsert config (create or update in-place) ─
   router.put('/api/config/:id', (req, res) => {
     const id = req.params.id;
     const config = req.body as Partial<Config>;
@@ -480,19 +839,41 @@ export function createReplayRoutes(): Router {
     try {
       const existing = db.prepare('SELECT config_json FROM replay_configs WHERE id = ?')
         .get(id) as { config_json: string } | undefined;
-      if (!existing) return res.status(404).json({ error: `Config '${id}' not found` });
 
-      // Merge with existing config to preserve fields not sent by client
-      const existingConfig = JSON.parse(existing.config_json) as Config;
-      const merged = mergeConfig(existingConfig, config);
-      merged.id = id;
-      merged.name = config.name || existingConfig.name;
+      let merged: Config;
+      if (existing) {
+        const existingConfig = JSON.parse(existing.config_json) as Config;
+        merged = mergeConfig(existingConfig, config);
+      } else {
+        merged = mergeConfig(DEFAULT_CONFIG, config);
+        merged.createdAt = Date.now();
+      }
+      merged.id   = id;
+      merged.name = (config.name as string | undefined) || merged.name || id;
+      merged.updatedAt = Date.now();
 
       db.prepare(`
-        UPDATE replay_configs SET config_json = ?, name = ?, updatedAt = ? WHERE id = ?
-      `).run(JSON.stringify(merged), merged.name, Date.now(), id);
+        INSERT INTO replay_configs (id, name, description, config_json, createdAt, updatedAt)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          name=excluded.name, config_json=excluded.config_json, updatedAt=excluded.updatedAt
+      `).run(id, merged.name, merged.description || '', JSON.stringify(merged), merged.createdAt, merged.updatedAt);
 
       res.json({ ok: true, id, name: merged.name });
+    } finally {
+      db.close();
+    }
+  });
+
+  // ── DELETE /replay/api/config/:id — remove a config ──────────────────────
+  router.delete('/api/config/:id', (req, res) => {
+    const id = req.params.id;
+    const db = getWriteDb();
+    try {
+      const row = db.prepare('SELECT 1 FROM replay_configs WHERE id = ?').get(id);
+      if (!row) return res.status(404).json({ error: `Config '${id}' not found` });
+      db.prepare('DELETE FROM replay_configs WHERE id = ?').run(id);
+      res.json({ ok: true, id });
     } finally {
       db.close();
     }
@@ -816,12 +1197,25 @@ export function createReplayRoutes(): Router {
     } finally {
       db.close();
     }
-    // Synthesize: DEFAULT_CONFIG + execution block for the requested instrument
-    const execByInstrument: Record<string, any> = {
-      SPX: { symbol: 'SPX', optionPrefix: 'SPXW', strikeDivisor: 1, strikeInterval: 5 },
-      NDX: { symbol: 'NDX', optionPrefix: 'NDXP', strikeDivisor: 1, strikeInterval: 10 },
-    };
-    const exec = execByInstrument[instrument] || execByInstrument.SPX;
+    // Synthesize: DEFAULT_CONFIG + execution block sourced from the saved
+    // instrument profile so QQQ/SPY/NVDA/TSLA pick up the right prefix +
+    // strike interval, not just SPX/NDX.
+    const profileDb = getDb();
+    let exec: any = { symbol: 'SPX', optionPrefix: 'SPXW', strikeDivisor: 1, strikeInterval: 5 };
+    try {
+      const all = listProfiles(profileDb);
+      const match = all.find(p => p.underlyingSymbol === instrument);
+      if (match) {
+        exec = {
+          symbol: match.underlyingSymbol,
+          optionPrefix: match.optionPrefix,
+          strikeDivisor: match.strikeDivisor,
+          strikeInterval: match.strikeInterval,
+        };
+      }
+    } finally {
+      profileDb.close();
+    }
     res.json({ ...DEFAULT_CONFIG, execution: { ...(DEFAULT_CONFIG as any).execution, ...exec } });
   });
 
@@ -950,15 +1344,32 @@ export function createReplayRoutes(): Router {
   // Spawns a detached child process so replays survive viewer restarts.
   // Job state is persisted in SQLite (replay_jobs table).
   router.post('/api/run-batch', (req, res) => {
-    const { dates, config, configId, configName } = req.body as {
+    const { dates: rawDates, config, configName } = req.body as {
       dates?: string[];
       config?: Partial<Config>;
       configId?: string;
+      configIds?: string[];
       configName?: string;
     };
+    // Accept both configId (singular) and configIds[0] (array form from newer clients)
+    const configId: string | undefined = req.body.configId || (Array.isArray(req.body.configIds) ? req.body.configIds[0] : undefined);
 
+    // Auto-load all available dates when not provided (parquet + SQLite replay_bars)
+    let dates = rawDates;
     if (!dates || !dates.length) {
-      return res.status(400).json({ error: 'dates[] required' });
+      const allDates = new Set<string>(listParquetDates(symbolToProfileId('SPX')));
+      try {
+        const rdb = new Database(DB_PATH, { readonly: true });
+        const rows = rdb.prepare(
+          `SELECT DISTINCT date(ts,'unixepoch','-5 hours') as d FROM ${REPLAY_DATA_SOURCE} WHERE symbol='SPX' AND timeframe='1m' ORDER BY d`
+        ).all() as { d: string }[];
+        rdb.close();
+        for (const { d } of rows) allDates.add(d);
+      } catch {}
+      dates = [...allDates].sort();
+      if (!dates.length) {
+        return res.status(400).json({ error: 'dates[] required — no replay data found' });
+      }
     }
 
     const db = getWriteDb();
@@ -1100,7 +1511,7 @@ export function createReplayRoutes(): Router {
   // ── GET /replay/api/sweep — leaderboard aggregated from replay_results ───
   // Supports ?maxEntryPrice=N to recompute metrics using only trades with entry ≤ $N
   router.get('/api/sweep', (req, res) => {
-    const { sort, limit, dir, minDays, maxEntryPrice, maxConcurrent, maxTradesPerDay } = req.query as Record<string, string | undefined>;
+    const { sort, limit, dir, minDays, maxEntryPrice, maxConcurrent, maxTradesPerDay, sinceTs, orFilter, gapFilter } = req.query as Record<string, string | undefined>;
     const allowedSorts = ['edge', 'rMultiple', 'ev', 'winRate', 'totalPnl', 'worstDay', 'profitDays', 'trades', 'avgDailyPnl', 'bestDay', 'days', 'avgEntryPrice', 'avgPnlPerTrade', 'breakEvenWR'];
     const sortCol = allowedSorts.includes(sort || '') ? sort : 'edge';
     const sortDir = dir === 'ASC' ? 'ASC' : 'DESC';
@@ -1108,6 +1519,10 @@ export function createReplayRoutes(): Router {
     const entryPriceCap = maxEntryPrice ? parseFloat(maxEntryPrice) : 0;  // 0 = no filter
     const concurrentCap = maxConcurrent ? parseInt(maxConcurrent) : 0;    // 0 = no filter
     const dailyTradeCap = maxTradesPerDay ? parseInt(maxTradesPerDay) : 0; // 0 = no filter
+    const sinceTsVal = sinceTs ? parseInt(sinceTs) : 0;                   // 0 = no filter
+    // OR/gap server-side filters (match _diag metadata in config_json)
+    const orFilterVal  = orFilter  && orFilter  !== 'all' ? orFilter  : null;
+    const gapFilterVal = gapFilter && gapFilter !== 'all' ? gapFilter : null;
 
     const db = getDb();
     const needsTradeFilter = entryPriceCap > 0 || concurrentCap > 0 || dailyTradeCap > 0;
@@ -1115,33 +1530,93 @@ export function createReplayRoutes(): Router {
 
     try {
       const enriched: any[] = [];
+      let enrichedOrExtra: any[] = [];
+      let totalConfigCount: number | undefined;
 
       if (!needsTradeFilter) {
-        // ── FAST PATH: use SQL aggregation, skip trades_json parsing ───────
-        const configRows = db.prepare(`
-          SELECT
-            r.configId,
-            c.name,
-            c.config_json,
-            COUNT(*) as days,
-            SUM(r.trades) as totalTrades,
-            SUM(r.wins) as totalWins,
-            SUM(r.totalPnl) as totalPnl,
-            MIN(r.totalPnl) as worstDay,
-            MAX(r.totalPnl) as bestDay,
-            GROUP_CONCAT(r.totalPnl) as pnlList,
-            SUM(r.sumWinPct) as totalSumWinPct,
-            SUM(r.cntWins) as totalCntWins,
-            SUM(r.sumLossPct) as totalSumLossPct,
-            SUM(r.cntLosses) as totalCntLosses
-          FROM replay_results r
-          JOIN replay_configs c ON c.id = r.configId
-          GROUP BY r.configId
-          HAVING COUNT(*) >= ?
-        `).all(minDaysVal) as any[];
+        // ── FAST PATH: read from replay_summary (pre-aggregated) ─────────
+        // Falls back to live GROUP BY if summary table is empty/missing.
+        const summaryExists = db.prepare(
+          "SELECT name FROM sqlite_master WHERE type='table' AND name='replay_summary'"
+        ).get();
+        const summaryCount = summaryExists
+          ? (db.prepare('SELECT COUNT(*) as c FROM replay_summary').get() as any).c
+          : 0;
+
+        // Build OR/gap WHERE fragments (safe — values validated below)
+        const allowedOrVals  = ['all','highOR','lowOR','medOR'];
+        const allowedGapVals = ['all','flat','gapDn','gapUp'];
+        const safeOr  = orFilterVal  && allowedOrVals.includes(orFilterVal)  ? orFilterVal  : null;
+        const safeGap = gapFilterVal && allowedGapVals.includes(gapFilterVal) ? gapFilterVal : null;
+        const orWhere  = safeOr  ? `AND json_extract(c.config_json, '$._diag.orFilter')  = '${safeOr}'`  : '';
+        const gapWhere = safeGap ? `AND json_extract(c.config_json, '$._diag.gapFilter') = '${safeGap}'` : '';
+
+        // Total count for pagination (fast — single index scan)
+        totalConfigCount = summaryCount > 0
+          ? (db.prepare(`SELECT COUNT(*) as c FROM replay_summary s JOIN replay_configs c ON c.id = s.configId WHERE s.days >= ? ${orWhere} ${gapWhere}`).get(minDaysVal) as any).c
+          : 0;
+
+        let configRows: any[];
+        if (summaryCount > 0) {
+          // Use the pre-aggregated summary table with pre-computed sort metrics.
+          // Push ORDER BY + LIMIT into SQL so JS only processes maxRows items.
+          const sqlSortCol = {
+            ev: 's.ev', edge: 's.edge', rMultiple: 's.rMultiple',
+            winRate: 's.winRate', totalPnl: 's.totalPnl',
+            avgDailyPnl: 's.avgDailyPnl', avgPnlPerTrade: 's.avgPnlPerTrade',
+            worstDay: 's.worstDay', bestDay: 's.bestDay',
+            days: 's.days', trades: 's.totalTrades', profitDays: 's.profitDays',
+            breakEvenWR: 's.edge',  // proxy
+          }[sortCol as string] ?? 's.ev';
+          const sqlDir = sortDir === 'ASC' ? 'ASC' : 'DESC';
+          configRows = db.prepare(`
+            SELECT
+              s.configId,
+              c.name,
+              c.config_json,
+              s.days,
+              s.totalTrades,
+              s.totalWins,
+              s.totalPnl,
+              s.worstDay,
+              s.bestDay,
+              s.profitDays,
+              s.sumWinPct  as totalSumWinPct,
+              s.cntWins    as totalCntWins,
+              s.sumLossPct as totalSumLossPct,
+              s.cntLosses  as totalCntLosses,
+              s.ev, s.edge, s.rMultiple, s.winRate,
+              s.avgDailyPnl, s.avgPnlPerTrade
+            FROM replay_summary s
+            JOIN replay_configs c ON c.id = s.configId
+            WHERE s.days >= ? ${orWhere} ${gapWhere}
+            ORDER BY ${sqlSortCol} ${sqlDir}
+            LIMIT ?
+          `).all(minDaysVal, maxRows) as any[];
+        } else {
+          // Summary table not yet built — return empty rather than blocking for 3 minutes
+          configRows = [];
+        }
+
+        // Fetch OR-signal configs that may rank outside the top N — appended after the main trim.
+        let extraOrRows: any[] = [];
+        if (summaryCount > 0) {
+          const inSet = new Set(configRows.map((r: any) => r.configId));
+          const orQueryRows = db.prepare(`
+            SELECT s.configId, c.name, c.config_json, s.days, s.totalTrades, s.totalWins,
+                   s.totalPnl, s.worstDay, s.bestDay, s.profitDays,
+                   s.sumWinPct as totalSumWinPct, s.cntWins as totalCntWins,
+                   s.sumLossPct as totalSumLossPct, s.cntLosses as totalCntLosses,
+                   s.ev, s.edge, s.rMultiple, s.winRate, s.avgDailyPnl, s.avgPnlPerTrade
+            FROM replay_summary s
+            JOIN replay_configs c ON c.id = s.configId
+            WHERE s.days >= ?
+              AND json_extract(c.config_json, '$.orSignal.enabled') = 1
+          `).all(minDaysVal) as any[];
+          extraOrRows = orQueryRows.filter((r: any) => !inSet.has(r.configId));
+        }
 
         for (const row of configRows) {
-          const dailyPnls = row.pnlList.split(',').map(Number);
           const days = row.days;
           const totalTrades = row.totalTrades;
           const totalWins = row.totalWins;
@@ -1150,7 +1625,7 @@ export function createReplayRoutes(): Router {
           const avgDailyPnl = days > 0 ? totalPnl / days : 0;
           const worstDay = row.worstDay;
           const bestDay = row.bestDay;
-          const profitDays = dailyPnls.filter((p: number) => p > 0).length;
+          const profitDays = row.profitDays ?? 0;
 
           // ── Statistical edge metrics (R-multiple, EV, breakeven WR, edge) ──
           const avgWinPct = row.totalCntWins > 0 ? row.totalSumWinPct / row.totalCntWins : 0;
@@ -1189,6 +1664,7 @@ export function createReplayRoutes(): Router {
               maxContracts: cfg.sizing?.maxContracts ?? 99,
               sizingMode: cfg.sizing?.sizingMode ?? 'fixed_dollars',
               sizingValue: cfg.sizing?.sizingValue ?? cfg.sizing?.baseDollarsPerTrade ?? 250,
+              dollarsPerTrade: cfg.sizing?.sizingValue ?? cfg.sizing?.baseDollarsPerTrade ?? 250,
               startingAccountValue: cfg.sizing?.startingAccountValue ?? 10000,
               isBasket: !!(cfg.basket?.enabled && cfg.basket?.members?.length),
               isBasketMember: row.configId.includes(':'),
@@ -1197,11 +1673,25 @@ export function createReplayRoutes(): Router {
               reverseSignals: cfg.signals?.reverseSignals ? true : false,
               strikeOffset: (() => {
                 const d = cfg.signals?.targetOtmDistance;
-                if (d === undefined || d === null) return 'OTM';
-                if (d === 0) return 'ATM';
-                if (d > 0) return `OTM${d}`;
-                return `ITM${Math.abs(d)}`;
+                if (d !== undefined && d !== null) return d === 0 ? 'ATM' : d > 0 ? `OTM${d}` : `ITM${Math.abs(d)}`;
+                // diag configs store offset in _diag
+                if (cfg._diag?.offset !== undefined) {
+                  const o = cfg._diag.offset;
+                  return o === 0 ? 'ATM' : o > 0 ? `OTM${o * 5}` : `ITM${Math.abs(o) * 5}`;
+                }
+                return 'OTM';
               })(),
+              // OR signal metadata
+              orSignalEnabled: cfg.orSignal?.enabled ?? false,
+              orMinutes: cfg.orSignal?.orMinutes ?? null,
+              // diag sweep metadata
+              ...(cfg._diag ? {
+                session:   cfg._diag.session   ?? null,
+                orFilter:  cfg._diag.orFilter  ?? null,
+                gapFilter: cfg._diag.gapFilter ?? null,
+                tfMin:     cfg._diag.tfMin     ?? null,
+                side: cfg.signals?.allowedSides === 'calls' ? 'call' : cfg.signals?.allowedSides === 'puts' ? 'put' : 'both',
+              } : {}),
             };
           } catch {}
 
@@ -1219,8 +1709,42 @@ export function createReplayRoutes(): Router {
             memberCount: params.memberCount ?? 0,
           });
         }
+
+        // Process extraOrRows (OR-signal configs outside top-N) — appended after the trim.
+        for (const row of extraOrRows) {
+          const days = row.days; const totalTrades = row.totalTrades; const totalWins = row.totalWins;
+          const totalPnl = row.totalPnl; const winRate = totalTrades > 0 ? totalWins / totalTrades : 0;
+          const avgDailyPnl = days > 0 ? totalPnl / days : 0; const avgPnlPerTrade = totalTrades > 0 ? totalPnl / totalTrades : 0;
+          const avgWinPct = row.totalCntWins > 0 ? row.totalSumWinPct / row.totalCntWins : 0;
+          const avgLossPct = row.totalCntLosses > 0 ? row.totalSumLossPct / row.totalCntLosses : 0;
+          const rMultiple = avgLossPct !== 0 ? avgWinPct / Math.abs(avgLossPct) : 0;
+          const breakEvenWR = (avgWinPct + Math.abs(avgLossPct)) > 0 ? Math.abs(avgLossPct) / (avgWinPct + Math.abs(avgLossPct)) : 0.5;
+          const ev = (winRate * avgWinPct) + ((1 - winRate) * avgLossPct);
+          const edge = winRate - breakEvenWR;
+          let params: any = {};
+          try {
+            const cfg = JSON.parse(row.config_json);
+            params = {
+              hmaFast: cfg.signals?.hmaCrossFast ?? 5, hmaSlow: cfg.signals?.hmaCrossSlow ?? 19,
+              orSignalEnabled: cfg.orSignal?.enabled ?? false, orMinutes: cfg.orSignal?.orMinutes ?? null,
+              stopLoss: cfg.position?.stopLossPercent ?? 80, tpMult: cfg.position?.takeProfitMultiplier ?? 5,
+              symbol: cfg.execution?.symbol ?? 'SPX', isBasket: false, isBasketMember: false, memberCount: 0,
+            };
+          } catch {}
+          enrichedOrExtra.push({
+            configId: row.configId, name: row.name, params, days, trades: totalTrades, wins: totalWins,
+            winRate, totalPnl, avgDailyPnl, worstDay: row.worstDay, bestDay: row.bestDay,
+            profitDays: row.profitDays ?? 0, avgEntryPrice: 0, avgPnlPerTrade,
+            avgWinPct, avgLossPct, rMultiple, ev, breakEvenWR, edge,
+            isBasket: false, isBasketMember: false, memberCount: 0,
+          });
+        }
+
       } else {
         // ── SLOW PATH: parse trades_json for entry price / concurrent / daily cap filters ──
+        const sinceCond2 = sinceTsVal > 0
+          ? `AND r.configId IN (SELECT configId FROM replay_runs WHERE startedAt >= ${sinceTsVal})`
+          : '';
         const configRows = db.prepare(`
           SELECT
             r.configId,
@@ -1230,6 +1754,7 @@ export function createReplayRoutes(): Router {
             r.trades_json
           FROM replay_results r
           JOIN replay_configs c ON c.id = r.configId
+          WHERE 1=1 ${sinceCond2}
           ORDER BY r.configId, r.date
         `).all() as { configId: string; name: string; config_json: string; date: string; trades_json: string }[];
 
@@ -1332,6 +1857,8 @@ export function createReplayRoutes(): Router {
               strikeRange: cfg.strikeSelector?.strikeSearchRange ?? 80,
               contractPriceMax: cfg.strikeSelector?.contractPriceMax ?? 8,
               activeStart: cfg.timeWindows?.activeStart ?? '09:30',
+              maxContracts: cfg.sizing?.maxContracts ?? 99,
+              dollarsPerTrade: cfg.sizing?.sizingValue ?? cfg.sizing?.baseDollarsPerTrade ?? 250,
               isBasket: !!(cfg.basket?.enabled && cfg.basket?.members?.length),
               isBasketMember: configId.includes(':'),
               memberCount: cfg.basket?.members?.length ?? 0,
@@ -1339,11 +1866,20 @@ export function createReplayRoutes(): Router {
               reverseSignals: cfg.signals?.reverseSignals ? true : false,
               strikeOffset: (() => {
                 const d = cfg.signals?.targetOtmDistance;
-                if (d === undefined || d === null) return 'OTM';
-                if (d === 0) return 'ATM';
-                if (d > 0) return `OTM${d}`;
-                return `ITM${Math.abs(d)}`;
+                if (d !== undefined && d !== null) return d === 0 ? 'ATM' : d > 0 ? `OTM${d}` : `ITM${Math.abs(d)}`;
+                if (cfg._diag?.offset !== undefined) {
+                  const o = cfg._diag.offset;
+                  return o === 0 ? 'ATM' : o > 0 ? `OTM${o * 5}` : `ITM${Math.abs(o) * 5}`;
+                }
+                return 'OTM';
               })(),
+              ...(cfg._diag ? {
+                session:   cfg._diag.session   ?? null,
+                orFilter:  cfg._diag.orFilter  ?? null,
+                gapFilter: cfg._diag.gapFilter ?? null,
+                tfMin:     cfg._diag.tfMin     ?? null,
+                side: cfg.signals?.allowedSides === 'calls' ? 'call' : cfg.signals?.allowedSides === 'puts' ? 'put' : 'both',
+              } : {}),
             };
         } catch {}
 
@@ -1363,15 +1899,19 @@ export function createReplayRoutes(): Router {
         }
       } // end needsTradeFilter else
 
-      // Sort
-      const validSort = allowedSorts.includes(sortCol!) ? sortCol! : 'edge';
-      enriched.sort((a: any, b: any) => {
-        const av = a[validSort] ?? 0, bv = b[validSort] ?? 0;
-        return sortDir === 'DESC' ? bv - av : av - bv;
-      });
+      // For the fast path (summary table), sorting+limiting happened in SQL already.
+      // For the slow path (trade filter), sort in JS.
+      if (needsTradeFilter) {
+        const validSort = allowedSorts.includes(sortCol!) ? sortCol! : 'edge';
+        enriched.sort((a: any, b: any) => {
+          const av = a[validSort] ?? 0, bv = b[validSort] ?? 0;
+          return sortDir === 'DESC' ? bv - av : av - bv;
+        });
+      }
 
-      const trimmed = enriched.slice(0, maxRows);
-      res.json({ rows: trimmed, total: enriched.length });
+      const trimmed = [...enriched.slice(0, maxRows), ...enrichedOrExtra];
+      const total = needsTradeFilter ? enriched.length : (totalConfigCount ?? enriched.length);
+      res.json({ rows: trimmed, total });
     } finally {
       db.close();
     }
@@ -1421,6 +1961,10 @@ export function createReplayRoutes(): Router {
             sizingMode: cfg.sizing?.sizingMode ?? 'fixed_dollars',
             sizingValue: cfg.sizing?.sizingValue ?? cfg.sizing?.baseDollarsPerTrade ?? 250,
             startingAccountValue: cfg.sizing?.startingAccountValue ?? 10000,
+            orSignalEnabled: cfg.orSignal?.enabled ?? false,
+            orMinutes: cfg.orSignal?.orMinutes ?? 30,
+            orBreakoutPct: cfg.orSignal?.breakoutPct ?? 0.001,
+            orDirection: cfg.orSignal?.direction ?? 'both',
           };
         } catch {}
       }
@@ -1577,6 +2121,24 @@ export function createReplayRoutes(): Router {
       });
     } finally {
       db.close();
+    }
+  });
+
+  // ── POST /replay/api/rebuild-summary — aggregate replay_results → replay_summary ──
+  // ?all=1 → full rebuild; default → incremental (only configs whose day-count changed).
+  router.post('/api/rebuild-summary', (req, res) => {
+    if (summaryRebuildInProgress) {
+      return res.json({ ok: false, message: 'rebuild already in progress' });
+    }
+    summaryRebuildInProgress = true;
+    try {
+      const forceAll = (req.query as any).all === '1';
+      const updated = runSummaryRebuild(forceAll);
+      res.json({ ok: true, updated });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    } finally {
+      summaryRebuildInProgress = false;
     }
   });
 
@@ -2305,6 +2867,15 @@ router.get('/api/sweep/chunks', (req, res) => {
   // Spawns a detached worker to fetch underlying + options data into replay_bars.
   // body: { date, profileId?: 'spx-0dte'|'ndx-0dte' }
   router.post('/api/backfill', (req, res) => {
+    // RETIRED: SQLite/replay_bars backfill is gone. SPXer is research-only;
+    // bars are backfilled directly to parquet via the EOD orchestrator
+    // (scripts/backfill/backfill-replay-options.ts → data/parquet/bars/).
+    return res.status(410).json({
+      error: 'Legacy SQLite backfill retired. Use the parquet EOD backfill ' +
+             '(scripts/backfill/backfill-replay-options.ts --profile=<id>).',
+    });
+
+    // eslint-disable-next-line no-unreachable
     const { date, profileId } = req.body as { date?: string; profileId?: string };
 
     if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
@@ -2388,6 +2959,18 @@ router.get('/api/sweep/chunks', (req, res) => {
       serveWithBasePath(htmlPath, req, res);
     } else {
       const altPath = path.resolve(process.cwd(), 'src/server/analytics-viewer.html');
+      serveWithBasePath(altPath, req, res);
+    }
+  });
+
+  // ── Serve the config manager HTML ────────────────────────────────────────
+  router.get('/configs', (req, res) => {
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    const htmlPath = path.resolve(__dirname, 'config-manager.html');
+    if (fs.existsSync(htmlPath)) {
+      serveWithBasePath(htmlPath, req, res);
+    } else {
+      const altPath = path.resolve(process.cwd(), 'src/server/config-manager.html');
       serveWithBasePath(altPath, req, res);
     }
   });
@@ -2560,6 +3143,13 @@ router.get('/api/sweep/chunks', (req, res) => {
 
   // ── POST /api/backfill/orchestrate — spawn orchestrator worker ─────────────
   router.post('/api/backfill/orchestrate', (req, res) => {
+    // RETIRED: orchestrator/mtf/replay_bars pipeline removed (parquet-only).
+    return res.status(410).json({
+      error: 'Legacy backfill orchestrator retired. SPXer is research-only; ' +
+             'use scripts/backfill/backfill-replay-options.ts (writes parquet directly).',
+    });
+
+    // eslint-disable-next-line no-unreachable
     const { profileId, start, end, onlyMtf } = req.body as {
       profileId?: string; start?: string; end?: string; onlyMtf?: boolean;
     };
@@ -2848,7 +3438,7 @@ router.get('/api/sweep/chunks', (req, res) => {
   router.get('/journal', (_req, res) => {
     const htmlPath = path.join(__dirname, 'journal-viewer.html');
     if (fs.existsSync(htmlPath)) {
-      return res.sendFile(htmlPath);
+      return serveWithBasePath(htmlPath, _req, res);
     }
     res.status(404).send('Journal viewer not found');
   });
@@ -2947,12 +3537,27 @@ router.get('/api/sweep/chunks', (req, res) => {
     } catch { res.json(null); }
   });
 
-  // GET /account — serve account dashboard HTML
-  router.get('/account', (_req, res) => {
-    const htmlPath = path.join(__dirname, 'account-viewer.html');
-    if (fs.existsSync(htmlPath)) return res.sendFile(htmlPath);
-    res.status(404).send('Account viewer not found');
-  });
+  // ── Hourly summary auto-rebuild ─────────────────────────────────────────────
+  // Keeps the leaderboard current as sweeps write new results to replay_results.
+  // Incremental: only updates configs whose day-count changed — skips over a
+  // full rebuild in ~seconds rather than minutes.
+  const AUTO_REBUILD_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
+  const rebuildTimer = setInterval(() => {
+    if (summaryRebuildInProgress) return;
+    summaryRebuildInProgress = true;
+    const t0 = Date.now();
+    try {
+      const updated = runSummaryRebuild(false);
+      if (updated > 0) {
+        console.log(`[summary] auto-rebuild: ${updated} configs updated (${Date.now() - t0}ms)`);
+      }
+    } catch (e: any) {
+      console.error('[summary] auto-rebuild failed:', e.message);
+    } finally {
+      summaryRebuildInProgress = false;
+    }
+  }, AUTO_REBUILD_INTERVAL_MS);
+  rebuildTimer.unref(); // don't prevent clean shutdown
 
   return router;
 }

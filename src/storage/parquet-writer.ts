@@ -193,6 +193,110 @@ export async function flushToParquet(opts: FlushOptions): Promise<FlushResult> {
 }
 
 /**
+ * A single bar row, shaped to EXPORT_COLUMNS. Base OHLCV+meta required;
+ * denormalized indicator columns optional (filled '' / NULL when absent).
+ */
+export interface BarRow {
+  symbol: string;
+  timeframe: string;
+  ts: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+  synthetic?: number;
+  gap_type?: string | null;
+  indicators?: string;
+  source?: string;
+  spread?: number | string | null;
+  [col: string]: any;
+}
+
+/**
+ * Write one (profile,date) of IN-MEMORY BarRows DIRECTLY to parquet — no
+ * SQLite. Same atomic CSV → DuckDB(zstd) → verify → rename pipeline as
+ * flushToParquet(), only the source is `rows` instead of replay_bars. This
+ * is the direct-to-parquet primitive the backfill chain (eod-backfill.ts /
+ * backfill-replay-options.ts) depends on. Additive — flushToParquet() and
+ * all SQLite-path callers are unaffected.
+ */
+export async function writeDayParquet(opts: {
+  profileId: string;
+  date: string;
+  rows: BarRow[];
+  outDir?: string;
+  skipVerify?: boolean;
+}): Promise<FlushResult> {
+  const outRoot = opts.outDir ?? DEFAULT_PARQUET_ROOT;
+  const profileDir = path.join(outRoot, opts.profileId);
+  const finalPath = path.join(profileDir, `${opts.date}.parquet`);
+  const tmpPath = `${finalPath}.tmp`;
+  const csvPath = `${finalPath}.csv`;
+  fs.mkdirSync(profileDir, { recursive: true });
+
+  const sourceRowCount = opts.rows.length;
+  if (sourceRowCount === 0) {
+    throw new Error(`writeDayParquet: no rows for ${opts.profileId}/${opts.date}`);
+  }
+
+  // Phase 1: rows → CSV (same escaping/column order as flushToParquet)
+  const header = EXPORT_COLUMNS.join(',');
+  const csvLines = [header];
+  for (const row of opts.rows) {
+    const vals = EXPORT_COLUMNS.map(col => {
+      const v = (row as any)[col];
+      if (v === null || v === undefined) return '';
+      if (typeof v === 'string') return `"${v.replace(/"/g, '""')}"`;
+      return String(v);
+    });
+    csvLines.push(vals.join(','));
+  }
+  fs.writeFileSync(csvPath, csvLines.join('\n'));
+
+  // Phase 2: CSV → parquet via DuckDB (identical to flushToParquet)
+  const duck = new duckdb.Database(':memory:');
+  try {
+    const typeDefs = EXPORT_COLUMNS.map(col => {
+      if (col === 'symbol' || col === 'timeframe' || col === 'gap_type' ||
+          col === 'indicators' || col === 'source') return `'${col}': 'VARCHAR'`;
+      if (col === 'ts' || col === 'volume' || col === 'synthetic') return `'${col}': 'INTEGER'`;
+      return `'${col}': 'DOUBLE'`;
+    }).join(', ');
+
+    await duckRun(duck, `
+      COPY (
+        SELECT * FROM read_csv('${csvPath}',
+          header=true,
+          columns={${typeDefs}},
+          ignore_errors=true
+        )
+      ) TO '${tmpPath}' (FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL 3)
+    `);
+
+    if (!opts.skipVerify) {
+      const [{ cnt }] = await duckQuery(duck,
+        `SELECT COUNT(*) as cnt FROM read_parquet('${tmpPath}')`);
+      const parquetRowCount = Number(cnt);
+      if (parquetRowCount !== sourceRowCount) {
+        try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
+        throw new Error(
+          `writeDayParquet row mismatch ${opts.profileId}/${opts.date}: ` +
+          `rows=${sourceRowCount}, parquet=${parquetRowCount}`
+        );
+      }
+    }
+
+    fs.renameSync(tmpPath, finalPath);
+    const stat = fs.statSync(finalPath);
+    return { filePath: finalPath, rowCount: sourceRowCount, sourceRowCount, fileSize: stat.size };
+  } finally {
+    try { fs.unlinkSync(csvPath); } catch { /* ignore */ }
+    await duckClose(duck);
+  }
+}
+
+/**
  * Build the symbol filter SQL fragment for a profile.
  */
 export function profileSymbolFilter(profileId: string, underlyingSymbol: string): string {
