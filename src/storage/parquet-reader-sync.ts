@@ -97,12 +97,27 @@ export function loadBarCacheFromParquetSync(opts: {
 
   const skipInd = opts.skipContractIndicators ?? false;
 
-  // Load underlying + contracts in one query for efficiency
-  // DuckDB reads the parquet file once and applies both filters
-  const contractIndCols = skipInd ? '' : `, ${INDICATOR_SELECT}`;
+  // Schema-tolerant SELECT. Parquet schemas are heterogeneous across the
+  // history: OLDER files lack the Keltner columns (kcUpper/kcMiddle/kcLower/
+  // kcWidth/kcSlope) that NEWER files have. A static `SELECT …, kcUpper, …`
+  // makes DuckDB throw "column not found" on every old file, duckQuery's
+  // catch swallows it → those days silently load 0 bars (this was dropping
+  // 232/277 SPX days). Fix: read the file's actual columns once and emit
+  // `NULL AS <col>` for any absent indicator so the SELECT always succeeds
+  // and rowToIndicators() still gets a complete shape.
+  // (CAST ts→DOUBLE is also kept: older files store ts as BIGINT and the
+  // driver would otherwise hand back BigInt; DOUBLE is exact for second ts.)
+  const present = new Set<string>(
+    duckQuery(`SELECT name FROM (DESCRIBE SELECT * FROM read_parquet('${fp}') LIMIT 1)`)
+      .map((r: any) => r.column_name ?? r.name)
+  );
+  const indSel = INDICATOR_COLUMNS
+    .map(c => (present.has(c) ? c : `NULL AS ${c}`))
+    .join(', ');
+  void skipInd; // indicators always selected (schema-safe, cheap); contracts filtered in JS
   const sql = `
-    SELECT symbol, ts, open, high, low, close, volume, spread,
-           ${INDICATOR_SELECT},
+    SELECT symbol, CAST(ts AS DOUBLE) AS ts, open, high, low, close, volume, spread,
+           ${indSel},
            CASE WHEN symbol != '${opts.underlyingSymbol}' THEN CAST(substr(symbol, -8) AS INTEGER) / 1000.0 ELSE NULL END as strike
     FROM read_parquet('${fp}')
     WHERE timeframe = '${opts.timeframe}'
@@ -123,12 +138,12 @@ export function loadBarCacheFromParquetSync(opts: {
   for (const r of rows) {
     const sym = r.symbol as string;
     const bar: Bar = {
-      ts: r.ts,
-      open: r.open,
-      high: r.high,
-      low: r.low,
-      close: r.close,
-      volume: r.volume,
+      ts: Number(r.ts),            // coerce any BigInt → Number (older BIGINT-ts parquet)
+      open: Number(r.open),
+      high: Number(r.high),
+      low: Number(r.low),
+      close: Number(r.close),
+      volume: Number(r.volume),
       indicators: (sym === opts.underlyingSymbol || !skipInd)
         ? rowToIndicators(r)
         : EMPTY_INDICATORS,
