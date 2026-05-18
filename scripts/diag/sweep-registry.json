@@ -1,0 +1,49 @@
+{
+  "_comment": "Tradeable sweep roster. One entry per (symbol,dte) profile the Spreads dashboard exposes. 'protected:true' = sweep-manager refuses destructive ops without --force-spx. 'class' (index|etf) drives the liquid width caps; geometry itself is strike-COUNT x strikeInterval so NDX($10) vs QQQ($1) scale correctly. Data vendor is Polygon ONLY (ThetaData removed 2026-05-17). Backfill is now registry-driven: resolveTarget (backfill-replay-options) + BASES (sweep-symbol) fall back to this file, and getUnderlyingDay fetches the underlying from Polygon when no 0DTE parquet exists — so 'sweep-manager onboard --symbol X --dte N --days K' works for a genuinely new ticker with zero code edits. underlyingPolygonTicker: indices need the I: prefix, ETFs/equities use the bare ticker. bandHalfWidthDollars: strike band = lastClose +/- this.",
+  "profiles": [
+    {
+      "symbol": "SPX",
+      "dte": 0,
+      "class": "index",
+      "strikeInterval": 5,
+      "optionPrefix": "SPXW",
+      "underlyingPolygonTicker": "I:SPX",
+      "bandHalfWidthDollars": 100,
+      "protected": true,
+      "note": "cash-settled index, 0DTE tradeable — DEFAULT dashboard dataset, never auto-wiped"
+    },
+    {
+      "symbol": "NDX",
+      "dte": 0,
+      "class": "index",
+      "strikeInterval": 10,
+      "optionPrefix": "NDXP",
+      "underlyingPolygonTicker": "I:NDX",
+      "bandHalfWidthDollars": 500,
+      "protected": false,
+      "note": "cash-settled index ~20k, $10 strikes, 0DTE tradeable"
+    },
+    {
+      "symbol": "SPY",
+      "dte": 1,
+      "class": "etf",
+      "strikeInterval": 1,
+      "optionPrefix": "SPY",
+      "underlyingPolygonTicker": "SPY",
+      "bandHalfWidthDollars": 10,
+      "protected": false,
+      "note": "physically-settled ETF, broker blocks 0DTE near expiry -> 1DTE; $1 strikes, tight liquid range"
+    },
+    {
+      "symbol": "QQQ",
+      "dte": 1,
+      "class": "etf",
+      "strikeInterval": 1,
+      "optionPrefix": "QQQ",
+      "underlyingPolygonTicker": "QQQ",
+      "bandHalfWidthDollars": 10,
+      "protected": false,
+      "note": "physically-settled ETF -> 1DTE; $1 strikes, tight liquid range"
+    }
+  ]
+}

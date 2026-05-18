@@ -137,11 +137,11 @@ export interface InstrumentProfile {
   options: OptionSymbolSpec;
 
   /**
-   * Data-provider routing is NOT on the profile. Vendor selection (ThetaData
-   * primary, Tradier WS cold-standby for options; Tradier REST for
-   * underlying + chain + orders; Polygon/ThetaData for historical backfill)
-   * lives in the per-ticker pipeline orchestration under src/pipeline/{id}/,
-   * not here. Profile stays structural — WHERE, not HOW.
+   * Data-provider routing is NOT on the profile. Vendor selection (Polygon
+   * for historical underlying + options backfill — the only backfill source
+   * since ThetaData was removed 2026-05-17) lives in the per-ticker pipeline
+   * orchestration / backfill-routing, not here. Profile stays structural —
+   * WHERE, not HOW.
    */
 
   /** When to poll / stream for this instrument, in ET. */

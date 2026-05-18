@@ -41,7 +41,7 @@ const SEEDS: Array<{ profile: InstrumentProfile; extras: SeedExtras }> = [
       tier: 2,
       vendorRouting: {
         underlying: { vendor: 'polygon', ticker: 'I:SPX' },
-        options: { vendor: 'thetadata' }, // SPX is ThetaData primary
+        options: { vendor: 'polygon' }, // Polygon-only (ThetaData removed 2026-05-17)
       },
     },
   },

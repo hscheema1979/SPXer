@@ -137,7 +137,7 @@ describe('profile-store', () => {
       tier: 2,
       vendorRouting: {
         underlying: { vendor: 'polygon', ticker: 'I:SPX' },
-        options: { vendor: 'thetadata' },
+        options: { vendor: 'polygon' },
       },
       source: 'seed',
     });

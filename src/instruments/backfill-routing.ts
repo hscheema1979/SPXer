@@ -17,12 +17,22 @@
 import type { AssetClass, StoredInstrumentProfile, VendorRouting } from './profile-store';
 
 export type UnderlyingVendor = 'polygon' | 'tradier';
-export type OptionVendor = 'polygon' | 'thetadata';
+// Options backfill is Polygon-only. ThetaData was removed 2026-05-17 — it was
+// SPX-only, the historical /v3/option/history endpoint carried no field the
+// credit/iron/long sweeps consume (no bid/ask; volume unused in P&L), Polygon
+// was already the dominant source post-fallback, and Polygon's aggregates have
+// no 50k-row truncation. Re-add a vendor here if a future ticker/strategy
+// genuinely needs a non-Polygon options feed.
+export type OptionVendor = 'polygon';
 
 /**
  * Resolve the backfill routing for a profile. Validates that the stored
  * JSON parses to a recognized vendor pair; throws with a clear message
  * otherwise so mis-configured profiles fail loud.
+ *
+ * Legacy `options.vendor === 'thetadata'` profiles (stored before the Theta
+ * removal) are transparently coerced to 'polygon' so no DB migration is
+ * needed — the resolved routing is mutated in place and returned.
  */
 export function resolveBackfillRouting(profile: StoredInstrumentProfile): VendorRouting {
   const r = profile.vendorRouting;
@@ -39,7 +49,11 @@ export function resolveBackfillRouting(profile: StoredInstrumentProfile): Vendor
   if (!r.underlying.ticker || r.underlying.ticker.length === 0) {
     throw new Error(`[backfill-routing] Profile '${profile.id}' missing underlying.ticker`);
   }
-  if (r.options.vendor !== 'polygon' && r.options.vendor !== 'thetadata') {
+  // Coerce retired ThetaData routing to Polygon (no DB migration required).
+  if ((r.options.vendor as string) === 'thetadata') {
+    r.options.vendor = 'polygon';
+  }
+  if (r.options.vendor !== 'polygon') {
     throw new Error(
       `[backfill-routing] Profile '${profile.id}' has unknown option vendor: ${r.options.vendor}`,
     );
@@ -50,9 +64,8 @@ export function resolveBackfillRouting(profile: StoredInstrumentProfile): Vendor
 /**
  * Pick default backfill routing for a newly discovered ticker.
  *
- *   - Indexes (SPX, NDX, RUT, VIX): Polygon's `I:${ticker}` for underlying.
- *     Options: ThetaData if and only if the ticker is SPX (our subscription
- *     covers SPX only); everything else falls back to Polygon.
+ *   - Indexes (SPX, NDX, RUT, VIX): Polygon's `I:${ticker}` for underlying;
+ *     options always Polygon.
  *   - Equities / ETFs (SPY, QQQ, AAPL, etc.): `${ticker}` for underlying
  *     on Polygon; options always Polygon.
  *
@@ -64,7 +77,7 @@ export function defaultRoutingFor(ticker: string, assetClass: AssetClass): Vendo
   if (assetClass === 'index') {
     return {
       underlying: { vendor: 'polygon', ticker: `I:${upper}` },
-      options: { vendor: upper === 'SPX' ? 'thetadata' : 'polygon' },
+      options: { vendor: 'polygon' },
     };
   }
   // equity or etf
@@ -75,6 +88,25 @@ export function defaultRoutingFor(ticker: string, assetClass: AssetClass): Vendo
 }
 
 /**
+ * Number of distinct option contracts (calls + puts) a fully-backfilled
+ * date should have for this profile, based on band width × strike interval.
+ *
+ *   strikesInBand = floor(2 × bandHalfWidth / strikeInterval) + 1
+ *   contracts     = 2 × strikesInBand    (calls + puts)
+ *
+ * Used by `findMissingDates({ options: { expectedContractsPerDate } })`
+ * to flag dates where the underlying is present but the option chain is
+ * thin — symptom of a half-failed backfill (Polygon 429 storm mid-day,
+ * strike list mismatch, etc.).
+ */
+export function expectedContractsForProfile(profile: StoredInstrumentProfile): number {
+  const strikesInBand = Math.floor(
+    (2 * profile.bandHalfWidthDollars) / profile.strikeInterval
+  ) + 1;
+  return 2 * strikesInBand;
+}
+
+/**
  * Does this vendor pair require an optional API subscription that may not
  * be configured? Used by the UI to warn before kicking off a long backfill.
  * Returns a list of missing capability names; empty means ready.
@@ -82,16 +114,12 @@ export function defaultRoutingFor(ticker: string, assetClass: AssetClass): Vendo
 export function checkVendorReadiness(routing: VendorRouting): string[] {
   const missing: string[] = [];
   const polygonKey = process.env.POLYGON_API_KEY;
-  const thetaBase = process.env.THETADATA_BASE_URL || 'http://127.0.0.1:25510';
 
   if (routing.underlying.vendor === 'polygon' && !polygonKey) {
     missing.push('POLYGON_API_KEY (underlying)');
   }
   if (routing.options.vendor === 'polygon' && !polygonKey) {
     missing.push('POLYGON_API_KEY (options)');
-  }
-  if (routing.options.vendor === 'thetadata' && !thetaBase) {
-    missing.push('THETADATA_BASE_URL');
   }
   return missing;
 }

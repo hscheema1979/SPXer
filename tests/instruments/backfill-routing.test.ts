@@ -45,12 +45,21 @@ describe('backfill-routing', () => {
       expect(resolveBackfillRouting(stub(routing))).toBe(routing);
     });
 
-    it('accepts tradier underlying + thetadata options', () => {
+    it('accepts tradier underlying + polygon options', () => {
       const routing: VendorRouting = {
         underlying: { vendor: 'tradier', ticker: 'SPX' },
-        options: { vendor: 'thetadata' },
+        options: { vendor: 'polygon' },
       };
       expect(resolveBackfillRouting(stub(routing))).toEqual(routing);
+    });
+
+    it('coerces legacy thetadata option vendor to polygon (no DB migration)', () => {
+      const routing = {
+        underlying: { vendor: 'polygon', ticker: 'I:SPX' },
+        options: { vendor: 'thetadata' },
+      };
+      const resolved = resolveBackfillRouting(stub(routing));
+      expect(resolved.options.vendor).toBe('polygon');
     });
 
     it('throws on null routing blob', () => {
@@ -104,10 +113,10 @@ describe('backfill-routing', () => {
   });
 
   describe('defaultRoutingFor', () => {
-    it('routes SPX index to Polygon underlying (I:SPX) + ThetaData options', () => {
+    it('routes SPX index to Polygon for both sides (ThetaData removed)', () => {
       expect(defaultRoutingFor('SPX', 'index')).toEqual({
         underlying: { vendor: 'polygon', ticker: 'I:SPX' },
-        options: { vendor: 'thetadata' },
+        options: { vendor: 'polygon' },
       });
     });
 
@@ -147,18 +156,14 @@ describe('backfill-routing', () => {
 
   describe('checkVendorReadiness', () => {
     const origPoly = process.env.POLYGON_API_KEY;
-    const origTheta = process.env.THETADATA_BASE_URL;
 
     beforeEach(() => {
       delete process.env.POLYGON_API_KEY;
-      delete process.env.THETADATA_BASE_URL;
     });
 
     afterEach(() => {
       if (origPoly === undefined) delete process.env.POLYGON_API_KEY;
       else process.env.POLYGON_API_KEY = origPoly;
-      if (origTheta === undefined) delete process.env.THETADATA_BASE_URL;
-      else process.env.THETADATA_BASE_URL = origTheta;
     });
 
     it('reports missing POLYGON_API_KEY for polygon-only routing', () => {
@@ -179,22 +184,23 @@ describe('backfill-routing', () => {
       expect(missing).toEqual([]);
     });
 
-    it('does not require polygon key when underlying is tradier and options are thetadata', () => {
-      // thetadata defaults to localhost base URL, so it's effectively always ready
+    it('does not require polygon key when underlying is tradier and options are polygon (with key set)', () => {
+      process.env.POLYGON_API_KEY = 'test-key';
       const missing = checkVendorReadiness({
         underlying: { vendor: 'tradier', ticker: 'SPX' },
-        options: { vendor: 'thetadata' },
+        options: { vendor: 'polygon' },
       });
       expect(missing).toEqual([]);
     });
 
-    it('requires polygon key for underlying even if options are thetadata', () => {
+    it('requires polygon key only for underlying when underlying is tradier', () => {
       const missing = checkVendorReadiness({
-        underlying: { vendor: 'polygon', ticker: 'I:SPX' },
-        options: { vendor: 'thetadata' },
+        underlying: { vendor: 'tradier', ticker: 'SPX' },
+        options: { vendor: 'polygon' },
       });
-      expect(missing).toContain('POLYGON_API_KEY (underlying)');
-      expect(missing).not.toContain('POLYGON_API_KEY (options)');
+      // tradier underlying needs no polygon key; polygon options still does
+      expect(missing).not.toContain('POLYGON_API_KEY (underlying)');
+      expect(missing).toContain('POLYGON_API_KEY (options)');
     });
   });
 });

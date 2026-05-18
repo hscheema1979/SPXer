@@ -21,7 +21,10 @@ export type Tier = 1 | 2;
 
 export interface VendorRouting {
   underlying: { vendor: 'polygon' | 'tradier'; ticker: string };
-  options: { vendor: 'polygon' | 'thetadata' };
+  // Options backfill is Polygon-only (ThetaData removed 2026-05-17). Legacy
+  // stored profiles with vendor:'thetadata' are coerced to 'polygon' by
+  // resolveBackfillRouting() — no DB migration required.
+  options: { vendor: 'polygon' };
 }
 
 /**
