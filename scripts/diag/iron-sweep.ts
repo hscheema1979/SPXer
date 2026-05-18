@@ -26,7 +26,7 @@ import * as dotenv from 'dotenv';
 dotenv.config({ quiet: true } as any);
 import { readBarCacheFile } from '../../src/replay/bar-cache-file';
 import { resolveSymbolTarget, listDatesFor, loadDay, outPath, instrumentClass } from './sweep-symbol';
-import { shardDates, dumpResults, loadShardsInto } from './sweep-shard';
+import { shardDates, dumpResults, loadShardsInto, mergeStateFile, knownDates } from './sweep-shard';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -363,11 +363,26 @@ const ALL_DATES = listDatesFor(TARGET);
 // No env = serial, identical. Each shard keeps every date's FULL bar history,
 // so this cannot introduce look-ahead and does not alter volume handling.
 const SWEEP_DATES = process.env.SWEEP_MERGE ? [] : shardDates(ALL_DATES);
+// Incremental hook (see credit-spread-sweep / sweep-shard): SWEEP_STATE=<file>
+// loads the prior accumulator, replays only NEW dates (idempotent by date),
+// finalize still writes FULL-history dashboard JSON, then state is persisted.
+const STATE_FILE = process.env.SWEEP_STATE;
+let RUN_DATES = SWEEP_DATES;
+if (STATE_FILE && !process.env.SWEEP_MERGE && !process.env.SWEEP_SHARD) {
+  const had = mergeStateFile(STATE_FILE, results);
+  if (had) {
+    const known = knownDates(results);
+    RUN_DATES = SWEEP_DATES.filter(d => !known.has(d));
+    console.error(`[incremental] state has ${known.size} dates; replaying ${RUN_DATES.length} NEW: ${RUN_DATES.join(',') || '(none)'}`);
+  } else {
+    console.error(`[incremental] no state file — bootstrap full ${SWEEP_DATES.length} dates`);
+  }
+}
 console.error(`[${TARGET.symbol}] Iron sweep — dates: ${ALL_DATES.length}${process.env.SWEEP_SHARD ? ` (shard ${process.env.SWEEP_SHARD} → ${SWEEP_DATES.length})` : ''}, signals: ${SIGNALS.length}, structures: ${STRUCTURES.length}, exits: ${EXITS.length}`);
 
-for(let di=0; di<SWEEP_DATES.length; di++){
-  const date = SWEEP_DATES[di];
-  if(di%20===0) console.error(`  ${di}/${SWEEP_DATES.length}  ${date}`);
+for(let di=0; di<RUN_DATES.length; di++){
+  const date = RUN_DATES[di];
+  if(di%20===0) console.error(`  ${di}/${RUN_DATES.length}  ${date}`);
   let c1:any, p1:any;
   try { c1 = loadDay(TARGET,date,'1m') as any; p1 = loadDay(TARGET,prevDate(date),'1m') as any; }
   catch { continue; }
@@ -616,4 +631,12 @@ for(const [k, v] of topRows){
     const avgC = hb.creditSum/hb.n, avgR = hb.riskSum/hb.n, avgP = hb.pnlSum/hb.n;
     console.log(`  ${h}  ${String(hb.n).padStart(4)}  $${avgC.toFixed(2).padStart(5)}   $${avgR.toFixed(0).padStart(5)}   $${avgP>=0?'+':''}${avgP.toFixed(1).padStart(6)}   ${(100*hb.wins/hb.n).toFixed(0)}`);
   }
+}
+
+// Incremental: persist the merged (prior + new dates) accumulator so the next
+// nightly run replays only the following day. (SWEEP_SHARD_OUT path already
+// process.exit(0)'d above; guard mirrors the load condition.)
+if (STATE_FILE && !process.env.SWEEP_MERGE && !process.env.SWEEP_SHARD) {
+  dumpResults(results, STATE_FILE);
+  console.error(`[incremental] state saved → ${STATE_FILE}`);
 }

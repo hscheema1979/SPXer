@@ -15,7 +15,7 @@ import * as dotenv from 'dotenv';
 dotenv.config({ quiet: true } as any);
 import { readBarCacheFile } from '../../src/replay/bar-cache-file';
 import { resolveSymbolTarget, listDatesFor, loadDay, outPath } from './sweep-symbol';
-import { shardDates, dumpResults, loadShardsInto } from './sweep-shard';
+import { shardDates, dumpResults, loadShardsInto, mergeStateFile, knownDates } from './sweep-shard';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -314,11 +314,30 @@ const ALL_DATES = listDatesFor(TARGET);
 // serial, identical behaviour. Each shard keeps every date's FULL bar
 // history, so this cannot introduce look-ahead.
 const SWEEP_DATES = process.env.SWEEP_MERGE ? [] : shardDates(ALL_DATES);
+// ── Incremental hook: SWEEP_STATE=<file> persists the per-variant
+// accumulator. On a nightly run we load it, then replay ONLY dates not
+// already in the accumulator's per-date `daily` maps (idempotent — a re-run
+// or --force re-backfill of an already-counted day is skipped). After the
+// normal finalize (which still writes the FULL-history dashboard JSON from
+// the merged accumulator) we persist the updated state. Additive/env-gated;
+// no SWEEP_STATE, or with SWEEP_SHARD/SWEEP_MERGE, = unchanged behaviour.
+const STATE_FILE = process.env.SWEEP_STATE;
+let RUN_DATES = SWEEP_DATES;
+if (STATE_FILE && !process.env.SWEEP_MERGE && !process.env.SWEEP_SHARD) {
+  const had = mergeStateFile(STATE_FILE, results);
+  if (had) {
+    const known = knownDates(results);
+    RUN_DATES = SWEEP_DATES.filter(d => !known.has(d));
+    console.error(`[incremental] state has ${known.size} dates; replaying ${RUN_DATES.length} NEW: ${RUN_DATES.join(',') || '(none)'}`);
+  } else {
+    console.error(`[incremental] no state file — bootstrap full ${SWEEP_DATES.length} dates`);
+  }
+}
 console.error(`[${TARGET.symbol}] Dates: ${ALL_DATES.length}${process.env.SWEEP_SHARD ? ` (shard ${process.env.SWEEP_SHARD} → ${SWEEP_DATES.length})` : ''}`);
 
-for(let di=0; di<SWEEP_DATES.length; di++){
-  const date = SWEEP_DATES[di];
-  if(di%20===0) console.error(`  ${di}/${SWEEP_DATES.length}  ${date}`);
+for(let di=0; di<RUN_DATES.length; di++){
+  const date = RUN_DATES[di];
+  if(di%20===0) console.error(`  ${di}/${RUN_DATES.length}  ${date}`);
   let c1:any, p1:any;
   try { c1 = loadDay(TARGET,date,'1m') as any; p1 = loadDay(TARGET,prevDate(date),'1m') as any; }
   catch { continue; }
@@ -522,4 +541,7 @@ if (process.env.SWEEP_SHARD_OUT) {
 } else {
   if (process.env.SWEEP_MERGE) loadShardsInto(process.env.SWEEP_MERGE, results);
   summary();
+  // Incremental: persist the merged (prior + new dates) accumulator so the
+  // next nightly run only replays the following day.
+  if (STATE_FILE) { dumpResults(results, STATE_FILE); console.error(`[incremental] state saved → ${STATE_FILE}`); }
 }

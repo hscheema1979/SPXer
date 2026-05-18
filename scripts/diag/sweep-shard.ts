@@ -99,3 +99,29 @@ export function loadShardsInto(dir: string, results: Map<string, any>): void {
     }
   }
 }
+
+/**
+ * INCREMENTAL: merge a single persisted accumulator state file into `results`
+ * (same additive reduce as the shard merge — parity-proven). Returns true if
+ * the state file existed (so the caller knows to replay only NEW dates),
+ * false on first/bootstrap run. dumpResults() writes this same file shape.
+ */
+export function mergeStateFile(file: string, results: Map<string, any>): boolean {
+  if (!fs.existsSync(file)) return false;
+  const obj = JSON.parse(fs.readFileSync(file, 'utf8'));
+  for (const k of Object.keys(obj)) {
+    const decoded = decode(obj[k]);
+    results.set(k, results.has(k) ? reduceInto(results.get(k), decoded) : decoded);
+  }
+  return true;
+}
+
+/** Union of all dates already present in the accumulator's per-date `daily`
+ *  maps — i.e. dates that must NOT be replayed again (idempotent by date). */
+export function knownDates(results: Map<string, any>): Set<string> {
+  const s = new Set<string>();
+  for (const v of results.values()) {
+    if (v && v.daily instanceof Map) for (const d of v.daily.keys()) s.add(d);
+  }
+  return s;
+}
