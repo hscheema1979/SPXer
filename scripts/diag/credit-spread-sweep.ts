@@ -292,19 +292,124 @@ function applyExit(traj:Array<{ts:number,V:number}>, endTs:number,
 
 // ── Aggregation ────────────────────────────────────────────────────────────
 interface AggKey { signal:string; spread:string; exit:string; }
+interface HourBucket { n:number; creditSum:number; riskSum:number; pnlSum:number; wins:number; }
 interface Stat {
   pnl:number; n:number; wins:number; daily:Map<string,number>; creditSum:number; widthSum:number;
   peakConcurrent:number; evictions:number;
   durationSumSec:number;
+  perHour: Map<number, HourBucket>;        // ET hour (9..15) → bucket
 }
 const results = new Map<string, Stat>();
 function recK(s:string,sp:string,ex:string){return `${s}|${sp}|${ex}`;}
-function rec(s:string,sp:string,ex:string, pnl:number, date:string, credit:number, width:number, durationSec:number = 0){
+
+// Fast ET hour from unix ts (no Date/toLocaleString in the hot loop). Mirror
+// of iron-sweep's helper: 09:30 ET = minute 570 of the day, so
+// etHour = floor((570 + (ts−sessOpen)/60) / 60).
+let _sessOpenForEtHour = 0;
+function setEtHourSessOpen(sessOpenTs: number){ _sessOpenForEtHour = sessOpenTs; }
+function etHour(ts: number): number {
+  const minSinceOpen = (ts - _sessOpenForEtHour) / 60;
+  return Math.floor((570 + minSinceOpen) / 60);
+}
+
+function rec(s:string,sp:string,ex:string, pnl:number, date:string, credit:number, width:number, durationSec:number = 0, entryTs:number = 0, maxRisk:number = 0){
   const k=recK(s,sp,ex);
-  let v=results.get(k); if(!v){v={pnl:0,n:0,wins:0,daily:new Map(),creditSum:0,widthSum:0,peakConcurrent:0,evictions:0,durationSumSec:0}; results.set(k,v);}
+  let v=results.get(k); if(!v){v={pnl:0,n:0,wins:0,daily:new Map(),creditSum:0,widthSum:0,peakConcurrent:0,evictions:0,durationSumSec:0,perHour:new Map()}; results.set(k,v);}
   v.pnl+=pnl; v.n++; if(pnl>0)v.wins++; v.daily.set(date,(v.daily.get(date)??0)+pnl);
   v.creditSum+=credit; v.widthSum+=width;
   v.durationSumSec += durationSec;
+  // Per-hour bucket (clamped to 9..15 — anything outside is noise/wrong-day).
+  // entryTs=0 is a back-compat default (no-op) for any caller that doesn't pass it.
+  if (entryTs > 0) {
+    const h = Math.max(9, Math.min(15, etHour(entryTs)));
+    let hb = v.perHour.get(h); if(!hb){hb={n:0,creditSum:0,riskSum:0,pnlSum:0,wins:0}; v.perHour.set(h,hb);}
+    hb.n++; hb.creditSum += credit; hb.riskSum += maxRisk; hb.pnlSum += pnl;
+    if (pnl > 0) hb.wins++;
+  }
+}
+
+// ── Per-trade emission (additive, env-gated) ───────────────────────────────
+// Enable by setting SWEEP_EMIT_TRADES_KEYS to a newline-separated list of
+// "signal|spread|exit" keys (passed via env). Trades for ONLY those variants
+// are emitted; everything else is a no-op (zero overhead). Output files:
+//   $SWEEP_EMIT_TRADES_DIR/{slug}/{date}.json
+// where slug = signal|spread|exit with spaces/pipes → underscores.
+// Each file holds one CreditSpreadDay record (header + trades[] + spxBars +
+// contractBars-for-legs). UI loads exactly one per inspection.
+interface TradeRecord {
+  entryTs:number; exitTs:number; durationSec:number;
+  dir:'bull'|'bear'; side:'put-credit'|'call-credit';
+  spxAtEntry:number; spxAtExit:number;
+  shortSymbol:string; shortStrike:number; shortEntryMark:number; shortExitMark:number;
+  longSymbol:string;  longStrike:number;  longEntryMark:number;  longExitMark:number;
+  netCredit:number; netExitDebit:number; width:number; maxRisk:number;
+  tpFrac:number; slMult:number;
+  pnlGross:number; pnlNet:number;
+  exitReason:string;
+}
+interface DayEmit {
+  date:string; signal:string; spread:string; exit:string;
+  spxOpen:number; spxClose:number; spxSettle:number|null;
+  trades: TradeRecord[];
+  spxBars: any[];                        // 1m OHLCV [ts,o,h,l,c,v]
+  contractBars: Record<string, any[]>;   // symbol → 1m bars (deduped: legs from all trades)
+}
+const EMIT_KEYS = (() => {
+  const raw = process.env.SWEEP_EMIT_TRADES_KEYS;
+  if (!raw) return null;
+  return new Set(raw.split(/[\n,]/).map(s=>s.trim()).filter(Boolean));
+})();
+const EMIT_DIR = process.env.SWEEP_EMIT_TRADES_DIR
+  || path.join(process.cwd(), 'scripts/autoresearch/output/spread-trades');
+const EMIT_BUFFER = new Map<string, Map<string, DayEmit>>();   // key → date → DayEmit
+function slugify(k:string){ return k.replace(/[|]/g,'__').replace(/\s+/g,'_'); }
+function emitTrade(k:string, date:string, hdr:{spxOpen:number; spxClose:number; spxSettle:number|null}, tr:TradeRecord, spxBars:any[], shortSym:string, shortBars:any[], longSym:string, longBars:any[]){
+  if (!EMIT_KEYS || !EMIT_KEYS.has(k)) return;
+  let byDate = EMIT_BUFFER.get(k); if(!byDate){byDate=new Map(); EMIT_BUFFER.set(k,byDate);}
+  let d = byDate.get(date);
+  if(!d){
+    const [signal,spread,exit] = k.split('|');
+    d = { date, signal, spread, exit,
+          spxOpen: hdr.spxOpen, spxClose: hdr.spxClose, spxSettle: hdr.spxSettle,
+          trades: [], spxBars, contractBars: {} };
+    byDate.set(date,d);
+  }
+  d.trades.push(tr);
+  if (!d.contractBars[shortSym]) d.contractBars[shortSym] = shortBars;
+  if (!d.contractBars[longSym])  d.contractBars[longSym]  = longBars;
+}
+// Serialize a Bar[] (object-shape with full indicators) as compact tuples
+// [ts, o, h, l, c, v] — what the lightweight-charts UI actually needs. Drops
+// the indicators blob which adds ~10× size.
+function compactBars(bars:any[]): number[][] {
+  const out:number[][] = new Array(bars.length);
+  for (let i=0;i<bars.length;i++) {
+    const b = bars[i];
+    out[i] = [b.ts, b.open, b.high, b.low, b.close, b.volume ?? 0];
+  }
+  return out;
+}
+function flushTrades(){
+  if (!EMIT_KEYS || EMIT_BUFFER.size === 0) return;
+  fs.mkdirSync(EMIT_DIR, { recursive: true });
+  let nFiles = 0, nTrades = 0;
+  for (const [k, byDate] of EMIT_BUFFER) {
+    const sub = path.join(EMIT_DIR, slugify(k));
+    fs.mkdirSync(sub, { recursive: true });
+    for (const [date, day] of byDate) {
+      day.trades.sort((a,b)=>a.entryTs-b.entryTs);
+      const compact = {
+        ...day,
+        spxBars: compactBars(day.spxBars),
+        contractBars: Object.fromEntries(
+          Object.entries(day.contractBars).map(([sym, b]) => [sym, compactBars(b as any[])])
+        ),
+      };
+      fs.writeFileSync(path.join(sub, `${date}.json`), JSON.stringify(compact));
+      nFiles++; nTrades += day.trades.length;
+    }
+  }
+  console.error(`[trades] emitted ${nTrades} trades across ${nFiles} files under ${EMIT_DIR}`);
 }
 
 // ── Main ───────────────────────────────────────────────────────────────────
@@ -344,6 +449,7 @@ for(let di=0; di<RUN_DATES.length; di++){
   if(!c1?.spxBars?.length) continue;
   const s1:any[]=c1.spxBars;
   const sess = sessOpenTs(date);
+  setEtHourSessOpen(sess);   // arm fast etHour() for the per-hour bucket below
   const cutoff = sess + CUTOFF_HHMM;
   const settle = sess + SETTLE_HHMM;
   // SPX close at settle ts — for intrinsic-value settle in applyExit
@@ -396,12 +502,50 @@ for(let di=0; di<RUN_DATES.length; di++){
           const nat = applyExit(traj, settle, shortBars, longBars, credit, ex.tpFrac, ex.slMult, flipTsToUse,
                                 isCallSpread, shortStrike, longStrike, spxAtSettle);
           const pnl = (credit - nat.exitV) * 100 - SLIPPAGE_PER_SPREAD;
+          const pnlGross = (credit - nat.exitV) * 100;
           const durationSec = Math.max(0, nat.exitTs - ev.entryTs);
-          rec(sig.label, sp.label, ex.label, pnl, date, credit, sp.width, durationSec);
+          const maxRisk = (sp.width - credit) * 100;   // per contract — defined-risk credit spread
+          rec(sig.label, sp.label, ex.label, pnl, date, credit, sp.width, durationSec, ev.entryTs, maxRisk);
 
           const k = `${sig.label}|${sp.label}|${ex.label}`;
           let evs = overlapMap.get(k); if(!evs){evs=[]; overlapMap.set(k, evs);}
           evs.push({entry: ev.entryTs, exit: nat.exitTs});
+
+          // Per-trade emission (no-op unless this variant key is in EMIT_KEYS).
+          if (EMIT_KEYS && EMIT_KEYS.has(k)) {
+            const spxAtExit = optPx(s1, nat.exitTs) ?? spxEntry;
+            // Reconstruct per-leg exit marks. For intrinsic-settle (0DTE expiry),
+            // derive marks from SPX vs strikes; otherwise use leg-bar close.
+            let shortExitMark:number, longExitMark:number;
+            if (nat.reason === 'expiry' && spxAtSettle != null) {
+              if (isCallSpread) {
+                shortExitMark = Math.max(0, spxAtSettle - shortStrike);
+                longExitMark  = Math.max(0, spxAtSettle - longStrike);
+              } else {
+                shortExitMark = Math.max(0, shortStrike - spxAtSettle);
+                longExitMark  = Math.max(0, longStrike  - spxAtSettle);
+              }
+            } else {
+              shortExitMark = optPx(shortBars, nat.exitTs) ?? 0;
+              longExitMark  = optPx(longBars,  nat.exitTs) ?? 0;
+            }
+            const tr: TradeRecord = {
+              entryTs: ev.entryTs, exitTs: nat.exitTs, durationSec,
+              dir: ev.dir, side: isCallSpread ? 'call-credit' : 'put-credit',
+              spxAtEntry: spxEntry, spxAtExit,
+              shortSymbol: shortSym, shortStrike, shortEntryMark: shortEntry, shortExitMark,
+              longSymbol:  longSym,  longStrike,  longEntryMark: longEntry,  longExitMark,
+              netCredit: credit, netExitDebit: nat.exitV, width: sp.width, maxRisk,
+              tpFrac: ex.tpFrac, slMult: ex.slMult,
+              pnlGross, pnlNet: pnl,
+              exitReason: nat.reason,
+            };
+            const spxOpen = s1[0]?.close ?? spxEntry;
+            const spxClose = s1[s1.length-1]?.close ?? spxEntry;
+            emitTrade(k, date,
+              { spxOpen, spxClose, spxSettle: spxAtSettle },
+              tr, s1, shortSym, shortBars, longSym, longBars);
+          }
         }
       }
     }
@@ -533,7 +677,53 @@ function summary(){
   try { fs.writeFileSync(STUDIO_DAILY, JSON.stringify({dates: mergedDates, series: mergedSeries})); } catch {}
   console.log(`Daily merged: ${mergedDates.length} dates × ${Object.keys(mergedSeries).length} variants`);
   console.log('Saved to /tmp/credit_spread_*.json + scripts/autoresearch/output/spread-*.json');
+
+  // ── Per-hour aggregates — mirror iron-sweep, MERGE with existing iron rows.
+  // Studio's Hourly Heatmap reads scripts/autoresearch/output/spread-hourly*.json;
+  // iron writes its entries (with `structure`) — we APPEND credit-spread entries
+  // (with `spread`) and drop any prior credit entries on re-run.
+  const HOURLY_JSON   = outPath('/tmp/credit_spread_hourly.json', TARGET);
+  const STUDIO_HOURLY = outPath(path.join(process.cwd(), 'scripts/autoresearch/output/spread-hourly.json'), TARGET);
+  const creditHourlyEntries: any[] = [];
+  for (const [k, v] of results) {
+    const [signal, spread, exit] = k.split('|');
+    if (v.perHour.size === 0) continue;
+    const byHour: Record<number, any> = {};
+    for (const [h, hb] of v.perHour) {
+      if (hb.n === 0) continue;
+      byHour[h] = {
+        n: hb.n,
+        avgCredit:  +(hb.creditSum / hb.n).toFixed(3),
+        avgMaxRisk: +(hb.riskSum   / hb.n).toFixed(0),
+        avgPnl:     +(hb.pnlSum    / hb.n).toFixed(2),
+        totalPnl:   +hb.pnlSum.toFixed(0),
+        wr:         +(100 * hb.wins / hb.n).toFixed(1),
+      };
+    }
+    creditHourlyEntries.push({ signal, spread, exit, hours: byHour });
+  }
+  const isCsHourly = (s: string) => /\d*\s*(ITM|ATM|OTM)\s*w\d+/.test(s);
+  let mergedHourly: any[] = [];
+  try {
+    const existingRaw = JSON.parse(fs.readFileSync(STUDIO_HOURLY, 'utf8'));
+    if (Array.isArray(existingRaw)) {
+      mergedHourly = existingRaw.filter((e: any) => !isCsHourly(e?.spread || e?.structure || ''));
+    } else if (existingRaw && typeof existingRaw === 'object') {
+      mergedHourly = Object.values(existingRaw).filter((e: any) => !isCsHourly(e?.spread || e?.structure || ''));
+    }
+  } catch { /* missing/parse-fail → start fresh from iron's entries via this run if any */ }
+  mergedHourly = mergedHourly.concat(creditHourlyEntries);
+  fs.writeFileSync(HOURLY_JSON, JSON.stringify(mergedHourly));
+  try { fs.writeFileSync(STUDIO_HOURLY, JSON.stringify(mergedHourly)); } catch {}
+  console.log(`Hourly merged: ${mergedHourly.length} variants (${creditHourlyEntries.length} credit-spread + ${mergedHourly.length - creditHourlyEntries.length} prior)`);
 }
+
+// Per-trade emission (no-op unless SWEEP_EMIT_TRADES_KEYS env is set).
+// Each shard flushes its own date subset; the merge step is a no-op because
+// shards don't share the EMIT_BUFFER. Outside the summary() gate so it fires
+// in both shard-worker and serial runs.
+flushTrades();
+
 if (process.env.SWEEP_SHARD_OUT) {
   // Worker: dump this shard's partial accumulator; do NOT run the
   // dashboard-merge finalize (the merge run owns the final JSON).

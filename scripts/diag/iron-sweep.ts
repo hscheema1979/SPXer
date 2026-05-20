@@ -357,6 +357,86 @@ function rec(sig:string,struct:string,ex:string, pnl_gross:number, date:string, 
   if(pnl_net > 0) hb.wins++;
 }
 
+// ── Per-trade emission (additive, env-gated) ───────────────────────────────
+// SWEEP_EMIT_TRADES_KEYS="signal|structure|exit\n…" enables emission for
+// specified variants only; SWEEP_EMIT_TRADES_DIR is the output root. Each
+// emitted day = one JSON file under {dir}/{slug}/{date}.json with the full
+// 4-leg trade history + SPX bars + per-leg bars (deduped) for the UI.
+interface IronTradeRecord {
+  entryTs:number; exitTs:number; durationSec:number;
+  dir:'bull'|'bear';
+  spxAtEntry:number; spxAtExit:number;
+  center:number;
+  shortPutSymbol:string;  shortPutStrike:number;  shortPutEntryMark:number;  shortPutExitMark:number;
+  longPutSymbol:string;   longPutStrike:number;   longPutEntryMark:number;   longPutExitMark:number;
+  shortCallSymbol:string; shortCallStrike:number; shortCallEntryMark:number; shortCallExitMark:number;
+  longCallSymbol:string;  longCallStrike:number;  longCallEntryMark:number;  longCallExitMark:number;
+  netCredit:number; netExitDebit:number; wingWidth:number; maxRisk:number;
+  tpFrac:number; slMult:number;
+  pnlGross:number; pnlNet:number;
+  exitReason:string;
+}
+interface IronDayEmit {
+  date:string; signal:string; structure:string; exit:string;
+  spxOpen:number; spxClose:number; spxSettle:number|null;
+  trades: IronTradeRecord[];
+  spxBars: any[];
+  contractBars: Record<string, any[]>;
+}
+const EMIT_KEYS = (() => {
+  const raw = process.env.SWEEP_EMIT_TRADES_KEYS;
+  if (!raw) return null;
+  return new Set(raw.split(/[\n,]/).map(s=>s.trim()).filter(Boolean));
+})();
+const EMIT_DIR = process.env.SWEEP_EMIT_TRADES_DIR
+  || path.join(process.cwd(), 'scripts/autoresearch/output/iron-trades');
+const EMIT_BUFFER = new Map<string, Map<string, IronDayEmit>>();
+function slugify(k:string){ return k.replace(/[|]/g,'__').replace(/\s+/g,'_'); }
+function emitIronTrade(k:string, date:string, hdr:{spxOpen:number; spxClose:number; spxSettle:number|null}, tr:IronTradeRecord, spxBars:any[], legs:Array<{symbol:string;bars:any[]}>){
+  if (!EMIT_KEYS || !EMIT_KEYS.has(k)) return;
+  let byDate = EMIT_BUFFER.get(k); if(!byDate){byDate=new Map(); EMIT_BUFFER.set(k,byDate);}
+  let d = byDate.get(date);
+  if(!d){
+    const [signal,structure,exit] = k.split('|');
+    d = { date, signal, structure, exit,
+          spxOpen: hdr.spxOpen, spxClose: hdr.spxClose, spxSettle: hdr.spxSettle,
+          trades: [], spxBars, contractBars: {} };
+    byDate.set(date,d);
+  }
+  d.trades.push(tr);
+  for (const lg of legs) if (!d.contractBars[lg.symbol]) d.contractBars[lg.symbol] = lg.bars;
+}
+function compactBars(bars:any[]): number[][] {
+  const out:number[][] = new Array(bars.length);
+  for (let i=0;i<bars.length;i++) {
+    const b = bars[i];
+    out[i] = [b.ts, b.open, b.high, b.low, b.close, b.volume ?? 0];
+  }
+  return out;
+}
+function flushTrades(){
+  if (!EMIT_KEYS || EMIT_BUFFER.size === 0) return;
+  fs.mkdirSync(EMIT_DIR, { recursive: true });
+  let nFiles = 0, nTrades = 0;
+  for (const [k, byDate] of EMIT_BUFFER) {
+    const sub = path.join(EMIT_DIR, slugify(k));
+    fs.mkdirSync(sub, { recursive: true });
+    for (const [date, day] of byDate) {
+      day.trades.sort((a,b)=>a.entryTs-b.entryTs);
+      const compact = {
+        ...day,
+        spxBars: compactBars(day.spxBars),
+        contractBars: Object.fromEntries(
+          Object.entries(day.contractBars).map(([sym, b]) => [sym, compactBars(b as any[])])
+        ),
+      };
+      fs.writeFileSync(path.join(sub, `${date}.json`), JSON.stringify(compact));
+      nFiles++; nTrades += day.trades.length;
+    }
+  }
+  console.error(`[iron-trades] emitted ${nTrades} trades across ${nFiles} files under ${EMIT_DIR}`);
+}
+
 const ALL_DATES = listDatesFor(TARGET);
 // Parallel-shard hook (see sweep-shard.ts). SWEEP_MERGE → skip loop, results
 // come from shard dumps. SWEEP_SHARD="i/n" → only this worker's date subset.
@@ -457,6 +537,7 @@ for(let di=0; di<RUN_DATES.length; di++){
           const flipUse = ex.useFlip ? flipTs : Infinity;
           const nat = applyExit(traj, settle, legs, credit, ex.tpFrac, ex.slMult, flipUse, spxAtSettle);
           const pnl_gross = (credit - nat.exitV) * 100;
+          const pnl_net = pnl_gross - SLIPPAGE_PER_STRUCTURE;
           const durationSec = Math.max(0, nat.exitTs - ev.entryTs);
           rec(sig.label, st.label, ex.label, pnl_gross, date, credit, st.wingWidth, ev.entryTs, maxRisk, durationSec);
 
@@ -464,6 +545,45 @@ for(let di=0; di<RUN_DATES.length; di++){
           const k = `${sig.label}|${st.label}|${ex.label}`;
           let evs = overlapMap.get(k); if(!evs){evs=[]; overlapMap.set(k, evs);}
           evs.push({entry: ev.entryTs, exit: nat.exitTs});
+
+          // Per-trade emission (no-op unless this variant key is in EMIT_KEYS).
+          if (EMIT_KEYS && EMIT_KEYS.has(k)) {
+            const spxAtExit = optPx(s1, nat.exitTs) ?? spxEntry;
+            // Per-leg exit marks. For intrinsic settle at 0DTE expiry use
+            // SPX-vs-strike; else fall back to leg-bar close.
+            // legs[0..1] are puts, legs[2..3] are calls (positional, see leg build).
+            const exitMark = (lg:Leg, isPut:boolean) => {
+              if (nat.reason === 'expiry' && spxAtSettle != null) {
+                return isPut
+                  ? Math.max(0, lg.strike - spxAtSettle)
+                  : Math.max(0, spxAtSettle - lg.strike);
+              }
+              return optPx(lg.bars, nat.exitTs) ?? 0;
+            };
+            const tr: IronTradeRecord = {
+              entryTs: ev.entryTs, exitTs: nat.exitTs, durationSec,
+              dir: ev.dir,
+              spxAtEntry: spxEntry, spxAtExit,
+              center,
+              shortPutSymbol: sym_sp, shortPutStrike: Kshort_put,
+              shortPutEntryMark: entries_px[0] as number, shortPutExitMark: exitMark(legs[0], true),
+              longPutSymbol:  sym_lp, longPutStrike: Klong_put,
+              longPutEntryMark:  entries_px[1] as number, longPutExitMark:  exitMark(legs[1], true),
+              shortCallSymbol: sym_sc, shortCallStrike: Kshort_call,
+              shortCallEntryMark: entries_px[2] as number, shortCallExitMark: exitMark(legs[2], false),
+              longCallSymbol:  sym_lc, longCallStrike: Klong_call,
+              longCallEntryMark:  entries_px[3] as number, longCallExitMark:  exitMark(legs[3], false),
+              netCredit: credit, netExitDebit: nat.exitV, wingWidth: st.wingWidth, maxRisk,
+              tpFrac: ex.tpFrac, slMult: ex.slMult,
+              pnlGross: pnl_gross, pnlNet: pnl_net,
+              exitReason: nat.reason,
+            };
+            const spxOpen = s1[0]?.close ?? spxEntry;
+            const spxClose = s1[s1.length-1]?.close ?? spxEntry;
+            emitIronTrade(k, date,
+              { spxOpen, spxClose, spxSettle: spxAtSettle },
+              tr, s1, legs);
+          }
         }
       }
     }
@@ -492,9 +612,13 @@ for(let di=0; di<RUN_DATES.length; di++){
 // inline finalize so output is byte-identical to a serial run.
 if (process.env.SWEEP_SHARD_OUT) {
   dumpResults(results, process.env.SWEEP_SHARD_OUT);
+  // Shard worker also flushes its own trade buffer (each shard owns a
+  // disjoint date subset → no overwrite). Merge run buffer is empty.
+  flushTrades();
   process.exit(0);
 }
 if (process.env.SWEEP_MERGE) loadShardsInto(process.env.SWEEP_MERGE, results);
+// Serial run reaches here too; trades flushed at very end (after finalize).
 
 console.log(`\n=== IRON CONDOR/BUTTERFLY SWEEP — look-ahead protected, $${SLIPPAGE_PER_STRUCTURE}/RT slippage ===`);
 const rows:any[] = [];
@@ -642,3 +766,6 @@ if (STATE_FILE && !process.env.SWEEP_SHARD_OUT) {
   dumpResults(results, STATE_FILE);
   console.error(`[incremental] state saved → ${STATE_FILE}`);
 }
+
+// Serial / merge-finalize trade emission (no-op unless SWEEP_EMIT_TRADES_KEYS).
+flushTrades();
