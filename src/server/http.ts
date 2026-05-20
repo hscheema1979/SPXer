@@ -15,6 +15,26 @@ import * as path from 'path';
 
 const startTime = Date.now();
 
+// ── Cross-module status hooks ──────────────────────────────────────────────
+// src/index.ts wires these up at startup so /health can report:
+//   • setLastSpxPrice(n)         — last seen SPX print
+//   • setTrackerCountFn(fn)      — # active+sticky contracts in the tracker
+//   • setOptionStreamStatusFn(fn)— ThetaData + Tradier WS health snapshot
+// Defensive defaults so /health never throws if index.ts hasn't called them
+// yet (and so this file boots even when wired by older callers).
+let lastSpxPrice: number | null = null;
+export function setLastSpxPrice(price: number): void {
+  if (typeof price === 'number' && isFinite(price)) lastSpxPrice = price;
+}
+let _trackerCountFn: () => number = () => 0;
+export function setTrackerCountFn(fn: () => number): void {
+  if (typeof fn === 'function') _trackerCountFn = fn;
+}
+let _optionStreamStatusFn: () => any = () => ({ connected: false, symbolCount: 0 });
+export function setOptionStreamStatusFn(fn: () => any): void {
+  if (typeof fn === 'function') _optionStreamStatusFn = fn;
+}
+
 export function startHttpServer(port: number): { app: Express; httpServer: Server } {
   const app = express();
   app.use(express.json());
@@ -59,11 +79,19 @@ export function startHttpServer(port: number): { app: Express; httpServer: Serve
       walSizeMb = Math.round(statSync(walPath).size / 1024 / 1024 * 10) / 10;
     } catch {}
 
+    let trackedContracts = 0;
+    try { trackedContracts = _trackerCountFn(); } catch {}
+    let optionStream: any = { connected: false, symbolCount: 0 };
+    try { optionStream = _optionStreamStatusFn(); } catch {}
+
     res.json({
       status: 'healthy',
       uptimeSec: report.uptimeSec,
       db: { sizeMb: dbSizeMb, walSizeMb },
       replayEndpoints: true,
+      spxPrice: lastSpxPrice,
+      trackedContracts,
+      optionStream,
       // Backward-compatible fields
       uptime: Math.floor((Date.now() - startTime) / 1000),
       dbSizeMb,
