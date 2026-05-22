@@ -19,10 +19,51 @@ import { shardDates, dumpResults, loadShardsInto, mergeStateFile, knownDates } f
 import * as fs from 'fs';
 import * as path from 'path';
 
+// ── Serial-execution guard ──────────────────────────────────────────────────
+// Direct invocation takes 40+ minutes on a 280-date SPX run. ALWAYS go through
+// sweep-parallel.ts (8× faster). The serial path is dead.
+// SWEEP_ALLOW_SERIAL=1 escape hatch for single-date debug; almost never useful.
+if (!process.env.SWEEP_SHARD && !process.env.SWEEP_MERGE && !process.env.SWEEP_ALLOW_SERIAL) {
+  console.error(`
+ERROR: credit-spread-sweep.ts must NOT be invoked directly.
+Use the parallel runner instead:
+
+  npx tsx scripts/diag/sweep-parallel.ts --symbol SPX --engine credit --shards 8
+
+Pass-through env vars (SWEEP_FILL_MODE, SWEEP_CLOSE_HALFSPREAD, etc.) inherit
+through to all workers automatically.
+
+Override only for single-date debugging: SWEEP_ALLOW_SERIAL=1
+`);
+  process.exit(2);
+}
+
 const TARGET = resolveSymbolTarget(process.argv);
 const SI = TARGET.strikeInterval; // $ per strike: SPX 5, SPY/QQQ 1, NDX 10
 
 const SLIPPAGE_PER_SPREAD = 15;
+
+// Pay-through-ask close model — see iron-sweep.ts for full rationale.
+// 2-leg structure → 2 legs × half_spread penalty on close. Default $0.10/leg
+// → $0.20 added to exit V. Applied to TP/SL/flip/settle-MTM, NOT to cash-settled
+// expiry. SWEEP_FILL_MODE: 'soft' (default) fills always at mid+penalty;
+// 'hard' fills only when mid penetrates by penalty, at the order's exact limit.
+const CLOSE_HALFSPREAD_PER_LEG = Number(process.env.SWEEP_CLOSE_HALFSPREAD ?? 0.10);
+const CLOSE_PENALTY_V = 2 * CLOSE_HALFSPREAD_PER_LEG;
+// Default 'hard' — see iron-sweep.ts for the rationale. Soft is for diagnostic
+// comparison ONLY, never for strategy selection.
+const FILL_MODE = (process.env.SWEEP_FILL_MODE ?? 'hard') as 'soft' | 'hard';
+
+// ── Exit liquidity gate (shorts-fresh) ──────────────────────────────────────
+// The trajectory carries forward each leg's last close until its next print, so
+// a TP/SL could fire off a STALE close that wasn't tradeable that minute — a
+// "false mid" that books a phantom fill and fakes short hold times. The fix that
+// survived study (docs/FILL-VOLUME-STUDY.md): honor a TP/SL ONLY at a bar where
+// the SHORT leg actually printed that minute (you transact the short to realize
+// the exit; the long protective leg's staleness must not block/fake a fill).
+//   SWEEP_EXIT_GATE = 'shorts-fresh' (default) | 'none' (legacy optimistic, no gate).
+const EXIT_GATE = (process.env.SWEEP_EXIT_GATE ?? 'shorts-fresh') as 'shorts-fresh' | 'none';
+const GATE_SHORTS = EXIT_GATE === 'shorts-fresh';
 const MIN_ALIGN = 3, CROSS_WIN = 60;
 const FAST0 = 3, SLOW0 = 15; // tier-0 unused for spreads but signal engine wants it
 const CUTOFF_HHMM = 6 * 3600; // 15:30 ET (sec from sess open)
@@ -96,13 +137,15 @@ const SPREADS: SpreadSpec[] = SPREAD_DEFS.map(({ soS, wS }) => {
 });
 
 // ── Exit policies (TP/SL as fraction of credit). TP=0 means hold to settle. ──
-interface ExitSpec { label: string; tpFrac: number; slMult: number; useFlip: boolean; }
-// tpFrac: close when current_spread_value <= (1 - tpFrac) × credit. e.g., 0.5 = take 50% of credit.
-// slMult: close when current_spread_value >= (1 + slMult) × credit, i.e., loss = slMult × credit.
-//         slMult = 0 means no SL.
-// useFlip: also exit on signal flip.
+// slRiskFrac (0-1): SL fires when V reaches credit + slRiskFrac × (width − credit).
+// Properly bounded for credit structures (V capped at width). Use INSTEAD of slMult.
+interface ExitSpec { label: string; tpFrac: number; slMult: number; slRiskFrac?: number; useFlip: boolean; }
 const EXITS: ExitSpec[] = [
   { label: 'hold-to-settle',  tpFrac: 0,    slMult: 0,   useFlip: false },
+  { label: 'TP5 only',        tpFrac: 0.05, slMult: 0,   useFlip: false },
+  { label: 'TP6 only',        tpFrac: 0.06, slMult: 0,   useFlip: false },
+  { label: 'TP7 only',        tpFrac: 0.07, slMult: 0,   useFlip: false },
+  { label: 'TP8 only',        tpFrac: 0.08, slMult: 0,   useFlip: false },
   { label: 'TP10 only',       tpFrac: 0.10, slMult: 0,   useFlip: false },
   { label: 'TP15 only',       tpFrac: 0.15, slMult: 0,   useFlip: false },
   { label: 'TP20 only',       tpFrac: 0.20, slMult: 0,   useFlip: false },
@@ -110,14 +153,24 @@ const EXITS: ExitSpec[] = [
   { label: 'TP35 only',       tpFrac: 0.35, slMult: 0,   useFlip: false },
   { label: 'TP50 only',       tpFrac: 0.50, slMult: 0,   useFlip: false },
   { label: 'TP75 only',       tpFrac: 0.75, slMult: 0,   useFlip: false },
+  // Risk-based SL variants for TP5/10/15
+  { label: 'TP5 SL50%',       tpFrac: 0.05, slMult: 0,   slRiskFrac: 0.50, useFlip: false },
+  { label: 'TP5 SL60%',       tpFrac: 0.05, slMult: 0,   slRiskFrac: 0.60, useFlip: false },
+  { label: 'TP5 SL70%',       tpFrac: 0.05, slMult: 0,   slRiskFrac: 0.70, useFlip: false },
+  { label: 'TP5 SL80%',       tpFrac: 0.05, slMult: 0,   slRiskFrac: 0.80, useFlip: false },
+  { label: 'TP10 SL50%',      tpFrac: 0.10, slMult: 0,   slRiskFrac: 0.50, useFlip: false },
+  { label: 'TP10 SL60%',      tpFrac: 0.10, slMult: 0,   slRiskFrac: 0.60, useFlip: false },
+  { label: 'TP10 SL70%',      tpFrac: 0.10, slMult: 0,   slRiskFrac: 0.70, useFlip: false },
+  { label: 'TP10 SL80%',      tpFrac: 0.10, slMult: 0,   slRiskFrac: 0.80, useFlip: false },
+  { label: 'TP15 SL50%',      tpFrac: 0.15, slMult: 0,   slRiskFrac: 0.50, useFlip: false },
+  { label: 'TP15 SL60%',      tpFrac: 0.15, slMult: 0,   slRiskFrac: 0.60, useFlip: false },
+  { label: 'TP15 SL70%',      tpFrac: 0.15, slMult: 0,   slRiskFrac: 0.70, useFlip: false },
+  { label: 'TP15 SL80%',      tpFrac: 0.15, slMult: 0,   slRiskFrac: 0.80, useFlip: false },
   // Flip-exit variants: close on signal reversal (first opposite alignment after entry)
   { label: 'TP10 +flip',      tpFrac: 0.10, slMult: 0,   useFlip: true  },
   { label: 'TP15 +flip',      tpFrac: 0.15, slMult: 0,   useFlip: true  },
   { label: 'TP25 +flip',      tpFrac: 0.25, slMult: 0,   useFlip: true  },
   { label: 'TP50 +flip',      tpFrac: 0.50, slMult: 0,   useFlip: true  },
-  { label: 'TP25 SL3x',       tpFrac: 0.25, slMult: 3.0, useFlip: false },
-  { label: 'TP50 SL3x',       tpFrac: 0.50, slMult: 3.0, useFlip: false },
-  { label: 'TP50 SL4x',       tpFrac: 0.50, slMult: 4.0, useFlip: false },
   { label: 'flip only',       tpFrac: 0,    slMult: 0,   useFlip: true  },
 ];
 
@@ -225,18 +278,23 @@ function optPx(bars:any[],ts:number):number|null{for(let i=bars.length-1;i>=0;i-
 
 // Build the spread-value trajectory from entryTs+1 to endTs as a list of {ts, V}.
 // Linear walk through both bar arrays (O(N+M)), instead of per-timestamp re-scan.
-function buildSpreadTrajectory(shortBars:any[], longBars:any[], entryTs:number, endTs:number): Array<{ts:number,V:number}> {
+interface TrajPoint { ts:number; V:number; shortFresh:boolean; }
+// Each point flags whether the SHORT leg printed AT that exact minute (vs a
+// carried-forward stale close), so applyExit can reject false-mid TP/SL fills
+// on an un-tradeable short (see GATE_SHORTS).
+function buildSpreadTrajectory(shortBars:any[], longBars:any[], entryTs:number, endTs:number): TrajPoint[] {
   const tsSet = new Set<number>();
   for(const b of shortBars) if(b.ts>entryTs && b.ts<=endTs) tsSet.add(b.ts);
   for(const b of longBars)  if(b.ts>entryTs && b.ts<=endTs) tsSet.add(b.ts);
   const tsList = [...tsSet].sort((a,b)=>a-b);
-  const traj: Array<{ts:number,V:number}> = [];
+  const traj: TrajPoint[] = [];
   let si = 0, li = 0;
   let lastShort:number|null = null, lastLong:number|null = null;
+  let lastShortTs = -1;
   for(const t of tsList){
-    while(si < shortBars.length && shortBars[si].ts <= t){ lastShort = shortBars[si].close; si++; }
+    while(si < shortBars.length && shortBars[si].ts <= t){ lastShort = shortBars[si].close; lastShortTs = shortBars[si].ts; si++; }
     while(li < longBars.length  && longBars[li].ts  <= t){ lastLong  = longBars[li].close;  li++; }
-    if(lastShort != null && lastLong != null) traj.push({ts: t, V: lastShort - lastLong});
+    if(lastShort != null && lastLong != null) traj.push({ts: t, V: lastShort - lastLong, shortFresh: lastShortTs === t});
   }
   return traj;
 }
@@ -255,18 +313,37 @@ function currentV(traj: Array<{ts:number,V:number}>, targetTs: number): number |
 // At true session settle (effEnd === endTs), V is computed as INTRINSIC from SPX close + strikes
 // to avoid stale-leg-bar bias on deep ITM credit spreads (which can stop printing late in the day).
 // At flip exits (effEnd < endTs), uses last available close on each leg.
-function applyExit(traj:Array<{ts:number,V:number}>, endTs:number,
+function applyExit(traj:TrajPoint[], endTs:number,
                    shortBars:any[], longBars:any[],
                    credit:number, tpFrac:number, slMult:number, flipTs:number,
                    isCallSpread:boolean, shortStrike:number, longStrike:number,
-                   spxAtSettle:number|null): {exitTs:number, exitV:number, reason:string} {
+                   spxAtSettle:number|null, width:number = 0, slRiskFrac:number = 0): {exitTs:number, exitV:number, reason:string} {
   const effEnd = Math.min(endTs, flipTs);
   const tpV = tpFrac>0 ? (1 - tpFrac) * credit : -Infinity;
-  const slV = slMult>0 ? (1 + slMult) * credit : Infinity;
+  // Prefer slRiskFrac (fraction of max risk) when > 0; slMult is broken for
+  // credit structures (V bounded by width). Kept for backward-compat.
+  const slV = slRiskFrac > 0 && width > 0
+    ? credit + slRiskFrac * (width - credit)
+    : slMult > 0 ? (1 + slMult) * credit : Infinity;
+  const slActive = slRiskFrac > 0 || slMult > 0;
+  // Hard mode: limit must be crossed (mid penetrates by penalty) for TP, stop
+  // must be cleared (mid clears stop by penalty) for SL. Fills at order level.
+  const tpTrigger = FILL_MODE === 'hard' ? tpV - CLOSE_PENALTY_V : tpV;
+  const slTrigger = FILL_MODE === 'hard' ? slV + CLOSE_PENALTY_V : slV;
+  // Liquidity gate: honor a TP/SL only at a bar where the SHORT leg actually
+  // printed (p.shortFresh). Rejects exits priced off a stale carried-forward
+  // SHORT close (the "false mid"). GATE_SHORTS=false reproduces legacy behavior.
   for(const p of traj){
     if(p.ts > effEnd) break;
-    if(tpFrac>0 && p.V <= tpV) return {exitTs: p.ts, exitV: Math.max(0, p.V), reason:'TP'};
-    if(slMult>0 && p.V >= slV) return {exitTs: p.ts, exitV: p.V, reason:'SL'};
+    const fillable = !GATE_SHORTS || p.shortFresh;
+    if(tpFrac>0 && p.V <= tpTrigger && fillable) {
+      const exitV = FILL_MODE === 'hard' ? tpV : p.V + CLOSE_PENALTY_V;
+      return {exitTs: p.ts, exitV: Math.max(0, exitV), reason:'TP'};
+    }
+    if(slActive && p.V >= slTrigger && fillable) {
+      const exitV = FILL_MODE === 'hard' ? slV + CLOSE_PENALTY_V : p.V + CLOSE_PENALTY_V;
+      return {exitTs: p.ts, exitV, reason:'SL'};
+    }
   }
   // INTRINSIC settle only valid at true same-day expiry (0DTE @ 15:45,
   // extrinsic ≈ 0). For 1DTE+ the contract still has ≥1 session of life at the
@@ -287,7 +364,9 @@ function applyExit(traj:Array<{ts:number,V:number}>, endTs:number,
   // exits (effEnd<endTs) AND 1DTE+ settle (effEnd==endTs, dte≥1).
   const ps = optPx(shortBars, effEnd) ?? 0;
   const pl = optPx(longBars,  effEnd) ?? 0;
-  return {exitTs: effEnd, exitV: Math.max(0, ps - pl), reason: effEnd === endTs ? 'settle-mtm' : 'flip'};
+  // Flip + 1DTE+ settle-MTM both require crossing the spread on both legs —
+  // apply pay-through-ask penalty. Cash-settled 0DTE expiry above is unpenalized.
+  return {exitTs: effEnd, exitV: Math.max(0, (ps - pl) + CLOSE_PENALTY_V), reason: effEnd === endTs ? 'settle-mtm' : 'flip'};
 }
 
 // ── Aggregation ────────────────────────────────────────────────────────────
@@ -500,7 +579,7 @@ for(let di=0; di<RUN_DATES.length; di++){
           // Compute natural exit, record P&L immediately, push overlap event.
           const flipTsToUse = ex.useFlip ? flipTs : Infinity;
           const nat = applyExit(traj, settle, shortBars, longBars, credit, ex.tpFrac, ex.slMult, flipTsToUse,
-                                isCallSpread, shortStrike, longStrike, spxAtSettle);
+                                isCallSpread, shortStrike, longStrike, spxAtSettle, sp.width, ex.slRiskFrac ?? 0);
           const pnl = (credit - nat.exitV) * 100 - SLIPPAGE_PER_SPREAD;
           const pnlGross = (credit - nat.exitV) * 100;
           const durationSec = Math.max(0, nat.exitTs - ev.entryTs);
@@ -594,7 +673,10 @@ function summary(){
       peakConcurrent:v.peakConcurrent, evictions:v.evictions,
       peakRiskCapacity:+(v.peakConcurrent * avgMaxRisk).toFixed(0),
       avgConcurrent, avgRiskCapacity, numActiveDays,
-      avgDurMin:+avgDurMin.toFixed(1)});
+      avgDurMin:+avgDurMin.toFixed(1),
+      // Fill-model provenance — see iron-sweep.ts for context.
+      fillModel: FILL_MODE,
+      fillHalfSpread: CLOSE_HALFSPREAD_PER_LEG});
   }
   rows.sort((a,b)=>b.pnl-a.pnl);
   console.log(`\n=== CREDIT-SPREAD SWEEP (look-ahead protected, $${SLIPPAGE_PER_SPREAD}/RT slippage) ===`);

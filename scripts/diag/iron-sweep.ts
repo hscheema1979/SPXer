@@ -30,12 +30,98 @@ import { shardDates, dumpResults, loadShardsInto, mergeStateFile, knownDates } f
 import * as fs from 'fs';
 import * as path from 'path';
 
+// ── Serial-execution guard ──────────────────────────────────────────────────
+// Direct invocation of this script (no SWEEP_SHARD, no SWEEP_MERGE) takes
+// 40+ minutes on a 280-date SPX run. ALWAYS go through sweep-parallel.ts which
+// fans out to N workers via date-sharding and merges. The serial path is dead.
+// If you genuinely need single-process for debugging one date, set
+// SWEEP_ALLOW_SERIAL=1 — but think twice; it's almost never what you want.
+if (!process.env.SWEEP_SHARD && !process.env.SWEEP_MERGE && !process.env.SWEEP_ALLOW_SERIAL) {
+  console.error(`
+ERROR: iron-sweep.ts must NOT be invoked directly.
+Use the parallel runner instead:
+
+  npx tsx scripts/diag/sweep-parallel.ts --symbol SPX --engine iron --shards 8
+
+Pass-through env vars (SWEEP_FILL_MODE, SWEEP_CLOSE_HALFSPREAD, etc.) inherit
+through to all workers automatically.
+
+Override only for single-date debugging: SWEEP_ALLOW_SERIAL=1
+`);
+  process.exit(2);
+}
+
 // Resolved early — geometry below is defined in STRIKE COUNTS and scaled to
 // dollars by the instrument's strike interval (SPX 5, SPY/QQQ 1, NDX 10).
 const TARGET = resolveSymbolTarget(process.argv);
 const SI = TARGET.strikeInterval;
 
-const SLIPPAGE_PER_STRUCTURE = 25;     // 4-leg = ~2× the 2-leg slippage
+const SLIPPAGE_PER_STRUCTURE = 25;     // 4-leg = ~2× the 2-leg slippage (entry-side friction + commissions)
+
+// Pay-through-ask close model (soft fill).
+// Bar cache stores only OHLC midpoints — no bid/ask. We approximate the close
+// fill as mid + half_spread × n_legs, where each leg costs half-spread to cross.
+// For SPXW 0DTE 4-leg structures: short legs pay ASK (mid + hs), long legs sell
+// at BID (mid − hs). Either way the exit-V we'd actually achieve = mid_V + 4·hs.
+// Default $0.10/leg → $0.40 added to exit V → $40/RT cost over and above the
+// existing $25 entry-side slippage. Override via SWEEP_CLOSE_HALFSPREAD.
+// Set to 0 to recover the previous (mid-fillable) model. Applied to:
+//   TP / SL / flip / settle-MTM exits — i.e. any exit that requires a live fill.
+// NOT applied to cash-settled expiry (SPX SET, no fill at all).
+const CLOSE_HALFSPREAD_PER_LEG = Number(process.env.SWEEP_CLOSE_HALFSPREAD ?? 0.10);
+const CLOSE_PENALTY_V = 4 * CLOSE_HALFSPREAD_PER_LEG;
+
+// Fill model: 'hard' (default) = realistic — TP fires only when mid crosses tpV
+//                                 − penalty (i.e. the natural close goes deep enough
+//                                 that an order at tpV would actually get crossed);
+//                                 fills at exactly tpV. Models the real "limit might
+//                                 not fill" case that bit us in production on 2026-05-20.
+//             'soft'            = TP fires when mid crosses tpV, fills at mid+penalty.
+//                                 Models spread cost only, not fill risk. NEVER use
+//                                 for production strategy selection — leads to deploying
+//                                 strategies that look great on paper but cannot actually
+//                                 fill their limit orders.
+//             For SL (stop-market): hard requires mid to clear slV by penalty before
+//             triggering; fills at slV + penalty (market exit still pays through ask).
+const FILL_MODE = (process.env.SWEEP_FILL_MODE ?? 'hard') as 'soft' | 'hard';
+
+// ── Exit liquidity gate (shorts-fresh) ──────────────────────────────────────
+// The trajectory carries forward each leg's LAST close until its next print, so
+// a TP/SL could fire off a STALE close that wasn't tradeable that minute — a
+// "false mid" that books a phantom fill and fakes short hold times. The fix
+// that survived study (docs/FILL-VOLUME-STUDY.md): honor a TP/SL ONLY at a bar
+// where the SHORT leg(s) actually printed that minute. You realize the exit by
+// transacting the shorts; the long wings are protection that expires worthless,
+// so their illiquidity must NOT block or fake a fill. The diagnostics also
+// showed it's the SHORT (ATM) legs that go stale (~85-94% fresh) while wings are
+// fresh ~98-99%, so requiring fresh wings (all-legs) or combined-volume gates
+// either over-penalize or filter nothing — shorts-fresh is the right target.
+//   SWEEP_EXIT_GATE = 'shorts-fresh' (default) | 'none' (legacy optimistic, no gate).
+const EXIT_GATE = (process.env.SWEEP_EXIT_GATE ?? 'shorts-fresh') as 'shorts-fresh' | 'none';
+const GATE_SHORTS = EXIT_GATE === 'shorts-fresh';
+
+// ── Trend gate (optional) ─────────────────────────────────────────────────
+// SWEEP_TREND_GATE_MIN = N → measure 30-min SPX drift. If drift > +threshold
+// (uptrend) and signal is bear → skip. If drift < −threshold (downtrend) and
+// signal is bull → skip. Threshold is SWEEP_TREND_GATE_THRESH (default 5pts).
+//
+// Rationale: HMA cross signals are mean-reverting in intent — they fire on
+// short-term reversals. On strongly-trending days these reversals don't
+// materialize and the counter-trend trades take max-loss. A SMA-based trend
+// filter skips the obviously-doomed direction.
+const TREND_GATE_MIN = process.env.SWEEP_TREND_GATE_MIN ? parseInt(process.env.SWEEP_TREND_GATE_MIN) : 0;
+const TREND_GATE_THRESH = parseFloat(process.env.SWEEP_TREND_GATE_THRESH ?? '5');
+function trendGateBlocks(s1: any[], entryTs: number, dir: 'bull' | 'bear'): boolean {
+  if (TREND_GATE_MIN <= 0) return false;
+  const spxNow = optPx(s1, entryTs - 1);
+  const spxPast = optPx(s1, entryTs - 1 - TREND_GATE_MIN * 60);
+  if (spxNow == null || spxPast == null) return false;  // no data → don't block
+  const drift = spxNow - spxPast;
+  // Block bear in uptrend, bull in downtrend
+  if (dir === 'bear' && drift > TREND_GATE_THRESH) return true;
+  if (dir === 'bull' && drift < -TREND_GATE_THRESH) return true;
+  return false;
+}
 const MIN_ALIGN = 3, CROSS_WIN = 60;
 const FAST0 = 3, SLOW0 = 15;
 const CUTOFF_HHMM = 6 * 3600;          // 15:30 ET
@@ -119,9 +205,18 @@ const STRUCTURES: IronSpec[] = [
   }; })),
 ];
 
-interface ExitSpec { label: string; tpFrac: number; slMult: number; useFlip: boolean; }
+// slRiskFrac: fraction of max risk (0-1) at which SL fires for credit structures.
+// SL threshold V = credit + slRiskFrac × (wingWidth − credit). At slRiskFrac=1 you ride
+// to max loss (effectively no SL). Lower values cap the loss tail earlier.
+// This replaces the broken slMult=N parameterization which never triggered for credit
+// structures (V is bounded by wingWidth, so V ≥ N×credit never fired for N≥1).
+interface ExitSpec { label: string; tpFrac: number; slMult: number; slRiskFrac?: number; useFlip: boolean; }
 const EXITS: ExitSpec[] = [
   { label: 'hold-to-settle',  tpFrac: 0,    slMult: 0,   useFlip: false },
+  { label: 'TP5 only',        tpFrac: 0.05, slMult: 0,   useFlip: false },
+  { label: 'TP6 only',        tpFrac: 0.06, slMult: 0,   useFlip: false },
+  { label: 'TP7 only',        tpFrac: 0.07, slMult: 0,   useFlip: false },
+  { label: 'TP8 only',        tpFrac: 0.08, slMult: 0,   useFlip: false },
   { label: 'TP10 only',       tpFrac: 0.10, slMult: 0,   useFlip: false },
   { label: 'TP15 only',       tpFrac: 0.15, slMult: 0,   useFlip: false },
   { label: 'TP20 only',       tpFrac: 0.20, slMult: 0,   useFlip: false },
@@ -129,6 +224,19 @@ const EXITS: ExitSpec[] = [
   { label: 'TP35 only',       tpFrac: 0.35, slMult: 0,   useFlip: false },
   { label: 'TP50 only',       tpFrac: 0.50, slMult: 0,   useFlip: false },
   { label: 'TP75 only',       tpFrac: 0.75, slMult: 0,   useFlip: false },
+  // Tail-cap variants: TP5/TP10/TP15 with SL at fraction of max risk
+  { label: 'TP5 SL50%',       tpFrac: 0.05, slMult: 0,   slRiskFrac: 0.50, useFlip: false },
+  { label: 'TP5 SL60%',       tpFrac: 0.05, slMult: 0,   slRiskFrac: 0.60, useFlip: false },
+  { label: 'TP5 SL70%',       tpFrac: 0.05, slMult: 0,   slRiskFrac: 0.70, useFlip: false },
+  { label: 'TP5 SL80%',       tpFrac: 0.05, slMult: 0,   slRiskFrac: 0.80, useFlip: false },
+  { label: 'TP10 SL50%',      tpFrac: 0.10, slMult: 0,   slRiskFrac: 0.50, useFlip: false },
+  { label: 'TP10 SL60%',      tpFrac: 0.10, slMult: 0,   slRiskFrac: 0.60, useFlip: false },
+  { label: 'TP10 SL70%',      tpFrac: 0.10, slMult: 0,   slRiskFrac: 0.70, useFlip: false },
+  { label: 'TP10 SL80%',      tpFrac: 0.10, slMult: 0,   slRiskFrac: 0.80, useFlip: false },
+  { label: 'TP15 SL50%',      tpFrac: 0.15, slMult: 0,   slRiskFrac: 0.50, useFlip: false },
+  { label: 'TP15 SL60%',      tpFrac: 0.15, slMult: 0,   slRiskFrac: 0.60, useFlip: false },
+  { label: 'TP15 SL70%',      tpFrac: 0.15, slMult: 0,   slRiskFrac: 0.70, useFlip: false },
+  { label: 'TP15 SL80%',      tpFrac: 0.15, slMult: 0,   slRiskFrac: 0.80, useFlip: false },
   // Flip-exit variants: close on signal reversal (first opposite alignment after entry)
   { label: 'TP10 +flip',      tpFrac: 0.10, slMult: 0,   useFlip: true  },
   { label: 'TP15 +flip',      tpFrac: 0.15, slMult: 0,   useFlip: true  },
@@ -237,42 +345,73 @@ function findStrike(c1:any, type:'C'|'P', targetK:number): string|null {
 function optPx(bars:any[],ts:number):number|null{for(let i=bars.length-1;i>=0;i--)if(bars[i].ts<=ts)return bars[i].close;return null;}
 
 interface Leg { bars:any[]; sign:number; strike:number; symbol:string; }
+interface TrajPoint { ts:number; V:number; shortsFresh:boolean; }
 // Compute V trajectory for a 4-leg structure. V = Σ sign_i × close_i(t).
-function buildTrajectory(legs:Leg[], entryTs:number, endTs:number): Array<{ts:number,V:number}> {
+// Each point also flags whether every SHORT leg (sign +1) actually printed AT
+// that exact minute (vs a carried-forward stale close), so applyExit can reject
+// false-mid TP/SL fills on un-tradeable shorts (see GATE_SHORTS).
+function buildTrajectory(legs:Leg[], entryTs:number, endTs:number): TrajPoint[] {
   const tsSet = new Set<number>();
   for(const lg of legs) for(const b of lg.bars) if(b.ts>entryTs && b.ts<=endTs) tsSet.add(b.ts);
   const tsList = [...tsSet].sort((a,b)=>a-b);
   // Walk pointers per leg
   const ptr = new Array(legs.length).fill(0);
   const last = new Array<number|null>(legs.length).fill(null);
-  const traj: Array<{ts:number,V:number}> = [];
+  const lastTs = new Array<number>(legs.length).fill(-1);    // ts of each leg's most-recent consumed bar
+  const traj: TrajPoint[] = [];
   for(const t of tsList){
     for(let i=0;i<legs.length;i++){
       while(ptr[i] < legs[i].bars.length && legs[i].bars[ptr[i]].ts <= t){
         last[i] = legs[i].bars[ptr[i]].close;
+        lastTs[i] = legs[i].bars[ptr[i]].ts;
         ptr[i]++;
       }
     }
     if(last.every(v=>v!=null)){
       let V = 0;
       for(let i=0;i<legs.length;i++) V += legs[i].sign * (last[i] as number);
-      traj.push({ts:t, V});
+      // shorts-fresh: every SHORT leg (sign +1) printed AT this exact minute.
+      let shortsFresh = true;
+      for(let i=0;i<legs.length;i++) if(legs[i].sign === +1 && lastTs[i] !== t){ shortsFresh = false; break; }
+      traj.push({ts:t, V, shortsFresh});
     }
   }
   return traj;
 }
 
-function applyExit(traj:Array<{ts:number,V:number}>, endTs:number, legs:Leg[],
+function applyExit(traj:TrajPoint[], endTs:number, legs:Leg[],
                    credit:number, tpFrac:number, slMult:number, flipTs:number,
-                   spxAtSettle:number|null)
+                   spxAtSettle:number|null, wingWidth:number = 0, slRiskFrac:number = 0)
                   : {exitTs:number, exitV:number, reason:string} {
   const effEnd = Math.min(endTs, flipTs);
   const tpV = tpFrac>0 ? (1 - tpFrac) * credit : -Infinity;
-  const slV = slMult>0 ? (1 + slMult) * credit : Infinity;
+  // SL threshold: prefer slRiskFrac (fraction of max risk) when > 0 since slMult
+  // is broken for credit structures (V bounded by wingWidth). slMult retained
+  // for backward compat / debit structures.
+  const slV = slRiskFrac > 0 && wingWidth > 0
+    ? credit + slRiskFrac * (wingWidth - credit)
+    : slMult > 0 ? (1 + slMult) * credit : Infinity;
+  const slActive = slRiskFrac > 0 || slMult > 0;
+  // Hard-mode triggers: limit must be crossed (mid penetrates by penalty) for TP;
+  // stop must be cleared (mid clears stop by penalty) for SL. Fills at the order
+  // level (TP gets exact limit, SL pays through ask on market exit).
+  const tpTrigger = FILL_MODE === 'hard' ? tpV - CLOSE_PENALTY_V : tpV;
+  const slTrigger = FILL_MODE === 'hard' ? slV + CLOSE_PENALTY_V : slV;
+  // Liquidity gate: honor a TP/SL only at a bar where the SHORT legs actually
+  // printed (p.shortsFresh). Rejects exits priced off a stale carried-forward
+  // SHORT close (the "false mid" that faked short hold times). Wings expire —
+  // their staleness is irrelevant. GATE_SHORTS=false reproduces legacy behavior.
   for(const p of traj){
     if(p.ts > effEnd) break;
-    if(tpFrac>0 && p.V <= tpV) return {exitTs:p.ts, exitV:Math.max(0,p.V), reason:'TP'};
-    if(slMult>0 && p.V >= slV) return {exitTs:p.ts, exitV:p.V, reason:'SL'};
+    const fillable = !GATE_SHORTS || p.shortsFresh;
+    if(tpFrac>0 && p.V <= tpTrigger && fillable) {
+      const exitV = FILL_MODE === 'hard' ? tpV : p.V + CLOSE_PENALTY_V;
+      return {exitTs:p.ts, exitV:Math.max(0,exitV), reason:'TP'};
+    }
+    if(slActive && p.V >= slTrigger && fillable) {
+      const exitV = FILL_MODE === 'hard' ? slV + CLOSE_PENALTY_V : p.V + CLOSE_PENALTY_V;
+      return {exitTs:p.ts, exitV, reason:'SL'};
+    }
   }
   // No TP/SL hit by effEnd.
   // Two cases:
@@ -305,7 +444,9 @@ function applyExit(traj:Array<{ts:number,V:number}>, endTs:number, legs:Leg[],
       V += lg.sign * c;
     }
     const reason = effEnd === endTs ? 'settle-mtm' : 'flip';
-    return {exitTs:effEnd, exitV: ok ? Math.max(0,V) : 0, reason};
+    // Both flip and settle-MTM require crossing the spread on each leg →
+    // apply pay-through-ask penalty. Skipped only for cash-settled expiry above.
+    return {exitTs:effEnd, exitV: ok ? Math.max(0, V + CLOSE_PENALTY_V) : 0, reason};
   }
 }
 
@@ -366,6 +507,7 @@ interface IronTradeRecord {
   entryTs:number; exitTs:number; durationSec:number;
   dir:'bull'|'bear';
   spxAtEntry:number; spxAtExit:number;
+  drift30:number;   // signed SPX 30-min drift at entry (spxAtEntry − spx 30min prior); + = uptrend
   center:number;
   shortPutSymbol:string;  shortPutStrike:number;  shortPutEntryMark:number;  shortPutExitMark:number;
   longPutSymbol:string;   longPutStrike:number;   longPutEntryMark:number;   longPutExitMark:number;
@@ -492,6 +634,9 @@ for(let di=0; di<RUN_DATES.length; di++){
       const spxEntry = optPx(s1, ev.entryTs - 1);
       if(spxEntry==null) continue;
 
+      // Optional trend gate: skip counter-trend signals.
+      if(trendGateBlocks(s1, ev.entryTs, ev.dir)) continue;
+
       // Flip cutoff for this signal direction
       let flipTs = Infinity;
       for(const [t, dirs] of dirLog){
@@ -530,12 +675,11 @@ for(let di=0; di<RUN_DATES.length; di++){
 
         const traj = buildTrajectory(legs, ev.entryTs, settle);
         const maxRisk = (st.wingWidth - credit) * 100;
-
         for(const ex of EXITS){
           // Compute natural exit and record P&L immediately (no position mgmt in sweep).
           // Concurrency tracked via overlapMap so dashboard can compute budget-scaled outcome.
           const flipUse = ex.useFlip ? flipTs : Infinity;
-          const nat = applyExit(traj, settle, legs, credit, ex.tpFrac, ex.slMult, flipUse, spxAtSettle);
+          const nat = applyExit(traj, settle, legs, credit, ex.tpFrac, ex.slMult, flipUse, spxAtSettle, st.wingWidth, ex.slRiskFrac ?? 0);
           const pnl_gross = (credit - nat.exitV) * 100;
           const pnl_net = pnl_gross - SLIPPAGE_PER_STRUCTURE;
           const durationSec = Math.max(0, nat.exitTs - ev.entryTs);
@@ -560,10 +704,13 @@ for(let di=0; di<RUN_DATES.length; di++){
               }
               return optPx(lg.bars, nat.exitTs) ?? 0;
             };
+            const spx30Prior = optPx(s1, ev.entryTs - 1 - 30*60);
+            const drift30 = (spx30Prior != null) ? (spxEntry - spx30Prior) : 0;
             const tr: IronTradeRecord = {
               entryTs: ev.entryTs, exitTs: nat.exitTs, durationSec,
               dir: ev.dir,
               spxAtEntry: spxEntry, spxAtExit,
+              drift30,
               center,
               shortPutSymbol: sym_sp, shortPutStrike: Kshort_put,
               shortPutEntryMark: entries_px[0] as number, shortPutExitMark: exitMark(legs[0], true),
@@ -651,7 +798,13 @@ for(const [k,v] of results){
              peakConcurrent:v.peakConcurrent, evictions:v.evictions,
              peakRiskCapacity:+(v.peakConcurrent * avgMaxRisk).toFixed(0),
              avgConcurrent, avgRiskCapacity, numActiveDays,
-             avgDurMin:+avgDurMin.toFixed(1)});
+             avgDurMin:+avgDurMin.toFixed(1),
+             // Fill-model provenance — stamped on every row so dashboard / archaeology
+             // can see which assumptions produced these numbers.
+             fillModel: FILL_MODE,
+             fillHalfSpread: CLOSE_HALFSPREAD_PER_LEG,
+             trendGateMin: TREND_GATE_MIN,
+             trendGateThresh: TREND_GATE_THRESH});
 }
 rows.sort((a,b)=>b.pnl-a.pnl);
 console.log(`Variants: ${rows.length}.  Positive net: ${rows.filter(r=>r.pnl>0).length}.\n`);
