@@ -1,9 +1,9 @@
 /**
  * long-config-sweep.ts
  *
- * Long-call sweep (v1): 27,000 variants (36 signals × 750 TP/SL combos, CB-off).
+ * Long-call sweep (v1): 10,800 variants (36 signals × 300 TP/SL combos, CB-off).
  * Signals: HMA/DEMA with 2+3+5, 2+3, and single timeframes (1m/2m/3m/5m).
- * TP: 10%-500% (by 10%), SL: 20%-90% (by 5%). Circuit breakers dropped for v1.
+ * TP: 25%-500% (by 25%, 20 vals), SL: 20%-90% (by 5%, 15 vals). CB dropped for v1.
  * Runs across date range (shardable via sweep-parallel.ts), stores to replay_summary.
  *
  * CRITICAL: NO look-ahead bias. Signal detected at bar CLOSE, entry filled at
@@ -97,7 +97,7 @@ const SIG_BY_LABEL = new Map<string, SignalSpec>(SIGNALS.map(s => [s.label, s]))
 function generateVariants(): ConfigVariant[] {
   const signals = SIGNALS;
   const tpsl: {tp: number; sl: number}[] = [];
-  for (let tp = 10; tp <= 500; tp += 10) {
+  for (let tp = 25; tp <= 500; tp += 25) {
     for (let sl = 20; sl <= 90; sl += 5) {
       tpsl.push({ tp, sl });
     }
