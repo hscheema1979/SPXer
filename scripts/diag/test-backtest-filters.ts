@@ -134,6 +134,16 @@ async function main() {
     vals.length && vals.every(v => v === '20%') ? ok(`all ${vals.length} rows SL=20%`) : bad(`SL leak: ${[...new Set(vals)].join(',')}`);
     await clearAll(page); await openFilters(page);
 
+    // ── Strike = 25ITM ──
+    console.log('\n[Strike = 25ITM]');
+    const idxStrike = await colIndex(page, 'Strike');
+    await selectByLabel(page, 'Strike', '25ITM');
+    const cStrike = await variantCount(page);
+    (cStrike > 0 && cStrike < base) ? ok(`narrowed ${base} → ${cStrike}`) : bad(`Strike=25ITM didn't narrow (${cStrike})`);
+    vals = await colValues(page, idxStrike);
+    vals.length && vals.every(v => v === '25ITM') ? ok(`all ${vals.length} rows Strike=25ITM`) : bad(`Strike leak: ${[...new Set(vals)].join(',')}`);
+    await clearAll(page); await openFilters(page);
+
     // ── Min WR% = 50 ──
     console.log('\n[Min WR% = 50]');
     {
