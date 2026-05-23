@@ -316,33 +316,38 @@ function buildTradeContexts(date: string, sig: SignalSpec, c1: any, p1: any): Tr
 // can be computed at write time exactly like runSummaryRebuild does.
 interface DayStat {
   trades: number; wins: number; pnl: number;       // pnl in $ (retPct × $100/pt notional)
+  pnlPct: number;                                   // sum of per-trade retPct (percent P&L)
   sumWinPct: number; cntWins: number;               // % returns of winning trades
   sumLossPct: number; cntLosses: number;            // % returns of losing trades
+  durSec: number;                                   // sum of hold durations (sec)
 }
 
 // Sweep a single TP/SL over the pre-built trade contexts. Cheap — just the
 // exit scan, no signal recomputation. CB-off for v1 (every entry taken).
 function simulateExits(ctxs: TradeCtx[], tpPct: number, slPct: number): DayStat {
-  let trades = 0, wins = 0, pnl = 0;
+  let trades = 0, wins = 0, pnl = 0, pnlPct = 0, durSec = 0;
   let sumWinPct = 0, cntWins = 0, sumLossPct = 0, cntLosses = 0;
   for (const ctx of ctxs) {
     const tp = ctx.entryPx * (1 + tpPct / 100);
     const sl = slPct > 0 ? ctx.entryPx * (1 - slPct / 100) : 0;
 
     let exitPx = optPx(ctx.bars, ctx.eod) ?? ctx.entryPx;
+    let exitTs = ctx.eod;
     for (const b of ctx.bars) {
       if (b.ts <= ctx.entryTs) continue;
       if (b.ts > ctx.eod) break;
-      if (b.high >= tp) { exitPx = tp; break; }
-      if (sl > 0 && b.low <= sl) { exitPx = sl; break; }
+      if (b.high >= tp) { exitPx = tp; exitTs = b.ts; break; }
+      if (sl > 0 && b.low <= sl) { exitPx = sl; exitTs = b.ts; break; }
     }
     const retPct = ((exitPx - ctx.entryPx) / ctx.entryPx) * 100;
     trades++;
     pnl += (exitPx - ctx.entryPx) * 100; // 1 contract × $100/pt
+    pnlPct += retPct;
+    durSec += Math.max(0, exitTs - ctx.entryTs);
     if (retPct > 0) { wins++; cntWins++; sumWinPct += retPct; }
     else { cntLosses++; sumLossPct += retPct; }
   }
-  return { trades, wins, pnl, sumWinPct, cntWins, sumLossPct, cntLosses };
+  return { trades, wins, pnl, pnlPct, sumWinPct, cntWins, sumLossPct, cntLosses, durSec };
 }
 
 // Per-config accumulator: every field the dashboard summary needs. The
@@ -351,9 +356,9 @@ function simulateExits(ctxs: TradeCtx[], tpPct: number, slPct: number): DayStat 
 // disjoint shards that loses true min/max, but for default edge-sort they're
 // secondary; the serial path (single shard) keeps them exact.
 interface Acc {
-  days: number; trades: number; wins: number; pnl: number;
+  days: number; trades: number; wins: number; pnl: number; pnlPct: number;
   sumWinPct: number; cntWins: number; sumLossPct: number; cntLosses: number;
-  profitDays: number; worstDay: number; bestDay: number;
+  profitDays: number; worstDay: number; bestDay: number; durSec: number;
 }
 
 // ── Main ────────────────────────────────────────────────────────────────────
@@ -401,15 +406,16 @@ async function main() {
         for (const variant of sigVariants) {
           const r = simulateExits(ctxs, variant.tp, variant.sl);
           const prev = results.get(variant.id) || {
-            days: 0, trades: 0, wins: 0, pnl: 0,
+            days: 0, trades: 0, wins: 0, pnl: 0, pnlPct: 0,
             sumWinPct: 0, cntWins: 0, sumLossPct: 0, cntLosses: 0,
-            profitDays: 0, worstDay: 0, bestDay: 0,
+            profitDays: 0, worstDay: 0, bestDay: 0, durSec: 0,
           };
           results.set(variant.id, {
             days: prev.days + 1,
             trades: prev.trades + r.trades,
             wins: prev.wins + r.wins,
             pnl: prev.pnl + r.pnl,
+            pnlPct: prev.pnlPct + r.pnlPct,
             sumWinPct: prev.sumWinPct + r.sumWinPct,
             cntWins: prev.cntWins + r.cntWins,
             sumLossPct: prev.sumLossPct + r.sumLossPct,
@@ -417,6 +423,7 @@ async function main() {
             profitDays: prev.profitDays + (r.pnl > 0 ? 1 : 0),
             worstDay: Math.min(prev.worstDay, r.pnl),
             bestDay: Math.max(prev.bestDay, r.pnl),
+            durSec: prev.durSec + r.durSec,
           });
         }
       }
@@ -441,9 +448,64 @@ async function main() {
   }
 
   writeToDb(variants, results as Map<string, Acc>);
+  writeLongSweepJson(variants, results as Map<string, Acc>);
 
   let totalTrades = 0; results.forEach(r => { totalTrades += r.trades; });
   console.log(`[long-config-sweep] Completed: ${results.size} configs, ${totalTrades} trades`);
+}
+
+// Emit the flat long-sweep.json the studio backtest page loads (source:'long'
+// rows). Schema mirrors spread-sweep.json's relevant fields so the existing
+// filter/sort UI works unchanged; long-specific fields (tp/sl/maType/tfClass).
+function writeLongSweepJson(variants: ConfigVariant[], results: Map<string, Acc>) {
+  const rows: any[] = [];
+  for (const variant of variants) {
+    const res = results.get(variant.id);
+    if (!res || res.days <= 0 || res.trades <= 0) continue;
+
+    const wr = res.trades > 0 ? (100 * res.wins) / res.trades : 0;
+    const avgWin = res.cntWins > 0 ? res.sumWinPct / res.cntWins : 0;
+    const avgLoss = res.cntLosses > 0 ? res.sumLossPct / res.cntLosses : 0; // negative
+    const ratio = avgLoss !== 0 ? avgWin / Math.abs(avgLoss) : 0;            // R-multiple
+    const avgDurMin = res.trades > 0 ? res.durSec / res.trades / 60 : 0;
+    const tfList = variant.tfs.map(t => `${t.tf}m`).join('+');
+    const maType = variant.signal === 'dema' ? 'DEMA' : 'HMA';
+
+    rows.push({
+      source: 'long',
+      configId: variant.id,
+      // 'signal' drives the viewer's signal/TF/MA-type filters: "<MA> <tf> <fast>x<slow>"
+      signal: variant.tfs.length > 1
+        ? `${maType} ${variant.tfs.map(t => t.tf).join('+')} ${variant.tfs[0].fast}x${variant.tfs[0].slow}`
+        : `${maType} ${variant.tfs[0].tf}m ${variant.tfs[0].fast}x${variant.tfs[0].slow}`,
+      spread: 'long',
+      exit: `${variant.tp}TP/${variant.sl}SL`,
+      tp: variant.tp,
+      sl: variant.sl,
+      maType,
+      tfClass: variant.tfs.length > 1 ? 'multi' : `${variant.tfs[0].tf}m`,
+      pnl: +res.pnl.toFixed(1),               // dollars (1 contract)
+      pnlPct: +res.pnlPct.toFixed(1),         // sum of per-trade retPct
+      n: res.trades,
+      wins: res.wins,
+      wr: +wr.toFixed(2),
+      dd: +Math.abs(res.worstDay).toFixed(1), // proxy: worst single-day loss
+      ratio: +ratio.toFixed(2),
+      pos: res.profitDays,
+      worstDay: +res.worstDay.toFixed(1),
+      bestDay: +res.bestDay.toFixed(1),
+      avgCredit: 0,
+      avgMaxRisk: 0,
+      avgPnlPerTrade: res.trades > 0 ? +(res.pnl / res.trades).toFixed(2) : 0,
+      avgDurMin: +avgDurMin.toFixed(1),
+      numActiveDays: res.days,
+    });
+  }
+
+  const outFile = path.join(process.cwd(), 'scripts/autoresearch/output', `long-sweep${TARGET.outSuffix}.json`);
+  fs.mkdirSync(path.dirname(outFile), { recursive: true });
+  fs.writeFileSync(outFile, JSON.stringify(rows));
+  console.log(`[long-config-sweep] Wrote ${rows.length} rows → ${outFile}`);
 }
 
 // Compute dashboard metrics (edge/EV/R-multiple/winRate) the same way
