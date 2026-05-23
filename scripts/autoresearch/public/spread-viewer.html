@@ -1,0 +1,1093 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#07090f">
+<title>Spreads — SPXer</title>
+<link rel="stylesheet" href="/spxer/static/spxer-shell.css">
+<script src="/spxer/static/spxer-shell.js" defer></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'SF Mono','Consolas','Menlo',monospace;background:var(--bg);color:#c9d1d9;font-size:12px;height:calc(100vh - var(--nav-height));display:flex;flex-direction:column;overflow:hidden}
+#hdr{display:flex;align-items:center;gap:14px;padding:8px 14px;background:#161b22;border-bottom:1px solid #30363d;flex-shrink:0;flex-wrap:wrap}
+#hdr h1{font-size:14px;font-weight:700;color:#f0f6fc;letter-spacing:-0.3px}
+#hdr .sub{font-size:10px;color:#484f58;letter-spacing:0.05em}
+#hdr a{color:#58a6ff;text-decoration:none;font-size:11px}
+#hdr a:hover{text-decoration:underline}
+#filters{display:flex;align-items:center;gap:10px;padding:9px 14px;background:#0d1117;border-bottom:1px solid #21262d;flex-wrap:wrap;flex-shrink:0}
+#sizing{display:flex;align-items:center;gap:10px;padding:9px 14px;background:#0f1419;border-bottom:1px solid #21262d;flex-wrap:wrap;flex-shrink:0}
+#sizing .fgroup .flabel{color:#56d364}
+.hidden{display:none !important}
+.fgroup{display:flex;align-items:center;gap:5px}
+.flabel{font-size:10px;color:#7d8590;text-transform:uppercase;letter-spacing:0.05em}
+select,input{background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:4px 6px;font-family:inherit;font-size:11px;border-radius:3px;cursor:pointer}
+select:hover,input:hover{border-color:#58a6ff}
+select:focus,input:focus{outline:none;border-color:#58a6ff}
+input[type=number]{width:80px;cursor:text}
+input[type=text]{width:160px;cursor:text}
+button{background:#21262d;border:1px solid #30363d;color:#c9d1d9;padding:4px 10px;font-family:inherit;font-size:11px;border-radius:3px;cursor:pointer}
+button:hover{background:#30363d;border-color:#58a6ff}
+#count{margin-left:auto;color:#7d8590;font-size:11px}
+#tablewrap{flex:1;overflow:auto;padding:0 4px}
+table{width:100%;border-collapse:collapse;font-size:11px}
+thead{position:sticky;top:0;background:#161b22;z-index:1}
+th{padding:6px 8px;text-align:left;color:#7d8590;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;font-size:10px;border-bottom:1px solid #30363d;cursor:pointer;user-select:none;white-space:nowrap}
+th:hover{color:#58a6ff}
+th.sorted{color:#58a6ff}
+th.num,td.num{text-align:right}
+tbody tr{border-bottom:1px solid #21262d}
+tbody tr:hover{background:#161b22}
+td{padding:5px 8px;white-space:nowrap}
+td.pos{color:#3fb950}
+td.neg{color:#f85149}
+td.signal{color:#d2a8ff}
+td.spread{color:#79c0ff}
+td.exit{color:#ffa657}
+.pill{display:inline-block;padding:1px 6px;border-radius:3px;font-size:10px;background:#21262d;color:#7d8590}
+.pill.itm{background:#3d2912;color:#ffa657}
+.pill.otm{background:#0c2d3d;color:#79c0ff}
+.pill.atm{background:#163838;color:#56d364}
+.pill.long{background:#2d1b3d;color:#d2a8ff}
+.pill.ib{background:#3d2b12;color:#ffb454}      /* iron butterfly */
+.pill.ic{background:#1d3d2b;color:#7ee787}      /* iron condor */
+#tabs{display:flex;gap:1px;padding:0 14px;background:#161b22;border-bottom:1px solid #30363d;flex-shrink:0}
+.tab{padding:7px 14px;color:#7d8590;cursor:pointer;font-size:11px;border-right:1px solid #21262d;font-weight:600;text-transform:uppercase;letter-spacing:0.05em}
+.tab:hover{background:#21262d;color:#c9d1d9}
+.tab.on{background:#0d1117;color:#58a6ff;border-bottom:2px solid #58a6ff;margin-bottom:-1px}
+.tpanel{display:none;flex:1;overflow:auto;flex-direction:column;min-height:0}
+.tpanel.on{display:flex}
+.sel-cell{cursor:pointer;text-align:center;width:24px}
+.sel-cell input{cursor:pointer;margin:0}
+#selectedBar{padding:7px 14px;background:#0f1419;border-bottom:1px solid #21262d;font-size:11px;color:#7d8590;display:flex;align-items:center;gap:10px}
+#selectedBar button{margin-left:auto}
+#chartPanel canvas{max-height:520px}
+#hmGrid{display:grid;gap:0;padding:8px}
+.hm-row{display:grid;align-items:center}
+.hm-label{padding:2px 6px;color:#c9d1d9;font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;background:#161b22;border-right:1px solid #30363d;position:sticky;left:0;z-index:1}
+.hm-cell{height:14px;border-right:1px solid #0d1117;cursor:default}
+.hm-cell:hover{outline:1px solid #58a6ff;outline-offset:-1px;position:relative;z-index:2}
+.kpi{display:flex;gap:18px;padding:10px 14px;background:#0f1419;border-bottom:1px solid #21262d;font-size:11px}
+.kpi .kg{display:flex;flex-direction:column}
+.kpi .kl{color:#7d8590;font-size:9px;text-transform:uppercase}
+.kpi .kv{color:#c9d1d9;font-size:13px;font-weight:600}
+.kpi .kv.pos{color:#3fb950}
+.kpi .kv.neg{color:#f85149}
+</style>
+</head>
+<body>
+<div id="hdr">
+  <h1>Credit Spread Sweep</h1>
+  <span class="sub">3,240 variants · 277 days · $15/RT slippage · look-ahead protected</span>
+  <a id="studioLink" href="/">← Strategy Studio</a>
+</div>
+<div id="filters">
+  <div class="fgroup"><span class="flabel">Signal</span>
+    <select id="fSig"><option value="">all</option></select>
+  </div>
+  <div class="fgroup"><span class="flabel">Signal TF</span>
+    <select id="fTf"><option value="">all</option><option value="1m">1m</option><option value="2m">2m</option><option value="3m">3m</option><option value="5m">5m</option><option value="multi">multi</option></select>
+  </div>
+  <div class="fgroup"><span class="flabel">Type</span>
+    <select id="fType"><option value="">all</option><option value="hma">HMA</option><option value="dema">DEMA</option></select>
+  </div>
+  <div class="fgroup"><span class="flabel">Spread</span>
+    <select id="fSpread"><option value="">all</option></select>
+  </div>
+  <div class="fgroup"><span class="flabel">Spread class</span>
+    <select id="fClass"><option value="">all</option><option value="ITM">ITM</option><option value="ATM">ATM</option><option value="OTM">OTM</option><option value="IB">Iron Butterfly</option><option value="IC">Iron Condor</option><option value="LONG">Long</option></select>
+  </div>
+  <div class="fgroup"><span class="flabel">Exit</span>
+    <select id="fExit"><option value="">all</option></select>
+  </div>
+  <div class="fgroup"><span class="flabel">Min $Net</span>
+    <input type="number" id="fMinPnl" placeholder="0">
+  </div>
+  <div class="fgroup"><span class="flabel">Min Ratio</span>
+    <input type="number" id="fMinRatio" placeholder="0" step="0.5">
+  </div>
+  <div class="fgroup"><span class="flabel">Min WR%</span>
+    <input type="number" id="fMinWr" placeholder="0">
+  </div>
+  <div class="fgroup"><span class="flabel">Min N</span>
+    <input type="number" id="fMinN" placeholder="0">
+  </div>
+  <div class="fgroup"><span class="flabel">Min CapLift</span>
+    <input type="number" id="fMinCapLift" placeholder="0" title="Min gain from a per-side sub-cap at pool 11">
+  </div>
+  <div class="fgroup"><span class="flabel">Source</span>
+    <select id="fSource"><option value="">all</option><option value="spread">spreads</option><option value="long">long</option></select>
+  </div>
+  <div class="fgroup"><span class="flabel">Search</span>
+    <input type="text" id="fSearch" placeholder="any text...">
+  </div>
+  <button onclick="resetFilters()">Reset</button>
+  <span id="count">—</span>
+</div>
+<div id="sizing">
+  <div class="fgroup"><span class="flabel">Sizing</span>
+    <select id="szMode">
+      <option value="1">1 contract (raw)</option>
+      <option value="fixedN">Fixed contracts</option>
+      <option value="fixed$">$ / trade</option>
+      <option value="pct">% of account</option>
+    </select>
+  </div>
+  <div class="fgroup" id="szNGrp"><span class="flabel">Contracts</span>
+    <input type="number" id="szN" value="1" min="1">
+  </div>
+  <div class="fgroup hidden" id="szDollarsGrp"><span class="flabel">$/trade</span>
+    <input type="number" id="szDollars" value="2500" min="50" step="50">
+  </div>
+  <div class="fgroup hidden" id="szAcctGrp"><span class="flabel">Account $</span>
+    <input type="number" id="szAcct" value="25000" min="1000" step="1000">
+  </div>
+  <div class="fgroup hidden" id="szPctGrp"><span class="flabel">% per trade</span>
+    <input type="number" id="szPct" value="10" min="0.1" step="0.5">
+  </div>
+  <div class="fgroup hidden" id="szMaxGrp"><span class="flabel">Max contracts</span>
+    <input type="number" id="szMax" value="10" min="1">
+  </div>
+  <div class="fgroup" id="szLongDollarsGrp" style="border-left:1px solid #21262d;padding-left:10px;margin-left:10px"><span class="flabel">Long $/trade</span>
+    <input type="number" id="szLongDollars" value="2500" min="100" step="100" title="Dollars allocated per long trade. In $/trade or %-account modes, the main budget is used instead.">
+  </div>
+  <div class="fgroup" id="szLongMaxGrp"><span class="flabel">Long max contracts</span>
+    <input type="number" id="szLongMax" value="5" min="1" title="Max contracts per long trade. In $/trade or %-account modes, the main max is used instead.">
+  </div>
+  <span class="flabel" id="sizingHint" style="margin-left:auto;">longs sized via Long $/trade & max above</span>
+</div>
+<div id="tabs">
+  <div class="tab on" data-tab="table" onclick="setTab('table')">Table</div>
+  <div class="tab" data-tab="chart" onclick="setTab('chart')">Equity Curves</div>
+  <div class="tab" data-tab="heatmap" onclick="setTab('heatmap')">Daily Heatmap</div>
+  <div class="tab" data-tab="coverage" onclick="setTab('coverage')">Coverage Grid</div>
+  <div class="tab" data-tab="regime" onclick="setTab('regime')">Regime</div>
+  <div class="tab" data-tab="corr" onclick="setTab('corr')">Correlation</div>
+  <div class="tab" data-tab="live" onclick="setTab('live')">Live</div>
+</div>
+<div id="liveBanner" style="padding:6px 14px;background:#0d1117;border-bottom:1px solid #30363d;font-size:11px;color:#8b949e;display:flex;gap:14px;align-items:center;flex-wrap:wrap">
+  <span style="color:#58a6ff;font-weight:600">LIVE CONFIGS:</span>
+  <span id="liveBannerContent" style="color:#8b949e">loading…</span>
+  <button onclick="loadLiveConfigs()" style="margin-left:auto;font-size:10px">↻</button>
+</div>
+<div id="selectedBar">
+  <span id="selCount">0 selected</span>
+  <span style="color:#484f58">·</span>
+  <span id="selCombinedPnl">combined $0</span>
+  <span style="color:#484f58">·</span>
+  <span id="selCombinedDd">combined DD $0</span>
+  <button onclick="clearSelection()">Clear</button>
+  <button onclick="selectTopN(5)">Top 5</button>
+  <button onclick="selectTopN(10)">Top 10</button>
+</div>
+<div class="tpanel on" id="panel-table">
+<div id="tablewrap">
+  <table id="tbl">
+    <thead>
+      <tr>
+        <th class="sel-cell"><input type="checkbox" id="selAll" onclick="toggleAll(this.checked)"></th>
+        <th data-key="signal">Signal</th>
+        <th data-key="spread">Spread</th>
+        <th data-key="exit">Exit</th>
+        <th class="num" data-key="contracts">Contracts</th>
+        <th class="num" data-key="avgMaxRisk">$Risk/trade</th>
+        <th class="num" data-key="avgCredit">Credit</th>
+        <th class="num" data-key="peakConcurrent">Peak</th>
+        <th class="num sorted" data-key="scaledPnl">$Net ↓</th>
+        <th class="num" data-key="avgPnl">$/trade</th>
+        <th class="num" data-key="n">N</th>
+        <th class="num" data-key="wr" title="Full-history win rate. $Net/$DD are full-history too (no cap proration); the real position-cap impact is the Cap$@11 column.">WR%</th>
+        <th class="num" data-key="scaledDd">$DD</th>
+        <th class="num" data-key="ratio">Ratio</th>
+        <th class="num" data-key="pos">+days</th>
+        <th class="num" data-key="capBest11Net" title="Best net at pool 11 with a per-side sub-cap">Cap$@11</th>
+        <th class="num" data-key="capLift11" title="Gain from the best per-side sub-cap vs no sub-cap, same pool 11">CapLift</th>
+        <th data-key="capBest11Pol" title="Best cap policy at pool 11 (which side to throttle)">CapPolicy</th>
+        <th class="num" style="min-width:60px">Live</th>
+      </tr>
+    </thead>
+    <tbody id="tbody"></tbody>
+  </table>
+</div>
+</div>
+<div class="tpanel" id="panel-chart">
+  <div class="kpi" id="chartKpi"></div>
+  <div style="padding:14px;flex:1;min-height:0;display:flex;flex-direction:column">
+    <canvas id="pnlCanvas"></canvas>
+  </div>
+</div>
+<div class="tpanel" id="panel-heatmap">
+  <div style="padding:8px 14px;color:#7d8590;font-size:11px">
+    Rows = selected variants (+ combined). Cells = daily P&L (green = positive, red = negative).
+    Cell intensity scaled to max abs P&L across visible cells.
+  </div>
+  <div id="hmGrid"></div>
+</div>
+<div class="tpanel" id="panel-coverage">
+  <div style="padding:8px 14px;color:#7d8590;font-size:11px">
+    Per-day P&amp;L grid · rows = dates · columns = variants + Portfolio (with running cumulative).
+    Regime ▲ Bull (+15pts) · ▼ Bear (-15pts) · ─ Flat.
+  </div>
+  <div id="coverageWrap" style="padding:8px 14px;overflow:auto;flex:1"></div>
+</div>
+<div class="tpanel" id="panel-regime">
+  <div style="padding:8px 14px;color:#7d8590;font-size:11px">
+    Avg daily P&L per variant, split by SPX regime (▲ Bull: +15pts &lbrace;close-open&rbrace; · ▼ Bear: -15pts · ─ Flat: |move|&lt;15pts).
+    Helps identify which strategies work in which markets.
+  </div>
+  <div id="regimeTbl" style="padding:8px 14px;overflow:auto"></div>
+</div>
+<div class="tpanel" id="panel-corr">
+  <div style="padding:8px 14px;color:#7d8590;font-size:11px">
+    Daily P&L correlation between selected variants. Low correlation = diversification benefit.
+    Combine variants with correlation &lt; 0.3 for risk reduction.
+  </div>
+  <div id="corrTbl" style="padding:8px 14px;overflow:auto"></div>
+</div>
+
+<div class="tpanel" id="panel-live">
+  <div style="padding:8px 14px;color:#7d8590;font-size:11px;display:flex;gap:12px;align-items:center">
+    <span>Live optionx configs. Status from PM2 — must be online to actually trade.</span>
+    <button onclick="loadLiveConfigs()" style="margin-left:auto">Refresh</button>
+  </div>
+  <div id="liveTbl" style="padding:8px 14px;overflow:auto"></div>
+</div>
+
+<script>
+// BASE = directory of current URL (works under /spxer/backtest/ proxy + local /spreads)
+const BASE = window.location.pathname.replace(/\/spreads\/?$/,'').replace(/\/$/,'');
+document.getElementById('studioLink').href = BASE + '/';
+
+let rows = [];
+let sortKey = 'scaledPnl';
+let sortDir = -1;
+let selected = new Set();          // Set of variant keys
+let allDates = [];                  // Available dates from daily meta
+let spxMoveByDate = {};             // date → SPX close-open in pts (for regime)
+let dailyCache = {};                // key → array of pnl per date
+let chartInst = null;
+
+function variantKey(r){
+  if(r.source==='long') return 'long::' + r.signal;
+  return `${r.signal}|${r.spread}|${r.exit}`;
+}
+
+async function load(){
+  // 1. Spread sweep summary
+  const spreadRows = await fetch(BASE + '/api/spreads').then(r=>r.json());
+  spreadRows.forEach(r=>{r.source='spread';});
+  rows = spreadRows;
+  // 2. Long strategies (separate fetch with current sizing)
+  await loadLongs(false);
+  // 3. Daily metadata (dates list for spreads)
+  try {
+    const meta = await fetch(BASE + '/api/spreads/daily').then(r=>r.json());
+    if(meta.dates && meta.dates.length) allDates = meta.dates;
+  } catch {}
+  // 4. Populate filter dropdowns once
+  const sigs = [...new Set(rows.map(r=>r.signal.trim()))].sort();
+  const spreads = [...new Set(rows.map(r=>r.spread))].sort((a,b)=>{
+    function rank(s){
+      // Iron butterflies first (group=0), iron condors next (group=1), then ITM (2), ATM (3), OTM (4), long (5)
+      if (s.startsWith('IB ')) { const w=parseInt(s.replace(/\D+/,''))||0; return [0,0,w]; }
+      if (s.startsWith('IC ')) { const m=s.match(/(\d+)w(\d+)/); return [1,parseInt(m?.[1]||'0'),parseInt(m?.[2]||'0')]; }
+      if (s==='long') return [5,0,0];
+      const m=s.match(/(\d+)?(ITM|ATM|OTM)\s*w(\d+)/);
+      if(!m) return [99,0,0];
+      const grp=({'ITM':2,'ATM':3,'OTM':4})[m[2]];
+      return [grp,(grp===2?-1:1)*Number(m[1]||0),Number(m[3])];
+    }
+    const [a1,a2,a3]=rank(a),[b1,b2,b3]=rank(b);
+    return a1-b1||a2-b2||a3-b3;
+  });
+  const exits = [...new Set(rows.map(r=>r.exit))];
+  const sigSel=document.getElementById('fSig'), spSel=document.getElementById('fSpread'), exSel=document.getElementById('fExit');
+  sigs.forEach(s=>sigSel.innerHTML+=`<option value="${s}">${s}</option>`);
+  spreads.forEach(s=>spSel.innerHTML+=`<option value="${s}">${s}</option>`);
+  exits.forEach(e=>exSel.innerHTML+=`<option value="${e}">${e}</option>`);
+  document.getElementById('count').textContent = `${spreadRows.length.toLocaleString()} spreads + ${rows.filter(r=>r.source==='long').length} long`;
+  render();
+}
+
+// Fetch (or refetch) long-strategy data with current sizing params and merge into rows.
+async function loadLongs(rerender){
+  const sz = getSizing();
+  const lb = longBudget(sz);
+  let longSummary = [], longDates = [], longSeries = {}, longSpxMove = [];
+  try {
+    const url = BASE + `/api/longs?dollars=${Math.round(lb.dollars)}&max=${lb.max}`;
+    const longs = await fetch(url).then(r=>r.json());
+    longSummary = longs.summary || [];
+    longDates = longs.dates || [];
+    longSeries = longs.series || {};
+    longSpxMove = longs.spxMove || [];
+  } catch(e){ console.error('long fetch failed', e); }
+  for(let i=0;i<longDates.length;i++) if(longSpxMove[i]) spxMoveByDate[longDates[i]] = longSpxMove[i];
+  const longRows = longSummary.map(s=>({
+    source:'long',
+    signal: s.name,
+    spread: 'long',
+    exit:   `${s.tp ?? '-'}TP/${s.sl ?? '-'}SL`,
+    pnl:    s.total ?? 0,
+    dd:     s.dd,
+    n:      s.trades,
+    wins:   s.wins,
+    wr:     s.wr,
+    ratio:  s.ratio,
+    pos:    s.posdays,
+    avgCredit: 0,
+    avgMaxRisk: 0,
+    avgPnlPerTrade: s.trades>0 ? s.total/s.trades : 0,
+  }));
+  for(const k of Object.keys(dailyCache)) if(k.startsWith('long::')) delete dailyCache[k];
+  for(const k in longSeries) dailyCache['long::'+k] = longSeries[k];
+  // Update rows: keep spreads, replace longs
+  const spreadOnly = rows.filter(r=>r.source==='spread');
+  rows = spreadOnly.concat(longRows);
+  if(!allDates.length && longDates.length) allDates = longDates;
+  if(rerender){ render(); refreshAuxPanels(); }
+}
+function tfClass(sig){
+  const s = sig.trim().split(/\s+/);
+  return s[1].includes('+') ? 'multi' : s[1];
+}
+function typeOf(sig){
+  return sig.trim().split(/\s+/)[0].toLowerCase();
+}
+function spreadClass(spread){
+  if(spread==='long') return 'LONG';
+  if(spread.startsWith('IB ')) return 'IB';
+  if(spread.startsWith('IC ')) return 'IC';
+  if(spread.includes('ITM')) return 'ITM';
+  if(spread.includes('OTM')) return 'OTM';
+  return 'ATM';
+}
+function fmt$(n){
+  const sign=n>=0?'+':'';
+  return sign+'$'+Math.round(n).toLocaleString();
+}
+function applyFilters(arr){
+  const fSig=document.getElementById('fSig').value;
+  const fTf=document.getElementById('fTf').value;
+  const fType=document.getElementById('fType').value;
+  const fSpread=document.getElementById('fSpread').value;
+  const fClass=document.getElementById('fClass').value;
+  const fExit=document.getElementById('fExit').value;
+  const fMinPnl=parseFloat(document.getElementById('fMinPnl').value);
+  const fMinRatio=parseFloat(document.getElementById('fMinRatio').value);
+  const fMinWr=parseFloat(document.getElementById('fMinWr').value);
+  const fMinN=parseFloat(document.getElementById('fMinN').value);
+  const fMinCapLift=parseFloat(document.getElementById('fMinCapLift').value);
+  const fSearch=document.getElementById('fSearch').value.toLowerCase();
+  const fSource=document.getElementById('fSource').value;
+  return arr.filter(r=>{
+    if(fSource && r.source!==fSource) return false;
+    if(fSig && r.signal.trim()!==fSig) return false;
+    if(fTf && tfClass(r.signal)!==fTf) return false;
+    if(fType && typeOf(r.signal)!==fType) return false;
+    if(fSpread && r.spread!==fSpread) return false;
+    if(fClass && spreadClass(r.spread)!==fClass) return false;
+    if(fExit && r.exit!==fExit) return false;
+    if(!isNaN(fMinPnl) && r.pnl<fMinPnl) return false;
+    if(!isNaN(fMinRatio) && r.ratio<fMinRatio) return false;
+    if(!isNaN(fMinWr) && r.wr<fMinWr) return false;
+    if(!isNaN(fMinN) && r.n<fMinN) return false;
+    if(!isNaN(fMinCapLift) && (r.capLift11??0)<fMinCapLift) return false;
+    if(fSearch){
+      const blob = (r.signal+' '+r.spread+' '+r.exit+' '+(r.capBest11Pol||'')).toLowerCase();
+      if(!blob.includes(fSearch)) return false;
+    }
+    return true;
+  });
+}
+function getSizing(){
+  return {
+    mode: document.getElementById('szMode').value,
+    N:       Math.max(1, parseFloat(document.getElementById('szN').value)||1),
+    dollars: Math.max(1, parseFloat(document.getElementById('szDollars').value)||0),
+    acct:    Math.max(1, parseFloat(document.getElementById('szAcct').value)||0),
+    pct:     Math.max(0, parseFloat(document.getElementById('szPct').value)||0),
+    max:     Math.max(1, parseFloat(document.getElementById('szMax').value)||1),
+    longDollars: Math.max(100, parseFloat(document.getElementById('szLongDollars').value)||2500),
+    longMax:     Math.max(1,   parseFloat(document.getElementById('szLongMax').value)||5),
+  };
+}
+// Effective per-trade $ budget and max contracts for LONGS.
+// In $/trade or %-account modes, the spread budget applies to longs too.
+// In 1-contract or Fixed-N modes, use the long-specific inputs.
+function longBudget(sz){
+  if(sz.mode === 'fixed$') return {dollars: sz.dollars, max: sz.max};
+  if(sz.mode === 'pct')    return {dollars: sz.acct * sz.pct / 100, max: sz.max};
+  return {dollars: sz.longDollars, max: sz.longMax};
+}
+function contractsFor(r, sz){
+  if(r.source==='long') return 1;  // long sizing is via $/1% rate, not contract count
+  const risk = r.avgMaxRisk || 0;
+  if(sz.mode==='1') return 1;
+  if(sz.mode==='fixedN') return Math.max(1, Math.floor(sz.N));
+  if(sz.mode==='fixed$'){
+    if(risk<=0) return 0;
+    return Math.max(0, Math.min(sz.max, Math.floor(sz.dollars / risk)));
+  }
+  if(sz.mode==='pct'){
+    const budget = sz.acct * (sz.pct/100);
+    if(risk<=0) return 0;
+    return Math.max(0, Math.min(sz.max, Math.floor(budget / risk)));
+  }
+  return 1;
+}
+// Capture fraction = how many trades survive a budget cap when actual sweep had
+// peakConcurrent open at peak. Linear approximation:
+//   budget_allows_concurrent = floor(budget / avgMaxRisk)
+//   capture_fraction = min(1, budget_allows_concurrent / peakConcurrent)
+// At budget ≥ peakConcurrent × avgMaxRisk → fraction=1 (capture everything).
+// At smaller budgets → fraction < 1, scaled pnl drops proportionally.
+function captureFraction(r, sz){
+  if(r.source === 'long') return 1;            // longs handled via dollarScale
+  if(!r.peakConcurrent || !r.avgMaxRisk) return 1;
+  let budget = 0;
+  if(sz.mode === 'fixed$')      budget = sz.dollars;
+  else if(sz.mode === 'pct')    budget = sz.acct * (sz.pct/100);
+  else if(sz.mode === 'fixedN') budget = sz.N * r.avgMaxRisk;
+  else return 1;                                // 1-contract or anything else
+  const concurrentAllowed = Math.floor(budget / r.avgMaxRisk);
+  if(concurrentAllowed >= r.peakConcurrent) return 1;
+  return Math.max(0, concurrentAllowed / r.peakConcurrent);
+}
+// Scale factor that converts a row's stored pnl unit into displayed $.
+// Spreads: stored in $-per-1-contract, multiply by contracts.
+// Long:    stored in $ already (computed server-side via /api/longs?dollars=...&max=...).
+//          So scale is 1.
+function dollarScale(r, sz){
+  if(r.source==='long') return 1;
+  return contractsFor(r, sz);
+}
+function decorate(r, sz){
+  const c = contractsFor(r, sz);
+  const k = dollarScale(r, sz);
+  // NO capture proration. $Net/$DD are full-history, contract-scaled only — the
+  // real position-cap impact is the simulated Cap$@11 column, not a peak-proration haircut.
+  return Object.assign({}, r, {
+    contracts: c,
+    dollarScale: k,
+    scaledPnl: r.pnl * k,
+    scaledDd:  r.dd  * k,
+    avgPnl:    (r.avgPnlPerTrade ?? (r.pnl/Math.max(1,r.n))) * k,
+  });
+}
+function render(){
+  const sz = getSizing();
+  let arr = applyFilters(rows).map(r=>decorate(r, sz));
+  arr.sort((a,b)=>{
+    const av = a[sortKey] ?? 0, bv = b[sortKey] ?? 0;
+    if(typeof av === 'string') return av.localeCompare(bv)*sortDir;
+    return (av-bv)*sortDir;
+  });
+  const tbody = document.getElementById('tbody');
+  tbody.innerHTML = arr.slice(0,500).map(r=>{
+    const isLong = r.source==='long';
+    const cls = isLong ? 'long' : spreadClass(r.spread).toLowerCase();
+    const cZero = (!isLong && r.contracts<=0) ? ' style="opacity:0.4"' : '';
+    const k = variantKey(r);
+    const isSel = selected.has(k);
+    const lb = longBudget(getSizing());
+    const contractsCell = isLong ? `$${Math.round(lb.dollars).toLocaleString()}/≤${lb.max}c` : String(r.contracts);
+    const riskCell = isLong ? '—' : `$${Math.round(r.avgMaxRisk??0).toLocaleString()}`;
+    const credCell = isLong ? '—' : `$${(r.avgCredit??0).toFixed(2)}`;
+    return `<tr${cZero} data-key="${k.replace(/"/g,'&quot;')}">
+      <td class="sel-cell"><input type="checkbox" ${isSel?'checked':''} onchange="toggleRow(this,'${k.replace(/'/g,"\\'")}')"></td>
+      <td class="signal">${r.signal}</td>
+      <td class="spread"><span class="pill ${cls}">${r.spread}</span></td>
+      <td class="exit">${r.exit}</td>
+      <td class="num">${contractsCell}</td>
+      <td class="num">${riskCell}</td>
+      <td class="num">${credCell}</td>
+      <td class="num">${r.source==='long'?'—':(r.peakConcurrent ?? '—')}</td>
+      <td class="num ${r.scaledPnl>=0?'pos':'neg'}">${fmt$(r.scaledPnl)}</td>
+      <td class="num ${r.avgPnl>=0?'pos':'neg'}">${fmt$(r.avgPnl)}</td>
+      <td class="num">${r.n.toLocaleString()}</td>
+      <td class="num">${r.wr.toFixed(1)}</td>
+      <td class="num">$${Math.round(r.scaledDd).toLocaleString()}</td>
+      <td class="num ${r.ratio>=1?'pos':r.ratio<0?'neg':''}">${r.ratio.toFixed(2)}</td>
+      <td class="num">${r.pos}</td>
+      <td class="num ${(r.capBest11Net??0)>=0?'pos':'neg'}">${(r.capBest11Net!=null&&r.source!=='long')?fmt$(r.capBest11Net):'—'}</td>
+      <td class="num ${(r.capLift11??0)>0?'pos':''}">${(r.capLift11!=null&&r.source!=='long')?fmt$(r.capLift11):'—'}</td>
+      <td style="font-size:10px;color:#8b949e">${(r.capBest11Pol&&r.source!=='long')?r.capBest11Pol:'—'}</td>
+      <td class="num">${isLong ? '—' : `<button class="takelive" onclick="takeLive(${JSON.stringify(r).replace(/"/g,'&quot;')})">→ Live</button>`}</td>
+    </tr>`;
+  }).join('');
+  updateSelectionBar();
+  const cnt = document.getElementById('count');
+  cnt.textContent = `${arr.length.toLocaleString()} of ${rows.length.toLocaleString()} variants${arr.length>500?' (showing top 500)':''}`;
+  document.querySelectorAll('th').forEach(th=>{
+    const txt=th.textContent.replace(/[↑↓]\s*$/,'').trim();
+    if(th.dataset.key===sortKey){
+      th.classList.add('sorted');
+      th.textContent = txt+' '+(sortDir<0?'↓':'↑');
+    } else {
+      th.classList.remove('sorted');
+      th.textContent = txt;
+    }
+  });
+}
+function updateSizingVisibility(){
+  const m = document.getElementById('szMode').value;
+  document.getElementById('szNGrp').classList.toggle('hidden', m!=='fixedN');
+  document.getElementById('szDollarsGrp').classList.toggle('hidden', m!=='fixed$');
+  document.getElementById('szAcctGrp').classList.toggle('hidden', m!=='pct');
+  document.getElementById('szPctGrp').classList.toggle('hidden', m!=='pct');
+  document.getElementById('szMaxGrp').classList.toggle('hidden', m!=='fixed$' && m!=='pct');
+  // When unified budget applies, hide long-specific inputs
+  const unified = (m==='fixed$' || m==='pct');
+  document.getElementById('szLongDollarsGrp').classList.toggle('hidden', unified);
+  document.getElementById('szLongMaxGrp').classList.toggle('hidden', unified);
+  document.getElementById('sizingHint').textContent = unified
+    ? 'longs share the same budget & max as spreads'
+    : 'longs sized via Long $/trade & max above';
+}
+// Long-sizing inputs (any of these affect long $-pnl): debounced refetch + rerender
+let longRefetchTimer;
+function scheduleLongRefetch(){
+  clearTimeout(longRefetchTimer);
+  longRefetchTimer = setTimeout(()=>loadLongs(true), 400);
+}
+document.getElementById('szMode').addEventListener('change',()=>{
+  updateSizingVisibility();
+  scheduleLongRefetch();      // budget mode change can shift long sizing
+  render(); refreshAuxPanels();
+});
+// $/trade modes and %-account inputs feed BOTH sides — refetch longs + rerender
+['szDollars','szAcct','szPct','szMax','szLongDollars','szLongMax'].forEach(id=>{
+  document.getElementById(id).addEventListener('input',()=>{
+    scheduleLongRefetch();
+    render(); refreshAuxPanels();
+  });
+});
+// Spread-only contracts (Fixed-N): no long refetch needed
+document.getElementById('szN').addEventListener('input',()=>{render(); refreshAuxPanels();});
+document.getElementById('fSource').addEventListener('change', render);
+
+// ── Tabs ──────────────────────────────────────────────────────────────────────
+function setTab(name){
+  document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('on',t.dataset.tab===name));
+  document.querySelectorAll('.tpanel').forEach(p=>p.classList.toggle('on',p.id==='panel-'+name));
+  if(name==='chart')   refreshChart();
+  if(name==='heatmap') refreshHeatmap();
+  if(name==='coverage')refreshCoverage();
+  if(name==='regime')  refreshRegime();
+  if(name==='corr')    refreshCorrelation();
+  if(name==='live')    loadLiveConfigs();
+}
+
+// ── Live configs panel + banner ──────────────────────────────────────────────
+async function loadLiveConfigs(){
+  let data;
+  try {
+    const r = await fetch(BASE + '/api/live-configs');
+    data = await r.json();
+  } catch (e) { data = []; }
+  // Banner: compact one-line summary of online LIVE-mode processes.
+  const liveOnline = data.filter(d => d.status === 'online' && d.mode === 'LIVE' && !d.disabled);
+  const bannerEl = document.getElementById('liveBannerContent');
+  if (bannerEl) {
+    if (liveOnline.length === 0) {
+      bannerEl.innerHTML = '<span style="color:#f85149">⚠ none running in LIVE mode</span>';
+    } else {
+      bannerEl.innerHTML = liveOnline.map(d =>
+        `<span style="color:#3fb950">● ${d.id}</span> <span style="color:#7d8590">(${d.exit})</span>`
+      ).join(' &nbsp; ');
+    }
+  }
+  // Full table in Live tab.
+  const tbl = document.getElementById('liveTbl');
+  if (!tbl) return;
+  if (data.length === 0) { tbl.innerHTML = '<div style="color:#7d8590;padding:14px">No configs found in ~/optionx/configs/</div>'; return; }
+  data.sort((a,b) => (b.status==='online'?1:0) - (a.status==='online'?1:0));
+  const rows = data.map(d => {
+    const dot = d.status==='online' ? '🟢' : (d.status==='stopped'?'⚪':'❓');
+    const modeColor = d.mode==='LIVE' ? '#f85149' : d.mode==='PAPER' ? '#d29922' : '#8b949e';
+    const struct = d.structure || d.spread || 'long';
+    return `<tr>
+      <td>${dot}</td>
+      <td style="font-family:monospace">${d.id}</td>
+      <td><span style="color:${modeColor};font-weight:600">${d.mode||'?'}</span>${d.disabled?' <span style="color:#7d8590">(disabled)</span>':''}</td>
+      <td>${d.signal}</td>
+      <td>${struct}</td>
+      <td>${d.exit}</td>
+      <td class="num">${d.maxContracts??1}c</td>
+      <td class="num">$${(d.maxDailyLoss||0).toLocaleString()}</td>
+      <td>${d.activeWindow||''}</td>
+      <td class="num">${d.restarts}</td>
+    </tr>`;
+  }).join('');
+  tbl.innerHTML = `<table id="tbl" style="width:100%">
+    <thead><tr>
+      <th>—</th><th>id</th><th>mode</th><th>signal</th><th>structure</th><th>exit</th>
+      <th class="num">maxC</th><th class="num">maxDailyLoss</th><th>active</th><th class="num">restarts</th>
+    </tr></thead>
+    <tbody>${rows}</tbody>
+  </table>`;
+}
+// Auto-load banner on page load + refresh every 30s.
+setTimeout(loadLiveConfigs, 200);
+setInterval(loadLiveConfigs, 30_000);
+
+// ── Take to Live ──────────────────────────────────────────────────────────────
+// Prompt for sizing + mode, POST to /api/take-live, write config to optionx.
+async function takeLive(row){
+  const exitParsed = (row.exit || '').toLowerCase();
+  const flipWarning = exitParsed.includes('+flip') || exitParsed.includes('flip only')
+    ? '\n\n⚠️  WARNING: this variant uses signal-reversal flip exits. For credit\nstructures the +flip variants historically destroy the theta-decay edge.'
+    : '';
+  const mode = prompt(
+    `Take to LIVE config generator\n\nSpec:\n  signal: ${row.signal}\n  spread: ${row.spread}\n  exit:   ${row.exit}\n\nBacktest: n=${row.n} WR=${row.wr?.toFixed(1)}% avg=$${row.avgPnlPerTrade?.toFixed(2)}${flipWarning}\n\nExecution mode? (LIVE / PAPER / SIMULATION):`,
+    'PAPER'
+  );
+  if (!mode) return;
+  const maxC = parseInt(prompt('Max contracts per position? (default 1)', '1') || '1', 10);
+  if (!Number.isFinite(maxC) || maxC < 1) return alert('Bad maxContracts');
+  // maxPositions default = backtest peakConcurrent (worst-case overlap).
+  // Match this to mirror the backtest's concurrency. Use 1 for a
+  // conservative first-capital trial.
+  const peak = row.peakConcurrent || 1;
+  const maxPosStr = prompt(`Max concurrent OPEN positions?\n\nBacktest peakConcurrent for this row = ${peak}\n(worst-case overlap across ${row.n} signals).\n  • Use ${peak} to mirror backtest exactly\n  • Use 1 for a conservative first trial`, String(peak));
+  if (!maxPosStr) return;
+  const maxPos = parseInt(maxPosStr, 10);
+  if (!Number.isFinite(maxPos) || maxPos < 1) return alert('Bad maxPositions');
+  const maxLoss = parseFloat(prompt('Max daily loss $ (kill switch)? (default 1500)', '1500') || '1500');
+  const maxTrades = parseInt(prompt('Max trades per day? (0 = no cap, default 0)', '0') || '0', 10);
+
+  const submitBody = {
+    signal: row.signal, spread: row.spread, exit: row.exit,
+    n: row.n, wr: row.wr, avgPnlPerTrade: row.avgPnlPerTrade, pnl: row.pnl, dd: row.dd,
+    peakConcurrent: row.peakConcurrent,
+    maxContracts: maxC, maxDailyLoss: maxLoss, maxTradesPerDay: maxTrades || undefined,
+    maxPositions: maxPos,
+    mode: mode.toUpperCase(),
+  };
+  let r;
+  try {
+    r = await fetch(BASE + '/api/take-live', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(submitBody),
+    });
+  } catch (e) { return alert('Request failed: '+e.message); }
+
+  if (r.status === 409) {
+    const body = await r.json();
+    if (!confirm(`Config "${body.id}" already exists at\n${body.path}\n\nOverwrite?`)) return;
+    r = await fetch(BASE + '/api/take-live', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ ...submitBody, overwrite: true }),
+    });
+  }
+  if (!r.ok) { const body = await r.json().catch(()=>({error:r.statusText})); return alert('Failed: '+(body.error||r.statusText)); }
+  const body = await r.json();
+  alert(`✓ Config written\n\nid:   ${body.id}\npath: ${body.path}\nmode: ${body.mode}\n\nTo start the process:\n${body.suggestedPm2Cmd}`);
+}
+
+// ── Selection ─────────────────────────────────────────────────────────────────
+function toggleRow(checkbox, key){
+  if(checkbox.checked) selected.add(key); else selected.delete(key);
+  updateSelectionBar();
+}
+function toggleAll(on){
+  if(on){
+    // select up to top 50 visible (don't go crazy)
+    const sz = getSizing();
+    let arr = applyFilters(rows).map(r=>decorate(r,sz));
+    arr.sort((a,b)=>((a[sortKey]??0)-(b[sortKey]??0))*sortDir);
+    arr.slice(0,50).forEach(r=>selected.add(variantKey(r)));
+  } else {
+    selected.clear();
+  }
+  render();
+}
+function clearSelection(){ selected.clear(); document.getElementById('selAll').checked=false; render(); refreshAuxPanels(); }
+function selectTopN(n){
+  selected.clear();
+  const sz = getSizing();
+  let arr = applyFilters(rows).map(r=>decorate(r,sz));
+  arr.sort((a,b)=>((a[sortKey]??0)-(b[sortKey]??0))*sortDir);
+  arr.slice(0,n).forEach(r=>selected.add(variantKey(r)));
+  render(); refreshAuxPanels();
+}
+function refreshAuxPanels(){
+  const onTab = document.querySelector('.tab.on').dataset.tab;
+  if(onTab==='chart')   refreshChart();
+  if(onTab==='heatmap') refreshHeatmap();
+  if(onTab==='coverage')refreshCoverage();
+  if(onTab==='regime')  refreshRegime();
+  if(onTab==='corr')    refreshCorrelation();
+}
+function updateSelectionBar(){
+  document.getElementById('selCount').textContent = `${selected.size} selected`;
+  // Quick combined pnl/dd
+  const sz = getSizing();
+  let cumPnl = 0, peak = 0, cum = 0, mdd = 0;
+  const selRows = rows.filter(r=>selected.has(variantKey(r)));
+  if(allDates.length && selRows.length){
+    // Need per-day data — use cached daily if available, otherwise just use summary scaled
+    const havDaily = selRows.every(r=>dailyCache[variantKey(r)]);
+    if(havDaily){
+      for(let i=0;i<allDates.length;i++){
+        let day = 0;
+        for(const r of selRows){
+          const c = contractsFor(r, sz);
+          day += (dailyCache[variantKey(r)][i] || 0) * c;
+        }
+        cum += day; peak = Math.max(peak,cum); mdd = Math.max(mdd, peak-cum);
+      }
+      cumPnl = cum;
+    } else {
+      cumPnl = selRows.reduce((s,r)=>s + r.pnl*contractsFor(r,sz), 0);
+      mdd = selRows.reduce((s,r)=>s + r.dd*contractsFor(r,sz), 0); // upper bound
+    }
+  }
+  document.getElementById('selCombinedPnl').textContent = `combined ${fmt$(cumPnl)}`;
+  document.getElementById('selCombinedDd').textContent  = `combined DD $${Math.round(mdd).toLocaleString()}`;
+}
+
+// ── Daily-series fetch (cached) ───────────────────────────────────────────────
+async function ensureDailyLoaded(){
+  // Spread keys need fetching; long keys are already in dailyCache from initial load
+  const spreadKeys = [...selected].filter(k => !k.startsWith('long::') && !dailyCache[k]);
+  if(!spreadKeys.length) return;
+  const body = spreadKeys.join('\n');
+  const res = await fetch(BASE + '/api/spreads/daily?keys=' + encodeURIComponent(body));
+  const data = await res.json();
+  allDates = data.dates || allDates;
+  for(const k in data.series) dailyCache[k] = data.series[k];
+}
+
+// ── Equity Curves ─────────────────────────────────────────────────────────────
+async function refreshChart(){
+  if(!selected.size){
+    if(chartInst){chartInst.destroy(); chartInst=null;}
+    document.getElementById('chartKpi').innerHTML='<span style="color:#7d8590">Select variants in the Table tab to chart.</span>';
+    return;
+  }
+  await ensureDailyLoaded();
+  const sz = getSizing();
+  const selRows = rows.filter(r=>selected.has(variantKey(r)));
+  const datasets = [];
+  const palette = ['#58a6ff','#d2a8ff','#ffa657','#56d364','#f85149','#79c0ff','#bc8cff','#ff7b72','#a5d6ff','#7ee787'];
+  let combined = new Array(allDates.length).fill(0);
+  selRows.forEach((r,i)=>{
+    const k = variantKey(r);
+    const arr = dailyCache[k] || [];
+    const k$ = dollarScale(r, sz);
+    let cum=0;
+    const cumArr = arr.map(v => (cum += v*k$));
+    const lb_ = longBudget(sz);
+    const lbl = r.source==='long'
+      ? `${r.signal} (long $${Math.round(lb_.dollars).toLocaleString()}/≤${lb_.max}c)`
+      : `${r.signal.trim()} · ${r.spread} · ${r.exit}${k$!==1?' ×'+k$:''}`;
+    datasets.push({
+      label: lbl,
+      data: cumArr,
+      borderColor: palette[i%palette.length],
+      backgroundColor: palette[i%palette.length]+'22',
+      borderWidth: 1.5, pointRadius: 0, tension: 0.1,
+      borderDash: r.source==='long' ? [5,3] : [],
+    });
+    for(let j=0;j<arr.length;j++) combined[j] += (arr[j]||0)*k$;
+  });
+  // Combined cumulative
+  let cum=0;
+  const combinedCum = combined.map(v=>(cum+=v));
+  datasets.unshift({
+    label: 'COMBINED (sum)',
+    data: combinedCum,
+    borderColor: '#ffffff', borderWidth: 2.5, pointRadius: 0, tension: 0.1, borderDash:[],
+  });
+  if(chartInst) chartInst.destroy();
+  const ctx = document.getElementById('pnlCanvas');
+  chartInst = new Chart(ctx, {
+    type:'line',
+    data:{labels: allDates, datasets},
+    options:{
+      responsive:true, maintainAspectRatio:false,
+      interaction:{intersect:false, mode:'index'},
+      plugins:{
+        legend:{labels:{color:'#c9d1d9', font:{size:10}}},
+        tooltip:{
+          backgroundColor:'#161b22', borderColor:'#30363d', borderWidth:1,
+          callbacks:{label:(c)=>`${c.dataset.label}: $${Math.round(c.parsed.y).toLocaleString()}`},
+        },
+      },
+      scales:{
+        x:{ticks:{color:'#7d8590', maxTicksLimit:12}, grid:{color:'#21262d'}},
+        y:{ticks:{color:'#7d8590', callback:v=>'$'+Math.round(v).toLocaleString()}, grid:{color:'#21262d'}},
+      },
+    },
+  });
+  // KPI: combined total, max DD, sharpe-ish
+  let peak=0, mdd=0;
+  for(const v of combinedCum){ peak=Math.max(peak,v); mdd=Math.max(mdd,peak-v); }
+  const totalP = combinedCum[combinedCum.length-1] || 0;
+  const ratio = mdd>0 ? totalP/mdd : 0;
+  const dailyMean = combined.reduce((s,v)=>s+v,0)/Math.max(1,combined.length);
+  const dailyStd = Math.sqrt(combined.reduce((s,v)=>s+Math.pow(v-dailyMean,2),0)/Math.max(1,combined.length));
+  const sharpe = dailyStd>0 ? (dailyMean/dailyStd)*Math.sqrt(252) : 0;
+  const posDays = combined.filter(v=>v>0.1).length;
+  const negDays = combined.filter(v=>v<-0.1).length;
+  document.getElementById('chartKpi').innerHTML = `
+    <div class="kg"><span class="kl">Combined $Net</span><span class="kv ${totalP>=0?'pos':'neg'}">${fmt$(totalP)}</span></div>
+    <div class="kg"><span class="kl">Combined $DD</span><span class="kv neg">$${Math.round(mdd).toLocaleString()}</span></div>
+    <div class="kg"><span class="kl">Ratio</span><span class="kv ${ratio>=1?'pos':''}">${ratio.toFixed(2)}</span></div>
+    <div class="kg"><span class="kl">Sharpe (annualized)</span><span class="kv">${sharpe.toFixed(2)}</span></div>
+    <div class="kg"><span class="kl">+days / -days</span><span class="kv">${posDays} / ${negDays}</span></div>
+    <div class="kg"><span class="kl">Variants</span><span class="kv">${selected.size}</span></div>
+  `;
+}
+
+// ── Daily Heatmap ─────────────────────────────────────────────────────────────
+async function refreshHeatmap(){
+  if(!selected.size){
+    document.getElementById('hmGrid').innerHTML = '<div style="padding:20px;color:#7d8590">Select variants to see daily heatmap.</div>';
+    return;
+  }
+  await ensureDailyLoaded();
+  const sz = getSizing();
+  const selRows = rows.filter(r=>selected.has(variantKey(r)));
+  // Build a row per variant + a COMBINED row
+  const seriesScaled = selRows.map(r=>{
+    const k$ = dollarScale(r, sz);
+    return (dailyCache[variantKey(r)]||[]).map(v=>v*k$);
+  });
+  const combined = new Array(allDates.length).fill(0);
+  for(const s of seriesScaled) for(let i=0;i<s.length;i++) combined[i]+=s[i]||0;
+  const allValues = [combined, ...seriesScaled].flat();
+  const maxAbs = Math.max(0.01, Math.max(...allValues.map(v=>Math.abs(v))));
+  function bg(v){
+    if(!v) return '#161b22';
+    const intensity = Math.min(1, Math.abs(v)/maxAbs);
+    const c = Math.floor(intensity*200)+30;
+    return v>0 ? `rgb(0,${c},${Math.floor(c*0.4)})` : `rgb(${c},0,0)`;
+  }
+  const labelW = 200;
+  const cellW = Math.max(4, Math.min(14, Math.floor((window.innerWidth - labelW - 60) / allDates.length)));
+  const colTemplate = `${labelW}px repeat(${allDates.length}, ${cellW}px)`;
+  const buildRow = (label, arr, isCombined) => {
+    const cells = arr.map((v,i)=>`<div class="hm-cell" style="background:${bg(v)}" title="${allDates[i]}: ${fmt$(v||0)}"></div>`).join('');
+    return `<div class="hm-row" style="grid-template-columns:${colTemplate}">
+      <div class="hm-label" style="${isCombined?'background:#1c2530;color:#56d364;font-weight:bold':''}">${label}</div>${cells}
+    </div>`;
+  };
+  let html = buildRow('COMBINED ('+selRows.length+')', combined, true);
+  selRows.forEach((r,i)=>{
+    const lbl = r.source==='long' ? `[LONG] ${r.signal}` : `${r.signal.trim()} · ${r.spread} · ${r.exit}`;
+    html += buildRow(lbl, seriesScaled[i], false);
+  });
+  document.getElementById('hmGrid').innerHTML = html;
+}
+
+// ── Coverage Grid ─────────────────────────────────────────────────────────────
+async function refreshCoverage(){
+  const wrap = document.getElementById('coverageWrap');
+  if(!selected.size){
+    wrap.innerHTML = '<div style="color:#7d8590;padding:8px">Select variants to see coverage grid.</div>';
+    return;
+  }
+  await ensureDailyLoaded();
+  const sz = getSizing();
+  const selRows = rows.filter(r=>selected.has(variantKey(r)));
+  // Per-variant scaled series
+  const seriesScaled = selRows.map(r=>{
+    const k$ = dollarScale(r, sz);
+    return (dailyCache[variantKey(r)]||[]).map(v=>v*k$);
+  });
+  // Portfolio (sum across selected) per day
+  const portfolio = new Array(allDates.length).fill(0);
+  for(const s of seriesScaled) for(let i=0;i<s.length;i++) portfolio[i] += s[i] || 0;
+  // Scaled magnitudes for color intensity
+  const flatVals = [portfolio, ...seriesScaled].flat();
+  const maxAbs = Math.max(1, ...flatVals.map(v=>Math.abs(v)));
+  function cellBg(v){
+    if(!v || v===0) return '#161b22';
+    const intensity = 0.15 + 0.7 * Math.min(1, Math.abs(v)/maxAbs);
+    return v>0 ? `rgba(63,185,80,${intensity})` : `rgba(248,81,73,${intensity})`;
+  }
+  // Regime indicators
+  function regime(date){
+    const mv = spxMoveByDate[date];
+    if(mv == null) return 'unknown';
+    return mv > 15 ? 'bull' : mv < -15 ? 'bear' : 'flat';
+  }
+  const regIco = {bull:'<span style="color:#3fb950">▲</span>', bear:'<span style="color:#f85149">▼</span>', flat:'<span style="color:#8b949e">─</span>', unknown:'<span style="color:#30363d">?</span>'};
+  // Short labels for headers
+  const headerLabels = selRows.map(r=>{
+    if(r.source==='long'){
+      // Compact: strip "DEMA " or "HMA " prefix duplication
+      return r.signal.length>18 ? r.signal.slice(0,16)+'…' : r.signal;
+    }
+    const sigShort = r.signal.trim().replace(/\s+/g,' ').replace(/^(HMA|DEMA)\s+/i,'');
+    const spreadShort = r.spread.replace(/\s/g,'');
+    const exitShort = r.exit.split(' ')[0];
+    const full = `${sigShort}·${spreadShort}·${exitShort}`;
+    return full.length>18 ? full.slice(0,16)+'…' : full;
+  });
+
+  let html = '<table style="border-collapse:collapse;font-size:10px"><thead><tr>';
+  html += '<th style="position:sticky;top:0;left:0;z-index:3;padding:5px 8px;background:#161b22;border-bottom:1px solid #30363d;border-right:1px solid #21262d;color:#7d8590;text-align:right">Date</th>';
+  html += '<th style="position:sticky;top:0;z-index:2;padding:5px 6px;background:#161b22;border-bottom:1px solid #30363d;color:#7d8590">Rgm</th>';
+  selRows.forEach((r,i)=>{
+    const col = r.source==='long' ? '#d2a8ff' : (spreadClass(r.spread)==='ITM'?'#ffa657':spreadClass(r.spread)==='OTM'?'#79c0ff':'#56d364');
+    const full = r.source==='long' ? r.signal : `${r.signal.trim()} · ${r.spread} · ${r.exit}`;
+    html += `<th style="position:sticky;top:0;z-index:2;padding:5px 6px;background:#161b22;border-bottom:1px solid #30363d;color:${col};font-size:9px;white-space:nowrap;min-width:60px" title="${full}">${headerLabels[i]}</th>`;
+  });
+  html += '<th style="position:sticky;top:0;z-index:2;padding:5px 8px;background:#161b22;border-bottom:1px solid #30363d;color:#f0f6fc;font-weight:bold;min-width:120px">Portfolio</th>';
+  html += '</tr></thead><tbody>';
+
+  let portCum = 0;
+  for(let di=0; di<allDates.length; di++){
+    const d = allDates[di];
+    // Skip dates where no variant has any value (compact view)
+    let anyValue = portfolio[di] !== 0 || seriesScaled.some(s=>s[di]!==0);
+    if(!anyValue) continue;
+    const reg = regime(d);
+    html += '<tr>';
+    html += `<td style="position:sticky;left:0;z-index:1;padding:3px 8px;background:#0d1117;border-right:1px solid #21262d;color:#8b949e;white-space:nowrap;text-align:right">${d}</td>`;
+    html += `<td style="padding:3px 6px;background:#161b22;text-align:center">${regIco[reg]}</td>`;
+    selRows.forEach((r,i)=>{
+      const v = seriesScaled[i][di] || 0;
+      if(v === 0){
+        html += `<td style="padding:2px 4px;background:#0d1117;color:#30363d;text-align:center;font-size:9px;border-right:1px solid #161b22">—</td>`;
+      } else {
+        const sign = v>=0?'+':'';
+        html += `<td style="padding:2px 4px;background:${cellBg(v)};color:#f0f6fc;text-align:right;font-size:9px;font-weight:600;border-right:1px solid #161b22" title="${d} · ${headerLabels[i]}: ${sign}${fmt$(v)}">${sign}${Math.round(v).toLocaleString()}</td>`;
+      }
+    });
+    portCum += portfolio[di];
+    const pd = portfolio[di]; const sign = pd>=0?'+':''; const pcSign = portCum>=0?'+':'';
+    html += `<td style="padding:3px 8px;background:${cellBg(pd)};color:#f0f6fc;text-align:right;font-weight:600;border-left:1px solid #30363d" title="Day: ${sign}${fmt$(pd)} · Cumulative: ${pcSign}${fmt$(portCum)}">${sign}${Math.round(pd).toLocaleString()} <span style="font-size:9px;opacity:.6">${pcSign}${Math.round(portCum).toLocaleString()}</span></td>`;
+    html += '</tr>';
+  }
+  html += '</tbody></table>';
+  wrap.innerHTML = html;
+}
+
+// ── Regime breakdown ──────────────────────────────────────────────────────────
+async function refreshRegime(){
+  if(!selected.size){
+    document.getElementById('regimeTbl').innerHTML = '<div style="color:#7d8590;padding:8px">Select variants to see regime breakdown.</div>';
+    return;
+  }
+  await ensureDailyLoaded();
+  const sz = getSizing();
+  const selRows = rows.filter(r=>selected.has(variantKey(r)));
+  // Classify each date
+  function regime(date){
+    const mv = spxMoveByDate[date];
+    if(mv == null) return 'unknown';
+    return mv > 15 ? 'bull' : mv < -15 ? 'bear' : 'flat';
+  }
+  const regs = allDates.map(regime);
+  const counts = {bull:0,bear:0,flat:0,unknown:0};
+  regs.forEach(r=>counts[r]++);
+  // For each variant compute avg $-pnl per regime (scaled)
+  const tableRows = selRows.map(r=>{
+    const k$ = dollarScale(r, sz);
+    const arr = (dailyCache[variantKey(r)]||[]).map(v=>v*k$);
+    const sums = {bull:0,bear:0,flat:0,unknown:0};
+    const ns   = {bull:0,bear:0,flat:0,unknown:0};
+    arr.forEach((v,i)=>{ const t=regs[i]; sums[t]+=v; ns[t]++; });
+    const avgs = {};
+    for(const t of ['bull','bear','flat']) avgs[t] = ns[t]>0 ? sums[t]/ns[t] : null;
+    return {row:r, avgs, sums};
+  });
+  // Combined row
+  const combinedAvgs = {bull:0,bear:0,flat:0};
+  for(const t of ['bull','bear','flat']) combinedAvgs[t] = tableRows.reduce((s,x)=>s+(x.avgs[t]||0),0);
+  function cellBg(v){
+    if(v==null) return '#161b22';
+    const t = Math.min(1, Math.abs(v)/(Math.max(...tableRows.flatMap(x=>['bull','bear','flat'].map(k=>Math.abs(x.avgs[k]||0))))||1));
+    return v>=0 ? `rgba(63,185,80,${0.15+t*0.7})` : `rgba(248,81,73,${0.15+t*0.7})`;
+  }
+  const labels = {bull:`▲ Bull (${counts.bull}d)`, bear:`▼ Bear (${counts.bear}d)`, flat:`─ Flat (${counts.flat}d)`};
+  const cols = {bull:'#3fb950',bear:'#f85149',flat:'#8b949e'};
+  let html = '<table style="border-collapse:collapse;font-size:11px;min-width:600px"><thead><tr>';
+  html += '<th style="padding:6px 10px;text-align:left;color:#7d8590;background:#161b22;border:1px solid #21262d">Variant</th>';
+  for(const t of ['bull','bear','flat']) html += `<th style="padding:6px 10px;color:${cols[t]};background:#161b22;border:1px solid #21262d">${labels[t]}</th>`;
+  html += '</tr></thead><tbody>';
+  // Combined row at top
+  html += `<tr><td style="padding:5px 10px;color:#56d364;font-weight:bold;background:#0f1a14;border:1px solid #21262d">COMBINED (${selRows.length})</td>`;
+  for(const t of ['bull','bear','flat']){
+    const v = combinedAvgs[t];
+    const sign = v>=0?'+':'';
+    html += `<td style="padding:5px 10px;text-align:right;background:${cellBg(v)};border:1px solid #21262d;color:#f0f6fc;font-weight:600">${sign}${fmt$(v)}</td>`;
+  }
+  html += '</tr>';
+  for(const row of tableRows){
+    const r = row.row;
+    const lbl = r.source==='long' ? `[LONG] ${r.signal}` : `${r.signal.trim()} · ${r.spread} · ${r.exit}`;
+    html += `<tr><td style="padding:5px 10px;color:#c9d1d9;background:#161b22;border:1px solid #21262d;white-space:nowrap">${lbl}</td>`;
+    for(const t of ['bull','bear','flat']){
+      const v = row.avgs[t];
+      if(v==null){ html += `<td style="padding:5px 10px;background:#161b22;border:1px solid #21262d;color:#30363d;text-align:right">—</td>`; continue; }
+      const sign = v>=0?'+':'';
+      html += `<td style="padding:5px 10px;text-align:right;background:${cellBg(v)};border:1px solid #21262d;color:#c9d1d9">${sign}${fmt$(v)}</td>`;
+    }
+    html += '</tr>';
+  }
+  html += '</tbody></table>';
+  document.getElementById('regimeTbl').innerHTML = html;
+}
+
+// ── Correlation matrix ────────────────────────────────────────────────────────
+function corrCoef(a,b){
+  const n = Math.min(a.length,b.length); if(n<2) return 0;
+  let ma=0,mb=0; for(let i=0;i<n;i++){ma+=a[i];mb+=b[i];} ma/=n;mb/=n;
+  let sa=0,sb=0,sab=0;
+  for(let i=0;i<n;i++){const da=a[i]-ma, db=b[i]-mb; sa+=da*da; sb+=db*db; sab+=da*db;}
+  const denom = Math.sqrt(sa*sb); return denom>0 ? sab/denom : 0;
+}
+async function refreshCorrelation(){
+  if(selected.size<2){
+    document.getElementById('corrTbl').innerHTML = '<div style="color:#7d8590;padding:8px">Select 2+ variants to compute correlation matrix.</div>';
+    return;
+  }
+  await ensureDailyLoaded();
+  const selRows = rows.filter(r=>selected.has(variantKey(r)));
+  const labels = selRows.map((r,i)=>`${i+1}. ${r.signal.trim()} · ${r.spread.split(' ')[0]} · ${r.exit.split(' ')[0]}`);
+  const series = selRows.map(r=>dailyCache[variantKey(r)]||[]);
+  let html = '<table style="border-collapse:collapse;font-size:11px">';
+  html += '<thead><tr><th style="padding:4px 8px;text-align:right;color:#7d8590"></th>';
+  for(let j=0;j<selRows.length;j++) html += `<th style="padding:4px 8px;color:#7d8590">${j+1}</th>`;
+  html += '</tr></thead><tbody>';
+  for(let i=0;i<selRows.length;i++){
+    html += `<tr><td style="padding:4px 8px;color:#c9d1d9;white-space:nowrap">${labels[i]}</td>`;
+    for(let j=0;j<selRows.length;j++){
+      const c = corrCoef(series[i], series[j]);
+      const a = Math.min(1, Math.abs(c));
+      const col = c>=0 ? `rgba(63,185,80,${a})` : `rgba(248,81,73,${a})`;
+      html += `<td style="padding:4px 8px;text-align:center;background:${col};color:${a>0.5?'#000':'#c9d1d9'}">${c.toFixed(2)}</td>`;
+    }
+    html += '</tr>';
+  }
+  html += '</tbody></table>';
+  document.getElementById('corrTbl').innerHTML = html;
+}
+function resetFilters(){
+  ['fSig','fTf','fType','fSpread','fClass','fExit','fSource'].forEach(id=>document.getElementById(id).value='');
+  ['fMinPnl','fMinRatio','fMinWr','fMinN','fMinCapLift','fSearch'].forEach(id=>document.getElementById(id).value='');
+  render();
+}
+document.querySelectorAll('th').forEach(th=>{
+  th.addEventListener('click',()=>{
+    const k=th.dataset.key;
+    if(sortKey===k) sortDir=-sortDir; else {sortKey=k; sortDir = (k==='signal'||k==='spread'||k==='exit')?1:-1;}
+    render();
+  });
+});
+['fSig','fTf','fType','fSpread','fClass','fExit'].forEach(id=>document.getElementById(id).addEventListener('change',render));
+['fMinPnl','fMinRatio','fMinWr','fMinN','fSearch'].forEach(id=>document.getElementById(id).addEventListener('input',render));
+load();
+</script>
+</body>
+</html>

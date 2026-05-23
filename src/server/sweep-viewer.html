@@ -265,6 +265,19 @@
   .refresh-badge { background: var(--success); color: var(--background); font-size: 9px; font-weight: 700; padding: 0 5px; border-radius: 999px; min-width: 14px; text-align: center; }
   .filter-count { font-size: 11px; color: var(--muted-foreground); margin-left: auto; }
 
+  /* ───────── Quick guide ───────── */
+  .quick-guide {
+    background: rgba(139,139,255,0.06);
+    border: 1px solid rgba(139,139,255,0.2);
+    border-radius: var(--radius-sm);
+    padding: 8px 12px;
+    margin: 8px 12px 0;
+    font-size: 11px;
+    color: var(--muted-foreground);
+    line-height: 1.5;
+  }
+  .quick-guide strong { color: var(--primary-soft); }
+
   /* ───────── Symbol quick-filter pills (prominent row above generic filters) ───────── */
   .sym-filter-bar {
     display: flex;
@@ -365,6 +378,13 @@
     border-color: var(--primary);
     color: var(--primary);
     background: rgba(139,139,255,0.08);
+  }
+  .sort-btn[data-sort="edge"].active {
+    background: rgba(139,139,255,0.15);
+    box-shadow: 0 0 0 1px rgba(139,139,255,0.4);
+  }
+  .sort-btn[data-sort="edge"].active::after {
+    content: ' ⭐';
   }
 
   /* ───────── Table ───────── */
@@ -870,6 +890,11 @@
   </div>
 </div>
 
+<div class="quick-guide">
+  <strong>📊 How to Find a Good Config:</strong>
+  Sort by <strong>Edge%</strong> (top left). Look for: Edge > 5%, Win Rate > 60%, Green Days > 60%. Click a row to expand daily breakdown. Use Parameter Analytics tab to see which settings matter most.
+</div>
+
 <div class="sym-filter-bar" id="sym-filter-bar">
   <label>Instrument</label>
   <button class="sym-pill all active" data-sym="" onclick="setSymbolFilter('')">All<span class="sym-pill-count" id="sym-count-all"></span></button>
@@ -930,7 +955,7 @@
   <select id="min-days" onchange="loadData()">
     <option value="2">2+</option>
     <option value="10">10+</option>
-    <option value="20">20+</option>
+    <option value="20" selected>20+ (start here)</option>
     <option value="30">30+</option>
     <option value="40">40+</option>
     <option value="50">50+</option>
@@ -941,7 +966,7 @@
     <option value="140">140+</option>
     <option value="160">160+</option>
     <option value="180">180+</option>
-    <option value="200" selected>200+</option>
+    <option value="200">200+</option>
     <option value="220">220+</option>
     <option value="240">240+</option>
   </select>
@@ -1499,10 +1524,13 @@ function renderTable() {
     </tr>`;
   }).join('');
 
-  document.getElementById('footer').textContent =
-    rows.length > 0
-      ? `${rows.length} configs | Best Edge: ${(Math.max(...rows.map(r=>r.edge||0)) * 100).toFixed(1)}% | Best R-Mult: ${Math.max(...rows.map(r=>r.rMultiple||0)).toFixed(2)} | Best EV: ${Math.max(...rows.map(r=>r.ev||0)).toFixed(2)}% | Best P&L: ${fmtMoney(Math.max(...rows.map(r=>r.totalPnl)))}`
-      : '';
+  if (rows.length > 0) {
+    const best = rows[0];
+    const guide = `🥇 Top config has Edge ${(best.edge * 100).toFixed(1)}% (WR: ${(best.winRate * 100).toFixed(0)}% vs BE: ${(best.breakEvenWR * 100).toFixed(0)}%) | Look for: Edge > 5%, WR > 60%, Consistency > 60%. Avoid: Single losing day > 20% of capital.`;
+    document.getElementById('footer').innerHTML = `<strong>${rows.length} configs</strong> | ${guide}`;
+  } else {
+    document.getElementById('footer').textContent = '';
+  }
 }
 
 // ── Daily expand ──
@@ -2140,10 +2168,14 @@ async function loadData() {
   const maxEntry = document.getElementById('max-entry-price').value;
   const maxConcurrent = document.getElementById('max-concurrent').value;
   const maxTradesDay = document.getElementById('max-trades-day').value;
+  // configPrefix isolates one sweep family (e.g. ?configPrefix=long for the
+  // long-call backtest view). Persisted from the page URL.
+  const configPrefix = new URLSearchParams(window.location.search).get('configPrefix') || '';
   let url = `${API}/sweep?limit=5000&minDays=${minDays}`;
   if (maxEntry && maxEntry !== '0') url += `&maxEntryPrice=${maxEntry}`;
   if (maxConcurrent && maxConcurrent !== '0') url += `&maxConcurrent=${maxConcurrent}`;
   if (maxTradesDay && maxTradesDay !== '0') url += `&maxTradesPerDay=${maxTradesDay}`;
+  if (configPrefix) url += `&configPrefix=${encodeURIComponent(configPrefix)}`;
   const res = await fetch(url);
   const data = await res.json();
   allRows = data.rows;

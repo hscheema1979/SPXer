@@ -27,15 +27,115 @@ dotenv.config({ quiet: true } as any);
 import { readBarCacheFile } from '../../src/replay/bar-cache-file';
 import { resolveSymbolTarget, listDatesFor, loadDay, outPath, instrumentClass } from './sweep-symbol';
 import { shardDates, dumpResults, loadShardsInto, mergeStateFile, knownDates } from './sweep-shard';
+import { CAP_POLICIES, capDayNet, capSummary, type CapEvent } from './side-cap';
 import * as fs from 'fs';
 import * as path from 'path';
+
+// ── Serial-execution guard ──────────────────────────────────────────────────
+// Direct invocation of this script (no SWEEP_SHARD, no SWEEP_MERGE) takes
+// 40+ minutes on a 280-date SPX run. ALWAYS go through sweep-parallel.ts which
+// fans out to N workers via date-sharding and merges. The serial path is dead.
+// If you genuinely need single-process for debugging one date, set
+// SWEEP_ALLOW_SERIAL=1 — but think twice; it's almost never what you want.
+if (!process.env.SWEEP_SHARD && !process.env.SWEEP_MERGE && !process.env.SWEEP_ALLOW_SERIAL) {
+  console.error(`
+ERROR: iron-sweep.ts must NOT be invoked directly.
+Use the parallel runner instead:
+
+  npx tsx scripts/diag/sweep-parallel.ts --symbol SPX --engine iron --shards 8
+
+Pass-through env vars (SWEEP_FILL_MODE, SWEEP_CLOSE_HALFSPREAD, etc.) inherit
+through to all workers automatically.
+
+Override only for single-date debugging: SWEEP_ALLOW_SERIAL=1
+`);
+  process.exit(2);
+}
 
 // Resolved early — geometry below is defined in STRIKE COUNTS and scaled to
 // dollars by the instrument's strike interval (SPX 5, SPY/QQQ 1, NDX 10).
 const TARGET = resolveSymbolTarget(process.argv);
 const SI = TARGET.strikeInterval;
 
-const SLIPPAGE_PER_STRUCTURE = 25;     // 4-leg = ~2× the 2-leg slippage
+const SLIPPAGE_PER_STRUCTURE = 25;     // 4-leg = ~2× the 2-leg slippage (entry-side friction + commissions)
+
+// Pay-through-ask close model (soft fill).
+// Bar cache stores only OHLC midpoints — no bid/ask. We approximate the close
+// fill as mid + half_spread × n_legs, where each leg costs half-spread to cross.
+// For SPXW 0DTE 4-leg structures: short legs pay ASK (mid + hs), long legs sell
+// at BID (mid − hs). Either way the exit-V we'd actually achieve = mid_V + 4·hs.
+// Default $0.10/leg → $0.40 added to exit V → $40/RT cost over and above the
+// existing $25 entry-side slippage. Override via SWEEP_CLOSE_HALFSPREAD.
+// Set to 0 to recover the previous (mid-fillable) model. Applied to:
+//   TP / SL / flip / settle-MTM exits — i.e. any exit that requires a live fill.
+// NOT applied to cash-settled expiry (SPX SET, no fill at all).
+const CLOSE_HALFSPREAD_PER_LEG = Number(process.env.SWEEP_CLOSE_HALFSPREAD ?? 0.10);
+const CLOSE_PENALTY_V = 4 * CLOSE_HALFSPREAD_PER_LEG;
+
+// Fill model: 'hard' (default) = realistic — TP fires only when mid crosses tpV
+//                                 − penalty (i.e. the natural close goes deep enough
+//                                 that an order at tpV would actually get crossed);
+//                                 fills at exactly tpV. Models the real "limit might
+//                                 not fill" case that bit us in production on 2026-05-20.
+//             'soft'            = TP fires when mid crosses tpV, fills at mid+penalty.
+//                                 Models spread cost only, not fill risk. NEVER use
+//                                 for production strategy selection — leads to deploying
+//                                 strategies that look great on paper but cannot actually
+//                                 fill their limit orders.
+//             For SL (stop-market): hard requires mid to clear slV by penalty before
+//             triggering; fills at slV + penalty (market exit still pays through ask).
+const FILL_MODE = (process.env.SWEEP_FILL_MODE ?? 'hard') as 'soft' | 'hard';
+
+// ── Exit liquidity gate (shorts-fresh) ──────────────────────────────────────
+// The trajectory carries forward each leg's LAST close until its next print, so
+// a TP/SL could fire off a STALE close that wasn't tradeable that minute — a
+// "false mid" that books a phantom fill and fakes short hold times. The fix
+// that survived study (docs/FILL-VOLUME-STUDY.md): honor a TP/SL ONLY at a bar
+// where AT LEAST ONE short leg printed that minute. You realize the exit by
+// transacting the shorts as a COMBO — one liquid short is enough to make the
+// buyback fillable off the combo NBBO, so requiring BOTH center shorts to print
+// the same minute over-haircuts (the wings are protection that expires; their
+// illiquidity is irrelevant). Diagnostics: short (ATM) legs go stale ~85-94%,
+// wings ~98-99% fresh — so all-legs / combined-volume gates over-penalize or
+// filter nothing; ≥1-short-fresh is the realistic target.
+//   SWEEP_EXIT_GATE = 'shorts-fresh' (default) | 'none' (legacy optimistic, no gate).
+const EXIT_GATE = (process.env.SWEEP_EXIT_GATE ?? 'shorts-fresh') as 'shorts-fresh' | 'none';
+const GATE_SHORTS = EXIT_GATE === 'shorts-fresh';
+
+// ── Entry liquidity gate (shorts-fresh AT ENTRY) ────────────────────────────
+// The exit gate above protects TP/SL fills, but the ENTRY credit is still built
+// from optPx() last-prints, which carry a stale close forward until the leg's
+// next trade. On thin chains (e.g. NDX 0DTE: ATM legs are >2min stale ~40% of
+// minutes) the SHORT legs can be minutes stale at entry → a fabricated credit
+// you could never actually fill, which is the dominant source of phantom edge.
+// SWEEP_ENTRY_STALE_SEC=N rejects entries where any SHORT leg's mark is older
+// than N seconds at entryTs-1 (wings are protection — their staleness is fine).
+//   Default 0 = DISABLED — reproduces all historical numbers exactly.
+//   Set e.g. 120 for an honest run.
+const ENTRY_STALE_SEC = process.env.SWEEP_ENTRY_STALE_SEC ? parseInt(process.env.SWEEP_ENTRY_STALE_SEC) : 0;
+
+// ── Trend gate (optional) ─────────────────────────────────────────────────
+// SWEEP_TREND_GATE_MIN = N → measure 30-min SPX drift. If drift > +threshold
+// (uptrend) and signal is bear → skip. If drift < −threshold (downtrend) and
+// signal is bull → skip. Threshold is SWEEP_TREND_GATE_THRESH (default 5pts).
+//
+// Rationale: HMA cross signals are mean-reverting in intent — they fire on
+// short-term reversals. On strongly-trending days these reversals don't
+// materialize and the counter-trend trades take max-loss. A SMA-based trend
+// filter skips the obviously-doomed direction.
+const TREND_GATE_MIN = process.env.SWEEP_TREND_GATE_MIN ? parseInt(process.env.SWEEP_TREND_GATE_MIN) : 0;
+const TREND_GATE_THRESH = parseFloat(process.env.SWEEP_TREND_GATE_THRESH ?? '5');
+function trendGateBlocks(s1: any[], entryTs: number, dir: 'bull' | 'bear'): boolean {
+  if (TREND_GATE_MIN <= 0) return false;
+  const spxNow = optPx(s1, entryTs - 1);
+  const spxPast = optPx(s1, entryTs - 1 - TREND_GATE_MIN * 60);
+  if (spxNow == null || spxPast == null) return false;  // no data → don't block
+  const drift = spxNow - spxPast;
+  // Block bear in uptrend, bull in downtrend
+  if (dir === 'bear' && drift > TREND_GATE_THRESH) return true;
+  if (dir === 'bull' && drift < -TREND_GATE_THRESH) return true;
+  return false;
+}
 const MIN_ALIGN = 3, CROSS_WIN = 60;
 const FAST0 = 3, SLOW0 = 15;
 const CUTOFF_HHMM = 6 * 3600;          // 15:30 ET
@@ -119,9 +219,18 @@ const STRUCTURES: IronSpec[] = [
   }; })),
 ];
 
-interface ExitSpec { label: string; tpFrac: number; slMult: number; useFlip: boolean; }
+// slRiskFrac: fraction of max risk (0-1) at which SL fires for credit structures.
+// SL threshold V = credit + slRiskFrac × (wingWidth − credit). At slRiskFrac=1 you ride
+// to max loss (effectively no SL). Lower values cap the loss tail earlier.
+// This replaces the broken slMult=N parameterization which never triggered for credit
+// structures (V is bounded by wingWidth, so V ≥ N×credit never fired for N≥1).
+interface ExitSpec { label: string; tpFrac: number; slMult: number; slRiskFrac?: number; useFlip: boolean; }
 const EXITS: ExitSpec[] = [
   { label: 'hold-to-settle',  tpFrac: 0,    slMult: 0,   useFlip: false },
+  { label: 'TP5 only',        tpFrac: 0.05, slMult: 0,   useFlip: false },
+  { label: 'TP6 only',        tpFrac: 0.06, slMult: 0,   useFlip: false },
+  { label: 'TP7 only',        tpFrac: 0.07, slMult: 0,   useFlip: false },
+  { label: 'TP8 only',        tpFrac: 0.08, slMult: 0,   useFlip: false },
   { label: 'TP10 only',       tpFrac: 0.10, slMult: 0,   useFlip: false },
   { label: 'TP15 only',       tpFrac: 0.15, slMult: 0,   useFlip: false },
   { label: 'TP20 only',       tpFrac: 0.20, slMult: 0,   useFlip: false },
@@ -129,6 +238,19 @@ const EXITS: ExitSpec[] = [
   { label: 'TP35 only',       tpFrac: 0.35, slMult: 0,   useFlip: false },
   { label: 'TP50 only',       tpFrac: 0.50, slMult: 0,   useFlip: false },
   { label: 'TP75 only',       tpFrac: 0.75, slMult: 0,   useFlip: false },
+  // Tail-cap variants: TP5/TP10/TP15 with SL at fraction of max risk
+  { label: 'TP5 SL50%',       tpFrac: 0.05, slMult: 0,   slRiskFrac: 0.50, useFlip: false },
+  { label: 'TP5 SL60%',       tpFrac: 0.05, slMult: 0,   slRiskFrac: 0.60, useFlip: false },
+  { label: 'TP5 SL70%',       tpFrac: 0.05, slMult: 0,   slRiskFrac: 0.70, useFlip: false },
+  { label: 'TP5 SL80%',       tpFrac: 0.05, slMult: 0,   slRiskFrac: 0.80, useFlip: false },
+  { label: 'TP10 SL50%',      tpFrac: 0.10, slMult: 0,   slRiskFrac: 0.50, useFlip: false },
+  { label: 'TP10 SL60%',      tpFrac: 0.10, slMult: 0,   slRiskFrac: 0.60, useFlip: false },
+  { label: 'TP10 SL70%',      tpFrac: 0.10, slMult: 0,   slRiskFrac: 0.70, useFlip: false },
+  { label: 'TP10 SL80%',      tpFrac: 0.10, slMult: 0,   slRiskFrac: 0.80, useFlip: false },
+  { label: 'TP15 SL50%',      tpFrac: 0.15, slMult: 0,   slRiskFrac: 0.50, useFlip: false },
+  { label: 'TP15 SL60%',      tpFrac: 0.15, slMult: 0,   slRiskFrac: 0.60, useFlip: false },
+  { label: 'TP15 SL70%',      tpFrac: 0.15, slMult: 0,   slRiskFrac: 0.70, useFlip: false },
+  { label: 'TP15 SL80%',      tpFrac: 0.15, slMult: 0,   slRiskFrac: 0.80, useFlip: false },
   // Flip-exit variants: close on signal reversal (first opposite alignment after entry)
   { label: 'TP10 +flip',      tpFrac: 0.10, slMult: 0,   useFlip: true  },
   { label: 'TP15 +flip',      tpFrac: 0.15, slMult: 0,   useFlip: true  },
@@ -235,44 +357,80 @@ function findStrike(c1:any, type:'C'|'P', targetK:number): string|null {
   return best;
 }
 function optPx(bars:any[],ts:number):number|null{for(let i=bars.length-1;i>=0;i--)if(bars[i].ts<=ts)return bars[i].close;return null;}
+// Age (sec) of the last printed bar at-or-before ts (Infinity if none). The bar
+// cache holds only real prints (no synthetic fill), so age = ts − lastBar.ts.
+function markAge(bars:any[],ts:number):number{for(let i=bars.length-1;i>=0;i--)if(bars[i].ts<=ts)return ts-bars[i].ts;return Infinity;}
 
 interface Leg { bars:any[]; sign:number; strike:number; symbol:string; }
+interface TrajPoint { ts:number; V:number; shortsFresh:boolean; }
 // Compute V trajectory for a 4-leg structure. V = Σ sign_i × close_i(t).
-function buildTrajectory(legs:Leg[], entryTs:number, endTs:number): Array<{ts:number,V:number}> {
+// Each point also flags whether every SHORT leg (sign +1) actually printed AT
+// that exact minute (vs a carried-forward stale close), so applyExit can reject
+// false-mid TP/SL fills on un-tradeable shorts (see GATE_SHORTS).
+function buildTrajectory(legs:Leg[], entryTs:number, endTs:number): TrajPoint[] {
   const tsSet = new Set<number>();
   for(const lg of legs) for(const b of lg.bars) if(b.ts>entryTs && b.ts<=endTs) tsSet.add(b.ts);
   const tsList = [...tsSet].sort((a,b)=>a-b);
   // Walk pointers per leg
   const ptr = new Array(legs.length).fill(0);
   const last = new Array<number|null>(legs.length).fill(null);
-  const traj: Array<{ts:number,V:number}> = [];
+  const lastTs = new Array<number>(legs.length).fill(-1);    // ts of each leg's most-recent consumed bar
+  const traj: TrajPoint[] = [];
   for(const t of tsList){
     for(let i=0;i<legs.length;i++){
       while(ptr[i] < legs[i].bars.length && legs[i].bars[ptr[i]].ts <= t){
         last[i] = legs[i].bars[ptr[i]].close;
+        lastTs[i] = legs[i].bars[ptr[i]].ts;
         ptr[i]++;
       }
     }
     if(last.every(v=>v!=null)){
       let V = 0;
       for(let i=0;i<legs.length;i++) V += legs[i].sign * (last[i] as number);
-      traj.push({ts:t, V});
+      // shorts-fresh: AT LEAST ONE short leg (sign +1) printed AT this minute.
+      // One liquid short → the combo buyback is fillable; requiring both was
+      // too strict (over-haircut). Wings (sign -1) are irrelevant — they expire.
+      let shortsFresh = false;
+      for(let i=0;i<legs.length;i++) if(legs[i].sign === +1 && lastTs[i] === t){ shortsFresh = true; break; }
+      traj.push({ts:t, V, shortsFresh});
     }
   }
   return traj;
 }
 
-function applyExit(traj:Array<{ts:number,V:number}>, endTs:number, legs:Leg[],
+function applyExit(traj:TrajPoint[], endTs:number, legs:Leg[],
                    credit:number, tpFrac:number, slMult:number, flipTs:number,
-                   spxAtSettle:number|null)
+                   spxAtSettle:number|null, wingWidth:number = 0, slRiskFrac:number = 0)
                   : {exitTs:number, exitV:number, reason:string} {
   const effEnd = Math.min(endTs, flipTs);
   const tpV = tpFrac>0 ? (1 - tpFrac) * credit : -Infinity;
-  const slV = slMult>0 ? (1 + slMult) * credit : Infinity;
+  // SL threshold: prefer slRiskFrac (fraction of max risk) when > 0 since slMult
+  // is broken for credit structures (V bounded by wingWidth). slMult retained
+  // for backward compat / debit structures.
+  const slV = slRiskFrac > 0 && wingWidth > 0
+    ? credit + slRiskFrac * (wingWidth - credit)
+    : slMult > 0 ? (1 + slMult) * credit : Infinity;
+  const slActive = slRiskFrac > 0 || slMult > 0;
+  // Hard-mode triggers: limit must be crossed (mid penetrates by penalty) for TP;
+  // stop must be cleared (mid clears stop by penalty) for SL. Fills at the order
+  // level (TP gets exact limit, SL pays through ask on market exit).
+  const tpTrigger = FILL_MODE === 'hard' ? tpV - CLOSE_PENALTY_V : tpV;
+  const slTrigger = FILL_MODE === 'hard' ? slV + CLOSE_PENALTY_V : slV;
+  // Liquidity gate: honor a TP/SL only at a bar where the SHORT legs actually
+  // printed (p.shortsFresh). Rejects exits priced off a stale carried-forward
+  // SHORT close (the "false mid" that faked short hold times). Wings expire —
+  // their staleness is irrelevant. GATE_SHORTS=false reproduces legacy behavior.
   for(const p of traj){
     if(p.ts > effEnd) break;
-    if(tpFrac>0 && p.V <= tpV) return {exitTs:p.ts, exitV:Math.max(0,p.V), reason:'TP'};
-    if(slMult>0 && p.V >= slV) return {exitTs:p.ts, exitV:p.V, reason:'SL'};
+    const fillable = !GATE_SHORTS || p.shortsFresh;
+    if(tpFrac>0 && p.V <= tpTrigger && fillable) {
+      const exitV = FILL_MODE === 'hard' ? tpV : p.V + CLOSE_PENALTY_V;
+      return {exitTs:p.ts, exitV:Math.max(0,exitV), reason:'TP'};
+    }
+    if(slActive && p.V >= slTrigger && fillable) {
+      const exitV = FILL_MODE === 'hard' ? slV + CLOSE_PENALTY_V : p.V + CLOSE_PENALTY_V;
+      return {exitTs:p.ts, exitV, reason:'SL'};
+    }
   }
   // No TP/SL hit by effEnd.
   // Two cases:
@@ -305,7 +463,9 @@ function applyExit(traj:Array<{ts:number,V:number}>, endTs:number, legs:Leg[],
       V += lg.sign * c;
     }
     const reason = effEnd === endTs ? 'settle-mtm' : 'flip';
-    return {exitTs:effEnd, exitV: ok ? Math.max(0,V) : 0, reason};
+    // Both flip and settle-MTM require crossing the spread on each leg →
+    // apply pay-through-ask penalty. Skipped only for cash-settled expiry above.
+    return {exitTs:effEnd, exitV: ok ? Math.max(0, V + CLOSE_PENALTY_V) : 0, reason};
   }
 }
 
@@ -329,6 +489,7 @@ interface Stat {
   evictions: number;
   // Trade-duration tracking (seconds). Sum across all trades; divide by n for avg.
   durationSumSec: number;
+  capNets: number[];   // cumulative net under each CAP_POLICIES entry (per-side bull/bear cap scan)
 }
 const results = new Map<string, Stat>();
 function recK(sig:string,struct:string,ex:string){return `${sig}|${struct}|${ex}`;}
@@ -345,7 +506,7 @@ function etHour(ts: number): number {
 
 function rec(sig:string,struct:string,ex:string, pnl_gross:number, date:string, credit:number, width:number, entryTs:number, maxRisk:number, durationSec:number = 0){
   const k=recK(sig,struct,ex);
-  let v=results.get(k); if(!v){v={pnl:0,pnl_gross:0,n:0,wins:0,daily:new Map(),creditSum:0,widthSum:0,perHour:new Map(),peakConcurrent:0,evictions:0,durationSumSec:0}; results.set(k,v);}
+  let v=results.get(k); if(!v){v={pnl:0,pnl_gross:0,n:0,wins:0,daily:new Map(),creditSum:0,widthSum:0,perHour:new Map(),peakConcurrent:0,evictions:0,durationSumSec:0,capNets:new Array(CAP_POLICIES.length).fill(0)}; results.set(k,v);}
   const pnl_net = pnl_gross - SLIPPAGE_PER_STRUCTURE;
   v.pnl += pnl_net; v.pnl_gross += pnl_gross; v.n++; if(pnl_net>0)v.wins++; v.daily.set(date,(v.daily.get(date)??0)+pnl_net);
   v.creditSum += credit; v.widthSum += width;
@@ -355,6 +516,93 @@ function rec(sig:string,struct:string,ex:string, pnl_gross:number, date:string, 
   let hb = v.perHour.get(h); if(!hb){hb={n:0,creditSum:0,riskSum:0,pnlSum:0,wins:0}; v.perHour.set(h,hb);}
   hb.n++; hb.creditSum += credit; hb.riskSum += maxRisk; hb.pnlSum += pnl_net;
   if(pnl_net > 0) hb.wins++;
+}
+
+// ── Per-trade emission (additive, env-gated) ───────────────────────────────
+// SWEEP_EMIT_TRADES_KEYS="signal|structure|exit\n…" enables emission for
+// specified variants only; SWEEP_EMIT_TRADES_DIR is the output root. Each
+// emitted day = one JSON file under {dir}/{slug}/{date}.json with the full
+// 4-leg trade history + SPX bars + per-leg bars (deduped) for the UI.
+interface IronTradeRecord {
+  entryTs:number; exitTs:number; durationSec:number;
+  dir:'bull'|'bear';
+  spxAtEntry:number; spxAtExit:number;
+  drift30:number;   // signed SPX 30-min drift at entry (spxAtEntry − spx 30min prior); + = uptrend
+  center:number;
+  shortPutSymbol:string;  shortPutStrike:number;  shortPutEntryMark:number;  shortPutExitMark:number;
+  longPutSymbol:string;   longPutStrike:number;   longPutEntryMark:number;   longPutExitMark:number;
+  shortCallSymbol:string; shortCallStrike:number; shortCallEntryMark:number; shortCallExitMark:number;
+  longCallSymbol:string;  longCallStrike:number;  longCallEntryMark:number;  longCallExitMark:number;
+  netCredit:number; netExitDebit:number; wingWidth:number; maxRisk:number;
+  tpFrac:number; slMult:number;
+  pnlGross:number; pnlNet:number;
+  exitReason:string;
+}
+interface IronDayEmit {
+  date:string; signal:string; structure:string; exit:string;
+  spxOpen:number; spxClose:number; spxSettle:number|null;
+  trades: IronTradeRecord[];
+  spxBars: any[];
+  contractBars: Record<string, any[]>;
+}
+const EMIT_KEYS = (() => {
+  const raw = process.env.SWEEP_EMIT_TRADES_KEYS;
+  if (!raw) return null;
+  return new Set(raw.split(/[\n,]/).map(s=>s.trim()).filter(Boolean));
+})();
+// EMIT-ONLY: narrow the matrix to just the emit keys' signal/structure/exit and
+// skip the dashboard writes — fast per-config trade emission without re-running
+// (or clobbering) the full sweep. Requires SWEEP_EMIT_TRADES_KEYS.
+const EMIT_ONLY = !!process.env.SWEEP_EMIT_ONLY && !!EMIT_KEYS;
+const EMIT_SIGNALS = new Set<string>(), EMIT_STRUCTS = new Set<string>(), EMIT_EXITS = new Set<string>();
+if (EMIT_KEYS) for (const k of EMIT_KEYS) { const [s, st, e] = k.split('|'); EMIT_SIGNALS.add(s); EMIT_STRUCTS.add(st); EMIT_EXITS.add(e); }
+const EMIT_DIR = process.env.SWEEP_EMIT_TRADES_DIR
+  || path.join(process.cwd(), 'scripts/autoresearch/output/iron-trades');
+const EMIT_BUFFER = new Map<string, Map<string, IronDayEmit>>();
+function slugify(k:string){ return k.replace(/[|]/g,'__').replace(/\s+/g,'_'); }
+function emitIronTrade(k:string, date:string, hdr:{spxOpen:number; spxClose:number; spxSettle:number|null}, tr:IronTradeRecord, spxBars:any[], legs:Array<{symbol:string;bars:any[]}>){
+  if (!EMIT_KEYS || !EMIT_KEYS.has(k)) return;
+  let byDate = EMIT_BUFFER.get(k); if(!byDate){byDate=new Map(); EMIT_BUFFER.set(k,byDate);}
+  let d = byDate.get(date);
+  if(!d){
+    const [signal,structure,exit] = k.split('|');
+    d = { date, signal, structure, exit,
+          spxOpen: hdr.spxOpen, spxClose: hdr.spxClose, spxSettle: hdr.spxSettle,
+          trades: [], spxBars, contractBars: {} };
+    byDate.set(date,d);
+  }
+  d.trades.push(tr);
+  for (const lg of legs) if (!d.contractBars[lg.symbol]) d.contractBars[lg.symbol] = lg.bars;
+}
+function compactBars(bars:any[]): number[][] {
+  const out:number[][] = new Array(bars.length);
+  for (let i=0;i<bars.length;i++) {
+    const b = bars[i];
+    out[i] = [b.ts, b.open, b.high, b.low, b.close, b.volume ?? 0];
+  }
+  return out;
+}
+function flushTrades(){
+  if (!EMIT_KEYS || EMIT_BUFFER.size === 0) return;
+  fs.mkdirSync(EMIT_DIR, { recursive: true });
+  let nFiles = 0, nTrades = 0;
+  for (const [k, byDate] of EMIT_BUFFER) {
+    const sub = path.join(EMIT_DIR, slugify(k));
+    fs.mkdirSync(sub, { recursive: true });
+    for (const [date, day] of byDate) {
+      day.trades.sort((a,b)=>a.entryTs-b.entryTs);
+      const compact = {
+        ...day,
+        spxBars: compactBars(day.spxBars),
+        contractBars: Object.fromEntries(
+          Object.entries(day.contractBars).map(([sym, b]) => [sym, compactBars(b as any[])])
+        ),
+      };
+      fs.writeFileSync(path.join(sub, `${date}.json`), JSON.stringify(compact));
+      nFiles++; nTrades += day.trades.length;
+    }
+  }
+  console.error(`[iron-trades] emitted ${nTrades} trades across ${nFiles} files under ${EMIT_DIR}`);
 }
 
 const ALL_DATES = listDatesFor(TARGET);
@@ -378,7 +626,7 @@ if (STATE_FILE && !process.env.SWEEP_MERGE && !process.env.SWEEP_SHARD) {
     console.error(`[incremental] no state file — bootstrap full ${SWEEP_DATES.length} dates`);
   }
 }
-console.error(`[${TARGET.symbol}] Iron sweep — dates: ${ALL_DATES.length}${process.env.SWEEP_SHARD ? ` (shard ${process.env.SWEEP_SHARD} → ${SWEEP_DATES.length})` : ''}, signals: ${SIGNALS.length}, structures: ${STRUCTURES.length}, exits: ${EXITS.length}`);
+console.error(`[${TARGET.symbol}] Iron sweep — dates: ${ALL_DATES.length}${process.env.SWEEP_SHARD ? ` (shard ${process.env.SWEEP_SHARD} → ${SWEEP_DATES.length})` : ''}, signals: ${SIGNALS.length}, structures: ${STRUCTURES.length}, exits: ${EXITS.length} | exitGate=${EXIT_GATE} entryStaleSec=${ENTRY_STALE_SEC || 'off'} fill=${FILL_MODE}`);
 
 for(let di=0; di<RUN_DATES.length; di++){
   const date = RUN_DATES[di];
@@ -399,9 +647,10 @@ for(let di=0; di<RUN_DATES.length; di++){
   // or EVICTED at the current V if rotation needs space for a new entry.
     // Per-variant per-day overlap tracking: list of (entryTs, exitTs) events.
   // Used to compute peak concurrent open positions after all trades recorded.
-  const overlapMap = new Map<string, Array<{entry:number, exit:number}>>();
+  const overlapMap = new Map<string, CapEvent[]>();
 
   for(const sig of SIGNALS){
+    if (EMIT_ONLY && !EMIT_SIGNALS.has(sig.label)) continue;
     const {entries,dirLog} = detectSignals(date, sig, c1, p1);
     // Sort entries by entryTs (should already be, but guarantee)
     entries.sort((a,b) => a.entryTs - b.entryTs);
@@ -411,6 +660,9 @@ for(let di=0; di<RUN_DATES.length; di++){
 
       const spxEntry = optPx(s1, ev.entryTs - 1);
       if(spxEntry==null) continue;
+
+      // Optional trend gate: skip counter-trend signals.
+      if(trendGateBlocks(s1, ev.entryTs, ev.dir)) continue;
 
       // Flip cutoff for this signal direction
       let flipTs = Infinity;
@@ -422,6 +674,7 @@ for(let di=0; di<RUN_DATES.length; di++){
       }
 
       for(const st of STRUCTURES){
+        if (EMIT_ONLY && !EMIT_STRUCTS.has(st.label)) continue;
         const center = st.centerOffset
           ? spxEntry + (ev.dir === 'bull' ? st.centerOffset : -st.centerOffset)
           : spxEntry;
@@ -444,26 +697,73 @@ for(let di=0; di<RUN_DATES.length; di++){
         ];
         const entries_px = legs.map(lg => optPx(lg.bars, ev.entryTs - 1));
         if(entries_px.some(p => p==null)) continue;
+        // Entry staleness gate (default off). Credit realism depends on the SHORT
+        // legs being freshly printed; reject if any short mark is too stale.
+        if(ENTRY_STALE_SEC > 0 && legs.some(lg => lg.sign === +1 && markAge(lg.bars, ev.entryTs - 1) > ENTRY_STALE_SEC)) continue;
         const credit = legs.reduce((s,lg,i) => s + lg.sign * (entries_px[i] as number), 0);
         if(credit <= 0.10) continue;
         if(credit >= st.wingWidth * 0.95) continue;
 
         const traj = buildTrajectory(legs, ev.entryTs, settle);
         const maxRisk = (st.wingWidth - credit) * 100;
-
         for(const ex of EXITS){
+          if (EMIT_ONLY && !EMIT_EXITS.has(ex.label)) continue;
           // Compute natural exit and record P&L immediately (no position mgmt in sweep).
           // Concurrency tracked via overlapMap so dashboard can compute budget-scaled outcome.
           const flipUse = ex.useFlip ? flipTs : Infinity;
-          const nat = applyExit(traj, settle, legs, credit, ex.tpFrac, ex.slMult, flipUse, spxAtSettle);
+          const nat = applyExit(traj, settle, legs, credit, ex.tpFrac, ex.slMult, flipUse, spxAtSettle, st.wingWidth, ex.slRiskFrac ?? 0);
           const pnl_gross = (credit - nat.exitV) * 100;
+          const pnl_net = pnl_gross - SLIPPAGE_PER_STRUCTURE;
           const durationSec = Math.max(0, nat.exitTs - ev.entryTs);
           rec(sig.label, st.label, ex.label, pnl_gross, date, credit, st.wingWidth, ev.entryTs, maxRisk, durationSec);
 
           // Record (entry, exit) span for peak-concurrent computation at end of day.
           const k = `${sig.label}|${st.label}|${ex.label}`;
           let evs = overlapMap.get(k); if(!evs){evs=[]; overlapMap.set(k, evs);}
-          evs.push({entry: ev.entryTs, exit: nat.exitTs});
+          // For directional flies the two "sides" are bull-leaning vs bear-leaning bodies → map to call/put buckets.
+          evs.push({entry: ev.entryTs, exit: nat.exitTs, side: ev.dir === 'bull' ? 'call' : 'put', pnl: pnl_net});
+
+          // Per-trade emission (no-op unless this variant key is in EMIT_KEYS).
+          if (EMIT_KEYS && EMIT_KEYS.has(k)) {
+            const spxAtExit = optPx(s1, nat.exitTs) ?? spxEntry;
+            // Per-leg exit marks. For intrinsic settle at 0DTE expiry use
+            // SPX-vs-strike; else fall back to leg-bar close.
+            // legs[0..1] are puts, legs[2..3] are calls (positional, see leg build).
+            const exitMark = (lg:Leg, isPut:boolean) => {
+              if (nat.reason === 'expiry' && spxAtSettle != null) {
+                return isPut
+                  ? Math.max(0, lg.strike - spxAtSettle)
+                  : Math.max(0, spxAtSettle - lg.strike);
+              }
+              return optPx(lg.bars, nat.exitTs) ?? 0;
+            };
+            const spx30Prior = optPx(s1, ev.entryTs - 1 - 30*60);
+            const drift30 = (spx30Prior != null) ? (spxEntry - spx30Prior) : 0;
+            const tr: IronTradeRecord = {
+              entryTs: ev.entryTs, exitTs: nat.exitTs, durationSec,
+              dir: ev.dir,
+              spxAtEntry: spxEntry, spxAtExit,
+              drift30,
+              center,
+              shortPutSymbol: sym_sp, shortPutStrike: Kshort_put,
+              shortPutEntryMark: entries_px[0] as number, shortPutExitMark: exitMark(legs[0], true),
+              longPutSymbol:  sym_lp, longPutStrike: Klong_put,
+              longPutEntryMark:  entries_px[1] as number, longPutExitMark:  exitMark(legs[1], true),
+              shortCallSymbol: sym_sc, shortCallStrike: Kshort_call,
+              shortCallEntryMark: entries_px[2] as number, shortCallExitMark: exitMark(legs[2], false),
+              longCallSymbol:  sym_lc, longCallStrike: Klong_call,
+              longCallEntryMark:  entries_px[3] as number, longCallExitMark:  exitMark(legs[3], false),
+              netCredit: credit, netExitDebit: nat.exitV, wingWidth: st.wingWidth, maxRisk,
+              tpFrac: ex.tpFrac, slMult: ex.slMult,
+              pnlGross: pnl_gross, pnlNet: pnl_net,
+              exitReason: nat.reason,
+            };
+            const spxOpen = s1[0]?.close ?? spxEntry;
+            const spxClose = s1[s1.length-1]?.close ?? spxEntry;
+            emitIronTrade(k, date,
+              { spxOpen, spxClose, spxSettle: spxAtSettle },
+              tr, s1, legs);
+          }
         }
       }
     }
@@ -482,6 +782,8 @@ for(let di=0; di<RUN_DATES.length; di++){
     let cur = 0, peak = 0;
     for(const e of events){ cur += e.delta; if(cur > peak) peak = cur; }
     if(peak > stat.peakConcurrent) stat.peakConcurrent = peak;
+    // Per-side (bull/bear) cap scan: accumulate today's capped net for each policy (drop-and-wait).
+    for(let i=0;i<CAP_POLICIES.length;i++) stat.capNets[i] += capDayNet(evs, CAP_POLICIES[i].pool, CAP_POLICIES[i].c, CAP_POLICIES[i].p);
   }
   overlapMap.clear();
 }
@@ -492,9 +794,14 @@ for(let di=0; di<RUN_DATES.length; di++){
 // inline finalize so output is byte-identical to a serial run.
 if (process.env.SWEEP_SHARD_OUT) {
   dumpResults(results, process.env.SWEEP_SHARD_OUT);
+  // Shard worker also flushes its own trade buffer (each shard owns a
+  // disjoint date subset → no overwrite). Merge run buffer is empty.
+  flushTrades();
   process.exit(0);
 }
 if (process.env.SWEEP_MERGE) loadShardsInto(process.env.SWEEP_MERGE, results);
+// Serial run reaches here too; trades flushed at very end (after finalize).
+if (EMIT_ONLY) { flushTrades(); process.exit(0); }   // emit-only: skip report + dashboard writes
 
 console.log(`\n=== IRON CONDOR/BUTTERFLY SWEEP — look-ahead protected, $${SLIPPAGE_PER_STRUCTURE}/RT slippage ===`);
 const rows:any[] = [];
@@ -521,13 +828,24 @@ for(const [k,v] of results){
     ? +(v.durationSumSec / (numActiveDays * SESSION_SEC)).toFixed(2)
     : 0;
   const avgRiskCapacity = +(avgConcurrent * avgMaxRisk).toFixed(0);
+  // Shared-pool cap scan (pool + per-side bull/bear sub-cap): baseline, best sub-cap at pool 11, best overall.
+  const cap = capSummary(v.capNets, 'bull', 'bear');
   rows.push({signal,spread,exit,pnl:v.pnl,pnl_gross:v.pnl_gross,n:v.n,wr,dd:mdd,ratio,pos,
+             ...cap,
              avgCredit:+avgCredit.toFixed(3),avgMaxRisk:+avgMaxRisk.toFixed(0),
              avgPnlPerTrade:+(v.pnl/Math.max(1,v.n)).toFixed(2),
              peakConcurrent:v.peakConcurrent, evictions:v.evictions,
              peakRiskCapacity:+(v.peakConcurrent * avgMaxRisk).toFixed(0),
              avgConcurrent, avgRiskCapacity, numActiveDays,
-             avgDurMin:+avgDurMin.toFixed(1)});
+             avgDurMin:+avgDurMin.toFixed(1),
+             // Fill-model provenance — stamped on every row so dashboard / archaeology
+             // can see which assumptions produced these numbers.
+             fillModel: FILL_MODE,
+             fillHalfSpread: CLOSE_HALFSPREAD_PER_LEG,
+             exitGate: EXIT_GATE,
+             entryStaleSec: ENTRY_STALE_SEC,
+             trendGateMin: TREND_GATE_MIN,
+             trendGateThresh: TREND_GATE_THRESH});
 }
 rows.sort((a,b)=>b.pnl-a.pnl);
 console.log(`Variants: ${rows.length}.  Positive net: ${rows.filter(r=>r.pnl>0).length}.\n`);
@@ -549,7 +867,9 @@ try { existing = JSON.parse(fs.readFileSync(SWEEP_JSON,'utf8')); } catch {}
 // directional-IB rows from pre-fix geometry accumulated forever. Credit-spread
 // labels are NNoffM (1ITM/ATM/5OTM…) — never IB/IC — so a bare prefix is safe.
 const isIron = (s:string) => s.startsWith('IB') || s.startsWith('IC');
-existing = existing.filter((r:any) => !isIron(r.spread));
+// Drop our own (signal-based) iron rows, but PRESERVE time-based-iron rows
+// (signal "TIME …") emitted by time-iron-study.ts — they share the IB label.
+existing = existing.filter((r:any) => !(isIron(r.spread) && !String(r.signal||'').startsWith('TIME ')));
 const merged = existing.concat(rows);
 fs.writeFileSync(SWEEP_JSON, JSON.stringify(merged));
 // Also write to the live viewer location so the dashboard picks it up
@@ -564,7 +884,8 @@ try { existingDaily = JSON.parse(fs.readFileSync(DAILY_JSON,'utf8')); } catch {}
 // Drop prior iron series keys
 for(const k of Object.keys(existingDaily.series||{})){
   const parts = k.split('|');
-  if(parts.length>=2 && (parts[1].startsWith('IB') || parts[1].startsWith('IC'))) delete existingDaily.series[k];
+  // Preserve time-based-iron series (signal "TIME …") even though spread is IB.
+  if(parts.length>=2 && (parts[1].startsWith('IB') || parts[1].startsWith('IC')) && !parts[0].startsWith('TIME ')) delete existingDaily.series[k];
 }
 const allDatesSet = new Set<string>(existingDaily.dates || []);
 for(const v of results.values()) for(const d of v.daily.keys()) allDatesSet.add(d);
@@ -598,7 +919,9 @@ console.log(`Daily series rewritten: ${dates.length} dates × ${Object.keys(seri
 // Output: /tmp/iron_hourly.json — separate file so it doesn't bloat the main viewer fetch.
 const HOURLY_JSON = outPath('/tmp/iron_hourly.json', TARGET);
 const STUDIO_HOURLY = outPath(path.join(process.cwd(), 'scripts/autoresearch/output/spread-hourly.json'), TARGET);
-const hourlyOut:any[] = [];
+// Preserve time-based-iron hourly rows (signal "TIME …") from time-iron-study.ts.
+let hourlyOut:any[] = [];
+try { const raw = JSON.parse(fs.readFileSync(HOURLY_JSON,'utf8')); hourlyOut = (Array.isArray(raw)?raw:Object.values(raw)).filter((e:any)=>String(e?.signal||'').startsWith('TIME ')); } catch {}
 for(const [k,v] of results){
   const [signal,structure,exit] = k.split('|');
   const byHour:Record<number, any> = {};
@@ -642,3 +965,6 @@ if (STATE_FILE && !process.env.SWEEP_SHARD_OUT) {
   dumpResults(results, STATE_FILE);
   console.error(`[incremental] state saved → ${STATE_FILE}`);
 }
+
+// Serial / merge-finalize trade emission (no-op unless SWEEP_EMIT_TRADES_KEYS).
+flushTrades();
