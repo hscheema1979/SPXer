@@ -1511,7 +1511,7 @@ export function createReplayRoutes(): Router {
   // ── GET /replay/api/sweep — leaderboard aggregated from replay_results ───
   // Supports ?maxEntryPrice=N to recompute metrics using only trades with entry ≤ $N
   router.get('/api/sweep', (req, res) => {
-    const { sort, limit, dir, minDays, maxEntryPrice, maxConcurrent, maxTradesPerDay, sinceTs, orFilter, gapFilter } = req.query as Record<string, string | undefined>;
+    const { sort, limit, dir, minDays, maxEntryPrice, maxConcurrent, maxTradesPerDay, sinceTs, orFilter, gapFilter, configPrefix } = req.query as Record<string, string | undefined>;
     const allowedSorts = ['edge', 'rMultiple', 'ev', 'winRate', 'totalPnl', 'worstDay', 'profitDays', 'trades', 'avgDailyPnl', 'bestDay', 'days', 'avgEntryPrice', 'avgPnlPerTrade', 'breakEvenWR'];
     const sortCol = allowedSorts.includes(sort || '') ? sort : 'edge';
     const sortDir = dir === 'ASC' ? 'ASC' : 'DESC';
@@ -1550,10 +1550,14 @@ export function createReplayRoutes(): Router {
         const safeGap = gapFilterVal && allowedGapVals.includes(gapFilterVal) ? gapFilterVal : null;
         const orWhere  = safeOr  ? `AND json_extract(c.config_json, '$._diag.orFilter')  = '${safeOr}'`  : '';
         const gapWhere = safeGap ? `AND json_extract(c.config_json, '$._diag.gapFilter') = '${safeGap}'` : '';
+        // configPrefix: isolate one sweep family (e.g. 'long-spx') in the UI.
+        // Sanitized to [A-Za-z0-9_-] so it's safe to inline as a LIKE literal.
+        const safePrefix = configPrefix ? configPrefix.replace(/[^A-Za-z0-9_-]/g, '') : '';
+        const prefixWhere = safePrefix ? `AND s.configId LIKE '${safePrefix}%'` : '';
 
         // Total count for pagination (fast — single index scan)
         totalConfigCount = summaryCount > 0
-          ? (db.prepare(`SELECT COUNT(*) as c FROM replay_summary s JOIN replay_configs c ON c.id = s.configId WHERE s.days >= ? ${orWhere} ${gapWhere}`).get(minDaysVal) as any).c
+          ? (db.prepare(`SELECT COUNT(*) as c FROM replay_summary s JOIN replay_configs c ON c.id = s.configId WHERE s.days >= ? ${orWhere} ${gapWhere} ${prefixWhere}`).get(minDaysVal) as any).c
           : 0;
 
         let configRows: any[];
@@ -1589,7 +1593,7 @@ export function createReplayRoutes(): Router {
               s.avgDailyPnl, s.avgPnlPerTrade
             FROM replay_summary s
             JOIN replay_configs c ON c.id = s.configId
-            WHERE s.days >= ? ${orWhere} ${gapWhere}
+            WHERE s.days >= ? ${orWhere} ${gapWhere} ${prefixWhere}
             ORDER BY ${sqlSortCol} ${sqlDir}
             LIMIT ?
           `).all(minDaysVal, maxRows) as any[];
@@ -1599,8 +1603,9 @@ export function createReplayRoutes(): Router {
         }
 
         // Fetch OR-signal configs that may rank outside the top N — appended after the main trim.
+        // Skip entirely when a configPrefix is set (the prefixed view must stay scoped to its family).
         let extraOrRows: any[] = [];
-        if (summaryCount > 0) {
+        if (summaryCount > 0 && !safePrefix) {
           const inSet = new Set(configRows.map((r: any) => r.configId));
           const orQueryRows = db.prepare(`
             SELECT s.configId, c.name, c.config_json, s.days, s.totalTrades, s.totalWins,
@@ -3402,36 +3407,15 @@ router.get('/api/sweep/chunks', (req, res) => {
     res.type('text/markdown').send(fs.readFileSync(mdPath, 'utf-8'));
   });
 
-  // POST /api/journal/:date/generate — trigger journal generation for a date
-  router.post('/api/journal/:date/generate', async (_req, res) => {
-    const date = _req.params.date;
-    try {
-      const { spawn } = require('child_process');
-      const proc = spawn('npx', ['tsx', 'scripts/daily-journal.ts', date], {
-        cwd: process.cwd(),
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
-      let out = '';
-      proc.stdout.on('data', (d: Buffer) => { out += d.toString(); });
-      proc.stderr.on('data', (d: Buffer) => { out += d.toString(); });
-      proc.on('close', (code: number) => {
-        if (code === 0) {
-          // Read the generated journal
-          const jsonPath = path.join(JOURNAL_DIR, `${date}.json`);
-          if (fs.existsSync(jsonPath)) {
-            return res.json(JSON.parse(fs.readFileSync(jsonPath, 'utf-8')));
-          }
-          const mdPath = path.join(JOURNAL_DIR, `${date}.md`);
-          if (fs.existsSync(mdPath)) {
-            return res.json({ date, markdown: fs.readFileSync(mdPath, 'utf-8') });
-          }
-          return res.json({ status: 'generated', output: out });
-        }
-        res.status(500).json({ error: `Process exited ${code}`, output: out });
-      });
-    } catch (e: any) {
-      res.status(500).json({ error: e.message });
-    }
+  // POST /api/journal/:date/generate — DISABLED.
+  // Journal generation read live Tradier broker data; live trading moved to
+  // OptionX and the generator (scripts/daily-journal.ts) was removed when this
+  // repo became backtest+backfill only. Existing journal files are still served
+  // by the GET routes above.
+  router.post('/api/journal/:date/generate', (_req, res) => {
+    res.status(410).json({
+      error: 'Journal generation removed — SPXer is backtest+backfill only (live trading is in OptionX).',
+    });
   });
 
   // GET /journal — serve journal viewer HTML

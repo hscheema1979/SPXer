@@ -311,10 +311,20 @@ function buildTradeContexts(date: string, sig: SignalSpec, c1: any, p1: any): Tr
   return ctxs;
 }
 
+// Per-day result for one TP/SL variant — carries the win/loss decomposition the
+// dashboard needs (sumWinPct/cntWins/sumLossPct/cntLosses) so edge/EV/R-multiple
+// can be computed at write time exactly like runSummaryRebuild does.
+interface DayStat {
+  trades: number; wins: number; pnl: number;       // pnl in $ (retPct × $100/pt notional)
+  sumWinPct: number; cntWins: number;               // % returns of winning trades
+  sumLossPct: number; cntLosses: number;            // % returns of losing trades
+}
+
 // Sweep a single TP/SL over the pre-built trade contexts. Cheap — just the
 // exit scan, no signal recomputation. CB-off for v1 (every entry taken).
-function simulateExits(ctxs: TradeCtx[], tpPct: number, slPct: number) {
+function simulateExits(ctxs: TradeCtx[], tpPct: number, slPct: number): DayStat {
   let trades = 0, wins = 0, pnl = 0;
+  let sumWinPct = 0, cntWins = 0, sumLossPct = 0, cntLosses = 0;
   for (const ctx of ctxs) {
     const tp = ctx.entryPx * (1 + tpPct / 100);
     const sl = slPct > 0 ? ctx.entryPx * (1 - slPct / 100) : 0;
@@ -328,10 +338,22 @@ function simulateExits(ctxs: TradeCtx[], tpPct: number, slPct: number) {
     }
     const retPct = ((exitPx - ctx.entryPx) / ctx.entryPx) * 100;
     trades++;
-    if (retPct > 0) wins++;
-    pnl += retPct;
+    pnl += (exitPx - ctx.entryPx) * 100; // 1 contract × $100/pt
+    if (retPct > 0) { wins++; cntWins++; sumWinPct += retPct; }
+    else { cntLosses++; sumLossPct += retPct; }
   }
-  return { trades, wins, pnl };
+  return { trades, wins, pnl, sumWinPct, cntWins, sumLossPct, cntLosses };
+}
+
+// Per-config accumulator: every field the dashboard summary needs. The
+// sweep-shard reducer SUMs numeric fields across shards (disjoint dates), so
+// trades/pnl/profitDays sum correctly. worstDay/bestDay are SUMmed too — across
+// disjoint shards that loses true min/max, but for default edge-sort they're
+// secondary; the serial path (single shard) keeps them exact.
+interface Acc {
+  days: number; trades: number; wins: number; pnl: number;
+  sumWinPct: number; cntWins: number; sumLossPct: number; cntLosses: number;
+  profitDays: number; worstDay: number; bestDay: number;
 }
 
 // ── Main ────────────────────────────────────────────────────────────────────
@@ -340,9 +362,10 @@ async function main() {
   console.log(`[long-config-sweep] Generated ${variants.length} variants`);
 
   const allDates = listDatesFor(TARGET);
-  const myDates = shardDates(allDates);
+  // Merge run skips the date loop — results come from shard dumps.
+  const myDates = process.env.SWEEP_MERGE ? [] : shardDates(allDates);
 
-  if (!myDates.length) {
+  if (!myDates.length && !process.env.SWEEP_MERGE) {
     console.log(`[long-config-sweep] No dates for this shard`);
     process.exit(0);
   }
@@ -360,7 +383,7 @@ async function main() {
   }
   const sigLabels = Array.from(bySig.keys());
 
-  const results = new Map<string, { days: number; trades: number; wins: number; pnl: number }>();
+  const results = new Map<string, Acc>();
 
   for (let di = 0; di < myDates.length; di++) {
     const date = myDates[di];
@@ -377,12 +400,23 @@ async function main() {
 
         for (const variant of sigVariants) {
           const r = simulateExits(ctxs, variant.tp, variant.sl);
-          const prev = results.get(variant.id) || { days: 0, trades: 0, wins: 0, pnl: 0 };
+          const prev = results.get(variant.id) || {
+            days: 0, trades: 0, wins: 0, pnl: 0,
+            sumWinPct: 0, cntWins: 0, sumLossPct: 0, cntLosses: 0,
+            profitDays: 0, worstDay: 0, bestDay: 0,
+          };
           results.set(variant.id, {
             days: prev.days + 1,
             trades: prev.trades + r.trades,
             wins: prev.wins + r.wins,
             pnl: prev.pnl + r.pnl,
+            sumWinPct: prev.sumWinPct + r.sumWinPct,
+            cntWins: prev.cntWins + r.cntWins,
+            sumLossPct: prev.sumLossPct + r.sumLossPct,
+            cntLosses: prev.cntLosses + r.cntLosses,
+            profitDays: prev.profitDays + (r.pnl > 0 ? 1 : 0),
+            worstDay: Math.min(prev.worstDay, r.pnl),
+            bestDay: Math.max(prev.bestDay, r.pnl),
           });
         }
       }
@@ -391,7 +425,30 @@ async function main() {
     }
   }
 
-  // Store to replay_summary & replay_configs
+  // ── Shard/merge finalize (mirrors credit-spread-sweep) ─────────────────────
+  // Worker (SWEEP_SHARD_OUT): dump partial accumulator only — NO DB write.
+  // Merge (SWEEP_MERGE): load all shard dumps, reduce, then write to DB.
+  // Serial (neither): write directly.
+  if (process.env.SWEEP_SHARD_OUT) {
+    dumpResults(results, process.env.SWEEP_SHARD_OUT);
+    let totalTrades = 0; results.forEach(r => { totalTrades += r.trades; });
+    console.log(`[long-config-sweep] Shard dumped: ${results.size} configs, ${totalTrades} trades`);
+    return;
+  }
+
+  if (process.env.SWEEP_MERGE) {
+    loadShardsInto(process.env.SWEEP_MERGE, results as any);
+  }
+
+  writeToDb(variants, results as Map<string, Acc>);
+
+  let totalTrades = 0; results.forEach(r => { totalTrades += r.trades; });
+  console.log(`[long-config-sweep] Completed: ${results.size} configs, ${totalTrades} trades`);
+}
+
+// Compute dashboard metrics (edge/EV/R-multiple/winRate) the same way
+// runSummaryRebuild does, and upsert summary + config rows.
+function writeToDb(variants: ConfigVariant[], results: Map<string, Acc>) {
   const db = new Database(DB_PATH);
   try {
     db.exec(`
@@ -417,8 +474,10 @@ async function main() {
     const now = Math.floor(Date.now() / 1000);
     const summaryStmt = db.prepare(`
       INSERT OR REPLACE INTO replay_summary
-      (configId, days, totalTrades, totalWins, totalPnl, avgDailyPnl)
-      VALUES (?, ?, ?, ?, ?, ?)
+      (configId, days, totalTrades, totalWins, totalPnl, worstDay, bestDay, profitDays,
+       sumWinPct, cntWins, sumLossPct, cntLosses,
+       winRate, avgDailyPnl, avgPnlPerTrade, ev, edge, rMultiple)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const configStmt = db.prepare(`
       INSERT OR REPLACE INTO replay_configs
@@ -426,40 +485,43 @@ async function main() {
       VALUES (?, ?, ?, ?, ?, ?)
     `);
 
-    for (const variant of variants) {
-      const res = results.get(variant.id);
-      if (!res) continue;
+    const tx = db.transaction(() => {
+      for (const variant of variants) {
+        const res = results.get(variant.id);
+        if (!res || res.days <= 0) continue;
 
-      const avgDailyPnl = res.days > 0 ? res.pnl / res.days : 0;
-      summaryStmt.run(variant.id, res.days, res.trades, res.wins, res.pnl, avgDailyPnl);
+        const winRate = res.trades > 0 ? res.wins / res.trades : 0;
+        const avgDailyPnl = res.pnl / res.days;
+        const avgPnlPerTrade = res.trades > 0 ? res.pnl / res.trades : 0;
+        const avgWin = res.cntWins > 0 ? res.sumWinPct / res.cntWins : 0;        // %
+        const avgLoss = res.cntLosses > 0 ? res.sumLossPct / res.cntLosses : 0;  // % (negative)
+        const ev = (res.trades > 0 && res.cntWins > 0 && res.cntLosses > 0)
+          ? winRate * avgWin + (1 - winRate) * avgLoss : 0;
+        const denom = avgWin + Math.abs(avgLoss);
+        const edge = (res.trades > 0 && res.cntWins > 0 && res.cntLosses > 0 && denom > 0)
+          ? winRate - Math.abs(avgLoss) / denom : 0;
+        const rMultiple = (res.cntLosses > 0 && avgLoss !== 0 && res.cntWins > 0)
+          ? avgWin / Math.abs(avgLoss) : 0;
 
-      const configJson = JSON.stringify({
-        signal: variant.signal,
-        timeframes: variant.tfs,
-        tp: variant.tp,
-        sl: variant.sl,
-        cbTrigger: variant.cbTrigger,
-        cbSkip: variant.cbSkip,
-      });
-      configStmt.run(
-        variant.id,
-        variant.name,
-        `Long-call sweep: ${variant.name}`,
-        configJson,
-        now,
-        now
-      );
-    }
+        summaryStmt.run(
+          variant.id, res.days, res.trades, res.wins, res.pnl,
+          res.worstDay, res.bestDay, res.profitDays,
+          res.sumWinPct, res.cntWins, res.sumLossPct, res.cntLosses,
+          winRate, avgDailyPnl, avgPnlPerTrade, ev, edge, rMultiple
+        );
+
+        const configJson = JSON.stringify({
+          signal: variant.signal, timeframes: variant.tfs,
+          tp: variant.tp, sl: variant.sl,
+          cbTrigger: variant.cbTrigger, cbSkip: variant.cbSkip,
+        });
+        configStmt.run(variant.id, variant.name, `Long-call sweep: ${variant.name}`, configJson, now, now);
+      }
+    });
+    tx();
   } finally {
     db.close();
   }
-
-  let totalTrades = 0;
-  results.forEach(r => { totalTrades += r.trades; });
-  console.log(`[long-config-sweep] Completed: ${results.size} configs, ${totalTrades} trades`);
-
-  const outPath = path.join(process.cwd(), 'data', 'results', `long-config-sweep-${TARGET.symbol.toLowerCase()}.json`);
-  dumpResults(results, outPath);
 }
 
 main().catch(e => {
