@@ -1,9 +1,9 @@
 /**
  * long-config-sweep.ts
  *
- * Long-call sweep: 108,000 variants (36 signals × 750 TP/SL combos × 4 CB configs).
+ * Long-call sweep (v1): 27,000 variants (36 signals × 750 TP/SL combos, CB-off).
  * Signals: HMA/DEMA with 2+3+5, 2+3, and single timeframes (1m/2m/3m/5m).
- * TP: 10%-500% (by 10%), SL: 20%-90% (by 5%), CB: off/1:1/1:3/3:2.
+ * TP: 10%-500% (by 10%), SL: 20%-90% (by 5%). Circuit breakers dropped for v1.
  * Runs across date range (shardable via sweep-parallel.ts), stores to replay_summary.
  *
  * CRITICAL: NO look-ahead bias. Signal detected at bar CLOSE, entry filled at
@@ -43,65 +43,69 @@ const FAST0 = 3, SLOW0 = 15;
 type Signal = 'hma' | 'dema';
 interface SignalSpec { label: string; signal: Signal; tfs: { tf: number; fast: number; slow: number }[] }
 interface ConfigVariant {
-  id: string; name: string; signal: Signal; tfs: { tf: number; fast: number; slow: number }[];
+  id: string; name: string; sigLabel: string; signal: Signal;
+  tfs: { tf: number; fast: number; slow: number }[];
   tp: number; sl: number; cbTrigger: number; cbSkip: number;
 }
 
+// ── Signal specs (module-level: shared by generator + main detect loop) ──────
+const SIGNALS: SignalSpec[] = [
+  // Multi-TF: 2+3+5
+  { label: 'HMA  2+3+5 3x9',  signal: 'hma', tfs:[{tf:2,fast:3,slow:9},{tf:3,fast:3,slow:9},{tf:5,fast:3,slow:9}] },
+  { label: 'HMA  2+3+5 3x12', signal: 'hma', tfs:[{tf:2,fast:3,slow:12},{tf:3,fast:3,slow:12},{tf:5,fast:3,slow:12}] },
+  { label: 'HMA  2+3+5 3x21', signal: 'hma', tfs:[{tf:2,fast:3,slow:21},{tf:3,fast:3,slow:21},{tf:5,fast:3,slow:21}] },
+  { label: 'DEMA 2+3+5 3x9',  signal: 'dema', tfs:[{tf:2,fast:3,slow:9},{tf:3,fast:3,slow:9},{tf:5,fast:3,slow:9}] },
+  { label: 'DEMA 2+3+5 3x12', signal: 'dema', tfs:[{tf:2,fast:3,slow:12},{tf:3,fast:3,slow:12},{tf:5,fast:3,slow:12}] },
+  { label: 'DEMA 2+3+5 3x21', signal: 'dema', tfs:[{tf:2,fast:3,slow:21},{tf:3,fast:3,slow:21},{tf:5,fast:3,slow:21}] },
+  // Multi-TF: 2+3
+  { label: 'HMA  2+3 3x9',  signal: 'hma', tfs:[{tf:2,fast:3,slow:9},{tf:3,fast:3,slow:9}] },
+  { label: 'HMA  2+3 3x12', signal: 'hma', tfs:[{tf:2,fast:3,slow:12},{tf:3,fast:3,slow:12}] },
+  { label: 'HMA  2+3 3x21', signal: 'hma', tfs:[{tf:2,fast:3,slow:21},{tf:3,fast:3,slow:21}] },
+  { label: 'DEMA 2+3 3x9',  signal: 'dema', tfs:[{tf:2,fast:3,slow:9},{tf:3,fast:3,slow:9}] },
+  { label: 'DEMA 2+3 3x12', signal: 'dema', tfs:[{tf:2,fast:3,slow:12},{tf:3,fast:3,slow:12}] },
+  { label: 'DEMA 2+3 3x21', signal: 'dema', tfs:[{tf:2,fast:3,slow:21},{tf:3,fast:3,slow:21}] },
+  // Single-TF: HMA
+  { label: 'HMA  1m 3x9',  signal: 'hma', tfs:[{tf:1,fast:3,slow:9}] },
+  { label: 'HMA  2m 3x9',  signal: 'hma', tfs:[{tf:2,fast:3,slow:9}] },
+  { label: 'HMA  3m 3x9',  signal: 'hma', tfs:[{tf:3,fast:3,slow:9}] },
+  { label: 'HMA  5m 3x9',  signal: 'hma', tfs:[{tf:5,fast:3,slow:9}] },
+  { label: 'HMA  1m 3x12', signal: 'hma', tfs:[{tf:1,fast:3,slow:12}] },
+  { label: 'HMA  2m 3x12', signal: 'hma', tfs:[{tf:2,fast:3,slow:12}] },
+  { label: 'HMA  3m 3x12', signal: 'hma', tfs:[{tf:3,fast:3,slow:12}] },
+  { label: 'HMA  5m 3x12', signal: 'hma', tfs:[{tf:5,fast:3,slow:12}] },
+  { label: 'HMA  1m 3x21', signal: 'hma', tfs:[{tf:1,fast:3,slow:21}] },
+  { label: 'HMA  2m 3x21', signal: 'hma', tfs:[{tf:2,fast:3,slow:21}] },
+  { label: 'HMA  3m 3x21', signal: 'hma', tfs:[{tf:3,fast:3,slow:21}] },
+  { label: 'HMA  5m 3x21', signal: 'hma', tfs:[{tf:5,fast:3,slow:21}] },
+  // Single-TF: DEMA
+  { label: 'DEMA 1m 3x9',  signal: 'dema', tfs:[{tf:1,fast:3,slow:9}] },
+  { label: 'DEMA 2m 3x9',  signal: 'dema', tfs:[{tf:2,fast:3,slow:9}] },
+  { label: 'DEMA 3m 3x9',  signal: 'dema', tfs:[{tf:3,fast:3,slow:9}] },
+  { label: 'DEMA 5m 3x9',  signal: 'dema', tfs:[{tf:5,fast:3,slow:9}] },
+  { label: 'DEMA 1m 3x12', signal: 'dema', tfs:[{tf:1,fast:3,slow:12}] },
+  { label: 'DEMA 2m 3x12', signal: 'dema', tfs:[{tf:2,fast:3,slow:12}] },
+  { label: 'DEMA 3m 3x12', signal: 'dema', tfs:[{tf:3,fast:3,slow:12}] },
+  { label: 'DEMA 5m 3x12', signal: 'dema', tfs:[{tf:5,fast:3,slow:12}] },
+  { label: 'DEMA 1m 3x21', signal: 'dema', tfs:[{tf:1,fast:3,slow:21}] },
+  { label: 'DEMA 2m 3x21', signal: 'dema', tfs:[{tf:2,fast:3,slow:21}] },
+  { label: 'DEMA 3m 3x21', signal: 'dema', tfs:[{tf:3,fast:3,slow:21}] },
+  { label: 'DEMA 5m 3x21', signal: 'dema', tfs:[{tf:5,fast:3,slow:21}] },
+];
+const SIG_BY_LABEL = new Map<string, SignalSpec>(SIGNALS.map(s => [s.label, s]));
+
 // ── Variant generator ──────────────────────────────────────────────────────
 function generateVariants(): ConfigVariant[] {
-  const signals: SignalSpec[] = [
-    // Multi-TF: 2+3+5
-    { label: 'HMA  2+3+5 3x9',  signal: 'hma', tfs:[{tf:2,fast:3,slow:9},{tf:3,fast:3,slow:9},{tf:5,fast:3,slow:9}] },
-    { label: 'HMA  2+3+5 3x12', signal: 'hma', tfs:[{tf:2,fast:3,slow:12},{tf:3,fast:3,slow:12},{tf:5,fast:3,slow:12}] },
-    { label: 'HMA  2+3+5 3x21', signal: 'hma', tfs:[{tf:2,fast:3,slow:21},{tf:3,fast:3,slow:21},{tf:5,fast:3,slow:21}] },
-    { label: 'DEMA 2+3+5 3x9',  signal: 'dema', tfs:[{tf:2,fast:3,slow:9},{tf:3,fast:3,slow:9},{tf:5,fast:3,slow:9}] },
-    { label: 'DEMA 2+3+5 3x12', signal: 'dema', tfs:[{tf:2,fast:3,slow:12},{tf:3,fast:3,slow:12},{tf:5,fast:3,slow:12}] },
-    { label: 'DEMA 2+3+5 3x21', signal: 'dema', tfs:[{tf:2,fast:3,slow:21},{tf:3,fast:3,slow:21},{tf:5,fast:3,slow:21}] },
-    // Multi-TF: 2+3
-    { label: 'HMA  2+3 3x9',  signal: 'hma', tfs:[{tf:2,fast:3,slow:9},{tf:3,fast:3,slow:9}] },
-    { label: 'HMA  2+3 3x12', signal: 'hma', tfs:[{tf:2,fast:3,slow:12},{tf:3,fast:3,slow:12}] },
-    { label: 'HMA  2+3 3x21', signal: 'hma', tfs:[{tf:2,fast:3,slow:21},{tf:3,fast:3,slow:21}] },
-    { label: 'DEMA 2+3 3x9',  signal: 'dema', tfs:[{tf:2,fast:3,slow:9},{tf:3,fast:3,slow:9}] },
-    { label: 'DEMA 2+3 3x12', signal: 'dema', tfs:[{tf:2,fast:3,slow:12},{tf:3,fast:3,slow:12}] },
-    { label: 'DEMA 2+3 3x21', signal: 'dema', tfs:[{tf:2,fast:3,slow:21},{tf:3,fast:3,slow:21}] },
-    // Single-TF: HMA
-    { label: 'HMA  1m 3x9',  signal: 'hma', tfs:[{tf:1,fast:3,slow:9}] },
-    { label: 'HMA  2m 3x9',  signal: 'hma', tfs:[{tf:2,fast:3,slow:9}] },
-    { label: 'HMA  3m 3x9',  signal: 'hma', tfs:[{tf:3,fast:3,slow:9}] },
-    { label: 'HMA  5m 3x9',  signal: 'hma', tfs:[{tf:5,fast:3,slow:9}] },
-    { label: 'HMA  1m 3x12', signal: 'hma', tfs:[{tf:1,fast:3,slow:12}] },
-    { label: 'HMA  2m 3x12', signal: 'hma', tfs:[{tf:2,fast:3,slow:12}] },
-    { label: 'HMA  3m 3x12', signal: 'hma', tfs:[{tf:3,fast:3,slow:12}] },
-    { label: 'HMA  5m 3x12', signal: 'hma', tfs:[{tf:5,fast:3,slow:12}] },
-    { label: 'HMA  1m 3x21', signal: 'hma', tfs:[{tf:1,fast:3,slow:21}] },
-    { label: 'HMA  2m 3x21', signal: 'hma', tfs:[{tf:2,fast:3,slow:21}] },
-    { label: 'HMA  3m 3x21', signal: 'hma', tfs:[{tf:3,fast:3,slow:21}] },
-    { label: 'HMA  5m 3x21', signal: 'hma', tfs:[{tf:5,fast:3,slow:21}] },
-    // Single-TF: DEMA
-    { label: 'DEMA 1m 3x9',  signal: 'dema', tfs:[{tf:1,fast:3,slow:9}] },
-    { label: 'DEMA 2m 3x9',  signal: 'dema', tfs:[{tf:2,fast:3,slow:9}] },
-    { label: 'DEMA 3m 3x9',  signal: 'dema', tfs:[{tf:3,fast:3,slow:9}] },
-    { label: 'DEMA 5m 3x9',  signal: 'dema', tfs:[{tf:5,fast:3,slow:9}] },
-    { label: 'DEMA 1m 3x12', signal: 'dema', tfs:[{tf:1,fast:3,slow:12}] },
-    { label: 'DEMA 2m 3x12', signal: 'dema', tfs:[{tf:2,fast:3,slow:12}] },
-    { label: 'DEMA 3m 3x12', signal: 'dema', tfs:[{tf:3,fast:3,slow:12}] },
-    { label: 'DEMA 5m 3x12', signal: 'dema', tfs:[{tf:5,fast:3,slow:12}] },
-    { label: 'DEMA 1m 3x21', signal: 'dema', tfs:[{tf:1,fast:3,slow:21}] },
-    { label: 'DEMA 2m 3x21', signal: 'dema', tfs:[{tf:2,fast:3,slow:21}] },
-    { label: 'DEMA 3m 3x21', signal: 'dema', tfs:[{tf:3,fast:3,slow:21}] },
-    { label: 'DEMA 5m 3x21', signal: 'dema', tfs:[{tf:5,fast:3,slow:21}] },
-  ];
+  const signals = SIGNALS;
   const tpsl: {tp: number; sl: number}[] = [];
   for (let tp = 10; tp <= 500; tp += 10) {
     for (let sl = 20; sl <= 90; sl += 5) {
       tpsl.push({ tp, sl });
     }
   }
+  // v1: circuit breakers dropped (CB-off only) → 36 × 750 × 1 = 27,000 variants.
+  // Re-add {1:1, 1:3, 3:2} here once the baseline TP/SL surface is validated.
   const cbs = [
     {trigger: 0, skip: 0, label: 'CB-off'},
-    {trigger: 1, skip: 1, label: 'CB1:1'},
-    {trigger: 1, skip: 3, label: 'CB1:3'},
-    {trigger: 3, skip: 2, label: 'CB3:2'},
   ];
 
   const variants: ConfigVariant[] = [];
@@ -111,7 +115,10 @@ function generateVariants(): ConfigVariant[] {
       for (const cb of cbs) {
         variants.push({
           id: `long-${TARGET.symbol.toLowerCase()}-${idx}`,
-          name: `${sig.label} TP${tp.tp / 100}x SL${tp.sl}% ${cb.label}`,
+          name: cb.trigger === 0
+            ? `${sig.label} TP${tp.tp}% SL${tp.sl}%`
+            : `${sig.label} TP${tp.tp}% SL${tp.sl}% ${cb.label}`,
+          sigLabel: sig.label,
           signal: sig.signal, tfs: sig.tfs, tp: tp.tp, sl: tp.sl,
           cbTrigger: cb.trigger, cbSkip: cb.skip,
         });
@@ -218,34 +225,42 @@ function findStrike(c1: any, type: 'C' | 'P', targetK: number): string | null {
   return best;
 }
 
-// ── Run day (long call logic) ───────────────────────────────────────────────
-function runDay(date: string, variant: ConfigVariant, c1: any, p1: any) {
+// ── Per-entry trade context (signal-spec dependent, TP/SL independent) ───────
+// Built ONCE per (date, signalSpec). The contract entry price, the post-entry
+// bar trajectory, and entry filters do NOT depend on TP/SL — only the exit
+// scan does. So we cache these and let the TP/SL sweep replay exits cheaply.
+interface TradeCtx {
+  dir: 'bull' | 'bear';
+  entryTs: number;
+  entryPx: number;
+  bars: any[];   // contract bars (post-entry trajectory scanned at exit time)
+  eod: number;
+}
+
+// Detect entries + build per-entry trade contexts for ONE signal spec.
+function buildTradeContexts(date: string, sig: SignalSpec, c1: any, p1: any): TradeCtx[] {
   const s1: any[] = c1.spxBars;
   const sess = sessOpenTs(date), eod = sess + 6.5 * 3600, tradeStart = sess + TRADESTART_SEC;
-  const gateStartTs = Math.max(tradeStart, tradeStart), gateEndTs = Math.min(eod, SETTLE_HHMM);
+  const gateStartTs = tradeStart, gateEndTs = Math.min(eod, sess + SETTLE_HHMM);
 
-  // State machines per timeframe
   const st0 = mkSt();
-  const sts = variant.tfs.map(() => mkSt());
+  const sts = sig.tfs.map(() => mkSt());
   for (const b of (p1?.spxBars ?? [])) {
     feed(st0, b, 1);
-    sts.forEach((st, i) => feed(st, b, variant.tfs[i].tf));
+    sts.forEach((st, i) => feed(st, b, sig.tfs[i].tf));
   }
 
-  // Signal detection (at bar CLOSE, entry NEXT bar open = +60s)
-  const prevDirs: any[] = variant.tfs.map(() => null);
-  const bullCross = variant.tfs.map(() => 0), bearCross = variant.tfs.map(() => 0);
-  const dirLog = new Map<number, any[]>();
-  const entries: any[] = [];
+  const prevDirs: any[] = sig.tfs.map(() => null);
+  const bullCross = sig.tfs.map(() => 0), bearCross = sig.tfs.map(() => 0);
+  const entries: { dir: 'bull' | 'bear'; entryTs: number }[] = [];
   let bullStreak = 0, bearStreak = 0, bullFired = false, bearFired = false;
 
   for (const b of s1) {
     feed(st0, b, 1);
-    sts.forEach((st, i) => feed(st, b, variant.tfs[i].tf));
+    sts.forEach((st, i) => feed(st, b, sig.tfs[i].tf));
     if (b.ts < tradeStart) continue;
 
-    const dirs = sts.map((st, i) => getDir(st, variant.tfs[i].fast, variant.tfs[i].slow, variant.signal));
-    dirLog.set(b.ts, dirs);
+    const dirs = sts.map((st, i) => getDir(st, sig.tfs[i].fast, sig.tfs[i].slow, sig.signal));
     dirs.forEach((d, i) => {
       if (prevDirs[i] !== null && d !== prevDirs[i]) {
         if (d === 'bull') bullCross[i] = b.ts;
@@ -260,78 +275,63 @@ function runDay(date: string, variant: ConfigVariant, c1: any, p1: any) {
 
     if (allBull && bullStreak >= MIN_ALIGN && !bullFired) {
       const ts = bullCross.filter(t => t > 0);
-      if (ts.length === variant.tfs.length && (Math.max(...ts) - Math.min(...ts)) / 60 <= CROSS_WIN) {
-        entries.push({ ts: b.ts, dir: 'bull', entryTs: b.ts + 60 });
+      if (ts.length === sig.tfs.length && (Math.max(...ts) - Math.min(...ts)) / 60 <= CROSS_WIN) {
+        entries.push({ dir: 'bull', entryTs: b.ts + 60 });
         bullFired = true;
       }
     }
     if (allBear && bearStreak >= MIN_ALIGN && !bearFired) {
       const ts = bearCross.filter(t => t > 0);
-      if (ts.length === variant.tfs.length && (Math.max(...ts) - Math.min(...ts)) / 60 <= CROSS_WIN) {
-        entries.push({ ts: b.ts, dir: 'bear', entryTs: b.ts + 60 });
+      if (ts.length === sig.tfs.length && (Math.max(...ts) - Math.min(...ts)) / 60 <= CROSS_WIN) {
+        entries.push({ dir: 'bear', entryTs: b.ts + 60 });
         bearFired = true;
       }
     }
   }
 
-  // Execute trades with TP/SL/CB logic
-  const raw: any[] = [];
-  for (const align of entries) {
-    const entryTs = align.entryTs;
-    if (entryTs < gateStartTs || entryTs >= gateEndTs) continue;
-
-    const spxEntry = optPx(s1, entryTs - 1);
+  // Resolve contract + entry price + entry filters ONCE per entry.
+  const ctxs: TradeCtx[] = [];
+  for (const e of entries) {
+    if (e.entryTs < gateStartTs || e.entryTs >= gateEndTs) continue;
+    const spxEntry = optPx(s1, e.entryTs - 1);
     if (!spxEntry) continue;
 
     const otm = spxEntry * 0.01; // Simple OTM: 1% of spot
-    const strikeTarget = align.dir === 'bull' ? spxEntry + otm : spxEntry - otm;
-    const contractSym = findStrike(c1, align.dir === 'bull' ? 'C' : 'P', strikeTarget);
+    const strikeTarget = e.dir === 'bull' ? spxEntry + otm : spxEntry - otm;
+    const contractSym = findStrike(c1, e.dir === 'bull' ? 'C' : 'P', strikeTarget);
     if (!contractSym) continue;
 
     const bars = c1.contractBars.get(contractSym) as any[];
-    const entryPx = optPx(bars, entryTs - 1);
+    const entryPx = optPx(bars, e.entryTs - 1);
     if (!entryPx || entryPx < MIN_PRICE || entryPx > MAX_ENTRY) continue;
-    if (cumVol(bars, sess, entryTs) < MIN_VOL) continue;
+    if (cumVol(bars, sess, e.entryTs) < MIN_VOL) continue;
 
-    // TP/SL: entry_px × (1 ± percent/100)
-    const tp = entryPx * (1 + variant.tp / 100);
-    const sl = variant.sl > 0 ? entryPx * (1 - variant.sl / 100) : 0;
-
-    let exitTs = eod, exitPx = optPx(bars, eod) ?? entryPx, reason = 'EOD';
-
-    // Check TP/SL AFTER entry bar (no look-ahead)
-    for (const b of bars) {
-      if (b.ts <= entryTs) continue;
-      if (b.ts > eod) break;
-      if (b.high >= tp) { exitTs = b.ts; exitPx = tp; reason = 'TP'; break; }
-      if (sl > 0 && b.low <= sl) { exitTs = b.ts; exitPx = sl; reason = 'SL'; break; }
-    }
-
-    const retPct = ((exitPx - entryPx) / entryPx) * 100;
-    raw.push({ entryTs, exitTs, dir: align.dir, entryPx, exitPx, retPct, reason });
+    ctxs.push({ dir: e.dir, entryTs: e.entryTs, entryPx, bars, eod });
   }
+  return ctxs;
+}
 
-  // Apply circuit breaker
-  const CB = variant.cbTrigger;
-  const CBSKIP = variant.cbSkip;
-  const taken: boolean[] = [];
-  let consec = 0, skipsLeft = 0;
-  for (const t of raw) {
-    if (skipsLeft > 0) { skipsLeft--; taken.push(false); } else {
-      taken.push(true);
-      if (CB === 0) { /* disabled */ } else if (t.retPct > 0) { consec = 0; } else {
-        consec++;
-        if (consec >= CB) { skipsLeft = CBSKIP; consec = 0; }
-      }
+// Sweep a single TP/SL over the pre-built trade contexts. Cheap — just the
+// exit scan, no signal recomputation. CB-off for v1 (every entry taken).
+function simulateExits(ctxs: TradeCtx[], tpPct: number, slPct: number) {
+  let trades = 0, wins = 0, pnl = 0;
+  for (const ctx of ctxs) {
+    const tp = ctx.entryPx * (1 + tpPct / 100);
+    const sl = slPct > 0 ? ctx.entryPx * (1 - slPct / 100) : 0;
+
+    let exitPx = optPx(ctx.bars, ctx.eod) ?? ctx.entryPx;
+    for (const b of ctx.bars) {
+      if (b.ts <= ctx.entryTs) continue;
+      if (b.ts > ctx.eod) break;
+      if (b.high >= tp) { exitPx = tp; break; }
+      if (sl > 0 && b.low <= sl) { exitPx = sl; break; }
     }
+    const retPct = ((exitPx - ctx.entryPx) / ctx.entryPx) * 100;
+    trades++;
+    if (retPct > 0) wins++;
+    pnl += retPct;
   }
-
-  const trades = raw.map((t, i) => ({ ...t, active: taken[i] }));
-  const active = trades.filter(t => t.active);
-  const dayPnl = active.reduce((s: number, t: any) => s + t.retPct, 0);
-  const wins = active.filter((t: any) => t.retPct > 0).length;
-
-  return { date, trades: active.length, wins, pnl: dayPnl };
+  return { trades, wins, pnl };
 }
 
 // ── Main ────────────────────────────────────────────────────────────────────
@@ -349,24 +349,42 @@ async function main() {
 
   console.log(`[long-config-sweep] Running ${myDates.length} dates for shard ${process.env.SWEEP_SHARD || '0'}`);
 
+  // Group variants by signal label so we detect each signal ONCE per date,
+  // then replay the cheap TP/SL exit scan over the cached entries. This is the
+  // performance fix: 36 signal detections per date instead of 27,000.
+  const bySig = new Map<string, ConfigVariant[]>();
+  for (const v of variants) {
+    const arr = bySig.get(v.sigLabel) || [];
+    arr.push(v);
+    bySig.set(v.sigLabel, arr);
+  }
+  const sigLabels = Array.from(bySig.keys());
+
   const results = new Map<string, { days: number; trades: number; wins: number; pnl: number }>();
 
-  for (const date of myDates) {
+  for (let di = 0; di < myDates.length; di++) {
+    const date = myDates[di];
+    if (di % 10 === 0) console.log(`[long-config-sweep] ${di}/${myDates.length} ${date}`);
     try {
       const c1 = loadDay(TARGET, date, '1m');
       const p1 = loadDay(TARGET, prevDate(date), '1m');
       if (!c1) { console.log(`[long-config-sweep] ${date}: no data`); continue; }
 
-      for (const variant of variants) {
-        const dayResult = runDay(date, variant, c1, p1);
-        const key = variant.id;
-        const prev = results.get(key) || { days: 0, trades: 0, wins: 0, pnl: 0 };
-        results.set(key, {
-          days: prev.days + 1,
-          trades: prev.trades + dayResult.trades,
-          wins: prev.wins + dayResult.wins,
-          pnl: prev.pnl + dayResult.pnl,
-        });
+      for (const sigLabel of sigLabels) {
+        const sigVariants = bySig.get(sigLabel)!;
+        const sig = SIG_BY_LABEL.get(sigLabel)!;
+        const ctxs = buildTradeContexts(date, sig, c1, p1);
+
+        for (const variant of sigVariants) {
+          const r = simulateExits(ctxs, variant.tp, variant.sl);
+          const prev = results.get(variant.id) || { days: 0, trades: 0, wins: 0, pnl: 0 };
+          results.set(variant.id, {
+            days: prev.days + 1,
+            trades: prev.trades + r.trades,
+            wins: prev.wins + r.wins,
+            pnl: prev.pnl + r.pnl,
+          });
+        }
       }
     } catch (e: any) {
       console.error(`[long-config-sweep] ${date}: ${e.message}`);
