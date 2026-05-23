@@ -64,9 +64,10 @@ for (let i = 0; i < argv.length; i++) {
 const ENGINES: Record<string, string> = {
   credit: 'scripts/diag/credit-spread-sweep.ts',
   iron:   'scripts/diag/iron-sweep.ts',
+  long:   'scripts/diag/long-config-sweep.ts',
 };
 const order = engineArg === 'both' ? ['credit', 'iron'] : [engineArg];
-for (const e of order) if (!ENGINES[e]) { console.error(`unknown --engine ${e} (credit|iron|both)`); process.exit(2); }
+for (const e of order) if (!ENGINES[e]) { console.error(`unknown --engine ${e} (credit|iron|long|both)`); process.exit(2); }
 
 function run(script: string, env: Record<string, string>, tag: string): Promise<void> {
   return new Promise((resolve, reject) => {
