@@ -59,10 +59,16 @@ the correct replacement for the rejected "all-legs ≥X% volume" gate.
 
 ## The implementation: `shorts-fresh`
 
-`buildTrajectory` / `buildSpreadTrajectory` flag each point with whether **every
-short leg (sign `+1`) printed at exactly that minute** (`shortsFresh` /
-`shortFresh`). `applyExit` honors a TP/SL only when that flag is true (or when
-the gate is disabled).
+`buildTrajectory` / `buildSpreadTrajectory` flag each point with whether the
+**short leg(s) printed at exactly that minute** (`shortsFresh` / `shortFresh`).
+`applyExit` honors a TP/SL only when that flag is true (or the gate is disabled).
+
+For the 4-leg iron the flag is **≥1 short leg fresh** (not both): you close the
+short straddle as a *combo* off the combo NBBO, so one liquid short makes the
+buyback fillable — requiring *both* center shorts to print the same minute
+over-haircut the edge (e.g. IB±25 w10 / 3x12 / TP10 fell to +$93k under
+both-fresh vs +$247k optimistic; ≥1-fresh lands between). The 2-leg spread has a
+single short, so ≥1 == that short fresh.
 
 ```
 SWEEP_EXIT_GATE = shorts-fresh   # default — honor TP/SL only when shorts are fresh

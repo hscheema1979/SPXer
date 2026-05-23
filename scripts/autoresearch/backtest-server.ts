@@ -17,5 +17,39 @@ data: ${JSON.stringify(data)}
 app.get("/api/spreads/trade-dates",(req,res)=>{try{const{signal,spread,exit}=req.query;if(!signal||!spread||!exit)return res.status(400).json({error:"missing signal/spread/exit"});const slug=`${signal}|${spread}|${exit}`.replace(/[|]/g,"__").replace(/\s+/g,"_");const dir=path.join(__dirname,"output","spread-trades",slug);if(!fs.existsSync(dir))return res.json({dates:[]});const dates=fs.readdirSync(dir).filter(f=>f.endsWith(".json")).map(f=>f.replace(/\.json$/,"")).sort();res.json({dates})}catch(e){res.status(500).json({error:e.message})}});
 app.get("/api/iron/trade-day",(req,res)=>{try{const{signal,structure,exit,date}=req.query;if(!signal||!structure||!exit||!date)return res.status(400).json({error:"missing signal/structure/exit/date"});const slug=`${signal}|${structure}|${exit}`.replace(/[|]/g,"__").replace(/\s+/g,"_");const f=path.join(__dirname,"output","iron-trades",slug,`${date}.json`);if(!fs.existsSync(f))return res.status(404).json({error:"no trade data for this (variant, date)",path:f});res.json(JSON.parse(fs.readFileSync(f,"utf8")))}catch(e){res.status(500).json({error:e.message})}});
 app.get("/api/iron/trade-dates",(req,res)=>{try{const{signal,structure,exit}=req.query;if(!signal||!structure||!exit)return res.status(400).json({error:"missing signal/structure/exit"});const slug=`${signal}|${structure}|${exit}`.replace(/[|]/g,"__").replace(/\s+/g,"_");const dir=path.join(__dirname,"output","iron-trades",slug);if(!fs.existsSync(dir))return res.json({dates:[]});const dates=fs.readdirSync(dir).filter(f=>f.endsWith(".json")).map(f=>f.replace(/\.json$/,"")).sort();res.json({dates})}catch(e){res.status(500).json({error:e.message})}});
+// ── Leveraged-ETF long-only SHARE study (swing/hold-overnight) ───────────────
+// Separate from the option long-sweep: data is etf-long-sweep-{ticker}.json
+// (flat rows, same column shape as /api/long-sweep). Profiles are discovered by
+// globbing those files so adding a ticker needs zero server edits.
+app.get("/api/etf-profiles",(_req,res)=>{try{const dir=path.join(__dirname,"output");if(!fs.existsSync(dir))return res.json([]);const profiles=fs.readdirSync(dir).map(f=>/^etf-long-sweep-([a-z0-9]+)\.json$/.exec(f)).filter(m=>!!m).map(m=>{const sym=m[1].toUpperCase();return{suffix:`-${m[1]}`,symbol:sym,dte:0,key:m[1],label:sym}}).sort((a,b)=>a.symbol.localeCompare(b.symbol));res.json(profiles)}catch(e){res.status(500).json({error:e.message})}});
+app.get("/api/etf-long-sweep",(req,res)=>{try{const suffix=symbolSuffix(req);const f=path.join(__dirname,"output",`etf-long-sweep${suffix}.json`);if(!fs.existsSync(f))return res.json([]);res.json(JSON.parse(fs.readFileSync(f,"utf8")))}catch(e){res.status(500).json({error:e.message})}});
+// All-ETF comparison: ONE best-config summary row per ticker so every ETF is
+// shown at once. ?by=ratio|pnlPct|sharpe|wr|profitFactor (default ratio) picks
+// which metric selects each ticker's representative row. ?minN filters out
+// thin configs before selecting (default 20 trades). Combined-rows feed for a
+// single ETF stays on /api/etf-long-sweep.
+app.get("/api/etf-long-all",(req,res)=>{try{
+  const dir=path.join(__dirname,"output");
+  if(!fs.existsSync(dir))return res.json([]);
+  const by=String(req.query.by||"ratio");
+  const minN=Number.isFinite(+req.query.minN)?+req.query.minN:20;
+  const files=fs.readdirSync(dir).map(f=>/^etf-long-sweep-([a-z0-9]+)\.json$/.exec(f)).filter(m=>!!m);
+  const out=[];
+  for(const m of files){
+    const ticker=m[1];
+    let rows;try{rows=JSON.parse(fs.readFileSync(path.join(dir,`etf-long-sweep-${ticker}.json`),"utf8"))}catch{continue}
+    if(!Array.isArray(rows)||!rows.length)continue;
+    const elig=rows.filter(r=>(r.n||0)>=minN);
+    const pool=elig.length?elig:rows;
+    const metric=r=>{const v=r[by];return typeof v==="number"?v:(r.ratio||0)};
+    const best=[...pool].sort((a,b)=>metric(b)-metric(a))[0];
+    // Ticker-level rollups for context alongside the chosen "best" config.
+    const variants=rows.length;
+    const profitable=rows.filter(r=>(r.pnlPct||0)>0).length;
+    out.push({...best, _variants:variants, _profitableVariants:profitable, _selectedBy:by});
+  }
+  out.sort((a,b)=>(b[by]||0)-(a[by]||0));
+  res.json(out);
+}catch(e){res.status(500).json({error:e.message})}});
 app.listen(PORT,()=>{console.log(`[backtest-studio] http://localhost:${PORT}`)});
 })()

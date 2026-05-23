@@ -1,0 +1,10 @@
+{
+  "_comment": "Ticker registry for sweeps. class drives liquid-width caps in option sweeps; for SHARE strategies (leveraged ETFs) the option fields are unused. profileId is the parquet subdir under data/parquet/bars/. assetClass=shares marks tickers traded as underlying shares (etf-long-sweep), not options.",
+  "profiles": [
+    { "symbol": "TQQQ", "dte": 0, "class": "etf", "assetClass": "shares", "profileId": "tqqq", "optionPrefix": "TQQQ", "strikeInterval": 1, "label": "TQQQ (3x QQQ)" },
+    { "symbol": "SQQQ", "dte": 0, "class": "etf", "assetClass": "shares", "profileId": "sqqq", "optionPrefix": "SQQQ", "strikeInterval": 1, "label": "SQQQ (-3x QQQ)" },
+    { "symbol": "SOXL", "dte": 0, "class": "etf", "assetClass": "shares", "profileId": "soxl", "optionPrefix": "SOXL", "strikeInterval": 1, "label": "SOXL (3x Semis)" },
+    { "symbol": "TNA",  "dte": 0, "class": "etf", "assetClass": "shares", "profileId": "tna",  "optionPrefix": "TNA",  "strikeInterval": 1, "label": "TNA (3x Small Cap)" },
+    { "symbol": "FAS",  "dte": 0, "class": "etf", "assetClass": "shares", "profileId": "fas",  "optionPrefix": "FAS",  "strikeInterval": 1, "label": "FAS (3x Financials)" }
+  ]
+}
