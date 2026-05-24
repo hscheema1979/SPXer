@@ -35,8 +35,9 @@ const tickersArg = argVal('tickers');
 const tickers = tickersArg
   ? tickersArg.split(',').map(s => s.trim().toUpperCase()).filter(Boolean)
   : discoverEtfDirs();
-// Default: 2 workers (safe for shared VPS); --workers=N to override. Max recommended is 6 to leave headroom for other services.
-const WORKERS = Math.max(1, parseInt(argVal('workers') || '2', 10));
+// Default: 4 workers (conservative, leaves cores for VPS services); --workers=N to override.
+// Max recommended: 6 (leaves 2 cores for backtest-server, studio, system).
+const WORKERS = Math.max(1, Math.min(6, parseInt(argVal('workers') || '4', 10)));
 
 console.error(`[parallel] ${tickers.length} tickers, ${WORKERS} workers (of ${os.cpus().length} cores)`);
 const t0 = Date.now();
