@@ -865,8 +865,11 @@ function summary(){
   const SWEEP_JSON = outPath('/tmp/credit_spread_sweep.json', TARGET);
   let existing:any[] = [];
   try { existing = JSON.parse(fs.readFileSync(SWEEP_JSON,'utf8')); } catch {}
-  // Identify 2-leg credit-spread spread labels we generate (e.g. "ATM w5", "15ITM w10")
-  const isCreditSpread = (s:string) => /\d*\s*(ITM|ATM|OTM)\s*w\d+/.test(s);
+  // Identify the spread labels THIS engine generates so a re-run REPLACES its
+  // own prior rows (not appends — appending caused duplicate variant keys that
+  // broke dashboard sorting). Matches both the legacy 2-leg format ("ATM w5",
+  // "15ITM w10") AND this engine's delta format ("0.45d w5c").
+  const isCreditSpread = (s:string) => /\d*\s*(ITM|ATM|OTM)\s*w\d+/.test(s) || /\d\.\d\dd\s*w\d+c/.test(s);
   existing = existing.filter((r:any) => !isCreditSpread(r.spread));
   const merged = existing.concat(rows);
   fs.writeFileSync(SWEEP_JSON, JSON.stringify(merged,null,2));
@@ -893,7 +896,7 @@ function summary(){
   // Drop prior 2-leg credit-spread keys (matched by spread label pattern in key)
   const isCsKey = (k:string) => {
     const parts = k.split('|');
-    return parts.length>=2 && /\d*\s*(ITM|ATM|OTM)\s*w\d+/.test(parts[1]);
+    return parts.length>=2 && (/\d*\s*(ITM|ATM|OTM)\s*w\d+/.test(parts[1]) || /\d\.\d\dd\s*w\d+c/.test(parts[1]));
   };
   for(const k of Object.keys(existingDaily.series||{})) if(isCsKey(k)) delete existingDaily.series[k];
   // Build unified date list
@@ -953,7 +956,7 @@ function summary(){
     }
     creditHourlyEntries.push({ signal, spread, exit, hours: byHour });
   }
-  const isCsHourly = (s: string) => /\d*\s*(ITM|ATM|OTM)\s*w\d+/.test(s);
+  const isCsHourly = (s: string) => /\d*\s*(ITM|ATM|OTM)\s*w\d+/.test(s) || /\d\.\d\dd\s*w\d+c/.test(s);
   let mergedHourly: any[] = [];
   try {
     const existingRaw = JSON.parse(fs.readFileSync(STUDIO_HOURLY, 'utf8'));
