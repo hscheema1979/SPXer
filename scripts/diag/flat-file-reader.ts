@@ -164,6 +164,59 @@ export function parseDayCsv(csv: string, symbols: string[]): Map<string, Bar[]> 
   return dayCache;
 }
 
+/**
+ * The OCC root of a symbol = everything before the 6-digit YYMMDD expiry.
+ * 'NDXP250519P20000000' -> 'NDXP'. Used to cache a whole product's day at once
+ * so any contract of that product is served without re-downloading.
+ */
+export function occRoot(symbol: string): string {
+  const m = /^([A-Z]+)\d{6}[CP]\d{8}$/.exec(symbol);
+  return m ? m[1] : symbol;
+}
+
+/**
+ * Parse a day-file CSV keeping EVERY contract whose OCC root matches `prefix`
+ * (e.g. 'NDXP'). Full-day, no time filter (see parseDayCsv). This lets
+ * getOptionsForDay cache an entire product's day from a single download, so
+ * subsequent requests for any other strike/expiry of that product on the same
+ * date are served from memory — the fix for the re-download-per-symbol bug.
+ */
+export function parseDayCsvByPrefix(csv: string, prefix: string): Map<string, Bar[]> {
+  const dayCache = new Map<string, Bar[]>();
+  const lines = csv.split('\n');
+  const pfx = 'O:' + prefix;
+
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line) continue;
+    // Cheap prefix gate before splitting (the CSV has millions of rows).
+    if (!line.startsWith(pfx) && !line.startsWith(prefix)) continue;
+
+    const parts = line.trim().split(',');
+    if (parts.length < 8) continue;
+
+    const ticker = parts[0];
+    const symbolKey = ticker.startsWith('O:') ? ticker.slice(2) : ticker;
+    // Confirm the root matches exactly (prefix gate above can over-match, e.g.
+    // 'NDX' would catch 'NDXP'; occRoot disambiguates).
+    if (occRoot(symbolKey) !== prefix) continue;
+
+    const volume = parseInt(parts[1], 10) || 0;
+    const open = parseFloat(parts[2]);
+    const close = parseFloat(parts[3]);
+    const high = parseFloat(parts[4]);
+    const low = parseFloat(parts[5]);
+    const ts = nsToSec(BigInt(parts[6]));
+
+    const bar: Bar = { ts, open, high, low, close, volume };
+    if (!dayCache.has(symbolKey)) dayCache.set(symbolKey, []);
+    dayCache.get(symbolKey)!.push(bar);
+  }
+
+  for (const bars of dayCache.values()) bars.sort((a, b) => a.ts - b.ts);
+  return dayCache;
+}
+
 // ── S3 download + cache ─────────────────────────────────────────────────────────
 
 /**
@@ -176,18 +229,24 @@ export async function getOptionsForDay(
   date: string,
   symbols: string[]
 ): Promise<Map<string, Bar[]>> {
-  // Check cache
-  if (cache.has(date)) {
-    const dayCache = cache.get(date)!;
-    const missing = symbols.filter(s => !dayCache.has(s));
-    if (missing.length === 0) {
-      // All symbols cached
-      const result = new Map<string, Bar[]>();
-      for (const s of symbols) {
-        result.set(s, dayCache.get(s)!);
-      }
-      return result;
-    }
+  if (symbols.length === 0) return new Map();
+
+  // All requested symbols should share one OCC root (a sweep's legs are the
+  // same product). Cache the ENTIRE product-day from one download so any
+  // strike/expiry of that product is served from memory thereafter.
+  const prefix = occRoot(symbols[0]);
+  const cacheKey = `${date}|${prefix}`;
+
+  const serve = (dayCache: Map<string, Bar[]>): Map<string, Bar[]> => {
+    const result = new Map<string, Bar[]>();
+    for (const s of symbols) result.set(s, dayCache.get(s) || []);
+    return result;
+  };
+
+  // Cache hit: the full product-day is present → serve any symbol (incl. those
+  // with zero prints) without re-downloading.
+  if (cache.has(cacheKey)) {
+    return serve(cache.get(cacheKey)!);
   }
 
   const key = s3KeyForDate(date);
@@ -202,22 +261,16 @@ export async function getOptionsForDay(
     const compressed = Buffer.concat(chunks);
     const csv = zlib.gunzipSync(compressed).toString('utf-8');
 
-    const dayCache = parseDayCsv(csv, symbols);
-
-    // Cache the day
-    cache.set(date, dayCache);
+    // Parse & cache EVERY contract of this product for the day (one download
+    // serves all legs across all trades on this date).
+    const dayCache = parseDayCsvByPrefix(csv, prefix);
+    cache.set(cacheKey, dayCache);
     if (cache.size > maxCacheSize) {
-      // Evict oldest (first insert)
       const oldest = cache.keys().next().value;
       if (oldest !== undefined) cache.delete(oldest);
     }
 
-    // Return requested symbols (some may be empty if no prints)
-    const result = new Map<string, Bar[]>();
-    for (const s of symbols) {
-      result.set(s, dayCache.get(s) || []);
-    }
-    return result;
+    return serve(dayCache);
   } catch (e) {
     console.error(`Failed to download ${date} from S3:`, (e as any).message);
     const result = new Map<string, Bar[]>();

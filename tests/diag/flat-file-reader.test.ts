@@ -18,6 +18,8 @@ import {
   sessOpenTs,
   withinRth,
   parseDayCsv,
+  parseDayCsvByPrefix,
+  occRoot,
 } from '../../scripts/diag/flat-file-reader';
 
 describe('s3KeyForDate', () => {
@@ -183,5 +185,52 @@ describe('parseDayCsv (full-day, no time filter)', () => {
   it('handles an empty / header-only file', () => {
     expect(parseDayCsv('', ['X']).size).toBe(0);
     expect(parseDayCsv(header, ['X']).size).toBe(0);
+  });
+});
+
+describe('occRoot', () => {
+  it('extracts the OCC root before the YYMMDD expiry', () => {
+    expect(occRoot('NDXP250519P20000000')).toBe('NDXP');
+    expect(occRoot('SPXW260318C05000000')).toBe('SPXW');
+    expect(occRoot('SPY250620P00400000')).toBe('SPY');
+    expect(occRoot('QQQ250620C00450000')).toBe('QQQ');
+  });
+  it('returns the input unchanged when it does not match the OCC shape', () => {
+    expect(occRoot('NOTANOCC')).toBe('NOTANOCC');
+  });
+});
+
+describe('parseDayCsvByPrefix (cache-friendly full-product day)', () => {
+  const open = sessOpenTs('2026-07-15');
+  const openNs = (sec: number) => `${BigInt(sec) * 1_000_000_000n}`;
+  const header = 'ticker,volume,open,close,high,low,window_start,transactions';
+
+  it('keeps EVERY contract whose root matches the prefix', () => {
+    const csv = [
+      header,
+      `O:NDXP250519P20000000,1,1,1,1,1,${openNs(open)},1`,
+      `O:NDXP250519P20100000,2,2,2,2,2,${openNs(open + 60)},1`,
+      `O:NDXP250519C20000000,3,3,3,3,3,${openNs(open + 120)},1`,
+      `O:SPXW250519P05000000,4,4,4,4,4,${openNs(open)},1`, // different root, excluded
+    ].join('\n');
+    const map = parseDayCsvByPrefix(csv, 'NDXP');
+    expect(new Set(map.keys())).toEqual(new Set([
+      'NDXP250519P20000000', 'NDXP250519P20100000', 'NDXP250519C20000000',
+    ]));
+  });
+
+  it('does NOT over-match a shorter root (NDX must not catch NDXP)', () => {
+    const csv = [
+      header,
+      `O:NDXP250519P20000000,1,1,1,1,1,${openNs(open)},1`,
+      `O:NDX250519P20000000,2,2,2,2,2,${openNs(open)},1`,
+    ].join('\n');
+    expect([...parseDayCsvByPrefix(csv, 'NDX').keys()]).toEqual(['NDX250519P20000000']);
+    expect([...parseDayCsvByPrefix(csv, 'NDXP').keys()]).toEqual(['NDXP250519P20000000']);
+  });
+
+  it('returns an empty map when no contracts match', () => {
+    const csv = [header, `O:SPXW250519P05000000,1,1,1,1,1,${openNs(open)},1`].join('\n');
+    expect(parseDayCsvByPrefix(csv, 'NDXP').size).toBe(0);
   });
 });
