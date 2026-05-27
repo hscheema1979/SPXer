@@ -26,6 +26,9 @@ import { getOptionsForDay } from './flat-file-reader';
 import { tradingDaysBetween, expiryForDate } from './sweep-dates';
 import { deriveStrikeInterval } from './strike-grid';
 import { selectStrikeByDelta, type DeltaCandidate } from './delta-grid';
+import { aggregateIntraday } from './ohlc-aggregate';
+import { freshBullCross, direction, type Signal as SwingSignal } from './swing-signal';
+import type { DailyBar } from './backfill-ndx-daily';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -84,57 +87,64 @@ const RISK_FREE_RATE = Number(process.env.SWEEP_RISK_FREE_RATE ?? 0.04);
 // SWEEP_ENTRY_STALE_SEC=N rejects entries where the SHORT leg's mark is older
 // than N sec at entryTs-1.  Default 0 = DISABLED (reproduces historical numbers).
 const ENTRY_STALE_SEC = process.env.SWEEP_ENTRY_STALE_SEC ? parseInt(process.env.SWEEP_ENTRY_STALE_SEC) : 0;
-const MIN_ALIGN = 3, CROSS_WIN = 60;
-const FAST0 = 3, SLOW0 = 15; // tier-0 unused for spreads but signal engine wants it
 const CUTOFF_HHMM = 6 * 3600; // 15:30 ET (sec from sess open)
 const SETTLE_HHMM = 6 * 3600 + 15 * 60; // 15:45 ET — force-exit window has liquid quotes — close before final 5 min
 const TRADESTART_SEC = 1800; // 10:00 ET (30 min after 9:30)
 
-// ── Signals to sweep ───────────────────────────────────────────────────────
-type Signal = 'hma' | 'dema';
-interface SignalSpec { label: string; signal: Signal; tfs: {tf:number;fast:number;slow:number}[]; }
+// ── Swing signals to sweep (higher TF for multi-DTE) ─────────────────────────
+// Multi-DTE holds are swing trades; we detect HMA/DEMA bull crosses on
+// DAILY and WEEKLY bars (warmed from the NDX daily-history cache), plus 2h/4h
+// built from the entry-day + recent 1m sessions. Each spec fires at most once
+// per date when its higher-TF state shows a fresh bull cross. (Short PUT
+// spreads only → bull bias.)
+type Signal = SwingSignal;
+type SwingTf = 'daily' | 'weekly' | '2h' | '4h';
+interface SignalSpec { label: string; signal: Signal; tf: SwingTf; fast: number; slow: number; mode: 'cross' | 'state'; }
 const SIGNALS: SignalSpec[] = [
-  // 2+3+5 multi-TF
-  { label: 'HMA  2+3+5 3x9',  signal: 'hma',  tfs:[{tf:2,fast:3,slow:9},{tf:3,fast:3,slow:9},{tf:5,fast:3,slow:9}] },
-  { label: 'HMA  2+3+5 3x12', signal: 'hma',  tfs:[{tf:2,fast:3,slow:12},{tf:3,fast:3,slow:12},{tf:5,fast:3,slow:12}] },
-  { label: 'HMA  2+3+5 3x21', signal: 'hma',  tfs:[{tf:2,fast:3,slow:21},{tf:3,fast:3,slow:21},{tf:5,fast:3,slow:21}] },
-  { label: 'DEMA 2+3+5 3x9',  signal: 'dema', tfs:[{tf:2,fast:3,slow:9},{tf:3,fast:3,slow:9},{tf:5,fast:3,slow:9}] },
-  { label: 'DEMA 2+3+5 3x12', signal: 'dema', tfs:[{tf:2,fast:3,slow:12},{tf:3,fast:3,slow:12},{tf:5,fast:3,slow:12}] },
-  { label: 'DEMA 2+3+5 3x21', signal: 'dema', tfs:[{tf:2,fast:3,slow:21},{tf:3,fast:3,slow:21},{tf:5,fast:3,slow:21}] },
-  // 2+3 multi-TF (faster entries, no 5m wait)
-  { label: 'HMA  2+3 3x9',  signal: 'hma',  tfs:[{tf:2,fast:3,slow:9},{tf:3,fast:3,slow:9}] },
-  { label: 'HMA  2+3 3x12', signal: 'hma',  tfs:[{tf:2,fast:3,slow:12},{tf:3,fast:3,slow:12}] },
-  { label: 'HMA  2+3 3x21', signal: 'hma',  tfs:[{tf:2,fast:3,slow:21},{tf:3,fast:3,slow:21}] },
-  { label: 'DEMA 2+3 3x9',  signal: 'dema', tfs:[{tf:2,fast:3,slow:9},{tf:3,fast:3,slow:9}] },
-  { label: 'DEMA 2+3 3x12', signal: 'dema', tfs:[{tf:2,fast:3,slow:12},{tf:3,fast:3,slow:12}] },
-  { label: 'DEMA 2+3 3x21', signal: 'dema', tfs:[{tf:2,fast:3,slow:21},{tf:3,fast:3,slow:21}] },
-  // Single-TF: HMA
-  { label: 'HMA  1m 3x9',  signal: 'hma',  tfs:[{tf:1,fast:3,slow:9}] },
-  { label: 'HMA  2m 3x9',  signal: 'hma',  tfs:[{tf:2,fast:3,slow:9}] },
-  { label: 'HMA  3m 3x9',  signal: 'hma',  tfs:[{tf:3,fast:3,slow:9}] },
-  { label: 'HMA  5m 3x9',  signal: 'hma',  tfs:[{tf:5,fast:3,slow:9}] },
-  { label: 'HMA  1m 3x12', signal: 'hma',  tfs:[{tf:1,fast:3,slow:12}] },
-  { label: 'HMA  2m 3x12', signal: 'hma',  tfs:[{tf:2,fast:3,slow:12}] },
-  { label: 'HMA  3m 3x12', signal: 'hma',  tfs:[{tf:3,fast:3,slow:12}] },
-  { label: 'HMA  5m 3x12', signal: 'hma',  tfs:[{tf:5,fast:3,slow:12}] },
-  { label: 'HMA  1m 3x21', signal: 'hma',  tfs:[{tf:1,fast:3,slow:21}] },
-  { label: 'HMA  2m 3x21', signal: 'hma',  tfs:[{tf:2,fast:3,slow:21}] },
-  { label: 'HMA  3m 3x21', signal: 'hma',  tfs:[{tf:3,fast:3,slow:21}] },
-  { label: 'HMA  5m 3x21', signal: 'hma',  tfs:[{tf:5,fast:3,slow:21}] },
-  // Single-TF: DEMA
-  { label: 'DEMA 1m 3x9',  signal: 'dema', tfs:[{tf:1,fast:3,slow:9}] },
-  { label: 'DEMA 2m 3x9',  signal: 'dema', tfs:[{tf:2,fast:3,slow:9}] },
-  { label: 'DEMA 3m 3x9',  signal: 'dema', tfs:[{tf:3,fast:3,slow:9}] },
-  { label: 'DEMA 5m 3x9',  signal: 'dema', tfs:[{tf:5,fast:3,slow:9}] },
-  { label: 'DEMA 1m 3x12', signal: 'dema', tfs:[{tf:1,fast:3,slow:12}] },
-  { label: 'DEMA 2m 3x12', signal: 'dema', tfs:[{tf:2,fast:3,slow:12}] },
-  { label: 'DEMA 3m 3x12', signal: 'dema', tfs:[{tf:3,fast:3,slow:12}] },
-  { label: 'DEMA 5m 3x12', signal: 'dema', tfs:[{tf:5,fast:3,slow:12}] },
-  { label: 'DEMA 1m 3x21', signal: 'dema', tfs:[{tf:1,fast:3,slow:21}] },
-  { label: 'DEMA 2m 3x21', signal: 'dema', tfs:[{tf:2,fast:3,slow:21}] },
-  { label: 'DEMA 3m 3x21', signal: 'dema', tfs:[{tf:3,fast:3,slow:21}] },
-  { label: 'DEMA 5m 3x21', signal: 'dema', tfs:[{tf:5,fast:3,slow:21}] },
+  // Daily HMA/DEMA crosses
+  { label: 'HMA  D 3x9',   signal: 'hma',  tf: 'daily',  fast: 3, slow: 9,  mode: 'cross' },
+  { label: 'HMA  D 5x20',  signal: 'hma',  tf: 'daily',  fast: 5, slow: 20, mode: 'cross' },
+  { label: 'DEMA D 3x9',   signal: 'dema', tf: 'daily',  fast: 3, slow: 9,  mode: 'cross' },
+  { label: 'DEMA D 5x20',  signal: 'dema', tf: 'daily',  fast: 5, slow: 20, mode: 'cross' },
+  // Weekly HMA/DEMA crosses (slower swing)
+  { label: 'HMA  W 3x9',   signal: 'hma',  tf: 'weekly', fast: 3, slow: 9,  mode: 'cross' },
+  { label: 'DEMA W 3x9',   signal: 'dema', tf: 'weekly', fast: 3, slow: 9,  mode: 'cross' },
+  // Daily STATE (already-bull) variants — enter while trend is up, not just on the flip
+  { label: 'HMA  D 3x9 st', signal: 'hma', tf: 'daily',  fast: 3, slow: 9,  mode: 'state' },
+  { label: 'HMA  D 5x20 st',signal: 'hma', tf: 'daily',  fast: 5, slow: 20, mode: 'state' },
 ];
+
+// ── NDX daily-history warmup cache (for daily/weekly indicators) ─────────────
+// Loaded once. Absent file → daily/weekly signals are skipped (run the backfill:
+// npx tsx scripts/diag/backfill-ndx-daily.ts). 2h/4h would use intraday bars.
+const DAILY_HISTORY_PATH = path.resolve(__dirname, '../../data/ndx-daily-history.json');
+let DAILY_HISTORY: DailyBar[] = [];
+try {
+  DAILY_HISTORY = JSON.parse(fs.readFileSync(DAILY_HISTORY_PATH, 'utf8'));
+} catch {
+  console.error(`[warn] ${DAILY_HISTORY_PATH} missing — daily/weekly signals disabled. Run scripts/diag/backfill-ndx-daily.ts`);
+}
+// Daily closes strictly BEFORE a given date (no look-ahead).
+function dailyClosesBefore(date: string): number[] {
+  const out: number[] = [];
+  for (const b of DAILY_HISTORY) { if (b.date < date) out.push(b.c); else break; }
+  return out;
+}
+// Weekly closes (last daily close of each ISO week) strictly before date.
+function weeklyClosesBefore(date: string): number[] {
+  const weekly: number[] = [];
+  let curWeek = ''; let lastClose = NaN;
+  for (const b of DAILY_HISTORY) {
+    if (b.date >= date) break;
+    const dt = new Date(b.date + 'T12:00:00Z');
+    const onejan = new Date(Date.UTC(dt.getUTCFullYear(), 0, 1));
+    const wk = `${dt.getUTCFullYear()}-${Math.ceil((((dt.getTime() - onejan.getTime()) / 86400000) + onejan.getUTCDay() + 1) / 7)}`;
+    if (wk !== curWeek && curWeek !== '') weekly.push(lastClose);
+    curWeek = wk; lastClose = b.c;
+  }
+  if (!Number.isNaN(lastClose)) weekly.push(lastClose);
+  return weekly;
+}
 
 // ── Spreads: CROSS-PRODUCT of shortDeltas × widths ────────────────────────────
 // Short leg selected by target |delta| (BS-computed from price; delta-grid.ts),
@@ -206,80 +216,9 @@ function sessOpenTs(date:string):number{
 }
 
 // ── Signal engine ──────────────────────────────────────────────────────────
-interface TFState { closed:any[]; partial:any|null; }
-function mkSt():TFState{return{closed:[],partial:null};}
-function feed(st:TFState,b:any,tf:number){
-  const bk=Math.floor(b.ts/(tf*60))*(tf*60);
-  if(!st.partial||st.partial.ts!==bk){if(st.partial)st.closed.push(st.partial);st.partial={ts:bk,open:b.open,high:b.high,low:b.low,close:b.close};}
-  else{if(b.high>st.partial.high)st.partial.high=b.high;if(b.low<st.partial.low)st.partial.low=b.low;st.partial.close=b.close;}
-}
-function wma(arr:number[],end:number,p:number):number|null{if(end<p-1)return null;let s=0,w=0;for(let i=0;i<p;i++){s+=arr[end-i]*(p-i);w+=(p-i);}return s/w;}
-function hmaDir(closes:number[],fast:number,slow:number):'bull'|'bear'|null{
-  const hf=Math.floor(fast/2),sf=Math.floor(Math.sqrt(fast));
-  const hs=Math.floor(slow/2),ss=Math.floor(Math.sqrt(slow));
-  const rf:number[]=[],rs:number[]=[]; let fa:number|null=null,sa:number|null=null;
-  for(let i=0;i<closes.length;i++){
-    const a=wma(closes,i,hf),b=wma(closes,i,fast);if(a!=null&&b!=null){rf.push(2*a-b);if(rf.length>=sf)fa=wma(rf,rf.length-1,sf);}
-    const c=wma(closes,i,hs),d=wma(closes,i,slow);if(c!=null&&d!=null){rs.push(2*c-d);if(rs.length>=ss)sa=wma(rs,rs.length-1,ss);}
-  }
-  if(fa==null||sa==null)return null; return fa>sa?'bull':'bear';
-}
-function demaDir(closes:number[],fast:number,slow:number):'bull'|'bear'|null{
-  function dema(p:number):number|null{
-    if(closes.length<p)return null;
-    const a=2/(p+1);
-    let e1=0; for(let i=0;i<p;i++)e1+=closes[i]; e1/=p;
-    const e1s:number[]=[e1];
-    for(let i=p;i<closes.length;i++){e1=a*closes[i]+(1-a)*e1;e1s.push(e1);}
-    if(e1s.length<p)return null;
-    let e2=0; for(let i=0;i<p;i++)e2+=e1s[i]; e2/=p;
-    for(let i=p;i<e1s.length;i++){e2=a*e1s[i]+(1-a)*e2;}
-    return 2*e1s[e1s.length-1]-e2;
-  }
-  const f=dema(fast),s=dema(slow);
-  if(f==null||s==null)return null; return f>s?'bull':'bear';
-}
-function getDir(st:TFState,fast:number,slow:number,signal:Signal):'bull'|'bear'|null{
-  const bars=st.partial?[...st.closed,st.partial]:st.closed;
-  if(!bars.length)return null;
-  const closes=bars.map((b:any)=>b.close);
-  return signal==='dema'?demaDir(closes,fast,slow):hmaDir(closes,fast,slow);
-}
-
-// Detect aligned-entry signals for one signal-spec on a day. Returns list of
-// { ts:alignmentBarTs, dir, entryTs } where entryTs = ts+60 (next 1m open).
-// Plus a per-bar dirLog so we can detect flip exits later.
-interface SignalEvent { alignTs:number; dir:'bull'|'bear'; entryTs:number; }
-function detectSignals(date:string, spec:SignalSpec, c1:any, p1:any): {entries:SignalEvent[], dirLog:Map<number,('bull'|'bear'|null)[]>} {
-  const s1:any[]=c1.spxBars;
-  const sess=sessOpenTs(date), tradeStart=sess+TRADESTART_SEC;
-  const sts=spec.tfs.map(()=>mkSt());
-  for(const b of (p1?.spxBars??[])){sts.forEach((st,i)=>feed(st,b,spec.tfs[i].tf));}
-  const prevDirs=spec.tfs.map(()=>null as any);
-  const bullCross=spec.tfs.map(()=>0), bearCross=spec.tfs.map(()=>0);
-  const dirLog=new Map<number,any[]>();
-  const entries:SignalEvent[]=[];
-  let bullStreak=0,bearStreak=0,bullFired=false,bearFired=false;
-  for(const b of s1){
-    sts.forEach((st,i)=>feed(st,b,spec.tfs[i].tf));
-    if(b.ts<tradeStart)continue;
-    const dirs=sts.map((st,i)=>getDir(st,spec.tfs[i].fast,spec.tfs[i].slow,spec.signal));
-    dirLog.set(b.ts,dirs);
-    dirs.forEach((d,i)=>{if(prevDirs[i]!==null&&d!==prevDirs[i]){if(d==='bull')bullCross[i]=b.ts;if(d==='bear')bearCross[i]=b.ts;}prevDirs[i]=d;});
-    const allBull=dirs.every(d=>d==='bull'), allBear=dirs.every(d=>d==='bear');
-    if(allBull){bullStreak++;bearStreak=0;bearFired=false;}else{bullStreak=0;bullFired=false;}
-    if(allBear){bearStreak++;bullStreak=0;bullFired=false;}else{bearStreak=0;bearFired=false;}
-    if(allBull&&bullStreak>=MIN_ALIGN&&!bullFired){
-      const ts=bullCross.filter(t=>t>0);
-      if(ts.length===spec.tfs.length&&(Math.max(...ts)-Math.min(...ts))/60<=CROSS_WIN){entries.push({alignTs:b.ts,dir:'bull',entryTs:b.ts+60});bullFired=true;}
-    }
-    if(allBear&&bearStreak>=MIN_ALIGN&&!bearFired){
-      const ts=bearCross.filter(t=>t>0);
-      if(ts.length===spec.tfs.length&&(Math.max(...ts)-Math.min(...ts))/60<=CROSS_WIN){entries.push({alignTs:b.ts,dir:'bear',entryTs:b.ts+60});bearFired=true;}
-    }
-  }
-  return {entries,dirLog};
-}
+// Swing signals (daily/weekly/2h/4h HMA-DEMA crosses) are detected by
+// swing-signal.ts off higher-TF closes; the intraday detector was removed when
+// this engine moved to multi-DTE swing entries.
 
 // Trading-day helpers (holiday-aware) live in sweep-dates.ts — imported above.
 
@@ -596,20 +535,43 @@ for(let di=0; di<RUN_DATES.length; di++){
   // Per-variant overlap event tracking (entry/exit timestamps) for peak-concurrent calc
   const overlapMap = new Map<string, CapEvent[]>();
 
+  // Swing-signal entry timestamp: enter at the trade-start window on the entry
+  // day (10:00 ET). One entry per (signal-spec, date) on a bull cross/state.
+  const entryTs = sess + TRADESTART_SEC;
+  // Higher-TF closes strictly before this date (no look-ahead).
+  const dailyCloses = dailyClosesBefore(date);
+  const weeklyCloses = weeklyClosesBefore(date);
+  // 2h/4h closes from the prior + current session 1m bars (aggregated).
+  const prior1m: any[] = (p1?.spxBars ?? []);
+  const cur1mBeforeEntry = s1.filter(b => b.ts <= entryTs);
+  const intraday1m = [...prior1m, ...cur1mBeforeEntry];
+
   for(const sig of SIGNALS){
     if (EMIT_ONLY && !EMIT_SIGNALS.has(sig.label)) continue;
-    const {entries,dirLog} = detectSignals(date, sig, c1, p1);
-    if(process.env.SWEEP_DEBUG){ const bull=entries.filter(e=>e.dir==='bull').length, bear=entries.filter(e=>e.dir==='bear').length; if(entries.length) console.error(`[dbg] ${date} ${sig.label}: ${entries.length} entries (bull=${bull} bear=${bear})`); }
-    entries.sort((a,b) => a.entryTs - b.entryTs);
 
-    for(const ev of entries){
-      if(ev.entryTs >= cutoff) continue;
-      // PUT_ONLY: skip bear signals (call spreads)
-      if(PUT_ONLY && ev.dir === 'bear') continue;
-      const spxEntry = optPx(s1, ev.entryTs - 1);
+    // Resolve the closes series for this spec's timeframe.
+    let closes: number[];
+    if (sig.tf === 'daily')       closes = dailyCloses;
+    else if (sig.tf === 'weekly') closes = weeklyCloses;
+    else {
+      const mins = sig.tf === '2h' ? 120 : 240;
+      closes = aggregateIntraday(intraday1m, mins, sess).map(b => b.close);
+    }
+    if (closes.length < sig.slow + 2) continue; // not enough history to warm up
+
+    const bull = sig.mode === 'cross'
+      ? freshBullCross(closes, sig.signal, sig.fast, sig.slow)
+      : direction(closes, sig.signal, sig.fast, sig.slow) === 'bull';
+    if (process.env.SWEEP_DEBUG && bull) console.error(`[dbg] ${date} ${sig.label}: BULL (closes=${closes.length})`);
+    if (!bull) continue;
+
+    // Single entry at the trade-start window.
+    {
+      if(entryTs >= cutoff) continue;
+      const spxEntry = optPx(s1, entryTs - 1);
       if(spxEntry==null) continue;
 
-      // PUT_ONLY engine: short PUT spreads only (bull signals). shortLetter is P.
+      // PUT_ONLY engine: short PUT spreads only. shortLetter is P.
       const isCallSpread = false;
       const shortLetter:'C'|'P' = 'P';
 
@@ -632,7 +594,7 @@ for(let di=0; di<RUN_DATES.length; di++){
         if (sym[sym.length - 9] !== 'P') continue;
         const k = c1.contractStrikes.get(sym) as number;
         const bars = c1.contractBars.get(sym) as any[];
-        const px = optPx(bars, ev.entryTs - 1);
+        const px = optPx(bars, entryTs - 1);
         if (px == null || px <= 0) continue;
         putCandidates.push({ strike: k, price: px });
         strikeToSym.set(k, sym);
@@ -652,7 +614,7 @@ for(let di=0; di<RUN_DATES.length; di++){
         const longSym = findStrike(c1, 'P', longK_target);
         if(!longSym || longSym === shortSym) continue;
         const longStrike = c1.contractStrikes.get(longSym) as number;
-        if(longStrike >= shortStrike) continue; // long must be further OTM (lower)
+        if(longStrike >= shortStrike) continue;
         // Realized width = actual distance between snapped strikes — the true risk.
         const spreadWidth = Math.abs(shortStrike - longStrike);
         if(spreadWidth <= 0) continue;
@@ -676,25 +638,22 @@ for(let di=0; di<RUN_DATES.length; di++){
           longBars  = c1.contractBars.get(longSym)  as any[];
         }
 
-        const shortEntry = optPx(shortBars, ev.entryTs-1);
-        const longEntry  = optPx(longBars,  ev.entryTs-1);
+        const shortEntry = optPx(shortBars, entryTs-1);
+        const longEntry  = optPx(longBars,  entryTs-1);
         if(shortEntry==null||longEntry==null) continue;
         // Entry staleness gate (default off). Credit realism depends on the SHORT
         // leg being freshly printed; reject if its mark is too stale at entry.
-        if(ENTRY_STALE_SEC > 0 && markAge(shortBars, ev.entryTs-1) > ENTRY_STALE_SEC) continue;
+        if(ENTRY_STALE_SEC > 0 && markAge(shortBars, entryTs-1) > ENTRY_STALE_SEC) continue;
         const credit = shortEntry - longEntry;
         if(credit <= 0.05) continue;
         if(credit > spreadWidth * 0.95) continue;
 
-        let flipTs = Infinity;
-        for(const [t, dirs] of dirLog){
-          if(t <= ev.entryTs) continue;
-          if(!dirs) continue;
-          const flip = ev.dir==='bull' ? dirs.every((d:any)=>d==='bear') : dirs.every((d:any)=>d==='bull');
-          if(flip){flipTs = t+60; break;}
-        }
+        // Credit strategies are TP/SL/settle only — never flip on signal
+        // reversal (it destroys the theta-decay edge). Swing signals have no
+        // intraday reversal log anyway, so flip is permanently disabled here.
+        const flipTs = Infinity;
 
-        const traj = buildSpreadTrajectory(shortBars, longBars, ev.entryTs, settleTs);
+        const traj = buildSpreadTrajectory(shortBars, longBars, entryTs, settleTs);
 
         for(const ex of EXITS){
           if (EMIT_ONLY && !EMIT_EXITS.has(ex.label)) continue;
@@ -704,13 +663,13 @@ for(let di=0; di<RUN_DATES.length; di++){
                                 isCallSpread, shortStrike, longStrike, spxAtSettle, spreadWidth, ex.slRiskFrac ?? 0);
           const pnl = (credit - nat.exitV) * 100 - SLIPPAGE_PER_SPREAD;
           const pnlGross = (credit - nat.exitV) * 100;
-          const durationSec = Math.max(0, nat.exitTs - ev.entryTs);
+          const durationSec = Math.max(0, nat.exitTs - entryTs);
           const maxRisk = (spreadWidth - credit) * 100;   // per contract — defined-risk credit spread
-          rec(sig.label, sp.label, ex.label, pnl, date, credit, spreadWidth, durationSec, ev.entryTs, maxRisk);
+          rec(sig.label, sp.label, ex.label, pnl, date, credit, spreadWidth, durationSec, entryTs, maxRisk);
 
           const k = `${sig.label}|${sp.label}|${ex.label}`;
           let evs = overlapMap.get(k); if(!evs){evs=[]; overlapMap.set(k, evs);}
-          evs.push({entry: ev.entryTs, exit: nat.exitTs, side: isCallSpread ? 'call' : 'put', pnl});
+          evs.push({entry: entryTs, exit: nat.exitTs, side: isCallSpread ? 'call' : 'put', pnl});
 
           // Per-trade emission (no-op unless this variant key is in EMIT_KEYS).
           if (EMIT_KEYS && EMIT_KEYS.has(k)) {
@@ -731,8 +690,8 @@ for(let di=0; di<RUN_DATES.length; di++){
               longExitMark  = optPx(longBars,  nat.exitTs) ?? 0;
             }
             const tr: TradeRecord = {
-              entryTs: ev.entryTs, exitTs: nat.exitTs, durationSec,
-              dir: ev.dir, side: isCallSpread ? 'call-credit' : 'put-credit',
+              entryTs: entryTs, exitTs: nat.exitTs, durationSec,
+              dir: "bull", side: isCallSpread ? 'call-credit' : 'put-credit',
               spxAtEntry: spxEntry, spxAtExit,
               shortSymbol: shortSym, shortStrike, shortEntryMark: shortEntry, shortExitMark,
               longSymbol:  longSym,  longStrike,  longEntryMark: longEntry,  longExitMark,
@@ -767,6 +726,10 @@ for(let di=0; di<RUN_DATES.length; di++){
   }
   overlapMap.clear();
 }
+
+// ── Finalize (INSIDE the async IIFE so it runs AFTER the await-driven loop) ──
+finalize();
+
 })().catch(err => {
   console.error('Sweep error:', err);
   process.exit(1);
@@ -933,22 +896,22 @@ function summary(){
   console.log(`Hourly merged: ${mergedHourly.length} variants (${creditHourlyEntries.length} credit-spread + ${mergedHourly.length - creditHourlyEntries.length} prior)`);
 }
 
-// Per-trade emission (no-op unless SWEEP_EMIT_TRADES_KEYS env is set).
-// Each shard flushes its own date subset; the merge step is a no-op because
-// shards don't share the EMIT_BUFFER. Outside the summary() gate so it fires
-// in both shard-worker and serial runs.
-flushTrades();
+// Per-trade emission + summary/finalize. Called from INSIDE the async IIFE
+// (after the await-driven date loop completes) so results is fully populated.
+function finalize(){
+  flushTrades();
 
-if (EMIT_ONLY) process.exit(0);   // emit-only: skip summary + dashboard writes
+  if (EMIT_ONLY) process.exit(0);   // emit-only: skip summary + dashboard writes
 
-if (process.env.SWEEP_SHARD_OUT) {
-  // Worker: dump this shard's partial accumulator; do NOT run the
-  // dashboard-merge finalize (the merge run owns the final JSON).
-  dumpResults(results, process.env.SWEEP_SHARD_OUT);
-} else {
-  if (process.env.SWEEP_MERGE) loadShardsInto(process.env.SWEEP_MERGE, results);
-  summary();
-  // Incremental: persist the merged (prior + new dates) accumulator so the
-  // next nightly run only replays the following day.
-  if (STATE_FILE) { dumpResults(results, STATE_FILE); console.error(`[incremental] state saved → ${STATE_FILE}`); }
+  if (process.env.SWEEP_SHARD_OUT) {
+    // Worker: dump this shard's partial accumulator; do NOT run the
+    // dashboard-merge finalize (the merge run owns the final JSON).
+    dumpResults(results, process.env.SWEEP_SHARD_OUT);
+  } else {
+    if (process.env.SWEEP_MERGE) loadShardsInto(process.env.SWEEP_MERGE, results);
+    summary();
+    // Incremental: persist the merged (prior + new dates) accumulator so the
+    // next nightly run only replays the following day.
+    if (STATE_FILE) { dumpResults(results, STATE_FILE); console.error(`[incremental] state saved → ${STATE_FILE}`); }
+  }
 }
