@@ -258,6 +258,31 @@ function loadEntryChainFromDisk(entryDate: string, expiryDate: string, prefix: s
   return contractBars.size ? { contractBars, contractStrikes } : null;
 }
 
+// Preload every carry session's full option chain for one entry date, ONCE,
+// from the disk cache. Returns session-date → (symbol → bars). The per-spread
+// trajectory build then concatenates a leg's bars from these in-memory maps —
+// no repeated disk reads / re-filtering (the old per-spread getMultiDayBars was
+// the serial-run bottleneck: ~400 rebuilds/date).
+function preloadCarrySessions(entryDate: string, expiryDate: string, prefix: string): Map<string, FlatBar[]>[] {
+  const sessionDates = tradingDaysBetween(entryDate, expiryDate);
+  const out: Map<string, FlatBar[]>[] = [];
+  for (const d of sessionDates) {
+    const day = readDiskCache(d, prefix);
+    if (day) out.push(day);
+  }
+  return out;
+}
+
+// Concatenate a single leg's bars across the preloaded carry sessions.
+function buildLegBars(symbol: string, sessions: Map<string, FlatBar[]>[]): FlatBar[] {
+  const all: FlatBar[] = [];
+  for (const sess of sessions) {
+    const bars = sess.get(symbol);
+    if (bars) all.push(...bars);
+  }
+  return all;
+}
+
 // ── Multi-day bar loading (S3 flat files for DTE≥2) ───────────────────────────
 async function getMultiDayBars(symbol: string, entryDate: string, expiryDate: string): Promise<any[]> {
   const sessionDates = tradingDaysBetween(entryDate, expiryDate);
@@ -524,7 +549,10 @@ function flushTrades(){
 }
 
 // ── Main ───────────────────────────────────────────────────────────────────
-const ALL_DATES = listDatesFor(TARGET);
+// Entry dates come from the UNDERLYING 0DTE profile (full history), NOT the
+// per-DTE parquet (which we no longer backfill). The loop skips any date whose
+// option chain isn't in the disk cache, so missing-cache days are safe.
+const ALL_DATES = listDatesFor({ ...TARGET, dte: 0, profileId: `${TARGET.symbol.toLowerCase()}-0dte` } as any);
 // Parallel-shard hook: SWEEP_MERGE skips the loop (results come from shard
 // dumps); SWEEP_SHARD="i/n" runs only this worker's date subset. No env =
 // serial, identical behaviour. Each shard keeps every date's FULL bar
@@ -571,6 +599,10 @@ for(let di=0; di<RUN_DATES.length; di++){
   const chain = loadEntryChainFromDisk(date, expiryDate, OPTION_PREFIX);
   if (!chain) continue; // no cached flat file for this date → skip (run preprocess first)
   c1 = { ...c1, contractBars: chain.contractBars, contractStrikes: chain.contractStrikes };
+
+  // Preload all carry-session chains ONCE per date (multi-day legs reuse these
+  // in-memory maps instead of re-reading/re-filtering disk per spread combo).
+  const carrySessions = TARGET.dte >= 2 ? preloadCarrySessions(date, expiryDate, OPTION_PREFIX) : [];
 
   const s1:any[]=c1.spxBars;
   const sess = sessOpenTs(date);
@@ -668,20 +700,12 @@ for(let di=0; di<RUN_DATES.length; di++){
         const spreadWidth = Math.abs(shortStrike - longStrike);
         if(spreadWidth <= 0) continue;
 
-        // Fetch bars: for DTE≥2 use multi-day S3 flat files; otherwise entry-day parquet
+        // Leg bars: for DTE≥2, concatenate across preloaded carry sessions
+        // (pure memory); for 0/1DTE the entry-day chain bars suffice.
         let shortBars: any[], longBars: any[];
         if (TARGET.dte >= 2) {
-          const expiryDate = expiryForDate(date, TARGET.dte);
-          try {
-            const [shortMulti, longMulti] = await Promise.all([
-              getMultiDayBars(shortSym, date, expiryDate),
-              getMultiDayBars(longSym, date, expiryDate),
-            ]);
-            shortBars = shortMulti;
-            longBars = longMulti;
-          } catch {
-            continue;
-          }
+          shortBars = buildLegBars(shortSym, carrySessions);
+          longBars  = buildLegBars(longSym, carrySessions);
         } else {
           shortBars = c1.contractBars.get(shortSym) as any[];
           longBars  = c1.contractBars.get(longSym)  as any[];
