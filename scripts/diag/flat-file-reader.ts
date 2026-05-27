@@ -21,17 +21,28 @@ export interface Bar {
   volume: number;
 }
 
-const s3 = new S3Client({
-  endpoint: process.env.POLYGON_S3_ENDPOINT,
-  region: 'us-east-1',
-  credentials: {
-    accessKeyId: process.env.POLYGON_S3_ACCESS_KEY || '',
-    secretAccessKey: process.env.POLYGON_S3_SECRET_KEY || '',
-  },
-  forcePathStyle: true,
-});
+// Lazily construct the S3 client on first use. Module imports are hoisted above
+// the dotenv.config() call in the entry scripts, so reading credentials at
+// module-load time gets empty env. Building the client on first getOptionsForDay
+// call ensures dotenv has populated process.env first.
+let _s3: S3Client | null = null;
+function getS3(): S3Client {
+  if (_s3) return _s3;
+  _s3 = new S3Client({
+    endpoint: process.env.POLYGON_S3_ENDPOINT,
+    region: 'us-east-1',
+    credentials: {
+      accessKeyId: process.env.POLYGON_S3_ACCESS_KEY || '',
+      secretAccessKey: process.env.POLYGON_S3_SECRET_KEY || '',
+    },
+    forcePathStyle: true,
+  });
+  return _s3;
+}
 
-const bucket = process.env.POLYGON_S3_BUCKET || 'flatfiles';
+function getBucket(): string {
+  return process.env.POLYGON_S3_BUCKET || 'flatfiles';
+}
 
 // In-memory LRU cache: { date -> { symbol -> Bar[] } }
 const cache = new Map<string, Map<string, Bar[]>>();
@@ -177,8 +188,8 @@ export async function getOptionsForDay(
   const key = s3KeyForDate(date);
 
   try {
-    const cmd = new GetObjectCommand({ Bucket: bucket, Key: key });
-    const response = await s3.send(cmd);
+    const cmd = new GetObjectCommand({ Bucket: getBucket(), Key: key });
+    const response = await getS3().send(cmd);
     const chunks: Uint8Array[] = [];
     for await (const chunk of response.Body as any) {
       chunks.push(chunk);
