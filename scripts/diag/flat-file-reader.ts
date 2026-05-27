@@ -110,15 +110,22 @@ export function withinRth(ts: number, date: string): boolean {
 }
 
 /**
- * Parse a gunzipped Polygon options day-file CSV into per-symbol RTH bars.
+ * Parse a gunzipped Polygon options day-file CSV into per-symbol bars.
+ *
+ * Collects the FULL day's bars with NO time-of-day filter — pre-market, RTH,
+ * and after-hours all included. The 15:30 trade cutoff and 15:45 settle are
+ * STRATEGY rules applied by the sweep engine, not the data layer; truncating
+ * here would discard the real session-close (16:00 ET) prints a multi-day
+ * position needs to mark/settle against. (withinRth/sessOpenTs are still
+ * exported for callers that want an RTH view.)
+ *
  * @param csv  decompressed CSV text (header row + data rows)
- * @param date 'YYYY-MM-DD' (for RTH window)
  * @param symbols OCC symbols WITHOUT the 'O:' prefix to keep
- * @returns Map of symbol -> RTH bars sorted ascending by ts
+ * @returns Map of symbol -> bars sorted ascending by ts
  *
  * CSV columns: ticker,volume,open,close,high,low,window_start(ns),transactions
  */
-export function parseDayCsv(csv: string, date: string, symbols: string[]): Map<string, Bar[]> {
+export function parseDayCsv(csv: string, symbols: string[]): Map<string, Bar[]> {
   const dayCache = new Map<string, Bar[]>();
   const symbolSet = new Set(symbols);
   const lines = csv.split('\n');
@@ -141,8 +148,6 @@ export function parseDayCsv(csv: string, date: string, symbols: string[]): Map<s
     const high = parseFloat(parts[4]);
     const low = parseFloat(parts[5]);
     const ts = nsToSec(BigInt(parts[6])); // ns to seconds
-
-    if (!withinRth(ts, date)) continue;
 
     const bar: Bar = { ts, open, high, low, close, volume };
     if (!dayCache.has(symbolKey)) {
@@ -197,7 +202,7 @@ export async function getOptionsForDay(
     const compressed = Buffer.concat(chunks);
     const csv = zlib.gunzipSync(compressed).toString('utf-8');
 
-    const dayCache = parseDayCsv(csv, date, symbols);
+    const dayCache = parseDayCsv(csv, symbols);
 
     // Cache the day
     cache.set(date, dayCache);

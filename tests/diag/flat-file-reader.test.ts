@@ -109,7 +109,7 @@ describe('withinRth', () => {
   });
 });
 
-describe('parseDayCsv', () => {
+describe('parseDayCsv (full-day, no time filter)', () => {
   const date = '2026-07-15';
   const open = sessOpenTs(date);
   const openNs = (sec: number) => `${BigInt(sec) * 1_000_000_000n}`;
@@ -123,7 +123,7 @@ describe('parseDayCsv', () => {
       `O:NDXP260720P18000000,3,0.50,0.55,0.60,0.45,${openNs(open + 60)},2`,
     ].join('\n');
 
-    const map = parseDayCsv(csv, date, ['NDXP260720P19000000']);
+    const map = parseDayCsv(csv, ['NDXP260720P19000000']);
     expect([...map.keys()]).toEqual(['NDXP260720P19000000']);
     const bars = map.get('NDXP260720P19000000')!;
     expect(bars).toHaveLength(1);
@@ -134,20 +134,23 @@ describe('parseDayCsv', () => {
 
   it('strips the O: prefix when matching symbols', () => {
     const csv = [header, `O:NDXP260720P19000000,1,1,1,1,1,${openNs(open)},1`].join('\n');
-    const map = parseDayCsv(csv, date, ['NDXP260720P19000000']);
+    const map = parseDayCsv(csv, ['NDXP260720P19000000']);
     expect(map.get('NDXP260720P19000000')).toHaveLength(1);
   });
 
-  it('drops bars outside the RTH window', () => {
+  it('KEEPS bars outside RTH — full session incl. pre-market & after-hours', () => {
+    // The data layer no longer applies a time cutoff; the sweep engine owns
+    // any strategy-level time gating. A multi-day position must see the real
+    // 16:00 ET close, so after-hours rows are retained.
     const csv = [
       header,
-      `O:NDXP260720P19000000,1,1,1,1,1,${openNs(open - 600)},1`,        // pre-open
-      `O:NDXP260720P19000000,2,2,2,2,2,${openNs(open + 3600)},1`,        // in-session
-      `O:NDXP260720P19000000,3,3,3,3,3,${openNs(open + 7 * 3600)},1`,    // after close
+      `O:NDXP260720P19000000,1,1,1,1,1,${openNs(open - 600)},1`,        // pre-open 09:20
+      `O:NDXP260720P19000000,2,2,2,2,2,${openNs(open + 3600)},1`,        // 10:30
+      `O:NDXP260720P19000000,3,3,3,3,3,${openNs(open + 6 * 3600 + 1800)},1`, // ~16:00
     ].join('\n');
-    const bars = parseDayCsv(csv, date, ['NDXP260720P19000000']).get('NDXP260720P19000000')!;
-    expect(bars).toHaveLength(1);
-    expect(bars[0].ts).toBe(open + 3600);
+    const bars = parseDayCsv(csv, ['NDXP260720P19000000']).get('NDXP260720P19000000')!;
+    expect(bars).toHaveLength(3); // none dropped
+    expect(bars.map(b => b.ts)).toEqual([open - 600, open + 3600, open + 6 * 3600 + 1800]);
   });
 
   it('sorts bars ascending by ts even when CSV rows are out of order', () => {
@@ -157,13 +160,13 @@ describe('parseDayCsv', () => {
       `O:NDXP260720P19000000,2,2,2,2,2,${openNs(open)},1`,
       `O:NDXP260720P19000000,3,3,3,3,3,${openNs(open + 60)},1`,
     ].join('\n');
-    const bars = parseDayCsv(csv, date, ['NDXP260720P19000000']).get('NDXP260720P19000000')!;
+    const bars = parseDayCsv(csv, ['NDXP260720P19000000']).get('NDXP260720P19000000')!;
     expect(bars.map(b => b.ts)).toEqual([open, open + 60, open + 120]);
   });
 
   it('returns no entry for a symbol with no prints (deep-OTM legs)', () => {
     const csv = [header, `O:NDXP260720P19000000,1,1,1,1,1,${openNs(open)},1`].join('\n');
-    const map = parseDayCsv(csv, date, ['NDXP260720P99999000']);
+    const map = parseDayCsv(csv, ['NDXP260720P99999000']);
     expect(map.has('NDXP260720P99999000')).toBe(false);
   });
 
@@ -173,12 +176,12 @@ describe('parseDayCsv', () => {
       'O:NDXP260720P19000000,1,2,3', // too few columns
       `O:NDXP260720P19000000,1,1,1,1,1,${openNs(open)},1`,
     ].join('\n');
-    const bars = parseDayCsv(csv, date, ['NDXP260720P19000000']).get('NDXP260720P19000000')!;
+    const bars = parseDayCsv(csv, ['NDXP260720P19000000']).get('NDXP260720P19000000')!;
     expect(bars).toHaveLength(1);
   });
 
   it('handles an empty / header-only file', () => {
-    expect(parseDayCsv('', date, ['X']).size).toBe(0);
-    expect(parseDayCsv(header, date, ['X']).size).toBe(0);
+    expect(parseDayCsv('', ['X']).size).toBe(0);
+    expect(parseDayCsv(header, ['X']).size).toBe(0);
   });
 });
