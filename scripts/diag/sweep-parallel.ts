@@ -64,10 +64,14 @@ for (let i = 0; i < argv.length; i++) {
 const ENGINES: Record<string, string> = {
   credit: 'scripts/diag/credit-spread-sweep.ts',
   iron:   'scripts/diag/iron-sweep.ts',
+  'broken-wing-butterfly': 'scripts/diag/broken-wing-butterfly-sweep.ts',
   long:   'scripts/diag/long-config-sweep.ts',
+  // Multi-DTE short-put-spread engine (delta-targeted, multi-session carry).
+  // Separate from `credit` so the 0DTE iron/credit study is untouched.
+  'multi-dte': 'scripts/diag/multi-dte-credit-sweep.ts',
 };
-const order = engineArg === 'both' ? ['credit', 'iron'] : [engineArg];
-for (const e of order) if (!ENGINES[e]) { console.error(`unknown --engine ${e} (credit|iron|long|both)`); process.exit(2); }
+const order = engineArg === 'both' ? ['credit', 'iron', 'broken-wing-butterfly'] : [engineArg];
+for (const e of order) if (!ENGINES[e]) { console.error(`unknown --engine ${e} (credit|iron|broken-wing-butterfly|long|multi-dte|both)`); process.exit(2); }
 
 function run(script: string, env: Record<string, string>, tag: string): Promise<void> {
   return new Promise((resolve, reject) => {

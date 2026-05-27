@@ -10,7 +10,7 @@
  *   - parseDayCsv symbol filtering, RTH filtering, ordering, and the
  *     ticker,volume,open,close,high,low,window_start,transactions column map.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import {
   s3KeyForDate,
   nsToSec,
@@ -20,7 +20,13 @@ import {
   parseDayCsv,
   parseDayCsvByPrefix,
   occRoot,
+  readDiskCache,
+  writeDiskCache,
+  type Bar,
 } from '../../scripts/diag/flat-file-reader';
+import * as os from 'os';
+import * as fsm from 'fs';
+import * as pathm from 'path';
 
 describe('s3KeyForDate', () => {
   it('builds the OPRA minute-aggs key with year/month partition', () => {
@@ -232,5 +238,45 @@ describe('parseDayCsvByPrefix (cache-friendly full-product day)', () => {
   it('returns an empty map when no contracts match', () => {
     const csv = [header, `O:SPXW250519P05000000,1,1,1,1,1,${openNs(open)},1`].join('\n');
     expect(parseDayCsvByPrefix(csv, 'NDXP').size).toBe(0);
+  });
+});
+
+describe('disk cache round-trip (preprocess-once store)', () => {
+  const tmp = fsm.mkdtempSync(pathm.join(os.tmpdir(), 'ffcache-'));
+  const prevEnv = process.env.FLATFILE_CACHE_DIR;
+  beforeAll(() => { process.env.FLATFILE_CACHE_DIR = tmp; });
+  afterAll(() => {
+    if (prevEnv === undefined) delete process.env.FLATFILE_CACHE_DIR;
+    else process.env.FLATFILE_CACHE_DIR = prevEnv;
+    fsm.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it('write then read returns identical bars (no loss/reorder)', () => {
+    const day = new Map<string, Bar[]>([
+      ['NDXP250519P20000000', [
+        { ts: 1747315800, open: 1.5, high: 1.6, low: 1.3, close: 1.4, volume: 12 },
+        { ts: 1747315860, open: 1.4, high: 1.45, low: 1.39, close: 1.41, volume: 3 },
+      ]],
+      ['NDXP250519P19900000', [
+        { ts: 1747315800, open: 0.5, high: 0.55, low: 0.45, close: 0.5, volume: 1 },
+      ]],
+    ]);
+    writeDiskCache('2025-05-19', 'NDXP', day);
+    const back = readDiskCache('2025-05-19', 'NDXP');
+    expect(back).not.toBeNull();
+    expect(new Set(back!.keys())).toEqual(new Set(day.keys()));
+    expect(back!.get('NDXP250519P20000000')).toEqual(day.get('NDXP250519P20000000'));
+    expect(back!.get('NDXP250519P19900000')).toEqual(day.get('NDXP250519P19900000'));
+  });
+
+  it('returns null for an uncached (date,prefix)', () => {
+    expect(readDiskCache('2099-01-01', 'NDXP')).toBeNull();
+  });
+
+  it('namespaces by prefix (NDXP and SPXW do not collide)', () => {
+    writeDiskCache('2025-06-02', 'NDXP', new Map([['NDXP250602P1', [{ ts: 1, open: 1, high: 1, low: 1, close: 1, volume: 1 }]]]));
+    writeDiskCache('2025-06-02', 'SPXW', new Map([['SPXW250602P1', [{ ts: 2, open: 2, high: 2, low: 2, close: 2, volume: 2 }]]]));
+    expect([...readDiskCache('2025-06-02', 'NDXP')!.keys()]).toEqual(['NDXP250602P1']);
+    expect([...readDiskCache('2025-06-02', 'SPXW')!.keys()]).toEqual(['SPXW250602P1']);
   });
 });

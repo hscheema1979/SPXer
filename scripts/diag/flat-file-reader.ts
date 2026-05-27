@@ -11,6 +11,8 @@
 
 import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
 import * as zlib from 'zlib';
+import * as fs from 'fs';
+import * as path from 'path';
 
 export interface Bar {
   ts: number;
@@ -44,9 +46,50 @@ function getBucket(): string {
   return process.env.POLYGON_S3_BUCKET || 'flatfiles';
 }
 
-// In-memory LRU cache: { date -> { symbol -> Bar[] } }
+// In-memory LRU cache: { `${date}|${prefix}` -> { symbol -> Bar[] } }
 const cache = new Map<string, Map<string, Bar[]>>();
 const maxCacheSize = 12; // roughly one trading week
+
+// ── Persistent on-disk day cache ────────────────────────────────────────────
+// Download + extract each (prefix, date) flat file ONCE, store a compact gzip
+// locally. Every DTE/profile/run then reads the same local file — no repeat S3.
+// Format: gzipped JSON { [symbol]: [[ts,o,h,l,c,v], ...] } (tuples = compact).
+function diskCacheRoot(): string {
+  // Read per-call so tests (and FLATFILE_CACHE_DIR overrides) take effect
+  // regardless of import order.
+  return process.env.FLATFILE_CACHE_DIR || path.resolve(__dirname, '../../data/flatfile-cache');
+}
+
+function diskCachePath(date: string, prefix: string): string {
+  const [year, month] = date.split('-');
+  return path.join(diskCacheRoot(), prefix, year, month, `${date}.json.gz`);
+}
+
+/** Read a (prefix,date) from the on-disk cache. null if not present. */
+export function readDiskCache(date: string, prefix: string): Map<string, Bar[]> | null {
+  const fp = diskCachePath(date, prefix);
+  if (!fs.existsSync(fp)) return null;
+  try {
+    const raw = zlib.gunzipSync(fs.readFileSync(fp)).toString('utf-8');
+    const obj: Record<string, number[][]> = JSON.parse(raw);
+    const m = new Map<string, Bar[]>();
+    for (const [sym, rows] of Object.entries(obj)) {
+      m.set(sym, rows.map(r => ({ ts: r[0], open: r[1], high: r[2], low: r[3], close: r[4], volume: r[5] })));
+    }
+    return m;
+  } catch { return null; }
+}
+
+/** Write a parsed (prefix,date) day to the on-disk cache (compact tuples). */
+export function writeDiskCache(date: string, prefix: string, day: Map<string, Bar[]>): void {
+  const fp = diskCachePath(date, prefix);
+  fs.mkdirSync(path.dirname(fp), { recursive: true });
+  const obj: Record<string, number[][]> = {};
+  for (const [sym, bars] of day) {
+    obj[sym] = bars.map(b => [b.ts, b.open, b.high, b.low, b.close, b.volume]);
+  }
+  fs.writeFileSync(fp, zlib.gzipSync(Buffer.from(JSON.stringify(obj))));
+}
 
 // ── Pure helpers (no I/O — unit-testable) ──────────────────────────────────────
 
@@ -243,12 +286,24 @@ export async function getOptionsForDay(
     return result;
   };
 
-  // Cache hit: the full product-day is present → serve any symbol (incl. those
-  // with zero prints) without re-downloading.
-  if (cache.has(cacheKey)) {
-    return serve(cache.get(cacheKey)!);
-  }
+  const remember = (dayCache: Map<string, Bar[]>) => {
+    cache.set(cacheKey, dayCache);
+    if (cache.size > maxCacheSize) {
+      const oldest = cache.keys().next().value;
+      if (oldest !== undefined) cache.delete(oldest);
+    }
+  };
 
+  // 1) In-memory hit.
+  if (cache.has(cacheKey)) return serve(cache.get(cacheKey)!);
+
+  // 2) On-disk hit — the (prefix,date) was preprocessed in a prior run/profile.
+  //    No S3. Promote into memory for this process.
+  const fromDisk = readDiskCache(date, prefix);
+  if (fromDisk) { remember(fromDisk); return serve(fromDisk); }
+
+  // 3) Cold: download from S3, parse the full product-day, persist to disk +
+  //    memory so every later DTE/profile/run reuses it.
   const key = s3KeyForDate(date);
 
   try {
@@ -261,14 +316,11 @@ export async function getOptionsForDay(
     const compressed = Buffer.concat(chunks);
     const csv = zlib.gunzipSync(compressed).toString('utf-8');
 
-    // Parse & cache EVERY contract of this product for the day (one download
-    // serves all legs across all trades on this date).
+    // Parse EVERY contract of this product for the day (one download serves all
+    // legs across all trades AND all DTEs on this date).
     const dayCache = parseDayCsvByPrefix(csv, prefix);
-    cache.set(cacheKey, dayCache);
-    if (cache.size > maxCacheSize) {
-      const oldest = cache.keys().next().value;
-      if (oldest !== undefined) cache.delete(oldest);
-    }
+    try { writeDiskCache(date, prefix, dayCache); } catch (e) { console.error(`[disk-cache] write failed ${date}/${prefix}: ${(e as any).message}`); }
+    remember(dayCache);
 
     return serve(dayCache);
   } catch (e) {

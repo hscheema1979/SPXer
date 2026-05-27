@@ -99,8 +99,16 @@ const TRADESTART_SEC = 1800; // 10:00 ET (30 min after 9:30)
 // spreads only → bull bias.)
 type Signal = SwingSignal;
 type SwingTf = 'daily' | 'weekly' | '2h' | '4h';
-interface SignalSpec { label: string; signal: Signal; tf: SwingTf; fast: number; slow: number; mode: 'cross' | 'state'; }
+// mode 'cross' = enter on a fresh bull cross; 'state' = enter while bull;
+// 'always' = unconditional daily entry (the swing fields are ignored). Each spec
+// enters at entrySec from the session open (default 10:00 ET = 1800s); the
+// always-daily spec enters at 1pm (12600s). One entry per (spec,date).
+interface SignalSpec { label: string; signal: Signal; tf: SwingTf; fast: number; slow: number; mode: 'cross' | 'state' | 'always'; entrySec?: number; }
+const ET_1PM_SEC = 3 * 3600 + 1800; // 13:00 ET = 3.5h after 09:30
 const SIGNALS: SignalSpec[] = [
+  // Unconditional daily 1pm entry — a baseline "signal" to compare the HMA
+  // variants against (always-on daily put-credit spread).
+  { label: '1pm daily',    signal: 'hma',  tf: 'daily',  fast: 3, slow: 9,  mode: 'always', entrySec: ET_1PM_SEC },
   // Daily HMA/DEMA crosses
   { label: 'HMA  D 3x9',   signal: 'hma',  tf: 'daily',  fast: 3, slow: 9,  mode: 'cross' },
   { label: 'HMA  D 5x20',  signal: 'hma',  tf: 'daily',  fast: 5, slow: 20, mode: 'cross' },
@@ -535,37 +543,37 @@ for(let di=0; di<RUN_DATES.length; di++){
   // Per-variant overlap event tracking (entry/exit timestamps) for peak-concurrent calc
   const overlapMap = new Map<string, CapEvent[]>();
 
-  // Swing-signal entry timestamp: enter at the trade-start window on the entry
-  // day (10:00 ET). One entry per (signal-spec, date) on a bull cross/state.
-  const entryTs = sess + TRADESTART_SEC;
   // Higher-TF closes strictly before this date (no look-ahead).
   const dailyCloses = dailyClosesBefore(date);
   const weeklyCloses = weeklyClosesBefore(date);
-  // 2h/4h closes from the prior + current session 1m bars (aggregated).
   const prior1m: any[] = (p1?.spxBars ?? []);
-  const cur1mBeforeEntry = s1.filter(b => b.ts <= entryTs);
-  const intraday1m = [...prior1m, ...cur1mBeforeEntry];
 
   for(const sig of SIGNALS){
     if (EMIT_ONLY && !EMIT_SIGNALS.has(sig.label)) continue;
 
-    // Resolve the closes series for this spec's timeframe.
-    let closes: number[];
-    if (sig.tf === 'daily')       closes = dailyCloses;
-    else if (sig.tf === 'weekly') closes = weeklyCloses;
-    else {
-      const mins = sig.tf === '2h' ? 120 : 240;
-      closes = aggregateIntraday(intraday1m, mins, sess).map(b => b.close);
+    // Per-signal entry timestamp (default 10:00 ET; 1pm-daily enters at 13:00).
+    const entryTs = sess + (sig.entrySec ?? TRADESTART_SEC);
+
+    // mode 'always' enters unconditionally; cross/state evaluate the higher TF.
+    if (sig.mode !== 'always') {
+      let closes: number[];
+      if (sig.tf === 'daily')       closes = dailyCloses;
+      else if (sig.tf === 'weekly') closes = weeklyCloses;
+      else {
+        const mins = sig.tf === '2h' ? 120 : 240;
+        const intraday1m = [...prior1m, ...s1.filter(b => b.ts <= entryTs)];
+        closes = aggregateIntraday(intraday1m, mins, sess).map(b => b.close);
+      }
+      if (closes.length < sig.slow + 2) continue; // not enough history to warm up
+
+      const bull = sig.mode === 'cross'
+        ? freshBullCross(closes, sig.signal, sig.fast, sig.slow)
+        : direction(closes, sig.signal, sig.fast, sig.slow) === 'bull';
+      if (process.env.SWEEP_DEBUG && bull) console.error(`[dbg] ${date} ${sig.label}: BULL (closes=${closes.length})`);
+      if (!bull) continue;
     }
-    if (closes.length < sig.slow + 2) continue; // not enough history to warm up
 
-    const bull = sig.mode === 'cross'
-      ? freshBullCross(closes, sig.signal, sig.fast, sig.slow)
-      : direction(closes, sig.signal, sig.fast, sig.slow) === 'bull';
-    if (process.env.SWEEP_DEBUG && bull) console.error(`[dbg] ${date} ${sig.label}: BULL (closes=${closes.length})`);
-    if (!bull) continue;
-
-    // Single entry at the trade-start window.
+    // Single entry at this signal's entry window.
     {
       if(entryTs >= cutoff) continue;
       const spxEntry = optPx(s1, entryTs - 1);
