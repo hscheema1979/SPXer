@@ -25,6 +25,7 @@ import { geometryForDte } from './sweep-geometry';
 import { getOptionsForDay } from './flat-file-reader';
 import { tradingDaysBetween, expiryForDate } from './sweep-dates';
 import { deriveStrikeInterval } from './strike-grid';
+import { selectStrikeByDelta, type DeltaCandidate } from './delta-grid';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -70,6 +71,10 @@ const GATE_SHORTS = EXIT_GATE === 'shorts-fresh';
 
 // ── PUT_ONLY mode (short put spreads only — this engine focuses on puts) ────────
 const PUT_ONLY = true;  // Multi-DTE study focuses on short puts by design
+
+// Flat risk-free rate for the BS delta calc (delta-grid). Approximate; delta is
+// only used to PICK strikes, so small rate error is immaterial to selection.
+const RISK_FREE_RATE = Number(process.env.SWEEP_RISK_FREE_RATE ?? 0.04);
 
 // ── Entry liquidity gate (shorts-fresh AT ENTRY) ────────────────────────────
 // The exit gate above protects TP/SL fills, but the ENTRY credit is still built
@@ -131,19 +136,20 @@ const SIGNALS: SignalSpec[] = [
   { label: 'DEMA 5m 3x21', signal: 'dema', tfs:[{tf:5,fast:3,slow:21}] },
 ];
 
-// ── Spreads (geometry in STRIKE COUNTS) ──────────────────────────────────────
-// soS/wS are strike COUNTS (negative soS = ITM). The dollar offset/width is
-// computed per-entry from the strike interval DERIVED from the real listed
-// chain near spot (strike-grid.ts) — NDXP spacing varies by DTE & moneyness, so
-// a fixed interval would mis-size spreads. The label is COUNT-based (e.g.
-// "8ITM w10c") so it stays a stable aggregation key regardless of the per-day
-// derived interval; the actual strikes always snap to real listed contracts.
-interface SpreadSpec { label: string; soS: number; wS: number; }
-const SPREAD_DEFS = GEO.spreadDefs;
-const SPREADS: SpreadSpec[] = SPREAD_DEFS.map(({ soS, wS }) => {
-  const moneyness = soS < 0 ? `${Math.abs(soS)}ITM` : soS > 0 ? `${soS}OTM` : 'ATM';
-  return { label: `${moneyness} w${wS}c`, soS, wS };  // "c" suffix = strike-count width
-});
+// ── Spreads: CROSS-PRODUCT of shortDeltas × widths ────────────────────────────
+// Short leg selected by target |delta| (BS-computed from price; delta-grid.ts),
+// long leg `wS` strike-counts further OTM (× per-expiry derived interval). The
+// matrix sweeps every width at every short delta, isolating the width effect at
+// each delta. Label is delta×count based (e.g. "0.30d w3c") — a stable
+// aggregation key independent of the per-day strikes; strikes snap to real
+// listed contracts.
+interface SpreadSpec { label: string; shortDelta: number; wS: number; }
+const SPREADS: SpreadSpec[] = [];
+for (const d of GEO.shortDeltas) {
+  for (const wS of GEO.widths) {
+    SPREADS.push({ label: `${d.toFixed(2)}d w${wS}c`, shortDelta: d, wS });
+  }
+}
 
 // ── Exit policies (TP/SL as fraction of credit). TP=0 means hold to settle. ──
 // slRiskFrac (0-1): SL fires when V reaches credit + slRiskFrac × (width − credit).
@@ -593,6 +599,7 @@ for(let di=0; di<RUN_DATES.length; di++){
   for(const sig of SIGNALS){
     if (EMIT_ONLY && !EMIT_SIGNALS.has(sig.label)) continue;
     const {entries,dirLog} = detectSignals(date, sig, c1, p1);
+    if(process.env.SWEEP_DEBUG){ const bull=entries.filter(e=>e.dir==='bull').length, bear=entries.filter(e=>e.dir==='bear').length; if(entries.length) console.error(`[dbg] ${date} ${sig.label}: ${entries.length} entries (bull=${bull} bear=${bear})`); }
     entries.sort((a,b) => a.entryTs - b.entryTs);
 
     for(const ev of entries){
@@ -602,32 +609,52 @@ for(let di=0; di<RUN_DATES.length; di++){
       const spxEntry = optPx(s1, ev.entryTs - 1);
       if(spxEntry==null) continue;
 
-      // Derive the REAL local strike interval near spot from the listed chain
-      // (NDXP spacing varies by DTE/moneyness). Geometry soS/wS are strike
-      // COUNTS; multiply by this to get the dollar target. Fall back to the
-      // nominal BASES interval if the chain is too thin to measure.
-      const isCallSpread = ev.dir === 'bear';
-      const shortLetter:'C'|'P' = isCallSpread ? 'C' : 'P';
-      const grid = deriveStrikeInterval(listStrikes(c1, shortLetter), spxEntry) ?? SI;
+      // PUT_ONLY engine: short PUT spreads only (bull signals). shortLetter is P.
+      const isCallSpread = false;
+      const shortLetter:'C'|'P' = 'P';
+
+      // Real local strike interval near spot from the listed chain (NDXP spacing
+      // varies by DTE/moneyness); used to convert width strike-COUNTS to dollars.
+      const allPutStrikes = listStrikes(c1, 'P');
+      const grid = deriveStrikeInterval(allPutStrikes, spxEntry) ?? SI;
+
+      // Time to expiry in YEARS for the BS delta calc. Use trading-day count /
+      // 252 (the option lives over TARGET.dte trading sessions).
+      const T = Math.max(TARGET.dte, 0.25) / 252;
+
+      // Put-strike candidates (strike + entry mark) for delta selection. The
+      // entry mark must come from the leg's own bars at entry; build a quick
+      // strike→symbol map and price each put at entryTs-1.
+      const putCandidates: DeltaCandidate[] = [];
+      const strikeToSym = new Map<number, string>();
+      for (const [s] of c1.contractBars) {
+        const sym = s as string;
+        if (sym[sym.length - 9] !== 'P') continue;
+        const k = c1.contractStrikes.get(sym) as number;
+        const bars = c1.contractBars.get(sym) as any[];
+        const px = optPx(bars, ev.entryTs - 1);
+        if (px == null || px <= 0) continue;
+        putCandidates.push({ strike: k, price: px });
+        strikeToSym.set(k, sym);
+      }
+      if (putCandidates.length < 2) continue;
 
       for(const sp of SPREADS){
         if (EMIT_ONLY && !EMIT_SPREADS.has(sp.label)) continue;
-        // Match the legacy dollar convention exactly: shortOffset = soS * interval
-        // (negative soS = ITM). Put spread: short strike = spx - shortOffset (so a
-        // negative offset puts it ABOVE spot = ITM). Call spread mirrors it.
-        const shortOffsetDollars = sp.soS * grid;
-        const widthDollars = sp.wS * grid;
-        const shortK_target = isCallSpread ? spxEntry + shortOffsetDollars : spxEntry - shortOffsetDollars;
-        const longK_target  = isCallSpread ? shortK_target + widthDollars  : shortK_target - widthDollars;
-        const shortSym = findStrike(c1, shortLetter, shortK_target);
-        const longSym  = findStrike(c1, shortLetter, longK_target);
-        if(!shortSym||!longSym||shortSym===longSym) continue;
-        const shortStrike = c1.contractStrikes.get(shortSym) as number;
-        const longStrike  = c1.contractStrikes.get(longSym)  as number;
-        // Realized width = actual distance between the snapped strikes (may differ
-        // slightly from widthDollars if the chain lacked the exact target strike).
-        // Use this for credit caps, max-risk, and P&L — it is the true defined risk.
-        const spreadWidth = Math.abs(longStrike - shortStrike);
+        // Short leg: listed put whose BS delta is nearest the target |delta|.
+        const shortSel = selectStrikeByDelta(putCandidates, sp.shortDelta, spxEntry, T, RISK_FREE_RATE);
+        if (!shortSel) continue;
+        const shortStrike = shortSel.strike;
+        const shortSym = strikeToSym.get(shortStrike)!;
+        // Long leg: wS strike-counts further OTM (lower strike for a put), snapped
+        // to the nearest listed put strike, excluding the short strike.
+        const longK_target = shortStrike - sp.wS * grid;
+        const longSym = findStrike(c1, 'P', longK_target);
+        if(!longSym || longSym === shortSym) continue;
+        const longStrike = c1.contractStrikes.get(longSym) as number;
+        if(longStrike >= shortStrike) continue; // long must be further OTM (lower)
+        // Realized width = actual distance between snapped strikes — the true risk.
+        const spreadWidth = Math.abs(shortStrike - longStrike);
         if(spreadWidth <= 0) continue;
 
         // Fetch bars: for DTE≥2 use multi-day S3 flat files; otherwise entry-day parquet

@@ -1,14 +1,10 @@
 /**
  * Unit tests for sweep-geometry.ts — DTE-aware geometry tiers.
  *
- * Invariants under test:
- *   - every supported DTE returns a well-formed DteGeometry,
- *   - spread defs are short-ITM (soS < 0) with positive width (wS > 0),
- *   - friction (slippage, half-spread) scales monotonically up with DTE,
- *   - the 0DTE / 1DTE tiers keep the tight 'shorts-fresh' exit gate; longer
- *     DTEs default to 'none' (multi-day carry, no intraday liquidity gate),
- *   - geometryForDte is total: any non-negative dte resolves to a tier
- *     (out-of-table values fall through to the 40+ tier).
+ * The short leg is selected by DELTA (shortDeltas), the long leg by width in
+ * strike counts (widths). The engine sweeps their cross-product. Delta band is
+ * the same 0.30–0.70 across DTEs (delta normalizes for time); widths grow with
+ * DTE; friction grows with DTE.
  */
 import { describe, it, expect } from 'vitest';
 import { geometryForDte, type DteGeometry } from '../../scripts/diag/sweep-geometry';
@@ -16,19 +12,23 @@ import { geometryForDte, type DteGeometry } from '../../scripts/diag/sweep-geome
 const SUPPORTED_DTES = [0, 1, 2, 3, 5, 10, 15, 20, 30, 40, 60];
 
 function assertWellFormed(g: DteGeometry) {
-  expect(Array.isArray(g.spreadDefs)).toBe(true);
-  expect(g.spreadDefs.length).toBeGreaterThan(0);
-  for (const { soS, wS } of g.spreadDefs) {
-    expect(Number.isFinite(soS)).toBe(true);
-    expect(Number.isFinite(wS)).toBe(true);
-    expect(soS).toBeLessThan(0);   // short leg is ITM for short-put credit
-    expect(wS).toBeGreaterThan(0); // width is a positive strike count
+  expect(Array.isArray(g.shortDeltas)).toBe(true);
+  expect(Array.isArray(g.widths)).toBe(true);
+  expect(g.shortDeltas.length).toBeGreaterThan(0);
+  expect(g.widths.length).toBeGreaterThan(0);
+  // Deltas are absolute targets in (0,1), spanning OTM(<0.5) to ITM(>0.5).
+  for (const d of g.shortDeltas) {
+    expect(d).toBeGreaterThan(0);
+    expect(d).toBeLessThan(1);
   }
+  expect(g.shortDeltas.some(d => d < 0.5)).toBe(true);  // OTM
+  expect(g.shortDeltas.some(d => d > 0.5)).toBe(true);  // ITM
+  expect(g.shortDeltas).toContain(0.50);                // ATM
+  expect(g.widths.every(w => Number.isFinite(w) && w > 0)).toBe(true);
   expect(g.wingWidths.every(w => w > 0)).toBe(true);
   expect(g.icOffsets.every(o => o > 0)).toBe(true);
   expect(g.closeHalfSpread).toBeGreaterThan(0);
   expect(g.entrySlippage2leg).toBeGreaterThan(0);
-  expect(g.entrySlippage4leg).toBeGreaterThan(0);
   expect(g.entrySlippage4leg).toBeGreaterThanOrEqual(g.entrySlippage2leg);
   expect(['shorts-fresh', 'none']).toContain(g.exitGateDefault);
 }
@@ -39,6 +39,15 @@ describe('geometryForDte — well-formed for every supported DTE', () => {
       assertWellFormed(geometryForDte(dte));
     });
   }
+});
+
+describe('geometryForDte — short-delta band', () => {
+  it('uses the 0.30–0.70 band (0.05 steps) at every DTE', () => {
+    const expected = [0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70];
+    for (const dte of SUPPORTED_DTES) {
+      expect(geometryForDte(dte).shortDeltas).toEqual(expected);
+    }
+  });
 });
 
 describe('geometryForDte — exit gate policy', () => {
@@ -54,31 +63,27 @@ describe('geometryForDte — exit gate policy', () => {
   });
 });
 
-describe('geometryForDte — friction scales monotonically with DTE', () => {
+describe('geometryForDte — friction & width scale monotonically with DTE', () => {
   it('close half-spread is non-decreasing across DTE tiers', () => {
     const hs = SUPPORTED_DTES.map(d => geometryForDte(d).closeHalfSpread);
-    for (let i = 1; i < hs.length; i++) {
-      expect(hs[i]).toBeGreaterThanOrEqual(hs[i - 1]);
-    }
+    for (let i = 1; i < hs.length; i++) expect(hs[i]).toBeGreaterThanOrEqual(hs[i - 1]);
   });
 
   it('2-leg entry slippage is non-decreasing across DTE tiers', () => {
     const slip = SUPPORTED_DTES.map(d => geometryForDte(d).entrySlippage2leg);
-    for (let i = 1; i < slip.length; i++) {
-      expect(slip[i]).toBeGreaterThanOrEqual(slip[i - 1]);
-    }
+    for (let i = 1; i < slip.length; i++) expect(slip[i]).toBeGreaterThanOrEqual(slip[i - 1]);
   });
 
   it('max spread width grows with DTE (longer DTE allows wider spreads)', () => {
-    const maxWidth = (d: number) => Math.max(...geometryForDte(d).spreadDefs.map(s => s.wS));
+    const maxWidth = (d: number) => Math.max(...geometryForDte(d).widths);
     expect(maxWidth(60)).toBeGreaterThan(maxWidth(5));
     expect(maxWidth(20)).toBeGreaterThan(maxWidth(2));
   });
 
-  it('deepest ITM offset grows with DTE', () => {
-    const deepest = (d: number) => Math.min(...geometryForDte(d).spreadDefs.map(s => s.soS));
-    expect(deepest(60)).toBeLessThan(deepest(5));  // more negative = deeper ITM
-    expect(deepest(20)).toBeLessThan(deepest(2));
+  it('widths stay reasonable strike counts (snap to real listed strikes)', () => {
+    for (const dte of SUPPORTED_DTES) {
+      expect(Math.max(...geometryForDte(dte).widths)).toBeLessThanOrEqual(20);
+    }
   });
 });
 
@@ -94,8 +99,6 @@ describe('geometryForDte — totality / range-based tier boundaries', () => {
   });
 
   it('an unlisted mid DTE resolves to the nearest higher tier, not 40+', () => {
-    // 7 sits between the 5 and 10 tiers; range buckets put it in the <=10 tier.
-    // It must NOT fall through to the 40+ tier (the old exact-match bug).
     expect(geometryForDte(7)).toEqual(geometryForDte(10));
     expect(geometryForDte(7)).not.toEqual(geometryForDte(40));
     assertWellFormed(geometryForDte(7));
