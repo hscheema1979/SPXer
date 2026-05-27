@@ -22,7 +22,7 @@ import { resolveSymbolTarget, listDatesFor, loadDay, outPath } from './sweep-sym
 import { shardDates, dumpResults, loadShardsInto, mergeStateFile, knownDates } from './sweep-shard';
 import { CAP_POLICIES, capDayNet, capSummary, type CapEvent } from './side-cap';
 import { geometryForDte } from './sweep-geometry';
-import { getOptionsForDay } from './flat-file-reader';
+import { getOptionsForDay, readDiskCache, type Bar as FlatBar } from './flat-file-reader';
 import { tradingDaysBetween, expiryForDate } from './sweep-dates';
 import { deriveStrikeInterval } from './strike-grid';
 import { selectStrikeByDelta, type DeltaCandidate } from './delta-grid';
@@ -229,6 +229,34 @@ function sessOpenTs(date:string):number{
 // this engine moved to multi-DTE swing entries.
 
 // Trading-day helpers (holiday-aware) live in sweep-dates.ts — imported above.
+
+// ── OCC symbol helpers ────────────────────────────────────────────────────────
+// Format: {ROOT}{YYMMDD}{C|P}{strike×1000, 8 digits}. The expiry + strike are
+// fixed-width from the END, so this works for any root length (NDXP, SPXW, …).
+function occExpiryYYMMDD(sym: string): string { return sym.slice(sym.length - 15, sym.length - 9); }
+function occType(sym: string): 'C' | 'P' { return sym[sym.length - 9] as 'C' | 'P'; }
+function occStrike(sym: string): number { return parseInt(sym.slice(sym.length - 8), 10) / 1000; }
+function expiryToYYMMDD(date: string): string { return date.slice(2).replace(/-/g, ''); }
+
+// Build the entry-day option CHAIN (put contracts of the TARGET expiry) from the
+// local disk cache — the same data the trajectory uses, so no parquet backfill
+// per DTE is needed. Returns the shape the engine's c1 expects for the chain:
+// { contractBars: Map<sym,Bar[]>, contractStrikes: Map<sym,number> }.
+function loadEntryChainFromDisk(entryDate: string, expiryDate: string, prefix: string):
+  { contractBars: Map<string, FlatBar[]>; contractStrikes: Map<string, number> } | null {
+  const day = readDiskCache(entryDate, prefix);
+  if (!day) return null;
+  const wantExp = expiryToYYMMDD(expiryDate);
+  const contractBars = new Map<string, FlatBar[]>();
+  const contractStrikes = new Map<string, number>();
+  for (const [sym, bars] of day) {
+    if (occType(sym) !== 'P') continue;            // puts only
+    if (occExpiryYYMMDD(sym) !== wantExp) continue; // target expiry only
+    contractBars.set(sym, bars);
+    contractStrikes.set(sym, occStrike(sym));
+  }
+  return contractBars.size ? { contractBars, contractStrikes } : null;
+}
 
 // ── Multi-day bar loading (S3 flat files for DTE≥2) ───────────────────────────
 async function getMultiDayBars(symbol: string, entryDate: string, expiryDate: string): Promise<any[]> {
@@ -523,14 +551,27 @@ if (STATE_FILE && !process.env.SWEEP_MERGE && !process.env.SWEEP_SHARD) {
 }
 console.error(`[${TARGET.symbol} DTE${TARGET.dte}] Dates: ${ALL_DATES.length}${process.env.SWEEP_SHARD ? ` (shard ${process.env.SWEEP_SHARD} → ${SWEEP_DATES.length})` : ''} | exitGate=${EXIT_GATE} entryStaleSec=${ENTRY_STALE_SEC || 'off'} fill=${FILL_MODE} putOnly=true`);
 
+// Underlying series comes from the 0DTE profile parquet (exists for the full
+// range); the option chain comes from the disk-cached flat files (per expiry).
+// This avoids backfilling a separate parquet per DTE.
+const UNDERLYING_TARGET = { ...TARGET, dte: 0, profileId: `${TARGET.symbol.toLowerCase()}-0dte` };
+const OPTION_PREFIX = TARGET.optionPrefix; // e.g. 'NDXP', 'SPXW'
+
 (async () => {
 for(let di=0; di<RUN_DATES.length; di++){
   const date = RUN_DATES[di];
   if(di%20===0) console.error(`  ${di}/${RUN_DATES.length}  ${date}`);
   let c1:any, p1:any;
-  try { c1 = loadDay(TARGET,date,'1m') as any; p1 = loadDay(TARGET,prevDate(date),'1m') as any; }
+  try { c1 = loadDay(UNDERLYING_TARGET,date,'1m') as any; p1 = loadDay(UNDERLYING_TARGET,prevDate(date),'1m') as any; }
   catch { continue; }
   if(!c1?.spxBars?.length) continue;
+
+  // Replace the 0DTE chain with the TARGET-expiry put chain from the disk cache.
+  const expiryDate = expiryForDate(date, TARGET.dte);
+  const chain = loadEntryChainFromDisk(date, expiryDate, OPTION_PREFIX);
+  if (!chain) continue; // no cached flat file for this date → skip (run preprocess first)
+  c1 = { ...c1, contractBars: chain.contractBars, contractStrikes: chain.contractStrikes };
+
   const s1:any[]=c1.spxBars;
   const sess = sessOpenTs(date);
   setEtHourSessOpen(sess);   // arm fast etHour() for the per-hour bucket below
