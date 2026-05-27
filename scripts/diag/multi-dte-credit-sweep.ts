@@ -817,7 +817,11 @@ function summary(){
     let cum=0,peak=0,mdd=0; for(const dp of dailyArr){cum+=dp; peak=Math.max(peak,cum); mdd=Math.max(mdd,peak-cum);}
     const pos = dailyArr.filter(x=>x>0.1).length;
     const wr = 100*v.wins/Math.max(1,v.n);
-    const ratio = mdd>0 ? v.pnl/mdd : 0;
+    // pnl/maxDD, but guard the near-zero-drawdown case: a variant with a trivial
+    // mdd (e.g. $1 from one down-day) would otherwise produce a meaningless
+    // quadrillion ratio that dominates Ratio-sorting. Require mdd ≥ $100 and
+    // clamp to 100 so the column stays sortable/informative.
+    const ratio = mdd >= 100 ? Math.min(100, v.pnl / mdd) : (v.pnl > 0 ? 100 : 0);
     const avgCredit = v.creditSum / Math.max(1,v.n);
     const avgWidth  = v.widthSum  / Math.max(1,v.n);
     const avgMaxRisk = (avgWidth - avgCredit) * 100; // dollars at risk per spread (1 contract)

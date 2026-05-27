@@ -85,9 +85,9 @@ export function geometryForDte(dte: number): DteGeometry {
   if (dte <= 5) {
     return {
       shortDeltas: DELTAS,
-      widths: [2, 3, 4, 5, 6],
-      wingWidths: [2, 3, 4, 5, 6],
-      icOffsets: [2, 3, 4, 5, 6],
+      widths: [1, 2, 3, 4, 5, 6],
+      wingWidths: [1, 2, 3, 4, 5, 6],
+      icOffsets: [1, 2, 3, 4, 5, 6],
       closeHalfSpread: 0.35,
       entrySlippage2leg: 45,
       entrySlippage4leg: 60,
@@ -98,9 +98,9 @@ export function geometryForDte(dte: number): DteGeometry {
   if (dte <= 10) {
     return {
       shortDeltas: DELTAS,
-      widths: [2, 3, 4, 6, 8],
-      wingWidths: [2, 3, 4, 6, 8],
-      icOffsets: [2, 3, 4, 6, 8],
+      widths: [1, 2, 3, 4, 6, 8],
+      wingWidths: [1, 2, 3, 4, 6, 8],
+      icOffsets: [1, 2, 3, 4, 6, 8],
       closeHalfSpread: 0.50,
       entrySlippage2leg: 55,
       entrySlippage4leg: 75,
@@ -111,9 +111,9 @@ export function geometryForDte(dte: number): DteGeometry {
   if (dte <= 15) {
     return {
       shortDeltas: DELTAS,
-      widths: [3, 4, 6, 8, 10],
-      wingWidths: [3, 4, 6, 8, 10],
-      icOffsets: [3, 4, 6, 8, 10],
+      widths: [1, 2, 3, 4, 6, 8, 10],
+      wingWidths: [1, 2, 3, 4, 6, 8, 10],
+      icOffsets: [1, 2, 3, 4, 6, 8, 10],
       closeHalfSpread: 0.55,
       entrySlippage2leg: 60,
       entrySlippage4leg: 82,
@@ -124,9 +124,9 @@ export function geometryForDte(dte: number): DteGeometry {
   if (dte <= 20) {
     return {
       shortDeltas: DELTAS,
-      widths: [4, 6, 8, 10, 12],
-      wingWidths: [4, 6, 8, 10, 12],
-      icOffsets: [4, 6, 8, 10, 12],
+      widths: [1, 2, 4, 6, 8, 10, 12],
+      wingWidths: [1, 2, 4, 6, 8, 10, 12],
+      icOffsets: [1, 2, 4, 6, 8, 10, 12],
       closeHalfSpread: 0.60,
       entrySlippage2leg: 65,
       entrySlippage4leg: 88,
@@ -137,9 +137,9 @@ export function geometryForDte(dte: number): DteGeometry {
   if (dte <= 30) {
     return {
       shortDeltas: DELTAS,
-      widths: [4, 6, 8, 12, 16],
-      wingWidths: [4, 6, 8, 12, 16],
-      icOffsets: [4, 6, 8, 12, 16],
+      widths: [1, 2, 4, 6, 8, 12, 16],
+      wingWidths: [1, 2, 4, 6, 8, 12, 16],
+      icOffsets: [1, 2, 4, 6, 8, 12, 16],
       closeHalfSpread: 0.65,
       entrySlippage2leg: 70,
       entrySlippage4leg: 95,
@@ -150,9 +150,9 @@ export function geometryForDte(dte: number): DteGeometry {
   // 40+ DTE: widest spreads
   return {
     shortDeltas: DELTAS,
-    widths: [6, 8, 12, 16, 20],
-    wingWidths: [6, 8, 12, 16, 20],
-    icOffsets: [6, 8, 12, 16, 20],
+    widths: [1, 2, 6, 8, 12, 16, 20],
+    wingWidths: [1, 2, 6, 8, 12, 16, 20],
+    icOffsets: [1, 2, 6, 8, 12, 16, 20],
     closeHalfSpread: 0.70,
     entrySlippage2leg: 75,
     entrySlippage4leg: 105,
