@@ -44,7 +44,14 @@ function flag(name: string, def?: string): string | undefined {
 }
 
 const engineArg = (flag('engine', 'both') || 'both').toLowerCase();
-const shards = Math.max(1, parseInt(flag('shards', String(os.cpus().length)) || '8', 10));
+// Default shards = quarter of the cores (min 1, cap 2) so a sweep leaves the bulk
+// of the box for the live services + an in-flight build. 4 shards previously
+// OOM-killed a Next build on this 8-core/22GB host. Explicit --shards overrides.
+// A hard ceiling of (cores-1) prevents pegging every core even if asked for more.
+const CORES = os.cpus().length;
+const defaultShards = Math.max(1, Math.min(2, Math.floor(CORES / 4)));
+const requestedShards = Math.max(1, parseInt(flag('shards', String(defaultShards)) || String(defaultShards), 10));
+const shards = Math.min(requestedShards, Math.max(1, CORES - 1));
 const noPost = argv.includes('--no-post');
 // --state-dir <dir>: a sharded run becomes a BOOTSTRAP — its merge finalize
 // also persists the per-(symbol,engine) accumulator so subsequent nightly
@@ -64,15 +71,37 @@ for (let i = 0; i < argv.length; i++) {
 const ENGINES: Record<string, string> = {
   credit: 'scripts/diag/credit-spread-sweep.ts',
   iron:   'scripts/diag/iron-sweep.ts',
+  'broken-wing-butterfly': 'scripts/diag/broken-wing-butterfly-sweep.ts',
   long:   'scripts/diag/long-config-sweep.ts',
+  // Multi-DTE short-put-spread engine (delta-targeted, multi-session carry).
+  // Separate from `credit` so the 0DTE iron/credit study is untouched.
+  'multi-dte': 'scripts/diag/multi-dte-credit-sweep.ts',
 };
-const order = engineArg === 'both' ? ['credit', 'iron'] : [engineArg];
-for (const e of order) if (!ENGINES[e]) { console.error(`unknown --engine ${e} (credit|iron|long|both)`); process.exit(2); }
+const order = engineArg === 'both' ? ['credit', 'iron', 'broken-wing-butterfly'] : [engineArg];
+for (const e of order) if (!ENGINES[e]) { console.error(`unknown --engine ${e} (credit|iron|broken-wing-butterfly|long|multi-dte|both)`); process.exit(2); }
+
+// Resource throttling so a sweep never starves the live services / a build on a
+// shared box. Workers run at low CPU + IO priority and a capped V8 heap. Tunable
+// without code changes:
+//   SWEEP_NICE       nice level 0..19 (default 15 — yields to anything interactive)
+//   SWEEP_IONICE     '1' to apply `ionice -c2 -n7` best-effort low IO (default on)
+//   SWEEP_HEAP_MB    per-worker --max-old-space-size (default 2048)
+const NICE = Math.min(19, Math.max(0, parseInt(process.env.SWEEP_NICE || '15', 10)));
+const USE_IONICE = (process.env.SWEEP_IONICE ?? '1') !== '0';
+const HEAP_MB = Math.max(512, parseInt(process.env.SWEEP_HEAP_MB || '2048', 10));
+const HAS_IONICE = USE_IONICE && process.platform === 'linux';
 
 function run(script: string, env: Record<string, string>, tag: string): Promise<void> {
   return new Promise((resolve, reject) => {
-    const ch = spawn('npx', ['tsx', path.join(ROOT, script), ...passthru], {
-      cwd: ROOT, env: { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'pipe'],
+    // Prefix: nice [ionice] npx tsx … — low CPU + IO priority. ionice only on
+    // Linux (no-op elsewhere). Heap cap goes to the worker via NODE_OPTIONS.
+    const prefix = ['nice', '-n', String(NICE),
+      ...(HAS_IONICE ? ['ionice', '-c2', '-n7'] : [])];
+    const cmd = prefix[0];
+    const cmdArgs = [...prefix.slice(1), 'npx', 'tsx', path.join(ROOT, script), ...passthru];
+    const workerNodeOpts = `${process.env.NODE_OPTIONS ? process.env.NODE_OPTIONS + ' ' : ''}--max-old-space-size=${HEAP_MB}`;
+    const ch = spawn(cmd, cmdArgs, {
+      cwd: ROOT, env: { ...process.env, ...env, NODE_OPTIONS: workerNodeOpts }, stdio: ['ignore', 'pipe', 'pipe'],
     });
     let lastErr = '';
     ch.stderr.on('data', d => { const s = d.toString(); lastErr = s.trim().split('\n').pop() || lastErr; });
@@ -106,6 +135,7 @@ async function shardRun(script: string, tag: string, stateFile?: string): Promis
 
 (async () => {
   const t0 = Date.now();
+  console.log(`[sweep-parallel] ${SYM} | ${shards}/${CORES} shards${requestedShards !== shards ? ` (requested ${requestedShards}, capped)` : ''} | nice=${NICE}${HAS_IONICE ? ' ionice=c2n7' : ''} | heap=${HEAP_MB}MB/worker`);
   for (const eng of order) {
     await shardRun(ENGINES[eng], eng, stateFor(eng));
   }

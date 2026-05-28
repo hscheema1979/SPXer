@@ -34,8 +34,12 @@ const OUT_DIR = path.resolve(process.cwd(), 'scripts/autoresearch/output');
 const FRICTION_PCT = 0.10; // 0.10% round-trip (entry+exit) haircut on gross return
 
 // ── timeframe minutes ─────────────────────────────────────────────────────────
-const TF_MIN: Record<string, number> = { '5m': 5, '15m': 15, '1h': 60, '1d': 390 };
+const TF_MIN: Record<string, number> = {
+  '5m': 5, '10m': 10, '15m': 15, '30m': 30, '1h': 60, '2h': 120, '4h': 240, '1d': 390,
+};
 // 1 trading day = 390 RTH minutes, so a "1d" bar = one session aggregated from 1m.
+// Intraday TFs (incl. 2h/4h) bucket by wall-clock alignment from 00:00 UTC; with
+// RTH-only bars this yields the expected ~3–4 buckets/day for 2h and ~2/day for 4h.
 
 // ── args ───────────────────────────────────────────────────────────────────────
 function argVal(name: string): string | undefined {
@@ -148,11 +152,14 @@ interface Variant { maType: 'hma' | 'ema'; tf: string; fast: number; slow: numbe
 function buildGrid(): Variant[] {
   const out: Variant[] = [];
   const maTypes: ('hma' | 'ema')[] = ['hma', 'ema'];
-  const tfs = ['5m', '15m', '1h', '1d'];
-  // Slow-MA swing pairs (fast×slow), periods up to 200 — "hold much longer".
-  const pairs: [number, number][] = [
-    [10, 50], [20, 50], [20, 100], [50, 100], [50, 150], [50, 200], [100, 200], [10, 30], [21, 55],
-  ];
+  const tfs = ['5m', '10m', '15m', '30m', '1h', '2h', '4h', '1d'];
+  // Incremental MA grid: every fast<slow combination. Fast 3→20, slow 10→200,
+  // so the sweep covers fast scalp-ish crosses through slow swing crosses
+  // ("hold much longer"). 44 valid pairs.
+  const fastPeriods = [3, 5, 10, 15, 20];
+  const slowPeriods = [10, 15, 20, 25, 30, 50, 75, 100, 150, 200];
+  const pairs: [number, number][] = [];
+  for (const f of fastPeriods) for (const s of slowPeriods) if (f < s) pairs.push([f, s]);
   const tps = [10, 20, 40]; // % gain take-profit (shares, leveraged → big swings)
   const sls = [5, 10, 20];  // % loss stop
   for (const maType of maTypes)
@@ -165,9 +172,10 @@ function buildGrid(): Variant[] {
 }
 
 // ── run one variant over the continuous TF series ─────────────────────────────
-interface Trade { entryTime: string; exitTime: string; entryPx: number; exitPx: number; retPct: number; durMin: number; reason: string }
+interface Trade { entryTime: string; exitTime: string; entryPx: number; exitPx: number; retPct: number; durMin: number; reason: string; entryDate: string; exitDate: string; entryHour: string }
+interface VariantResult { trades: Trade[]; daily: Map<string, number>; hourly: Map<string, number> }
 
-function runVariant(v: Variant, tfBars: TFBar[], tfMinutes: number): Trade[] {
+function runVariant(v: Variant, tfBars: TFBar[], tfMinutes: number): VariantResult {
   const closes = tfBars.map(b => b.close);
   const fastMA = maSeries(closes, v.fast, v.maType);
   const slowMA = maSeries(closes, v.slow, v.maType);
@@ -177,6 +185,8 @@ function runVariant(v: Variant, tfBars: TFBar[], tfMinutes: number): Trade[] {
     return f > s ? 'bull' : 'bear';
   };
   const trades: Trade[] = [];
+  const daily = new Map<string, number>();
+  const hourly = new Map<string, number>();
   let inPos = false, entryIdx = -1, entryPx = 0;
   for (let i = 1; i < tfBars.length; i++) {
     const dPrev = dir(i - 1), dNow = dir(i);
@@ -196,14 +206,25 @@ function runVariant(v: Variant, tfBars: TFBar[], tfMinutes: number): Trade[] {
     else if (dNow === 'bear' && dPrev !== 'bear') { exitPx = bar.close; reason = 'reverse'; }
     if (exitPx != null) {
       const gross = (exitPx - entryPx) / entryPx * 100;
+      const retPct = +(gross - FRICTION_PCT).toFixed(2);
+      const entryTimeStr = fmtETDateTime(tfBars[entryIdx].ts);
+      const exitTimeStr = fmtETDateTime(bar.ts);
+      const entryDate = entryTimeStr.slice(0, 10);
+      const exitDate = exitTimeStr.slice(0, 10);
+      const entryHour = entryTimeStr.slice(11, 13);
+      const exitHour = exitTimeStr.slice(11, 13);
       trades.push({
-        entryTime: fmtETDateTime(tfBars[entryIdx].ts),
-        exitTime: fmtETDateTime(bar.ts),
+        entryTime: entryTimeStr,
+        exitTime: exitTimeStr,
+        entryDate, exitDate, entryHour,
         entryPx: +entryPx.toFixed(2), exitPx: +exitPx.toFixed(2),
-        retPct: +(gross - FRICTION_PCT).toFixed(2),
+        retPct,
         durMin: (i - entryIdx) * tfMinutes,
         reason,
       });
+      // Aggregate exit P&L into exit date's daily and exit hour's hourly
+      daily.set(exitDate, (daily.get(exitDate) || 0) + retPct);
+      hourly.set(exitHour, (hourly.get(exitHour) || 0) + retPct);
       inPos = false; entryIdx = -1; entryPx = 0;
     }
   }
@@ -211,13 +232,22 @@ function runVariant(v: Variant, tfBars: TFBar[], tfMinutes: number): Trade[] {
   if (inPos && entryIdx >= 0) {
     const last = tfBars[tfBars.length - 1];
     const gross = (last.close - entryPx) / entryPx * 100;
+    const retPct = +(gross - FRICTION_PCT).toFixed(2);
+    const entryTimeStr = fmtETDateTime(tfBars[entryIdx].ts);
+    const exitTimeStr = fmtETDateTime(last.ts);
+    const entryDate = entryTimeStr.slice(0, 10);
+    const exitDate = exitTimeStr.slice(0, 10);
+    const entryHour = entryTimeStr.slice(11, 13);
     trades.push({
-      entryTime: fmtETDateTime(tfBars[entryIdx].ts), exitTime: fmtETDateTime(last.ts),
+      entryTime: entryTimeStr, exitTime: exitTimeStr,
+      entryDate, exitDate, entryHour,
       entryPx: +entryPx.toFixed(2), exitPx: +last.close.toFixed(2),
-      retPct: +(gross - FRICTION_PCT).toFixed(2), durMin: (tfBars.length - 1 - entryIdx) * tfMinutes, reason: 'open',
+      retPct, durMin: (tfBars.length - 1 - entryIdx) * tfMinutes, reason: 'open',
     });
+    daily.set(exitDate, (daily.get(exitDate) || 0) + retPct);
+    hourly.set(entryHour, (hourly.get(entryHour) || 0) + retPct);
   }
-  return trades;
+  return { trades, daily, hourly };
 }
 
 // ── metrics → flat row (shape /api/long-sweep consumes) ───────────────────────
@@ -304,21 +334,56 @@ function sweepTicker(symbol: string) {
   const { bars, dates } = loadContinuous(profileId);
   if (!bars.length) { console.error(`  [${symbol}] no bars — skip`); return; }
   const grid = buildGrid();
-  // Pre-aggregate each TF once (shared across all variants on that TF).
+  // Pre-aggregate each TF once (shared across all variants on that TF). Derive
+  // the TF set from the grid so it never drifts from buildGrid()'s tfs list.
   const tfBarsByTf: Record<string, TFBar[]> = {};
-  for (const tf of ['5m', '15m', '1h', '1d']) tfBarsByTf[tf] = aggregate(bars, tf);
+  for (const tf of [...new Set(grid.map(v => v.tf))]) tfBarsByTf[tf] = aggregate(bars, tf);
   const rows: any[] = [];
+  const allDaily = new Map<string, Map<string, number>>();  // configId -> { date -> pnl }
+  const allHourly = new Map<string, Map<string, number>>();  // configId -> { hour -> pnl }
   for (const v of grid) {
     const tfBars = tfBarsByTf[v.tf];
     const tfMin = TF_MIN[v.tf];
-    const trades = runVariant(v, tfBars, tfMin);
+    const { trades, daily, hourly } = runVariant(v, tfBars, tfMin);
     rows.push(toRow(symbol, v, trades));
+    const configId = `etflong-${symbol.toLowerCase()}-${v.maType}-${v.tf}-${v.fast}x${v.slow}-tp${v.tp}-sl${v.sl}`;
+    allDaily.set(configId, daily);
+    allHourly.set(configId, hourly);
   }
   const outFile = path.join(OUT_DIR, `etf-long-sweep-${profileId}.json`);
   fs.mkdirSync(OUT_DIR, { recursive: true });
   fs.writeFileSync(outFile, JSON.stringify(rows));
   const best = [...rows].sort((a, b) => b.pnlPct - a.pnlPct)[0];
   console.error(`✓ [${symbol}] ${rows.length} variants × ${dates.length} days → ${path.basename(outFile)}  | best ${best.signal} ${best.exit}: pnl ${best.pnlPct}% wr ${best.wr}% n ${best.n} dd ${best.dd}%`);
+
+  // Write daily/hourly aggregations (like spreads do)
+  const allDates = new Set<string>();
+  for (const d of allDaily.values()) for (const date of d.keys()) allDates.add(date);
+  const sortedDates = Array.from(allDates).sort();
+  const dailyByConfig: Record<string, number[]> = {};
+  for (const [configId, dateMap] of allDaily) {
+    const arr = new Array(sortedDates.length).fill(0);
+    for (let i = 0; i < sortedDates.length; i++) arr[i] = dateMap.get(sortedDates[i]) || 0;
+    dailyByConfig[configId] = arr;
+  }
+  const dailyOutFile = path.join(OUT_DIR, `etf-long-daily-${profileId}.json`);
+  try {
+    fs.writeFileSync(dailyOutFile, JSON.stringify({ dates: sortedDates, series: dailyByConfig }, null, 2));
+  } catch {}
+
+  const allHours = new Set<string>();
+  for (const h of allHourly.values()) for (const hour of h.keys()) allHours.add(hour);
+  const sortedHours = Array.from(allHours).sort();
+  const hourlyByConfig: Record<string, number[]> = {};
+  for (const [configId, hourMap] of allHourly) {
+    const arr = new Array(sortedHours.length).fill(0);
+    for (let i = 0; i < sortedHours.length; i++) arr[i] = hourMap.get(sortedHours[i]) || 0;
+    hourlyByConfig[configId] = arr;
+  }
+  const hourlyOutFile = path.join(OUT_DIR, `etf-long-hourly-${profileId}.json`);
+  try {
+    fs.writeFileSync(hourlyOutFile, JSON.stringify({ hours: sortedHours, series: hourlyByConfig }, null, 2));
+  } catch {}
 }
 
 // ── main ─────────────────────────────────────────────────────────────────────

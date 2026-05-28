@@ -5,6 +5,26 @@
     { "symbol": "SQQQ", "dte": 0, "class": "etf", "assetClass": "shares", "profileId": "sqqq", "optionPrefix": "SQQQ", "strikeInterval": 1, "label": "SQQQ (-3x QQQ)" },
     { "symbol": "SOXL", "dte": 0, "class": "etf", "assetClass": "shares", "profileId": "soxl", "optionPrefix": "SOXL", "strikeInterval": 1, "label": "SOXL (3x Semis)" },
     { "symbol": "TNA",  "dte": 0, "class": "etf", "assetClass": "shares", "profileId": "tna",  "optionPrefix": "TNA",  "strikeInterval": 1, "label": "TNA (3x Small Cap)" },
-    { "symbol": "FAS",  "dte": 0, "class": "etf", "assetClass": "shares", "profileId": "fas",  "optionPrefix": "FAS",  "strikeInterval": 1, "label": "FAS (3x Financials)" }
+    { "symbol": "FAS",  "dte": 0, "class": "etf", "assetClass": "shares", "profileId": "fas",  "optionPrefix": "FAS",  "strikeInterval": 1, "label": "FAS (3x Financials)" },
+    { "symbol": "NDX", "dte": 1,  "class": "index", "profileId": "ndx-1dte",  "optionPrefix": "NDXP", "strikeInterval": 10, "bandHalfWidthDollars": 750,  "underlyingPolygonTicker": "I:NDX", "label": "NDX 1DTE" },
+    { "symbol": "NDX", "dte": 2,  "class": "index", "profileId": "ndx-2dte",  "optionPrefix": "NDXP", "strikeInterval": 10, "bandHalfWidthDollars": 875,  "underlyingPolygonTicker": "I:NDX", "label": "NDX 2DTE" },
+    { "symbol": "NDX", "dte": 3,  "class": "index", "profileId": "ndx-3dte",  "optionPrefix": "NDXP", "strikeInterval": 10, "bandHalfWidthDollars": 1000, "underlyingPolygonTicker": "I:NDX", "label": "NDX 3DTE" },
+    { "symbol": "NDX", "dte": 5,  "class": "index", "profileId": "ndx-5dte",  "optionPrefix": "NDXP", "strikeInterval": 10, "bandHalfWidthDollars": 1250, "underlyingPolygonTicker": "I:NDX", "label": "NDX 5DTE" },
+    { "symbol": "NDX", "dte": 10, "class": "index", "profileId": "ndx-10dte", "optionPrefix": "NDXP", "strikeInterval": 10, "bandHalfWidthDollars": 1750, "underlyingPolygonTicker": "I:NDX", "label": "NDX 10DTE" },
+    { "symbol": "NDX", "dte": 15, "class": "index", "profileId": "ndx-15dte", "optionPrefix": "NDXP", "strikeInterval": 10, "bandHalfWidthDollars": 2000, "underlyingPolygonTicker": "I:NDX", "label": "NDX 15DTE" },
+    { "symbol": "NDX", "dte": 20, "class": "index", "profileId": "ndx-20dte", "optionPrefix": "NDXP", "strikeInterval": 10, "bandHalfWidthDollars": 2250, "underlyingPolygonTicker": "I:NDX", "label": "NDX 20DTE" },
+    { "symbol": "NDX", "dte": 30, "class": "index", "profileId": "ndx-30dte", "optionPrefix": "NDXP", "strikeInterval": 10, "bandHalfWidthDollars": 2500, "underlyingPolygonTicker": "I:NDX", "label": "NDX 30DTE" },
+    { "symbol": "NDX", "dte": 40, "class": "index", "profileId": "ndx-40dte", "optionPrefix": "NDXP", "strikeInterval": 10, "bandHalfWidthDollars": 2750, "underlyingPolygonTicker": "I:NDX", "label": "NDX 40DTE" },
+    { "symbol": "NDX", "dte": 60, "class": "index", "profileId": "ndx-60dte", "optionPrefix": "NDXP", "strikeInterval": 10, "bandHalfWidthDollars": 3000, "underlyingPolygonTicker": "I:NDX", "label": "NDX 60DTE" },
+    { "symbol": "SPX", "dte": 1,  "class": "index", "profileId": "spx-1dte",  "optionPrefix": "SPXW", "strikeInterval": 5, "bandHalfWidthDollars": 150, "underlyingPolygonTicker": "I:SPX", "label": "SPX 1DTE" },
+    { "symbol": "SPX", "dte": 2,  "class": "index", "profileId": "spx-2dte",  "optionPrefix": "SPXW", "strikeInterval": 5, "bandHalfWidthDollars": 175, "underlyingPolygonTicker": "I:SPX", "label": "SPX 2DTE" },
+    { "symbol": "SPX", "dte": 3,  "class": "index", "profileId": "spx-3dte",  "optionPrefix": "SPXW", "strikeInterval": 5, "bandHalfWidthDollars": 200, "underlyingPolygonTicker": "I:SPX", "label": "SPX 3DTE" },
+    { "symbol": "SPX", "dte": 5,  "class": "index", "profileId": "spx-5dte",  "optionPrefix": "SPXW", "strikeInterval": 5, "bandHalfWidthDollars": 250, "underlyingPolygonTicker": "I:SPX", "label": "SPX 5DTE" },
+    { "symbol": "SPX", "dte": 10, "class": "index", "profileId": "spx-10dte", "optionPrefix": "SPXW", "strikeInterval": 5, "bandHalfWidthDollars": 350, "underlyingPolygonTicker": "I:SPX", "label": "SPX 10DTE" },
+    { "symbol": "SPX", "dte": 15, "class": "index", "profileId": "spx-15dte", "optionPrefix": "SPXW", "strikeInterval": 5, "bandHalfWidthDollars": 400, "underlyingPolygonTicker": "I:SPX", "label": "SPX 15DTE" },
+    { "symbol": "SPX", "dte": 20, "class": "index", "profileId": "spx-20dte", "optionPrefix": "SPXW", "strikeInterval": 5, "bandHalfWidthDollars": 450, "underlyingPolygonTicker": "I:SPX", "label": "SPX 20DTE" },
+    { "symbol": "SPX", "dte": 30, "class": "index", "profileId": "spx-30dte", "optionPrefix": "SPXW", "strikeInterval": 5, "bandHalfWidthDollars": 500, "underlyingPolygonTicker": "I:SPX", "label": "SPX 30DTE" },
+    { "symbol": "SPX", "dte": 40, "class": "index", "profileId": "spx-40dte", "optionPrefix": "SPXW", "strikeInterval": 5, "bandHalfWidthDollars": 550, "underlyingPolygonTicker": "I:SPX", "label": "SPX 40DTE" },
+    { "symbol": "SPX", "dte": 60, "class": "index", "profileId": "spx-60dte", "optionPrefix": "SPXW", "strikeInterval": 5, "bandHalfWidthDollars": 600, "underlyingPolygonTicker": "I:SPX", "label": "SPX 60DTE" }
   ]
 }

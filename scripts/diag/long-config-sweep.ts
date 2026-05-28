@@ -430,6 +430,9 @@ interface Acc {
   days: number; trades: number; wins: number; pnl: number; pnlPct: number;
   sumWinPct: number; cntWins: number; sumLossPct: number; cntLosses: number;
   profitDays: number; worstDay: number; bestDay: number; durSec: number;
+  // Per-date $ P&L for the equity/heatmap/coverage tabs. Map<date,pnl> so the
+  // sweep-shard reducer merges shards (disjoint dates) by key-union.
+  daily: Map<string, number>;
 }
 
 // ── Main ────────────────────────────────────────────────────────────────────
@@ -487,7 +490,9 @@ async function main() {
             days: 0, trades: 0, wins: 0, pnl: 0, pnlPct: 0,
             sumWinPct: 0, cntWins: 0, sumLossPct: 0, cntLosses: 0,
             profitDays: 0, worstDay: 0, bestDay: 0, durSec: 0,
+            daily: new Map<string, number>(),
           };
+          prev.daily.set(date, +r.pnl.toFixed(2)); // this config's $ P&L for `date`
           results.set(variant.id, {
             days: prev.days + 1,
             trades: prev.trades + r.trades,
@@ -502,6 +507,7 @@ async function main() {
             worstDay: Math.min(prev.worstDay, r.pnl),
             bestDay: Math.max(prev.bestDay, r.pnl),
             durSec: prev.durSec + r.durSec,
+            daily: prev.daily,
           });
           }
         }
@@ -538,6 +544,8 @@ async function main() {
 // filter/sort UI works unchanged; long-specific fields (tp/sl/maType/tfClass).
 function writeLongSweepJson(variants: ConfigVariant[], results: Map<string, Acc>) {
   const rows: any[] = [];
+  const dailyByKey: Record<string, Record<string, number>> = {}; // vkey → {date: pnl}
+  const allDatesSet = new Set<string>();
   for (const variant of variants) {
     const res = results.get(variant.id);
     if (!res || res.days <= 0 || res.trades <= 0) continue;
@@ -550,16 +558,20 @@ function writeLongSweepJson(variants: ConfigVariant[], results: Map<string, Acc>
     const maType = variant.signal === 'dema' ? 'DEMA' : 'HMA';
     const off = variant.offset;
     const moneyness = off < 0 ? `${Math.abs(off) * SI}ITM` : off > 0 ? `${off * SI}OTM` : 'ATM';
+    const signalStr = variant.tfs.length > 1
+      ? `${maType} ${variant.tfs.map(t => t.tf).join('+')} ${variant.tfs[0].fast}x${variant.tfs[0].slow}`
+      : `${maType} ${variant.tfs[0].tf}m ${variant.tfs[0].fast}x${variant.tfs[0].slow}`;
+    const exitStr = `${variant.tp}TP/${variant.sl}SL`;
+    // variantKey MUST match the studio viewer's: long::signal::moneyness::exit
+    const vkey = `long::${signalStr}::${moneyness}::${exitStr}`;
+    res.daily.forEach((pnl, d) => { dailyByKey[vkey] ??= {}; dailyByKey[vkey][d] = pnl; allDatesSet.add(d); });
 
     rows.push({
       source: 'long',
       configId: variant.id,
-      // 'signal' drives the viewer's signal/TF/MA-type filters: "<MA> <tf> <fast>x<slow>"
-      signal: variant.tfs.length > 1
-        ? `${maType} ${variant.tfs.map(t => t.tf).join('+')} ${variant.tfs[0].fast}x${variant.tfs[0].slow}`
-        : `${maType} ${variant.tfs[0].tf}m ${variant.tfs[0].fast}x${variant.tfs[0].slow}`,
+      signal: signalStr,
       spread: 'long',
-      exit: `${variant.tp}TP/${variant.sl}SL`,
+      exit: exitStr,
       tp: variant.tp,
       sl: variant.sl,
       offset: off,            // strikes (neg=ITM)
@@ -588,6 +600,21 @@ function writeLongSweepJson(variants: ConfigVariant[], results: Map<string, Acc>
   fs.mkdirSync(path.dirname(outFile), { recursive: true });
   fs.writeFileSync(outFile, JSON.stringify(rows));
   console.log(`[long-config-sweep] Wrote ${rows.length} rows → ${outFile}`);
+
+  // long-daily.json: {dates:[...sorted], series:{vkey:[perDatePnl aligned to dates]}}
+  // for the Equity/Heatmap/Coverage/Regime/Correlation tabs (fetched per key).
+  const dates = Array.from(allDatesSet).sort();
+  const dateIdx = new Map(dates.map((d, i) => [d, i]));
+  const series: Record<string, number[]> = {};
+  for (const vkey of Object.keys(dailyByKey)) {
+    const arr = new Array(dates.length).fill(0);
+    const m = dailyByKey[vkey];
+    for (const d of Object.keys(m)) arr[dateIdx.get(d)!] = m[d];
+    series[vkey] = arr;
+  }
+  const dailyFile = path.join(process.cwd(), 'scripts/autoresearch/output', `long-daily${TARGET.outSuffix}.json`);
+  fs.writeFileSync(dailyFile, JSON.stringify({ dates, series }));
+  console.log(`[long-config-sweep] Wrote ${Object.keys(series).length} daily series (${dates.length} dates) → ${dailyFile}`);
 }
 
 // Compute dashboard metrics (edge/EV/R-multiple/winRate) the same way
