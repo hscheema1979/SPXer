@@ -361,8 +361,10 @@ function optPx(bars:any[],ts:number):number|null{for(let i=bars.length-1;i>=0;i-
 // cache holds only real prints (no synthetic fill), so age = ts − lastBar.ts.
 function markAge(bars:any[],ts:number):number{for(let i=bars.length-1;i>=0;i--)if(bars[i].ts<=ts)return ts-bars[i].ts;return Infinity;}
 
-interface Leg { bars:any[]; sign:number; strike:number; symbol:string; }
-interface TrajPoint { ts:number; V:number; shortsFresh:boolean; }
+interface Leg { bars:any[]; sign:number; strike:number; symbol:string; isPut?: boolean; }
+// perLegV: current mark of each leg in the same order as the legs array passed to buildTrajectory.
+// Used by applyExit's TP guard to check whether the dangerous short has expanded.
+interface TrajPoint { ts:number; V:number; shortsFresh:boolean; perLegV: number[]; }
 // Compute V trajectory for a 4-leg structure. V = Σ sign_i × close_i(t).
 // Each point also flags whether every SHORT leg (sign +1) actually printed AT
 // that exact minute (vs a carried-forward stale close), so applyExit can reject
@@ -392,15 +394,40 @@ function buildTrajectory(legs:Leg[], entryTs:number, endTs:number): TrajPoint[] 
       // too strict (over-haircut). Wings (sign -1) are irrelevant — they expire.
       let shortsFresh = false;
       for(let i=0;i<legs.length;i++) if(legs[i].sign === +1 && lastTs[i] === t){ shortsFresh = true; break; }
-      traj.push({ts:t, V, shortsFresh});
+      traj.push({ts:t, V, shortsFresh, perLegV: last.map(v => v as number)});
     }
   }
   return traj;
 }
 
+// ── Realistic TP guard ───────────────────────────────────────────────────────
+// For 4-leg structures (IB, IC, BWB) V is the NET of all legs, so the "safe"
+// side decaying (calls going worthless while SPX drops) can push V below the TP
+// threshold even though the dangerous side (short put) is expanding toward max
+// loss. This is a false TP: the directional bet failed, but cross-leg theta
+// decay manufactured a paper profit. Real fills would require buying back the
+// expanding short put at a loss, wiping out the call-side gain.
+//
+// Guard: at the moment V crosses the TP trigger, the SHORT leg on the DANGEROUS
+// side (the one SPX moved toward) must not have expanded beyond its entry mark.
+// If it has, the TP is a cross-leg artefact — skip it and ride to settle/SL.
+//
+// "Dangerous side" for a given signal direction:
+//   bull signal → body displaced above spot → short PUT is the dangerous leg
+//                 (SPX dropping pushes put ITM). legs[0] = short put (isPut=true, sign=+1).
+//   bear signal → body displaced below spot → short CALL is the dangerous leg.
+//                 legs[2] = short call (isPut=false, sign=+1).
+// For single-sided structures (credit put spread: only short put; credit call spread:
+// only short call) the guard is naturally satisfied — there's only one short leg and
+// it IS the dangerous one.
+//
+// SWEEP_TP_GUARD=0 disables (reproduces old behavior). Default=1 (enabled).
+const TP_GUARD = (process.env.SWEEP_TP_GUARD ?? '1') !== '0';
+
 function applyExit(traj:TrajPoint[], endTs:number, legs:Leg[],
                    credit:number, tpFrac:number, slMult:number, flipTs:number,
-                   spxAtSettle:number|null, wingWidth:number = 0, slRiskFrac:number = 0)
+                   spxAtSettle:number|null, wingWidth:number = 0, slRiskFrac:number = 0,
+                   entryPerLegV?: number[], signalDir?: 'bull'|'bear')
                   : {exitTs:number, exitV:number, reason:string} {
   const effEnd = Math.min(endTs, flipTs);
   const tpV = tpFrac>0 ? (1 - tpFrac) * credit : -Infinity;
@@ -416,6 +443,18 @@ function applyExit(traj:TrajPoint[], endTs:number, legs:Leg[],
   // level (TP gets exact limit, SL pays through ask on market exit).
   const tpTrigger = FILL_MODE === 'hard' ? tpV - CLOSE_PENALTY_V : tpV;
   const slTrigger = FILL_MODE === 'hard' ? slV + CLOSE_PENALTY_V : slV;
+
+  // Identify the dangerous short leg index.
+  // legs[0]=short put (sign+1,isPut=true), legs[2]=short call (sign+1,isPut=false).
+  // For a bull signal the dangerous leg is the short put (index 0).
+  // For a bear signal the dangerous leg is the short call (index 2).
+  // If entryPerLegV not provided, guard is skipped (single-leg or credit spread).
+  const dangerousIdx = (TP_GUARD && entryPerLegV && signalDir)
+    ? (signalDir === 'bull' ? legs.findIndex(l => l.sign === +1 && l.isPut === true)
+                            : legs.findIndex(l => l.sign === +1 && l.isPut === false))
+    : -1;
+  const dangerousEntryMark = dangerousIdx >= 0 ? entryPerLegV![dangerousIdx] : null;
+
   // Liquidity gate: honor a TP/SL only at a bar where the SHORT legs actually
   // printed (p.shortsFresh). Rejects exits priced off a stale carried-forward
   // SHORT close (the "false mid" that faked short hold times). Wings expire —
@@ -424,6 +463,12 @@ function applyExit(traj:TrajPoint[], endTs:number, legs:Leg[],
     if(p.ts > effEnd) break;
     const fillable = !GATE_SHORTS || p.shortsFresh;
     if(tpFrac>0 && p.V <= tpTrigger && fillable) {
+      // TP guard: reject if the dangerous short has expanded beyond its entry mark.
+      // A tolerance of +$0.20 allows for normal bid-ask noise without over-filtering.
+      if(dangerousIdx >= 0 && dangerousEntryMark != null) {
+        const dangerousNow = p.perLegV[dangerousIdx];
+        if(dangerousNow > dangerousEntryMark + 0.20) continue; // false TP — dangerous leg expanding
+      }
       const exitV = FILL_MODE === 'hard' ? tpV : p.V + CLOSE_PENALTY_V;
       return {exitTs:p.ts, exitV:Math.max(0,exitV), reason:'TP'};
     }
@@ -690,10 +735,10 @@ for(let di=0; di<RUN_DATES.length; di++){
         if(new Set([sym_sp, sym_lp, sym_sc, sym_lc]).size !== 4) continue;
 
         const legs:Leg[] = [
-          { symbol:sym_sp, strike:Kshort_put,  sign:+1, bars: c1.contractBars.get(sym_sp) as any[] },
-          { symbol:sym_lp, strike:Klong_put,   sign:-1, bars: c1.contractBars.get(sym_lp) as any[] },
-          { symbol:sym_sc, strike:Kshort_call, sign:+1, bars: c1.contractBars.get(sym_sc) as any[] },
-          { symbol:sym_lc, strike:Klong_call,  sign:-1, bars: c1.contractBars.get(sym_lc) as any[] },
+          { symbol:sym_sp, strike:Kshort_put,  sign:+1, isPut:true,  bars: c1.contractBars.get(sym_sp) as any[] },
+          { symbol:sym_lp, strike:Klong_put,   sign:-1, isPut:true,  bars: c1.contractBars.get(sym_lp) as any[] },
+          { symbol:sym_sc, strike:Kshort_call, sign:+1, isPut:false, bars: c1.contractBars.get(sym_sc) as any[] },
+          { symbol:sym_lc, strike:Klong_call,  sign:-1, isPut:false, bars: c1.contractBars.get(sym_lc) as any[] },
         ];
         const entries_px = legs.map(lg => optPx(lg.bars, ev.entryTs - 1));
         if(entries_px.some(p => p==null)) continue;
@@ -711,7 +756,7 @@ for(let di=0; di<RUN_DATES.length; di++){
           // Compute natural exit and record P&L immediately (no position mgmt in sweep).
           // Concurrency tracked via overlapMap so dashboard can compute budget-scaled outcome.
           const flipUse = ex.useFlip ? flipTs : Infinity;
-          const nat = applyExit(traj, settle, legs, credit, ex.tpFrac, ex.slMult, flipUse, spxAtSettle, st.wingWidth, ex.slRiskFrac ?? 0);
+          const nat = applyExit(traj, settle, legs, credit, ex.tpFrac, ex.slMult, flipUse, spxAtSettle, st.wingWidth, ex.slRiskFrac ?? 0, entries_px as number[], ev.dir);
           const pnl_gross = (credit - nat.exitV) * 100;
           const pnl_net = pnl_gross - SLIPPAGE_PER_STRUCTURE;
           const durationSec = Math.max(0, nat.exitTs - ev.entryTs);
