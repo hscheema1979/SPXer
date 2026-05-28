@@ -8,7 +8,10 @@
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 
-SHARDS="${1:-3}"
+# Conservative default: 2 shards keeps the sweep to ~2 cores + ~4GB so it never
+# starves the live services or an in-flight build. Override with arg 1 if the box
+# is idle. sweep-parallel.ts also nice/ionice's every worker and caps its heap.
+SHARDS="${1:-2}"
 DTES=(1 2 3 5 10 15 20 30 40 60)
 SYMBOLS=(NDX SPX)
 LOG=/tmp/multi-dte-batch.log
