@@ -90,6 +90,7 @@ const ENTRY_STALE_SEC = process.env.SWEEP_ENTRY_STALE_SEC ? parseInt(process.env
 const CUTOFF_HHMM = 6 * 3600; // 15:30 ET (sec from sess open)
 const SETTLE_HHMM = 6 * 3600 + 15 * 60; // 15:45 ET — force-exit window has liquid quotes — close before final 5 min
 const TRADESTART_SEC = 1800; // 10:00 ET (30 min after 9:30)
+const WARMUP_SESSIONS = 8;   // prior 1m sessions loaded to warm 1h/2h/4h indicators
 
 // ── Swing signals to sweep (higher TF for multi-DTE) ─────────────────────────
 // Multi-DTE holds are swing trades; we detect HMA/DEMA bull crosses on
@@ -98,29 +99,39 @@ const TRADESTART_SEC = 1800; // 10:00 ET (30 min after 9:30)
 // per date when its higher-TF state shows a fresh bull cross. (Short PUT
 // spreads only → bull bias.)
 type Signal = SwingSignal;
-type SwingTf = 'daily' | 'weekly' | '2h' | '4h';
+type SwingTf = 'daily' | 'weekly' | '1h' | '2h' | '4h';
 // mode 'cross' = enter on a fresh bull cross; 'state' = enter while bull;
 // 'always' = unconditional daily entry (the swing fields are ignored). Each spec
 // enters at entrySec from the session open (default 10:00 ET = 1800s); the
 // always-daily spec enters at 1pm (12600s). One entry per (spec,date).
 interface SignalSpec { label: string; signal: Signal; tf: SwingTf; fast: number; slow: number; mode: 'cross' | 'state' | 'always'; entrySec?: number; }
 const ET_1PM_SEC = 3 * 3600 + 1800; // 13:00 ET = 3.5h after 09:30
-const SIGNALS: SignalSpec[] = [
-  // Unconditional daily 1pm entry — a baseline "signal" to compare the HMA
-  // variants against (always-on daily put-credit spread).
-  { label: '1pm daily',    signal: 'hma',  tf: 'daily',  fast: 3, slow: 9,  mode: 'always', entrySec: ET_1PM_SEC },
-  // Daily HMA/DEMA crosses
-  { label: 'HMA  D 3x9',   signal: 'hma',  tf: 'daily',  fast: 3, slow: 9,  mode: 'cross' },
-  { label: 'HMA  D 5x20',  signal: 'hma',  tf: 'daily',  fast: 5, slow: 20, mode: 'cross' },
-  { label: 'DEMA D 3x9',   signal: 'dema', tf: 'daily',  fast: 3, slow: 9,  mode: 'cross' },
-  { label: 'DEMA D 5x20',  signal: 'dema', tf: 'daily',  fast: 5, slow: 20, mode: 'cross' },
-  // Weekly HMA/DEMA crosses (slower swing)
-  { label: 'HMA  W 3x9',   signal: 'hma',  tf: 'weekly', fast: 3, slow: 9,  mode: 'cross' },
-  { label: 'DEMA W 3x9',   signal: 'dema', tf: 'weekly', fast: 3, slow: 9,  mode: 'cross' },
-  // Daily STATE (already-bull) variants — enter while trend is up, not just on the flip
-  { label: 'HMA  D 3x9 st', signal: 'hma', tf: 'daily',  fast: 3, slow: 9,  mode: 'state' },
-  { label: 'HMA  D 5x20 st',signal: 'hma', tf: 'daily',  fast: 5, slow: 20, mode: 'state' },
+
+// Build the signal matrix: for every TF × MA-pair, sweep BOTH a CROSS variant
+// (enter on the bear→bull flip — clean but sparse on slow MAs) AND a STATE
+// variant (enter on any day the trend is bull — high sample). The "st" suffix
+// marks state. Plus the always-on 1pm-daily baseline. TF tokens: 1h/2h/4h/D/W.
+const TF_DEFS: Array<{ tf: SwingTf; tok: string }> = [
+  { tf: '1h', tok: '1h' }, { tf: '2h', tok: '2h' }, { tf: '4h', tok: '4h' },
+  { tf: 'daily', tok: 'D' }, { tf: 'weekly', tok: 'W' },
 ];
+const MA_PAIRS: Array<{ signal: Signal; fast: number; slow: number; maTok: string }> = [
+  { signal: 'hma',  fast: 3, slow: 9,  maTok: 'HMA ' },
+  { signal: 'hma',  fast: 5, slow: 20, maTok: 'HMA ' },
+  { signal: 'dema', fast: 3, slow: 9,  maTok: 'DEMA' },
+  { signal: 'dema', fast: 5, slow: 20, maTok: 'DEMA' },
+];
+const SIGNALS: SignalSpec[] = [
+  // Always-on daily 1pm baseline (compare the signal variants against this).
+  { label: '1pm daily', signal: 'hma', tf: 'daily', fast: 3, slow: 9, mode: 'always', entrySec: ET_1PM_SEC },
+];
+for (const { tf, tok } of TF_DEFS) {
+  for (const { signal, fast, slow, maTok } of MA_PAIRS) {
+    const base = `${maTok} ${tok} ${fast}x${slow}`;
+    SIGNALS.push({ label: base,         signal, tf, fast, slow, mode: 'cross' });
+    SIGNALS.push({ label: `${base} st`, signal, tf, fast, slow, mode: 'state' });
+  }
+}
 
 // ── NDX daily-history warmup cache (for daily/weekly indicators) ─────────────
 // Loaded once. Absent file → daily/weekly signals are skipped (run the backfill:
@@ -589,8 +600,8 @@ const OPTION_PREFIX = TARGET.optionPrefix; // e.g. 'NDXP', 'SPXW'
 for(let di=0; di<RUN_DATES.length; di++){
   const date = RUN_DATES[di];
   if(di%20===0) console.error(`  ${di}/${RUN_DATES.length}  ${date}`);
-  let c1:any, p1:any;
-  try { c1 = loadDay(UNDERLYING_TARGET,date,'1m') as any; p1 = loadDay(UNDERLYING_TARGET,prevDate(date),'1m') as any; }
+  let c1:any;
+  try { c1 = loadDay(UNDERLYING_TARGET,date,'1m') as any; }
   catch { continue; }
   if(!c1?.spxBars?.length) continue;
 
@@ -619,7 +630,20 @@ for(let di=0; di<RUN_DATES.length; di++){
   // Higher-TF closes strictly before this date (no look-ahead).
   const dailyCloses = dailyClosesBefore(date);
   const weeklyCloses = weeklyClosesBefore(date);
-  const prior1m: any[] = (p1?.spxBars ?? []);
+  // Intraday (1h/2h/4h) warmup: load the last WARMUP_SESSIONS trading days of 1m
+  // underlying bars BEFORE the entry day so the hourly HMA/DEMA can warm up
+  // (1h slow=20 ≈ 3 sessions of hourly bars). 8 sessions covers slow=20 on 1h
+  // with margin. Loaded once per entry date.
+  const intradayWarmup1m: any[] = [];
+  {
+    let d = prevDate(date);
+    const warmDays: string[] = [];
+    for (let i = 0; i < WARMUP_SESSIONS; i++) { warmDays.unshift(d); d = prevDate(d); }
+    for (const wd of warmDays) {
+      try { const dd = loadDay(UNDERLYING_TARGET, wd, '1m') as any; if (dd?.spxBars?.length) intradayWarmup1m.push(...dd.spxBars); }
+      catch { /* missing prior session — skip */ }
+    }
+  }
 
   for(const sig of SIGNALS){
     if (EMIT_ONLY && !EMIT_SIGNALS.has(sig.label)) continue;
@@ -633,8 +657,11 @@ for(let di=0; di<RUN_DATES.length; di++){
       if (sig.tf === 'daily')       closes = dailyCloses;
       else if (sig.tf === 'weekly') closes = weeklyCloses;
       else {
-        const mins = sig.tf === '2h' ? 120 : 240;
-        const intraday1m = [...prior1m, ...s1.filter(b => b.ts <= entryTs)];
+        const mins = sig.tf === '1h' ? 60 : sig.tf === '2h' ? 120 : 240;
+        // Intraday HMA/DEMA on 1h/2h/4h needs multiple prior SESSIONS to warm up
+        // (1h slow=20 ≈ 3 trading days of hourly bars). intradayWarmup1m holds the
+        // last WARMUP_SESSIONS days of 1m underlying + the current day up to entry.
+        const intraday1m = [...intradayWarmup1m, ...s1.filter(b => b.ts <= entryTs)];
         closes = aggregateIntraday(intraday1m, mins, sess).map(b => b.close);
       }
       if (closes.length < sig.slow + 2) continue; // not enough history to warm up
