@@ -596,6 +596,21 @@ console.error(`[${TARGET.symbol} DTE${TARGET.dte}] Dates: ${ALL_DATES.length}${p
 const UNDERLYING_TARGET = { ...TARGET, dte: 0, profileId: `${TARGET.symbol.toLowerCase()}-0dte` };
 const OPTION_PREFIX = TARGET.optionPrefix; // e.g. 'NDXP', 'SPXW'
 
+// Memoized underlying-day loader. Each entry date needs WARMUP_SESSIONS prior
+// days for intraday warmup, and consecutive entry dates share most of those
+// sessions — without caching, the same parquet is read ~8x via the DuckDB CLI
+// (the dominant cost: 33min/profile). Cache the 1m bars per date so each
+// session's parquet is read at most ONCE per profile. null = no data that day.
+const underlyingDayCache = new Map<string, any[] | null>();
+function underlyingBars(d: string): any[] | null {
+  if (underlyingDayCache.has(d)) return underlyingDayCache.get(d)!;
+  let bars: any[] | null = null;
+  try { const dd = loadDay(UNDERLYING_TARGET, d, '1m') as any; bars = dd?.spxBars?.length ? dd.spxBars : null; }
+  catch { bars = null; }
+  underlyingDayCache.set(d, bars);
+  return bars;
+}
+
 (async () => {
 for(let di=0; di<RUN_DATES.length; di++){
   const date = RUN_DATES[di];
@@ -604,6 +619,7 @@ for(let di=0; di<RUN_DATES.length; di++){
   try { c1 = loadDay(UNDERLYING_TARGET,date,'1m') as any; }
   catch { continue; }
   if(!c1?.spxBars?.length) continue;
+  underlyingDayCache.set(date, c1.spxBars); // seed cache so warmup reuses it
 
   // Replace the 0DTE chain with the TARGET-expiry put chain from the disk cache.
   const expiryDate = expiryForDate(date, TARGET.dte);
@@ -640,8 +656,8 @@ for(let di=0; di<RUN_DATES.length; di++){
     const warmDays: string[] = [];
     for (let i = 0; i < WARMUP_SESSIONS; i++) { warmDays.unshift(d); d = prevDate(d); }
     for (const wd of warmDays) {
-      try { const dd = loadDay(UNDERLYING_TARGET, wd, '1m') as any; if (dd?.spxBars?.length) intradayWarmup1m.push(...dd.spxBars); }
-      catch { /* missing prior session — skip */ }
+      const wb = underlyingBars(wd);   // memoized — each session's parquet read once per profile
+      if (wb) intradayWarmup1m.push(...wb);
     }
   }
 
