@@ -3,23 +3,13 @@ import { initDb, closeDb } from '../src/storage/db';
 import { upsertBar, getBars } from '../src/storage/queries';
 import { buildBars } from '../src/pipeline/bar-builder';
 import { computeIndicators } from '../src/pipeline/indicator-engine';
-import { startHttpServer } from '../src/server/http';
-import { healthTracker } from '../src/utils/health';
-import axios from 'axios';
 import type { OHLCVRaw } from '../src/types';
-
-let server: any;
-const PORT = 3698;
 
 beforeAll(() => {
   initDb(':memory:');
-  healthTracker.reset();
-  const { httpServer } = startHttpServer(PORT);
-  server = httpServer;
 });
 
 afterAll(() => {
-  server?.close();
   closeDb();
 });
 
@@ -61,26 +51,5 @@ describe('smoke: bar pipeline produces indicator-enriched bars', () => {
     const stored = getBars('SPX_SMOKE', '1m', 100);
     expect(stored.length).toBe(30);
     expect(stored[stored.length - 1].indicators).toHaveProperty('hma5');
-  });
-});
-
-describe('smoke: REST server starts and responds to /health', () => {
-  it('responds to GET /health with n/a status when no providers registered', async () => {
-    const { data, status } = await axios.get(`http://localhost:${PORT}/health`);
-    expect(status).toBe(200);
-    // No providers registered in smoke test → 'n/a'
-    expect(data.status).toBe('n/a');
-    expect(typeof data.uptime).toBe('number');
-    expect(typeof data.dbSizeMb).toBe('number');
-  });
-
-  it('responds to GET /spx/bars with an array', async () => {
-    const { data } = await axios.get(`http://localhost:${PORT}/spx/bars?tf=1m&n=5`);
-    expect(Array.isArray(data)).toBe(true);
-  });
-
-  it('responds to GET /contracts/active with an array', async () => {
-    const { data } = await axios.get(`http://localhost:${PORT}/contracts/active`);
-    expect(Array.isArray(data)).toBe(true);
   });
 });

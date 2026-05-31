@@ -7,24 +7,14 @@
     "doc": "docs"
   },
   "scripts": {
-    "dev": "tsx src/index.ts",
-    "agent": "tsx event_handler_mvp.ts",
-    "agent:live": "AGENT_PAPER=false tsx event_handler_mvp.ts",
-    "handler": "tsx event_handler_mvp.ts",
-    "handler:live": "AGENT_PAPER=false tsx event_handler_mvp.ts",
-    "agent:legacy": "tsx spx_agent.ts",
-    "agent:legacy:live": "AGENT_PAPER=false tsx spx_agent.ts",
     "build": "tsc",
-    "start": "node dist/index.js",
     "test": "vitest run",
     "test:watch": "vitest",
-    "monitor": "tsx scripts/monitor/live-monitor.ts",
     "replay": "tsx src/replay/cli.ts run",
     "replay:22day": "bash scripts/backtest/run-22day-replay-parallel.sh",
     "backtest": "tsx src/replay/cli.ts backtest --no-scanners --no-judge",
     "viewer": "tsx src/server/replay-server.ts",
-    "schwaber": "AGENT_PAPER=true tsx schwaber.ts",
-    "schwaber:live": "AGENT_PAPER=false tsx schwaber.ts",
+    "start": "tsx src/server/replay-server.ts",
     "eod": "bash scripts/ops/eod-pipeline.sh --now"
   },
   "keywords": [],
@@ -33,6 +23,7 @@
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.79",
     "@anthropic-ai/sdk": "^0.80.0",
+    "@aws-sdk/client-s3": "^3.1054.0",
     "@duckdb/node-api": "^1.5.2-r.1",
     "@sinclair/typebox": "^0.34.0",
     "axios": "^1.13.6",

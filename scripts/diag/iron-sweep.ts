@@ -27,6 +27,7 @@ dotenv.config({ quiet: true } as any);
 import { readBarCacheFile } from '../../src/replay/bar-cache-file';
 import { resolveSymbolTarget, listDatesFor, loadDay, outPath, instrumentClass } from './sweep-symbol';
 import { shardDates, dumpResults, loadShardsInto, mergeStateFile, knownDates } from './sweep-shard';
+import { CAP_POLICIES, capDayNet, capSummary, type CapEvent } from './side-cap';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -90,15 +91,28 @@ const FILL_MODE = (process.env.SWEEP_FILL_MODE ?? 'hard') as 'soft' | 'hard';
 // a TP/SL could fire off a STALE close that wasn't tradeable that minute — a
 // "false mid" that books a phantom fill and fakes short hold times. The fix
 // that survived study (docs/FILL-VOLUME-STUDY.md): honor a TP/SL ONLY at a bar
-// where the SHORT leg(s) actually printed that minute. You realize the exit by
-// transacting the shorts; the long wings are protection that expires worthless,
-// so their illiquidity must NOT block or fake a fill. The diagnostics also
-// showed it's the SHORT (ATM) legs that go stale (~85-94% fresh) while wings are
-// fresh ~98-99%, so requiring fresh wings (all-legs) or combined-volume gates
-// either over-penalize or filter nothing — shorts-fresh is the right target.
+// where AT LEAST ONE short leg printed that minute. You realize the exit by
+// transacting the shorts as a COMBO — one liquid short is enough to make the
+// buyback fillable off the combo NBBO, so requiring BOTH center shorts to print
+// the same minute over-haircuts (the wings are protection that expires; their
+// illiquidity is irrelevant). Diagnostics: short (ATM) legs go stale ~85-94%,
+// wings ~98-99% fresh — so all-legs / combined-volume gates over-penalize or
+// filter nothing; ≥1-short-fresh is the realistic target.
 //   SWEEP_EXIT_GATE = 'shorts-fresh' (default) | 'none' (legacy optimistic, no gate).
 const EXIT_GATE = (process.env.SWEEP_EXIT_GATE ?? 'shorts-fresh') as 'shorts-fresh' | 'none';
 const GATE_SHORTS = EXIT_GATE === 'shorts-fresh';
+
+// ── Entry liquidity gate (shorts-fresh AT ENTRY) ────────────────────────────
+// The exit gate above protects TP/SL fills, but the ENTRY credit is still built
+// from optPx() last-prints, which carry a stale close forward until the leg's
+// next trade. On thin chains (e.g. NDX 0DTE: ATM legs are >2min stale ~40% of
+// minutes) the SHORT legs can be minutes stale at entry → a fabricated credit
+// you could never actually fill, which is the dominant source of phantom edge.
+// SWEEP_ENTRY_STALE_SEC=N rejects entries where any SHORT leg's mark is older
+// than N seconds at entryTs-1 (wings are protection — their staleness is fine).
+//   Default 0 = DISABLED — reproduces all historical numbers exactly.
+//   Set e.g. 120 for an honest run.
+const ENTRY_STALE_SEC = process.env.SWEEP_ENTRY_STALE_SEC ? parseInt(process.env.SWEEP_ENTRY_STALE_SEC) : 0;
 
 // ── Trend gate (optional) ─────────────────────────────────────────────────
 // SWEEP_TREND_GATE_MIN = N → measure 30-min SPX drift. If drift > +threshold
@@ -343,9 +357,14 @@ function findStrike(c1:any, type:'C'|'P', targetK:number): string|null {
   return best;
 }
 function optPx(bars:any[],ts:number):number|null{for(let i=bars.length-1;i>=0;i--)if(bars[i].ts<=ts)return bars[i].close;return null;}
+// Age (sec) of the last printed bar at-or-before ts (Infinity if none). The bar
+// cache holds only real prints (no synthetic fill), so age = ts − lastBar.ts.
+function markAge(bars:any[],ts:number):number{for(let i=bars.length-1;i>=0;i--)if(bars[i].ts<=ts)return ts-bars[i].ts;return Infinity;}
 
-interface Leg { bars:any[]; sign:number; strike:number; symbol:string; }
-interface TrajPoint { ts:number; V:number; shortsFresh:boolean; }
+interface Leg { bars:any[]; sign:number; strike:number; symbol:string; isPut?: boolean; }
+// perLegV: current mark of each leg in the same order as the legs array passed to buildTrajectory.
+// Used by applyExit's TP guard to check whether the dangerous short has expanded.
+interface TrajPoint { ts:number; V:number; shortsFresh:boolean; perLegV: number[]; }
 // Compute V trajectory for a 4-leg structure. V = Σ sign_i × close_i(t).
 // Each point also flags whether every SHORT leg (sign +1) actually printed AT
 // that exact minute (vs a carried-forward stale close), so applyExit can reject
@@ -370,18 +389,45 @@ function buildTrajectory(legs:Leg[], entryTs:number, endTs:number): TrajPoint[] 
     if(last.every(v=>v!=null)){
       let V = 0;
       for(let i=0;i<legs.length;i++) V += legs[i].sign * (last[i] as number);
-      // shorts-fresh: every SHORT leg (sign +1) printed AT this exact minute.
-      let shortsFresh = true;
-      for(let i=0;i<legs.length;i++) if(legs[i].sign === +1 && lastTs[i] !== t){ shortsFresh = false; break; }
-      traj.push({ts:t, V, shortsFresh});
+      // shorts-fresh: AT LEAST ONE short leg (sign +1) printed AT this minute.
+      // One liquid short → the combo buyback is fillable; requiring both was
+      // too strict (over-haircut). Wings (sign -1) are irrelevant — they expire.
+      let shortsFresh = false;
+      for(let i=0;i<legs.length;i++) if(legs[i].sign === +1 && lastTs[i] === t){ shortsFresh = true; break; }
+      traj.push({ts:t, V, shortsFresh, perLegV: last.map(v => v as number)});
     }
   }
   return traj;
 }
 
+// ── Realistic TP guard ───────────────────────────────────────────────────────
+// For 4-leg structures (IB, IC, BWB) V is the NET of all legs, so the "safe"
+// side decaying (calls going worthless while SPX drops) can push V below the TP
+// threshold even though the dangerous side (short put) is expanding toward max
+// loss. This is a false TP: the directional bet failed, but cross-leg theta
+// decay manufactured a paper profit. Real fills would require buying back the
+// expanding short put at a loss, wiping out the call-side gain.
+//
+// Guard: at the moment V crosses the TP trigger, the SHORT leg on the DANGEROUS
+// side (the one SPX moved toward) must not have expanded beyond its entry mark.
+// If it has, the TP is a cross-leg artefact — skip it and ride to settle/SL.
+//
+// "Dangerous side" for a given signal direction:
+//   bull signal → body displaced above spot → short PUT is the dangerous leg
+//                 (SPX dropping pushes put ITM). legs[0] = short put (isPut=true, sign=+1).
+//   bear signal → body displaced below spot → short CALL is the dangerous leg.
+//                 legs[2] = short call (isPut=false, sign=+1).
+// For single-sided structures (credit put spread: only short put; credit call spread:
+// only short call) the guard is naturally satisfied — there's only one short leg and
+// it IS the dangerous one.
+//
+// SWEEP_TP_GUARD=0 disables (reproduces old behavior). Default=1 (enabled).
+const TP_GUARD = (process.env.SWEEP_TP_GUARD ?? '1') !== '0';
+
 function applyExit(traj:TrajPoint[], endTs:number, legs:Leg[],
                    credit:number, tpFrac:number, slMult:number, flipTs:number,
-                   spxAtSettle:number|null, wingWidth:number = 0, slRiskFrac:number = 0)
+                   spxAtSettle:number|null, wingWidth:number = 0, slRiskFrac:number = 0,
+                   entryPerLegV?: number[], signalDir?: 'bull'|'bear')
                   : {exitTs:number, exitV:number, reason:string} {
   const effEnd = Math.min(endTs, flipTs);
   const tpV = tpFrac>0 ? (1 - tpFrac) * credit : -Infinity;
@@ -397,6 +443,18 @@ function applyExit(traj:TrajPoint[], endTs:number, legs:Leg[],
   // level (TP gets exact limit, SL pays through ask on market exit).
   const tpTrigger = FILL_MODE === 'hard' ? tpV - CLOSE_PENALTY_V : tpV;
   const slTrigger = FILL_MODE === 'hard' ? slV + CLOSE_PENALTY_V : slV;
+
+  // Identify the dangerous short leg index.
+  // legs[0]=short put (sign+1,isPut=true), legs[2]=short call (sign+1,isPut=false).
+  // For a bull signal the dangerous leg is the short put (index 0).
+  // For a bear signal the dangerous leg is the short call (index 2).
+  // If entryPerLegV not provided, guard is skipped (single-leg or credit spread).
+  const dangerousIdx = (TP_GUARD && entryPerLegV && signalDir)
+    ? (signalDir === 'bull' ? legs.findIndex(l => l.sign === +1 && l.isPut === true)
+                            : legs.findIndex(l => l.sign === +1 && l.isPut === false))
+    : -1;
+  const dangerousEntryMark = dangerousIdx >= 0 ? entryPerLegV![dangerousIdx] : null;
+
   // Liquidity gate: honor a TP/SL only at a bar where the SHORT legs actually
   // printed (p.shortsFresh). Rejects exits priced off a stale carried-forward
   // SHORT close (the "false mid" that faked short hold times). Wings expire —
@@ -405,6 +463,12 @@ function applyExit(traj:TrajPoint[], endTs:number, legs:Leg[],
     if(p.ts > effEnd) break;
     const fillable = !GATE_SHORTS || p.shortsFresh;
     if(tpFrac>0 && p.V <= tpTrigger && fillable) {
+      // TP guard: reject if the dangerous short has expanded beyond its entry mark.
+      // A tolerance of +$0.20 allows for normal bid-ask noise without over-filtering.
+      if(dangerousIdx >= 0 && dangerousEntryMark != null) {
+        const dangerousNow = p.perLegV[dangerousIdx];
+        if(dangerousNow > dangerousEntryMark + 0.20) continue; // false TP — dangerous leg expanding
+      }
       const exitV = FILL_MODE === 'hard' ? tpV : p.V + CLOSE_PENALTY_V;
       return {exitTs:p.ts, exitV:Math.max(0,exitV), reason:'TP'};
     }
@@ -470,6 +534,7 @@ interface Stat {
   evictions: number;
   // Trade-duration tracking (seconds). Sum across all trades; divide by n for avg.
   durationSumSec: number;
+  capNets: number[];   // cumulative net under each CAP_POLICIES entry (per-side bull/bear cap scan)
 }
 const results = new Map<string, Stat>();
 function recK(sig:string,struct:string,ex:string){return `${sig}|${struct}|${ex}`;}
@@ -486,7 +551,7 @@ function etHour(ts: number): number {
 
 function rec(sig:string,struct:string,ex:string, pnl_gross:number, date:string, credit:number, width:number, entryTs:number, maxRisk:number, durationSec:number = 0){
   const k=recK(sig,struct,ex);
-  let v=results.get(k); if(!v){v={pnl:0,pnl_gross:0,n:0,wins:0,daily:new Map(),creditSum:0,widthSum:0,perHour:new Map(),peakConcurrent:0,evictions:0,durationSumSec:0}; results.set(k,v);}
+  let v=results.get(k); if(!v){v={pnl:0,pnl_gross:0,n:0,wins:0,daily:new Map(),creditSum:0,widthSum:0,perHour:new Map(),peakConcurrent:0,evictions:0,durationSumSec:0,capNets:new Array(CAP_POLICIES.length).fill(0)}; results.set(k,v);}
   const pnl_net = pnl_gross - SLIPPAGE_PER_STRUCTURE;
   v.pnl += pnl_net; v.pnl_gross += pnl_gross; v.n++; if(pnl_net>0)v.wins++; v.daily.set(date,(v.daily.get(date)??0)+pnl_net);
   v.creditSum += credit; v.widthSum += width;
@@ -530,6 +595,12 @@ const EMIT_KEYS = (() => {
   if (!raw) return null;
   return new Set(raw.split(/[\n,]/).map(s=>s.trim()).filter(Boolean));
 })();
+// EMIT-ONLY: narrow the matrix to just the emit keys' signal/structure/exit and
+// skip the dashboard writes — fast per-config trade emission without re-running
+// (or clobbering) the full sweep. Requires SWEEP_EMIT_TRADES_KEYS.
+const EMIT_ONLY = !!process.env.SWEEP_EMIT_ONLY && !!EMIT_KEYS;
+const EMIT_SIGNALS = new Set<string>(), EMIT_STRUCTS = new Set<string>(), EMIT_EXITS = new Set<string>();
+if (EMIT_KEYS) for (const k of EMIT_KEYS) { const [s, st, e] = k.split('|'); EMIT_SIGNALS.add(s); EMIT_STRUCTS.add(st); EMIT_EXITS.add(e); }
 const EMIT_DIR = process.env.SWEEP_EMIT_TRADES_DIR
   || path.join(process.cwd(), 'scripts/autoresearch/output/iron-trades');
 const EMIT_BUFFER = new Map<string, Map<string, IronDayEmit>>();
@@ -600,7 +671,7 @@ if (STATE_FILE && !process.env.SWEEP_MERGE && !process.env.SWEEP_SHARD) {
     console.error(`[incremental] no state file — bootstrap full ${SWEEP_DATES.length} dates`);
   }
 }
-console.error(`[${TARGET.symbol}] Iron sweep — dates: ${ALL_DATES.length}${process.env.SWEEP_SHARD ? ` (shard ${process.env.SWEEP_SHARD} → ${SWEEP_DATES.length})` : ''}, signals: ${SIGNALS.length}, structures: ${STRUCTURES.length}, exits: ${EXITS.length}`);
+console.error(`[${TARGET.symbol}] Iron sweep — dates: ${ALL_DATES.length}${process.env.SWEEP_SHARD ? ` (shard ${process.env.SWEEP_SHARD} → ${SWEEP_DATES.length})` : ''}, signals: ${SIGNALS.length}, structures: ${STRUCTURES.length}, exits: ${EXITS.length} | exitGate=${EXIT_GATE} entryStaleSec=${ENTRY_STALE_SEC || 'off'} fill=${FILL_MODE}`);
 
 for(let di=0; di<RUN_DATES.length; di++){
   const date = RUN_DATES[di];
@@ -621,9 +692,10 @@ for(let di=0; di<RUN_DATES.length; di++){
   // or EVICTED at the current V if rotation needs space for a new entry.
     // Per-variant per-day overlap tracking: list of (entryTs, exitTs) events.
   // Used to compute peak concurrent open positions after all trades recorded.
-  const overlapMap = new Map<string, Array<{entry:number, exit:number}>>();
+  const overlapMap = new Map<string, CapEvent[]>();
 
   for(const sig of SIGNALS){
+    if (EMIT_ONLY && !EMIT_SIGNALS.has(sig.label)) continue;
     const {entries,dirLog} = detectSignals(date, sig, c1, p1);
     // Sort entries by entryTs (should already be, but guarantee)
     entries.sort((a,b) => a.entryTs - b.entryTs);
@@ -647,6 +719,7 @@ for(let di=0; di<RUN_DATES.length; di++){
       }
 
       for(const st of STRUCTURES){
+        if (EMIT_ONLY && !EMIT_STRUCTS.has(st.label)) continue;
         const center = st.centerOffset
           ? spxEntry + (ev.dir === 'bull' ? st.centerOffset : -st.centerOffset)
           : spxEntry;
@@ -662,13 +735,16 @@ for(let di=0; di<RUN_DATES.length; di++){
         if(new Set([sym_sp, sym_lp, sym_sc, sym_lc]).size !== 4) continue;
 
         const legs:Leg[] = [
-          { symbol:sym_sp, strike:Kshort_put,  sign:+1, bars: c1.contractBars.get(sym_sp) as any[] },
-          { symbol:sym_lp, strike:Klong_put,   sign:-1, bars: c1.contractBars.get(sym_lp) as any[] },
-          { symbol:sym_sc, strike:Kshort_call, sign:+1, bars: c1.contractBars.get(sym_sc) as any[] },
-          { symbol:sym_lc, strike:Klong_call,  sign:-1, bars: c1.contractBars.get(sym_lc) as any[] },
+          { symbol:sym_sp, strike:Kshort_put,  sign:+1, isPut:true,  bars: c1.contractBars.get(sym_sp) as any[] },
+          { symbol:sym_lp, strike:Klong_put,   sign:-1, isPut:true,  bars: c1.contractBars.get(sym_lp) as any[] },
+          { symbol:sym_sc, strike:Kshort_call, sign:+1, isPut:false, bars: c1.contractBars.get(sym_sc) as any[] },
+          { symbol:sym_lc, strike:Klong_call,  sign:-1, isPut:false, bars: c1.contractBars.get(sym_lc) as any[] },
         ];
         const entries_px = legs.map(lg => optPx(lg.bars, ev.entryTs - 1));
         if(entries_px.some(p => p==null)) continue;
+        // Entry staleness gate (default off). Credit realism depends on the SHORT
+        // legs being freshly printed; reject if any short mark is too stale.
+        if(ENTRY_STALE_SEC > 0 && legs.some(lg => lg.sign === +1 && markAge(lg.bars, ev.entryTs - 1) > ENTRY_STALE_SEC)) continue;
         const credit = legs.reduce((s,lg,i) => s + lg.sign * (entries_px[i] as number), 0);
         if(credit <= 0.10) continue;
         if(credit >= st.wingWidth * 0.95) continue;
@@ -676,10 +752,11 @@ for(let di=0; di<RUN_DATES.length; di++){
         const traj = buildTrajectory(legs, ev.entryTs, settle);
         const maxRisk = (st.wingWidth - credit) * 100;
         for(const ex of EXITS){
+          if (EMIT_ONLY && !EMIT_EXITS.has(ex.label)) continue;
           // Compute natural exit and record P&L immediately (no position mgmt in sweep).
           // Concurrency tracked via overlapMap so dashboard can compute budget-scaled outcome.
           const flipUse = ex.useFlip ? flipTs : Infinity;
-          const nat = applyExit(traj, settle, legs, credit, ex.tpFrac, ex.slMult, flipUse, spxAtSettle, st.wingWidth, ex.slRiskFrac ?? 0);
+          const nat = applyExit(traj, settle, legs, credit, ex.tpFrac, ex.slMult, flipUse, spxAtSettle, st.wingWidth, ex.slRiskFrac ?? 0, entries_px as number[], ev.dir);
           const pnl_gross = (credit - nat.exitV) * 100;
           const pnl_net = pnl_gross - SLIPPAGE_PER_STRUCTURE;
           const durationSec = Math.max(0, nat.exitTs - ev.entryTs);
@@ -688,7 +765,8 @@ for(let di=0; di<RUN_DATES.length; di++){
           // Record (entry, exit) span for peak-concurrent computation at end of day.
           const k = `${sig.label}|${st.label}|${ex.label}`;
           let evs = overlapMap.get(k); if(!evs){evs=[]; overlapMap.set(k, evs);}
-          evs.push({entry: ev.entryTs, exit: nat.exitTs});
+          // For directional flies the two "sides" are bull-leaning vs bear-leaning bodies → map to call/put buckets.
+          evs.push({entry: ev.entryTs, exit: nat.exitTs, side: ev.dir === 'bull' ? 'call' : 'put', pnl: pnl_net});
 
           // Per-trade emission (no-op unless this variant key is in EMIT_KEYS).
           if (EMIT_KEYS && EMIT_KEYS.has(k)) {
@@ -749,6 +827,8 @@ for(let di=0; di<RUN_DATES.length; di++){
     let cur = 0, peak = 0;
     for(const e of events){ cur += e.delta; if(cur > peak) peak = cur; }
     if(peak > stat.peakConcurrent) stat.peakConcurrent = peak;
+    // Per-side (bull/bear) cap scan: accumulate today's capped net for each policy (drop-and-wait).
+    for(let i=0;i<CAP_POLICIES.length;i++) stat.capNets[i] += capDayNet(evs, CAP_POLICIES[i].pool, CAP_POLICIES[i].c, CAP_POLICIES[i].p);
   }
   overlapMap.clear();
 }
@@ -766,6 +846,7 @@ if (process.env.SWEEP_SHARD_OUT) {
 }
 if (process.env.SWEEP_MERGE) loadShardsInto(process.env.SWEEP_MERGE, results);
 // Serial run reaches here too; trades flushed at very end (after finalize).
+if (EMIT_ONLY) { flushTrades(); process.exit(0); }   // emit-only: skip report + dashboard writes
 
 console.log(`\n=== IRON CONDOR/BUTTERFLY SWEEP — look-ahead protected, $${SLIPPAGE_PER_STRUCTURE}/RT slippage ===`);
 const rows:any[] = [];
@@ -792,7 +873,10 @@ for(const [k,v] of results){
     ? +(v.durationSumSec / (numActiveDays * SESSION_SEC)).toFixed(2)
     : 0;
   const avgRiskCapacity = +(avgConcurrent * avgMaxRisk).toFixed(0);
+  // Shared-pool cap scan (pool + per-side bull/bear sub-cap): baseline, best sub-cap at pool 11, best overall.
+  const cap = capSummary(v.capNets, 'bull', 'bear');
   rows.push({signal,spread,exit,pnl:v.pnl,pnl_gross:v.pnl_gross,n:v.n,wr,dd:mdd,ratio,pos,
+             ...cap,
              avgCredit:+avgCredit.toFixed(3),avgMaxRisk:+avgMaxRisk.toFixed(0),
              avgPnlPerTrade:+(v.pnl/Math.max(1,v.n)).toFixed(2),
              peakConcurrent:v.peakConcurrent, evictions:v.evictions,
@@ -803,6 +887,8 @@ for(const [k,v] of results){
              // can see which assumptions produced these numbers.
              fillModel: FILL_MODE,
              fillHalfSpread: CLOSE_HALFSPREAD_PER_LEG,
+             exitGate: EXIT_GATE,
+             entryStaleSec: ENTRY_STALE_SEC,
              trendGateMin: TREND_GATE_MIN,
              trendGateThresh: TREND_GATE_THRESH});
 }
@@ -826,7 +912,9 @@ try { existing = JSON.parse(fs.readFileSync(SWEEP_JSON,'utf8')); } catch {}
 // directional-IB rows from pre-fix geometry accumulated forever. Credit-spread
 // labels are NNoffM (1ITM/ATM/5OTM…) — never IB/IC — so a bare prefix is safe.
 const isIron = (s:string) => s.startsWith('IB') || s.startsWith('IC');
-existing = existing.filter((r:any) => !isIron(r.spread));
+// Drop our own (signal-based) iron rows, but PRESERVE time-based-iron rows
+// (signal "TIME …") emitted by time-iron-study.ts — they share the IB label.
+existing = existing.filter((r:any) => !(isIron(r.spread) && !String(r.signal||'').startsWith('TIME ')));
 const merged = existing.concat(rows);
 fs.writeFileSync(SWEEP_JSON, JSON.stringify(merged));
 // Also write to the live viewer location so the dashboard picks it up
@@ -841,7 +929,8 @@ try { existingDaily = JSON.parse(fs.readFileSync(DAILY_JSON,'utf8')); } catch {}
 // Drop prior iron series keys
 for(const k of Object.keys(existingDaily.series||{})){
   const parts = k.split('|');
-  if(parts.length>=2 && (parts[1].startsWith('IB') || parts[1].startsWith('IC'))) delete existingDaily.series[k];
+  // Preserve time-based-iron series (signal "TIME …") even though spread is IB.
+  if(parts.length>=2 && (parts[1].startsWith('IB') || parts[1].startsWith('IC')) && !parts[0].startsWith('TIME ')) delete existingDaily.series[k];
 }
 const allDatesSet = new Set<string>(existingDaily.dates || []);
 for(const v of results.values()) for(const d of v.daily.keys()) allDatesSet.add(d);
@@ -875,7 +964,9 @@ console.log(`Daily series rewritten: ${dates.length} dates × ${Object.keys(seri
 // Output: /tmp/iron_hourly.json — separate file so it doesn't bloat the main viewer fetch.
 const HOURLY_JSON = outPath('/tmp/iron_hourly.json', TARGET);
 const STUDIO_HOURLY = outPath(path.join(process.cwd(), 'scripts/autoresearch/output/spread-hourly.json'), TARGET);
-const hourlyOut:any[] = [];
+// Preserve time-based-iron hourly rows (signal "TIME …") from time-iron-study.ts.
+let hourlyOut:any[] = [];
+try { const raw = JSON.parse(fs.readFileSync(HOURLY_JSON,'utf8')); hourlyOut = (Array.isArray(raw)?raw:Object.values(raw)).filter((e:any)=>String(e?.signal||'').startsWith('TIME ')); } catch {}
 for(const [k,v] of results){
   const [signal,structure,exit] = k.split('|');
   const byHour:Record<number, any> = {};
