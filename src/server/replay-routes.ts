@@ -325,6 +325,36 @@ export function createReplayRoutes(): Router {
     res.redirect('/replay/contracts/monthly/index.html');
   });
 
+  // ── GET /replay/api/monthly/manifest — fetch the manifest list ──────────
+  router.get('/api/monthly/manifest', (_req, res) => {
+    try {
+      const manifestPath = path.resolve(process.cwd(), 'data/reports/monthly/manifest.json');
+      const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
+      res.json(manifest);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('[monthly/manifest] failed:', msg);
+      res.status(500).json({ error: msg });
+    }
+  });
+
+  // ── GET /replay/api/monthly/:date — fetch a day's contract data ─────────
+  router.get('/api/monthly/:date', (req, res) => {
+    const { date } = req.params;
+    if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return res.status(400).json({ error: 'date must be YYYY-MM-DD' });
+    }
+    try {
+      const dayPath = path.resolve(process.cwd(), `data/reports/monthly/${date}.json`);
+      const dayData = JSON.parse(fs.readFileSync(dayPath, 'utf-8'));
+      res.json(dayData);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[monthly/${date}] failed:`, msg);
+      res.status(404).json({ error: msg });
+    }
+  });
+
   // ── POST /replay/api/monthly/generate — generate a day's report ──────────
   // Body: { date: "YYYY-MM-DD" }
   // Runs monthly-gen.ts --date <date>, returns { ok, date, contractCount }
