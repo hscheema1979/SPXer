@@ -11,10 +11,12 @@ import { parseArgs } from 'util';
 const args = parseArgs({
   options: {
     date: { type: 'string' },
+    instrument: { type: 'string' },
   },
 });
 
 const date = args.values.date as string;
+const instrument = (args.values.instrument as string) || 'SPX';
 if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
   console.error('Error: --date YYYY-MM-DD required');
   process.exit(1);
@@ -37,35 +39,38 @@ function duckQuery(sql: string): any[] {
   }
 }
 
-async function generateReport(targetDate: string) {
+async function generateReport(targetDate: string, inst: string) {
   const parquetRoot = path.resolve(process.cwd(), 'data/parquet/bars');
+  const dirName = inst === 'SPX' ? 'spx-0dte' : inst === 'NDX' ? 'ndx-0dte' : 'spx-0dte';
+  const contractPrefix = inst === 'SPX' ? 'SPXW' : inst === 'NDX' ? 'NDXP' : 'SPXW';
 
-  // Query SPX bars to get open price
-  const spxBarPath = path.join(parquetRoot, 'spx-0dte', `${targetDate}.parquet`);
-  if (!fs.existsSync(spxBarPath)) {
-    console.error(`No parquet data for ${targetDate}`);
+  // Query underlying bars to get open price
+  const barPath = path.join(parquetRoot, dirName, `${targetDate}.parquet`);
+  if (!fs.existsSync(barPath)) {
+    console.error(`No parquet data for ${targetDate} (${inst})`);
     process.exit(1);
   }
 
   const dayStart = Math.floor(new Date(targetDate + 'T00:00:00Z').getTime() / 1000);
   const dayEnd = dayStart + 86400;
 
-  // Get SPX bars to find market open
-  const spxBars = duckQuery(`
+  // Get underlying bars to find market open
+  const underlyingSymbol = inst;
+  const underlyingBars = duckQuery(`
     SELECT ts, open, high, low, close, volume
-    FROM read_parquet('${spxBarPath}')
-    WHERE symbol = 'SPX' AND ts >= ${dayStart} AND ts <= ${dayEnd}
+    FROM read_parquet('${barPath}')
+    WHERE symbol = '${underlyingSymbol}' AND ts >= ${dayStart} AND ts <= ${dayEnd}
     ORDER BY ts ASC
     LIMIT 1000
   `);
 
-  if (spxBars.length === 0) {
-    console.error(`No bars found for ${targetDate}`);
+  if (underlyingBars.length === 0) {
+    console.error(`No bars found for ${targetDate} (${inst})`);
     process.exit(1);
   }
 
-  const spxOpen = spxBars[0].open;
-  const atmStrike = Math.round(spxOpen / 5) * 5;
+  const underlyingOpen = underlyingBars[0].open;
+  const atmStrike = Math.round(underlyingOpen / 5) * 5;
 
   // Get ET offset (calculate as -4 or -5 depending on DST)
   // June is always EDT (UTC-4)
@@ -76,8 +81,8 @@ async function generateReport(targetDate: string) {
     SELECT DISTINCT symbol,
            CASE WHEN symbol LIKE '%C%' THEN 'call' ELSE 'put' END as type,
            CAST(substr(symbol, -8) AS INTEGER) / 1000.0 as strike
-    FROM read_parquet('${spxBarPath}')
-    WHERE symbol LIKE 'SPXW%' AND ts >= ${dayStart} AND ts <= ${dayEnd}
+    FROM read_parquet('${barPath}')
+    WHERE symbol LIKE '${contractPrefix}%' AND ts >= ${dayStart} AND ts <= ${dayEnd}
     ORDER BY strike ASC
   `);
 
@@ -86,7 +91,7 @@ async function generateReport(targetDate: string) {
   for (const contract of contracts) {
     const bars = duckQuery(`
       SELECT ts, open, high, low, close, volume
-      FROM read_parquet('${spxBarPath}')
+      FROM read_parquet('${barPath}')
       WHERE symbol = '${contract.symbol}' AND ts >= ${dayStart} AND ts <= ${dayEnd}
       ORDER BY ts ASC
     `);
@@ -105,14 +110,14 @@ async function generateReport(targetDate: string) {
 
   const report = {
     date: targetDate,
-    spxOpen,
+    open: underlyingOpen,
     atmStrike,
     etOffset: etOffsetSec,
     contracts: contractData,
   };
 
-  // Write report file
-  const reportsDir = path.resolve(process.cwd(), 'data/reports/monthly');
+  // Write report file (organize by instrument)
+  const reportsDir = path.resolve(process.cwd(), `data/reports/monthly-${inst.toLowerCase()}`);
   if (!fs.existsSync(reportsDir)) {
     fs.mkdirSync(reportsDir, { recursive: true });
   }
@@ -133,7 +138,7 @@ async function generateReport(targetDate: string) {
   // Add new entry
   manifest.push({
     date: targetDate,
-    spxOpen,
+    open: underlyingOpen,
     atmStrike,
     contractCount: contractData.length,
   });
@@ -143,10 +148,10 @@ async function generateReport(targetDate: string) {
 
   fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
 
-  console.log(`Generated report for ${targetDate}: ${contractData.length} contracts`);
+  console.log(`Generated report for ${targetDate} (${inst}): ${contractData.length} contracts`);
 }
 
-generateReport(date).catch(err => {
+generateReport(date, instrument).catch(err => {
   console.error('Error:', err.message);
   process.exit(1);
 });

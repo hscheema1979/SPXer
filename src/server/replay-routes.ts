@@ -326,9 +326,11 @@ export function createReplayRoutes(): Router {
   });
 
   // ── GET /replay/api/monthly/manifest — fetch the manifest list ──────────
-  router.get('/api/monthly/manifest', (_req, res) => {
+  router.get('/api/monthly/manifest', (req, res) => {
+    const instrument = ((req.query.instrument as string) || 'SPX').toUpperCase();
     try {
-      const manifestPath = path.resolve(process.cwd(), 'data/reports/monthly/manifest.json');
+      const dir = instrument === 'NDX' ? 'monthly-ndx' : 'monthly-spx';
+      const manifestPath = path.resolve(process.cwd(), `data/reports/${dir}/manifest.json`);
       const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
       res.json(manifest);
     } catch (err: unknown) {
@@ -341,11 +343,13 @@ export function createReplayRoutes(): Router {
   // ── GET /replay/api/monthly/:date — fetch a day's contract data ─────────
   router.get('/api/monthly/:date', (req, res) => {
     const { date } = req.params;
+    const instrument = ((req.query.instrument as string) || 'SPX').toUpperCase();
     if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
       return res.status(400).json({ error: 'date must be YYYY-MM-DD' });
     }
     try {
-      const dayPath = path.resolve(process.cwd(), `data/reports/monthly/${date}.json`);
+      const dir = instrument === 'NDX' ? 'monthly-ndx' : 'monthly-spx';
+      const dayPath = path.resolve(process.cwd(), `data/reports/${dir}/${date}.json`);
       const dayData = JSON.parse(fs.readFileSync(dayPath, 'utf-8'));
       res.json(dayData);
     } catch (err: unknown) {
