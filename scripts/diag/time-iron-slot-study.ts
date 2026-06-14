@@ -168,9 +168,26 @@ for (let di = 0; di < DATES.length; di++) {
         const b = stats.get(`${slotSec}|${offS}|${wS}`)!; b.creditSum += credit;
         if (EMIT) {
           const pnlNet = pnlGross - friction;
+          // Per-SIDE net P&L (each credit spread as its own 2-leg strategy w/ own
+          // friction + assignment close) so put/call sides can be optimized
+          // independently and recombined into an asymmetric condor (put-offset
+          // ≠ call-offset, equal wings).
+          const sideNet = (shortLeg: any, longLeg: any, sEntry: number, lEntry: number, isPut: boolean) => {
+            const sideCredit = sEntry - lEntry;
+            const intrAt = (px: number) => isPut
+              ? Math.max(0, shortLeg.strike - px) - Math.max(0, longLeg.strike - px)
+              : Math.max(0, px - shortLeg.strike) - Math.max(0, px - longLeg.strike);
+            let eV = Math.max(0, intrAt(spxAtSettle as number)), eFric = 0;
+            const itm = ITM_CLOSE && spxAtItmClose != null && (isPut ? spxAtItmClose < shortLeg.strike : spxAtItmClose > shortLeg.strike);
+            if (itm) { const sm = optPx(shortLeg.bars, itmCloseTs), lm = optPx(longLeg.bars, itmCloseTs);
+              if (sm != null && lm != null) { eV = Math.max(0, sm - lm); eFric = entryFriction(Math.abs(sm) + Math.abs(lm)); } }
+            return Math.round((sideCredit - eV) * 100 - (entryFriction(Math.abs(sEntry) + Math.abs(lEntry)) + eFric));
+          };
+          const putNet = sideNet(legs[0], legs[1], entriesPx[0] as number, entriesPx[1] as number, true);
+          const callNet = sideNet(legs[2], legs[3], entriesPx[2] as number, entriesPx[3] as number, false);
           emitRows.push([date, slotLabel(slotSec), shortOffset, `w${wingWidth}`, center.toFixed(2), legs[0].strike, legs[2].strike,
             credit.toFixed(2), grossPrem.toFixed(2), (spxAtSettle as number).toFixed(2), (spxAtSettle as number - center).toFixed(2),
-            exitV.toFixed(2), Math.round(pnlGross), friction.toFixed(2), Math.round(pnlNet), pnlNet > 0 ? 1 : 0].join(','));
+            exitV.toFixed(2), Math.round(pnlGross), friction.toFixed(2), Math.round(pnlNet), pnlNet > 0 ? 1 : 0, putNet, callNet].join(','));
         }
       }
     }
@@ -251,7 +268,7 @@ fs.writeFileSync(JSON_OUT, JSON.stringify({
 }, null, 2));
 console.log(`\nWrote ${JSON_OUT} (${rows.length} slot×offset×width rows).`);
 if (EMIT) {
-  const hdr = 'date,slot,short_offset,width,entry_spx,short_put_strike,short_call_strike,credit,gross_premium,settle_spx,dist_from_center,exit_value,pnl_gross,friction,pnl_net,win';
+  const hdr = 'date,slot,short_offset,width,entry_spx,short_put_strike,short_call_strike,credit,gross_premium,settle_spx,dist_from_center,exit_value,pnl_gross,friction,pnl_net,win,put_net,call_net';
   fs.writeFileSync(CSV_OUT, hdr + '\n' + emitRows.join('\n'));
   console.log(`Wrote ${CSV_OUT} (${emitRows.length} per-trade rows).`);
 }
