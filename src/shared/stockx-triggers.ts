@@ -149,8 +149,6 @@ export function computeMA(prices: number[], period: number, type: MaType = 'hma'
 }
 
 // ── Stock framework: pluggable entry/exit triggers ──
-
-// ── Stock framework: pluggable entry/exit triggers ──
 //
 // Pure functions shared by the LIVE engine (event-handler.ts monitor +
 // processConfigTickFn) and the SPXer BACKTEST (scripts/diag/stockx-backtest.ts)
@@ -170,7 +168,9 @@ export type StockExitTrigger = 'tp' | 'sl' | 'ma_cross_down' | 'ma_cross_up';
  * entry×mult convention so the backtest's intrabar-extreme checks use the exact
  * same levels the live monitor tests quotes against.
  *   long  (side= 1): tpLevel = entry × tpMult (tpMult>1, e.g. 1.15); slLevel = entry × slMult (slMult∈(0,1)).
- *   short (side=-1): tpLevel = entry × slMult-side... (mirrored; reserved for future short support).
+ *   short (side=-1): tpLevel = entry × (2−tpMult), slLevel = entry × (2−slMult)
+ *   (profit when price falls → TP below entry, SL above; mirrored from long).
+ *   Short support is LIVE (direction:'short'), not future work.
  */
 export function tpSlLevels(entry: number, side: 1 | -1, tpMult: number, slMult: number): { tpLevel: number; slLevel: number } {
   if (side === 1) return { tpLevel: entry * tpMult, slLevel: entry * slMult };

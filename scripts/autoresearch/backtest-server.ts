@@ -158,22 +158,53 @@ app.get("/api/long/trade-day",(req,res)=>{
 // GET    /api/stockx/result?job=<id> → { cumPnlPct, pnlDollars, profitFactor, winRate,
 //   trades, maxDrawdownPct, equityCurve:[{date,equity}], summary, tradesList, buyHold }
 //
-// Body field names match the studio (Phase C) contract: takeProfitMultiplier /
-// stopLossMultiplier / entryMode / sizing. Translated here to the engine CLI.
+// Accepted body fields (the studio StockX panel contract):
+//   symbol, direction ('long'|'short', default 'long'),
+//   hmaFast/hmaSlow (aliases: fast/slow), takeProfitMultiplier (alias: tp),
+//   stopLossMultiplier (alias: sl), entryTriggers[] (alias: entry[]), exitTriggers[]
+//   (alias: exit[]), entryMode ('all'|'any' → engine --entry-match),
+//   sizing {type:'dollars'|'shares'|'risk', value} (alias: dollars N → dollars sizing),
+//   maxRiskPerTrade, slippage, commission, startDate, endDate,
+//   timeframe ('5m' default), maType ('hma' default), session ('rth' default).
+// Unknown trigger values are rejected 400 — never silently swapped for defaults
+// (the 2026-08-08 review caught `direction` being dropped exactly this way: a
+// short request ran as a LONG with profitable-looking but wrong results).
+const STOCKX_ENTRY_TRIGGERS = new Set(["price_cross_fast_up", "price_cross_fast_down", "ma_cross_up", "ma_cross_down"]);
+const STOCKX_EXIT_TRIGGERS = new Set(["tp", "sl", "ma_cross_up", "ma_cross_down"]);
 const stockxJobs = new Map<string, { status: string; log: string; jsonOut: string | null; startedAt: number; endedAt?: number }>();
+// Job-map hygiene: evict finished jobs 30 min after completion (the map used
+// to grow forever). Result FILES under output/stockx stay on disk.
+const STOCKX_JOB_TTL_MS = 30 * 60 * 1000;
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, j] of stockxJobs) {
+    if (j.endedAt && now - j.endedAt > STOCKX_JOB_TTL_MS) stockxJobs.delete(id);
+  }
+}, 5 * 60 * 1000).unref();
 app.post("/api/stockx/run", (req, res) => {
   const b = req.body || {};
   const symbol = String(b.symbol || "ASTX").toUpperCase().replace(/[^A-Z.]/g, "");
-  const fast = parseInt(b.hmaFast, 10) || 5;
-  const slow = parseInt(b.hmaSlow, 10) || 100;
-  const tp = parseFloat(b.takeProfitMultiplier ?? b.tpMult ?? 1.15);
-  const sl = parseFloat(b.stopLossMultiplier ?? b.slMult ?? 0.93);
-  const entryTriggers = Array.isArray(b.entryTriggers) && b.entryTriggers.length
-    ? b.entryTriggers : ["price_cross_fast_up"];
-  const exitTriggers = Array.isArray(b.exitTriggers) && b.exitTriggers.length
-    ? b.exitTriggers : ["tp", "sl", "ma_cross_down"];
+  const fast = parseInt(b.hmaFast ?? b.fast, 10) || 5;
+  const slow = parseInt(b.hmaSlow ?? b.slow, 10) || 100;
+  const tp = parseFloat(b.takeProfitMultiplier ?? b.tpMult ?? b.tp ?? 1.15);
+  const sl = parseFloat(b.stopLossMultiplier ?? b.slMult ?? b.sl ?? 0.93);
+  const direction = b.direction === "short" ? "short" : "long";
+  // Direction-aware trigger defaults mirror the engine CLI (short enters on the
+  // down-cross, exits on the up-cross).
+  const entryTriggers = Array.isArray(b.entryTriggers ?? b.entry) && (b.entryTriggers ?? b.entry).length
+    ? (b.entryTriggers ?? b.entry) : [direction === "short" ? "price_cross_fast_down" : "price_cross_fast_up"];
+  const exitTriggers = Array.isArray(b.exitTriggers ?? b.exit) && (b.exitTriggers ?? b.exit).length
+    ? (b.exitTriggers ?? b.exit) : (direction === "short" ? ["tp", "sl", "ma_cross_up"] : ["tp", "sl", "ma_cross_down"]);
+  const badEntry = entryTriggers.filter((t: string) => !STOCKX_ENTRY_TRIGGERS.has(t));
+  const badExit = exitTriggers.filter((t: string) => !STOCKX_EXIT_TRIGGERS.has(t));
+  if (badEntry.length || badExit.length) {
+    return res.status(400).json({ error: "unknown trigger(s)", entry: badEntry, exit: badExit,
+      allowedEntry: [...STOCKX_ENTRY_TRIGGERS], allowedExit: [...STOCKX_EXIT_TRIGGERS] });
+  }
   const entryMatch = b.entryMode === "any" ? "any" : "all";
-  const sizing = b.sizing && typeof b.sizing === "object" ? b.sizing : { type: "dollars", value: 1000 };
+  const sizing = b.sizing && typeof b.sizing === "object"
+    ? b.sizing
+    : (b.dollars != null ? { type: "dollars", value: Number(b.dollars) } : { type: "dollars", value: 1000 });
   if (!symbol) return res.status(400).json({ error: "symbol required" });
 
   const jobId = crypto.randomBytes(8).toString("hex");
@@ -188,6 +219,7 @@ app.post("/api/stockx/run", (req, res) => {
     "--entry", entryTriggers.join(","),
     "--exit", exitTriggers.join(","),
     "--entry-match", entryMatch,
+    "--direction", direction,
     "--timeframe", String(b.timeframe || "5m"),
     "--ma-type", String(b.maType || "hma"),
     "--session", String(b.session || "rth"),

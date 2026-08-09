@@ -19,7 +19,8 @@
  *      is respected (a strategy may disable 'sl', etc.).
  *   4. SHARE sizing (P&L ×1, no option multiplier): dollars / shares / risk,
  *      integer shares via Math.floor (matches live sizeStockPosition).
- *   5. Optional slippage (cents/share, applied to each side) + commission
+ *   5. Optional slippage (cents/share, ADVERSE on each side: long pays more,
+   *      short receives less) + commission
  *      ($ per order side).
  *
  * CLI:
@@ -248,7 +249,10 @@ export function runBacktest(p: StockxParams): StockxResult {
         triggers: entryTriggers, match: p.entryMatch ?? 'all', i,
       });
       if (fired && i + 1 < N) {
-        const fill = tfBars[N0 + i + 1].open + slip;    // NEXT BAR OPEN (no look-ahead)
+        // NEXT BAR OPEN (no look-ahead). Slippage must be ADVERSE for the side
+        // taken: a long BUYS higher (+slip); a short SELLS lower (−slip).
+        // Direction-blind +slip made every short fill better (M4).
+        const fill = tfBars[N0 + i + 1].open + slip * side;
         const q = sizeQty(fill);
         if (q > 0) { inPos = true; entryIdx = i + 1; entryPx = fill; qty = q; }
       }
@@ -295,7 +299,9 @@ export function runBacktest(p: StockxParams): StockxResult {
     }
 
     if (exitPx != null && reason) {
-      const fill = exitPx - slip;
+      // Adverse slippage on the flatten too: a long SELLS lower (−slip); a
+      // short COVERS higher (+slip).
+      const fill = exitPx - slip * side;
       const delta = signedDelta(fill, entryPx);
       const pnl = +(delta * qty - 2 * comm).toFixed(2);
       trades.push({
@@ -311,7 +317,7 @@ export function runBacktest(p: StockxParams): StockxResult {
   // Mark any open position at the last bar close.
   if (inPos) {
     const last = tfBars[tfBars.length - 1];
-    const fill = last.close - slip;
+    const fill = last.close - slip * side;  // same direction-aware slippage as exits
     const delta = signedDelta(fill, entryPx);
     const pnl = +(delta * qty - 2 * comm).toFixed(2);
     trades.push({
