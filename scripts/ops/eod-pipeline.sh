@@ -73,6 +73,11 @@ log "[PHASE 2] sweep aggregation start (independent of backfill)"
 # ~Jul 21). Runs after the close, so the bigger footprint doesn't contend with
 # live services. Merge heap defaults to 2x worker inside sweep-parallel.
 export SWEEP_HEAP_MB=3072
+# Per-worker wall-clock (FR-001): single-day incremental iron shards peak at
+# ~30 min, but a catch-up run replaying several missed days (e.g. NDX after
+# the 2026-08-19 leak, ~11 days stale) legitimately needs more — 90 min keeps
+# the bound real without false kills on multi-day recovery runs.
+export SWEEP_WORKER_TIMEOUT_S=5400
 # Outer wall-clock bound (FR-001): legitimate max observed is ≈70 min/symbol
 # (credit 7m + iron 29m + bwb 23m + post 4m + slack); 2h is a backstop for a
 # hung sweep-parallel WRAPPER (inner per-worker/merge timeouts live in
