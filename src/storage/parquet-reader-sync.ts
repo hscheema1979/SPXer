@@ -43,6 +43,8 @@ interface BarCache {
   contractBars: Map<string, Bar[]>;
   contractStrikes: Map<string, number>;
   timestamps: number[];
+  /** Bar duration in seconds (stamped by the loader so accessors can gate on bar closure). */
+  tfSeconds?: number;
 }
 
 function parquetPath(profileId: string, date: string): string {

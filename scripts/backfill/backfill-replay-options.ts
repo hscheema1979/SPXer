@@ -404,6 +404,7 @@ async function main() {
   const profileFlag = flags.find((f) => f.startsWith('--profile='))?.slice('--profile='.length);
 
   const force = flags.includes('--force');
+  const bandFlag = flags.find((f) => f.startsWith('--band='))?.slice('--band='.length);
 
   if (positional.length < 1) {
     console.error(`
@@ -420,6 +421,11 @@ must exist for each target date — it carries the underlying series + band.
   }
 
   const target = resolveTarget(profileFlag);
+  if (bandFlag) {
+    const b = Number(bandFlag);
+    if (!Number.isFinite(b) || b <= 0) throw new Error(`--band must be a positive number, got '${bandFlag}'`);
+    target.bandHalfWidthDollars = b;  // widen the strike band (centered on the day's close)
+  }
 
   const startDate = positional[0];
   const endDate = positional[1] || startDate;
