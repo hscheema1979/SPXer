@@ -42,7 +42,7 @@ for PID in $(pgrep -f "$PATTERN" | sort -un); do
   CMD=$(tr '\0' ' ' < "/proc/$PID/cmdline" 2>/dev/null)
   [ -n "$CMD" ] || continue                                   # zombie/ kernel thread
   case "$CMD" in                                              # mere holders, never kill
-    *vi\ *|*vim\ *|*nano\ *|*less\ *|*more\ *|*tail\ *|*head\ *|*grep\ *|*claude\ *|*sweep-reaper*) continue ;;
+    *vi\ *|*vim\ *|*nano\ *|*less\ *|*more\ *|*tail\ *|*head\ *|*grep\ *|*claude\ *|*sweep-reaper*|*shell-snapshots*) continue ;;
   esac
   ET=$(ps -o etimes= -p "$PID" 2>/dev/null | tr -d ' ')
   { [ -n "$ET" ] && [ "$ET" -ge "$MAX_AGE_S" ]; } || continue
