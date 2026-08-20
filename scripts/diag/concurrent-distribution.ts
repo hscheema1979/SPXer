@@ -557,3 +557,10 @@ if (STATE_FILE && !SHARD_OUT) {
   fs.writeFileSync(STATE_FILE, _serializeStats());
   console.log(`[incremental] state saved → ${STATE_FILE}`);
 }
+
+// FR-001: THIS script's merge is the one that hung the nightly pipeline from
+// 2026-07-31 onward — state was written (files fresh on disk) but the process
+// never exited, so sweep-parallel awaited forever and each weekday's cron fire
+// stacked another orphaned tree. All writes above are synchronous; exit
+// explicitly. Shard workers already process.exit(0)'d above.
+process.exit(0);

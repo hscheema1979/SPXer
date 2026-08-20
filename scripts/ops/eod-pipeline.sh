@@ -36,6 +36,21 @@ if [ "$FORCE" != "1" ]; then
   fi
 fi
 TODAY=$(TZ=America/New_York date +%F)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ONE PIPELINE AT A TIME (FR-001). Before this lock, overlapping generations
+# (cron + manual --now + other agent sessions) stacked hung sweep trees until
+# 37 leaked processes OOM-killed unrelated services. The lock is held by fd 9
+# for the script's lifetime and auto-releases on ANY exit, including crashes.
+# ─────────────────────────────────────────────────────────────────────────────
+LOCK="$STATE_DIR/eod.lock"
+exec 9>"$LOCK"
+if ! flock -n 9; then
+  log "skip — previous run still active (holder pid $(cat "$LOCK" 2>/dev/null || echo '?')); not overlapping"
+  exit 0
+fi
+echo $$ > "$LOCK"
+
 log "=== EOD pipeline start (ET $(TZ=America/New_York date +%H:%M) | today=$TODAY | bootstrap=$BOOTSTRAP) ==="
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -58,18 +73,35 @@ log "[PHASE 2] sweep aggregation start (independent of backfill)"
 # ~Jul 21). Runs after the close, so the bigger footprint doesn't contend with
 # live services. Merge heap defaults to 2x worker inside sweep-parallel.
 export SWEEP_HEAP_MB=3072
+# Outer wall-clock bound (FR-001): legitimate max observed is ≈70 min/symbol
+# (credit 7m + iron 29m + bwb 23m + post 4m + slack); 2h is a backstop for a
+# hung sweep-parallel WRAPPER (inner per-worker/merge timeouts live in
+# sweep-parallel.ts). timeout signals the whole process group; -k escalates
+# to SIGKILL after 60s grace.
+SWEEP_TIMEOUT=(timeout -k 60s 7200s)
 for SYM in SPX NDX; do
   if [ "$BOOTSTRAP" = "1" ]; then
     log "[$SYM] BOOTSTRAP — sharded full recompute, seeding $STATE_DIR/$SYM-*.json"
-    npx tsx scripts/diag/sweep-parallel.ts --symbol "$SYM" --engine both --shards 8 \
-      --state-dir "$STATE_DIR" >> "$LOG" 2>&1 \
-      && log "[$SYM] bootstrap OK (state seeded)" || log "[$SYM] bootstrap FAILED (non-critical)"
+    if "${SWEEP_TIMEOUT[@]}" npx tsx scripts/diag/sweep-parallel.ts --symbol "$SYM" --engine both --shards 8 \
+      --state-dir "$STATE_DIR" >> "$LOG" 2>&1; then
+      log "[$SYM] bootstrap OK (state seeded)"
+    else
+      RC=$?
+      [ "$RC" = "124" ] || [ "$RC" = "137" ] \
+        && log "[$SYM] bootstrap TIMED OUT after 2h (tree killed — non-critical)" \
+        || log "[$SYM] bootstrap FAILED rc=$RC (non-critical)"
+    fi
   else
     log "[$SYM] INCREMENTAL — replay only $TODAY into persisted state"
-    npx tsx scripts/diag/sweep-parallel.ts --symbol "$SYM" --engine both --shards 4 \
-      --state-dir "$STATE_DIR" >> "$LOG" 2>&1 \
-      && log "[$SYM] incremental OK (sweep+cap/risk updated for $TODAY)" \
-      || log "[$SYM] incremental FAILED (non-critical — candlesticks still available)"
+    if "${SWEEP_TIMEOUT[@]}" npx tsx scripts/diag/sweep-parallel.ts --symbol "$SYM" --engine both --shards 4 \
+      --state-dir "$STATE_DIR" >> "$LOG" 2>&1; then
+      log "[$SYM] incremental OK (sweep+cap/risk updated for $TODAY)"
+    else
+      RC=$?
+      [ "$RC" = "124" ] || [ "$RC" = "137" ] \
+        && log "[$SYM] incremental TIMED OUT after 2h (tree killed — non-critical — candlesticks still available)" \
+        || log "[$SYM] incremental FAILED rc=$RC (non-critical — candlesticks still available)"
+    fi
   fi
 done
 

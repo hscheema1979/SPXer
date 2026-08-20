@@ -28,9 +28,20 @@ A research/backtest platform for short-DTE index options (SPX/NDX/XSP 0DTE, SPY/
 | **backtest studio** | `scripts/autoresearch/backtest-server.ts` | HTTP API + viewer on **port 3700**; runs sweeps, serves results, `take-live` → OptionX | ✅ Active (run manually / ad-hoc) |
 | **live-capture** | `scripts/live/live-capture.ts` | Tradier RTH polling → parquet bars + snapshots; self-exits at close | ✅ Active (PM2 cron) |
 | **daily-backfill** | `scripts/backfill/daily-backfill.ts` | Nightly candlestick backfill for all profiles | ✅ Active (PM2 cron) |
-| ~~replay-viewer~~ | ~~`src/server/replay-server.ts`~~ | Old `:3601` viewer | ❌ **DELETED** (see Known Issues) |
+| ~~replay-viewer~~ | ~~`src/server/replay-server.ts`~~ | Old `:3601` viewer | ❌ **DELETED** (ecosystem entry + stray `replay2-viewer` PM2 app removed 2026-08-20, FR-001) |
 
-> ⚠️ `ecosystem.config.js` still contains a `replay-viewer` entry pointing at the deleted `src/server/replay-server.ts`. That PM2 process will fail to start. The real HTTP server is the backtest studio on port 3700. See **Known Issues**.
+### EOD pipeline process-lifecycle guarantees (FR-001, 2026-08-20)
+
+Between 2026-07-31 and 2026-08-19 the nightly pipeline hung silently at the
+`concurrent-distribution` merge (child never exited; wrapper awaited forever)
+and each weekday's cron fire stacked another orphaned tree — 37 leaked
+processes at peak. Three layers now bound every run:
+
+1. **Per-step timeouts** (`scripts/diag/sweep-process.ts`, used by `sweep-parallel.ts`): every child is detached (own process group), wall-clock-bounded (`SWEEP_WORKER_TIMEOUT_S` 2700s / `SWEEP_MERGE_TIMEOUT_S` 900s), has stdout drained, and dies with the wrapper on SIGINT/SIGTERM. Engine merge paths exit explicitly (`process.exit(0)`).
+2. **Pipeline mutex + bound** (`eod-pipeline.sh`): `flock -n` on `data/sweep-state/eod.lock` (a second fire logs `skip — previous run still active` and exits 0) and a 2h-per-symbol `timeout -k 60s` wrapper.
+3. **Reaper** (`scripts/ops/sweep-reaper.sh`, cron `13,43 * * * *`): kills any sweep-family process tree older than 6h (`SWEEP_REAP_AGE_H`), `--dry-run` to preview.
+
+Freshness is monitored by `check-data-pipeline.sh` TIER 9 + `eodFreshnessStatus()` in `src/ops/pipeline-health.ts` (warn >72h, fail >96h without a `=== EOD pipeline done ===` line).
 
 **Live trading** (event handler, position monitor, data service `:3600`, Schwaber) has been **removed from this repo entirely** and reimplemented in OptionX. Do not look for it here.
 
@@ -248,7 +259,8 @@ A separate live/E2E config exists at `vitest.live.config.ts` (240s timeout, `tes
 
 | Script | Purpose |
 |--------|---------|
-| `eod-pipeline.sh` | Nightly: backfill today → incremental sweep (or `--bootstrap` for full recompute) |
+| `eod-pipeline.sh` | Nightly: backfill today → incremental sweep (or `--bootstrap` for full recompute). flock-mutexed + timeout-bounded (see FR-001 notes above) |
+| `sweep-reaper.sh` | Cron (13,43 * * * *): kills sweep/eod process trees older than 6h; `--dry-run` previews |
 | `daily-backfill.sh` (via `daily-backfill.ts`) | Nightly candlestick backfill, all profiles |
 | `live-capture-start.sh` | Start the live-capture daemon |
 | `check-environment.sh` / `check-data-pipeline.sh` | Health checks |

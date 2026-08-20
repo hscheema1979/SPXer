@@ -27,11 +27,18 @@
  *   stale cap/risk data. `--no-post` skips it; partial engine runs (credit-
  *   or iron-only, e.g. sweep-parity) never trigger it (curate needs the
  *   combined credit+iron sweep JSON).
+ *
+ * Lifecycle (FR-001): every spawn is detached (own process group), bounded by
+ * a wall-clock timeout, has its stdout drained, and dies with the wrapper on
+ * SIGINT/SIGTERM — see sweep-process.ts. Layers above this file: eod-
+ * pipeline.sh takes an flock and wraps each symbol in `timeout`; scripts/ops/
+ * sweep-reaper.sh reaps anything that still escapes (>6h). No layer may hang
+ * forever — the 2026-07-31..08-19 leak stacked ~4-6 orphaned processes/day.
  */
-import { spawn } from 'child_process';
 import * as os from 'os';
 import * as fs from 'fs';
 import * as path from 'path';
+import { runScript, installSignalCleanup, parseTimeoutEnv } from './sweep-process';
 
 const ROOT = process.cwd();
 const argv = process.argv.slice(2);
@@ -102,23 +109,29 @@ const USE_IONICE = (process.env.SWEEP_IONICE ?? '1') !== '0';
 const HEAP_MB = Math.max(512, parseInt(process.env.SWEEP_HEAP_MB || '2048', 10));
 const MERGE_HEAP_MB = Math.max(HEAP_MB, parseInt(process.env.SWEEP_MERGE_HEAP_MB || String(HEAP_MB * 2), 10));
 const HAS_IONICE = USE_IONICE && process.platform === 'linux';
+// Wall-clock bounds per spawn (FR-001): a hung step can no longer block the
+// wrapper forever. Defaults sized from eod-pipeline.log history — longest
+// shard phase ever observed 1818s (iron), longest merge 64s — so these only
+// trip on genuine hangs. Overridable like the other SWEEP_* knobs.
+const WORKER_TIMEOUT_S = parseTimeoutEnv('SWEEP_WORKER_TIMEOUT_S', 2700);
+const MERGE_TIMEOUT_S = parseTimeoutEnv('SWEEP_MERGE_TIMEOUT_S', 900);
 
-function run(script: string, env: Record<string, string>, tag: string, heapMb: number = HEAP_MB): Promise<void> {
-  return new Promise((resolve, reject) => {
-    // Prefix: nice [ionice] npx tsx … — low CPU + IO priority. ionice only on
-    // Linux (no-op elsewhere). Heap cap goes to the worker via NODE_OPTIONS.
-    const prefix = ['nice', '-n', String(NICE),
-      ...(HAS_IONICE ? ['ionice', '-c2', '-n7'] : [])];
-    const cmd = prefix[0];
-    const cmdArgs = [...prefix.slice(1), 'npx', 'tsx', path.join(ROOT, script), ...passthru];
-    const workerNodeOpts = `${process.env.NODE_OPTIONS ? process.env.NODE_OPTIONS + ' ' : ''}--max-old-space-size=${heapMb}`;
-    const ch = spawn(cmd, cmdArgs, {
-      cwd: ROOT, env: { ...process.env, ...env, NODE_OPTIONS: workerNodeOpts }, stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    let lastErr = '';
-    ch.stderr.on('data', d => { const s = d.toString(); lastErr = s.trim().split('\n').pop() || lastErr; });
-    ch.on('close', code => code === 0 ? resolve()
-      : reject(new Error(`${tag} exited ${code}: ${lastErr}`)));
+function run(script: string, env: Record<string, string>, tag: string, heapMb: number = HEAP_MB,
+            timeoutS: number = WORKER_TIMEOUT_S): Promise<void> {
+  // Prefix: nice [ionice] npx tsx … — low CPU + IO priority. ionice only on
+  // Linux (no-op elsewhere). Heap cap goes to the worker via NODE_OPTIONS.
+  // Lifecycle (detached group, timeout kill, drained stdout, signal cleanup)
+  // lives in sweep-process.ts.
+  const prefix = ['nice', '-n', String(NICE),
+    ...(HAS_IONICE ? ['ionice', '-c2', '-n7'] : [])];
+  const workerNodeOpts = `${process.env.NODE_OPTIONS ? process.env.NODE_OPTIONS + ' ' : ''}--max-old-space-size=${heapMb}`;
+  return runScript({
+    cmd: prefix[0],
+    args: [...prefix.slice(1), 'npx', 'tsx', path.join(ROOT, script), ...passthru],
+    env: { ...env, NODE_OPTIONS: workerNodeOpts },
+    cwd: ROOT,
+    tag,
+    timeoutS,
   });
 }
 
@@ -141,28 +154,46 @@ function pruneStaleShards(): void {
   }
 }
 
-async function shardRun(script: string, tag: string, stateFile?: string): Promise<void> {
-  pruneStaleShards();
+// Create a fresh shard tmp dir for fn, remove it when fn settles — INCLUDING
+// on failure (FR-001: cleanup previously ran only on success, so every crash
+// stranded a tmpfs dir — RAM on this box). Exported for tests.
+export async function withShardTmp<T>(tag: string, fn: (tmp: string) => Promise<T>): Promise<T> {
   const tmp = path.join('/tmp/sweepshard', `${Date.now()}_${tag}`);
   fs.rmSync(tmp, { recursive: true, force: true });
   fs.mkdirSync(tmp, { recursive: true });
-  if (stateFile) fs.mkdirSync(path.dirname(stateFile), { recursive: true });
-  console.log(`\n[${tag}] ${shards} shard workers …`);
-  const tA = Date.now();
-  await Promise.all(
-    Array.from({ length: shards }, (_, i) =>
-      run(script, { SWEEP_SHARD: `${i}/${shards}`, SWEEP_SHARD_OUT: path.join(tmp, `shard_${i}.json`) }, `${tag}#${i}`)),
-  );
-  console.log(`[${tag}] shards done in ${((Date.now() - tA) / 1000).toFixed(1)}s → merging …`);
-  const tM = Date.now();
-  // Merge finalize: SWEEP_STATE (when bootstrapping) makes it persist the
-  // merged accumulator so the next nightly run can replay only the new day.
-  await run(script, stateFile ? { SWEEP_MERGE: tmp, SWEEP_STATE: stateFile } : { SWEEP_MERGE: tmp }, `${tag}#merge`, MERGE_HEAP_MB);
-  fs.rmSync(tmp, { recursive: true, force: true });
-  console.log(`[${tag}] merge+finalize in ${((Date.now() - tM) / 1000).toFixed(1)}s${stateFile ? ` (state → ${stateFile})` : ''}`);
+  try {
+    return await fn(tmp);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 }
 
-(async () => {
+async function shardRun(script: string, tag: string, stateFile?: string): Promise<void> {
+  pruneStaleShards();
+  if (stateFile) fs.mkdirSync(path.dirname(stateFile), { recursive: true });
+  await withShardTmp(tag, async tmp => {
+    console.log(`\n[${tag}] ${shards} shard workers …`);
+    const tA = Date.now();
+    await Promise.all(
+      Array.from({ length: shards }, (_, i) =>
+        run(script, { SWEEP_SHARD: `${i}/${shards}`, SWEEP_SHARD_OUT: path.join(tmp, `shard_${i}.json`) }, `${tag}#${i}`)),
+    );
+    console.log(`[${tag}] shards done in ${((Date.now() - tA) / 1000).toFixed(1)}s → merging …`);
+    const tM = Date.now();
+    // Merge finalize: SWEEP_STATE (when bootstrapping) makes it persist the
+    // merged accumulator so the next nightly run can replay only the new day.
+    await run(script, stateFile ? { SWEEP_MERGE: tmp, SWEEP_STATE: stateFile } : { SWEEP_MERGE: tmp },
+      `${tag}#merge`, MERGE_HEAP_MB, MERGE_TIMEOUT_S);
+    console.log(`[${tag}] merge+finalize in ${((Date.now() - tM) / 1000).toFixed(1)}s${stateFile ? ` (state → ${stateFile})` : ''}`);
+  });
+}
+
+// Main guard: run the orchestration only when executed directly (tsx …/sweep-
+// parallel.ts), not when imported by tests. argv[1] is the script path under
+// tsx/node; under vitest it's the runner.
+if (process.argv[1] && path.resolve(process.argv[1]).endsWith('sweep-parallel.ts')) {
+  installSignalCleanup();
+  (async () => {
   const t0 = Date.now();
   console.log(`[sweep-parallel] ${SYM} | ${shards}/${CORES} shards${requestedShards !== shards ? ` (requested ${requestedShards}, capped)` : ''} | nice=${NICE}${HAS_IONICE ? ' ionice=c2n7' : ''} | heap=${HEAP_MB}MB/worker, ${MERGE_HEAP_MB}MB merge`);
   for (const eng of order) {
@@ -186,4 +217,5 @@ async function shardRun(script: string, tag: string, stateFile?: string): Promis
   }
 
   console.log(`\n✓ sweep-parallel complete in ${((Date.now() - t0) / 1000).toFixed(1)}s (${shards}-way)`);
-})().catch(e => { console.error(`\n✗ ${e.message}`); process.exit(1); });
+  })().catch(e => { console.error(`\n✗ ${e.message}`); process.exit(1); });
+}

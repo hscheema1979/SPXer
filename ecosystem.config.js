@@ -1,44 +1,21 @@
 // SPXer PM2 Ecosystem Configuration
 //
 // SPXer is a BACKTEST + BACKFILL system. Live trading lives in OptionX, not here.
-// Two long-lived processes: the backtest/replay server and the daily backfill cron.
+// Two long-lived processes: the live-capture daemon and the daily backfill cron.
+//
+// The old `replay-viewer` (:3601) entry was REMOVED (FR-001, 2026-08-20):
+// src/server/replay-server.ts was deleted in a32fe0e1a and the entry pointed
+// at a dead file. The backtest studio (:3700) is run on demand — see
+// scripts/autoresearch/backtest-server.ts — not managed here.
 //
 // Usage:
 //   pm2 start ecosystem.config.js                 # start all
-//   pm2 start ecosystem.config.js --only replay-viewer
-//   pm2 restart replay-viewer
-//   pm2 logs replay-viewer --lines 50
+//   pm2 restart live-capture
+//   pm2 logs live-capture --lines 50
 //   pm2 save                                      # persist across reboots
 //
 module.exports = {
   apps: [
-    // ── Backtest/Backfill Server (port 3601) ──────────────────────
-    // Serves the replay/backtest viewer, sweep manager API, admin UI,
-    // ticker/backfill API, and the SPXer Studio dashboard. This is the
-    // ONLY HTTP server in the repo.
-    {
-      name: 'replay-viewer',
-      script: 'npx',
-      args: 'tsx src/server/replay-server.ts',
-      cwd: '/home/ubuntu/SPXer',
-      watch: false,
-      autorestart: true,
-      max_restarts: 10,
-      min_uptime: '10s',
-      restart_delay: 10000,
-      kill_timeout: 5000,
-      max_memory_restart: '512M',
-      env: {
-        NODE_ENV: 'production',
-        REPLAY_PORT: '3601',
-        DB_PATH: '/home/ubuntu/SPXer/data/spxer.db',
-      },
-      log_date_format: 'YYYY-MM-DD HH:mm:ss',
-      error_file: '/home/ubuntu/.pm2/logs/replay-viewer-error.log',
-      out_file: '/home/ubuntu/.pm2/logs/replay-viewer-out.log',
-      merge_logs: true,
-    },
-
     // ── Live Capture (cron start, self-exits at close) ────────────
     // Polygon + ThetaData are cancelled; Tradier is the only remaining market
     // data source. This daemon polls Tradier once/minute during RTH and appends
