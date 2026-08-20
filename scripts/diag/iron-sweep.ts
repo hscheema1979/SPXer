@@ -1017,3 +1017,11 @@ if (STATE_FILE && !process.env.SWEEP_SHARD_OUT) {
 
 // Serial / merge-finalize trade emission (no-op unless SWEEP_EMIT_TRADES_KEYS).
 flushTrades();
+
+// FR-001: all output above is written synchronously — exit explicitly instead
+// of waiting for the event loop to drain. An undrained handle (or a stdout
+// write into a full pipe under the old un-drained sweep-parallel) otherwise
+// keeps this process alive forever, which is what stranded the nightly eod-
+// pipeline wrappers from 2026-07-31 to 2026-08-19. Shard workers already
+// process.exit(0)'d above; this covers the serial and SWEEP_MERGE paths.
+process.exit(0);

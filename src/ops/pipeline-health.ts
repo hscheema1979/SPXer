@@ -157,3 +157,38 @@ export function recordCheckpoint(walMb: number): void {
   pipelineHealth.db.lastCheckpointTs = Date.now();
   pipelineHealth.db.walSizeMbAtLastCheckpoint = walMb;
 }
+
+// ── EOD pipeline freshness (FR-001) ─────────────────────────────────────────
+// The nightly eod-pipeline appends "[<ISO-UTC>] === EOD pipeline done ===" to
+// logs/eod-pipeline.log on every COMPLETE run. Between 2026-07-31 and
+// 2026-08-19 the pipeline hung silently (concurrent-distribution merge never
+// exited) and the only symptoms were stale NDX state + monthly reports —
+// these pure helpers turn that silence into a number someone can alert on.
+// scripts/ops/check-data-pipeline.sh mirrors them in bash (TIER 9).
+
+/** Parse the ISO-UTC timestamp (ms) out of an eod-pipeline "done" log line. */
+export function parseEodDoneTimestamp(line: string): number | null {
+  const m = line.match(/\[(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})Z\]\s*=== EOD pipeline done/);
+  if (!m) return null;
+  const ts = Date.parse(`${m[1]}Z`);
+  return Number.isFinite(ts) ? ts : null;
+}
+
+/** Whole (fractional) days since the last completed EOD run; clamped ≥0. */
+export function eodStalenessDays(lastDoneMs: number, nowMs: number): number {
+  return Math.max(0, (nowMs - lastDoneMs) / 86_400_000);
+}
+
+export type EodFreshness = 'fresh' | 'stale' | 'failed-stale';
+
+/**
+ * Freshness verdict. Thresholds in days: ≤3 fresh (a Fri-night run is ~2.6d
+ * old by Monday morning), ≤4 stale (tolerates a Monday holiday), >4 means the
+ * pipeline has been hung/dead for days — the exact condition that leaked 37
+ * processes before anyone noticed.
+ */
+export function eodFreshnessStatus(lastDoneMs: number, nowMs: number): EodFreshness {
+  const d = eodStalenessDays(lastDoneMs, nowMs);
+  if (d <= 3) return 'fresh';
+  return d <= 4 ? 'stale' : 'failed-stale';
+}
