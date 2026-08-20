@@ -1,3 +1,12 @@
+> ⚠️ **SUPERSEDED — 2026-08-09.** This review was written for the `feat/shorts-fresh-fill-study`
+> branch. The current branch is `feat/multi-dte-credit-sweep`, and **every blocker listed below has
+> been resolved** — almost all of them by the deletion of `src/server/*` (the old `:3601` replay
+> viewer) in commit `a32fe0e1a`. The current branch compiles clean (`tsc` → 0 errors) and passes
+> **684/684 tests**. See **`CODE-REVIEW-2026-08-09.md`** and **`CLAUDE.md`** for the accurate
+> current state. This file is retained for history only.
+
+---
+
 # Code Review: SPXer Branch (feat/shorts-fresh-fill-study) — 2026-05-22
 
 ## Executive Summary

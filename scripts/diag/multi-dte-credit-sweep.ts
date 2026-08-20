@@ -26,6 +26,7 @@ import { getOptionsForDay, readDiskCache, type Bar as FlatBar } from './flat-fil
 import { tradingDaysBetween, expiryForDate } from './sweep-dates';
 import { deriveStrikeInterval } from './strike-grid';
 import { selectStrikeByDelta, type DeltaCandidate } from './delta-grid';
+import { bsPutPrice, impliedVolFromPut } from './black-scholes';
 import { aggregateIntraday } from './ohlc-aggregate';
 import { freshBullCross, direction, type Signal as SwingSignal } from './swing-signal';
 import type { DailyBar } from './backfill-ndx-daily';
@@ -87,6 +88,16 @@ const RISK_FREE_RATE = Number(process.env.SWEEP_RISK_FREE_RATE ?? 0.04);
 // SWEEP_ENTRY_STALE_SEC=N rejects entries where the SHORT leg's mark is older
 // than N sec at entryTs-1.  Default 0 = DISABLED (reproduces historical numbers).
 const ENTRY_STALE_SEC = process.env.SWEEP_ENTRY_STALE_SEC ? parseInt(process.env.SWEEP_ENTRY_STALE_SEC) : 0;
+// ── BS PRICING MODE ──────────────────────────────────────────────────────────
+// SWEEP_PRICING=bs reprices each spread off the DENSE SPX 1m path via Black-Scholes
+// (entry-anchored IV + skew), instead of sparse option leg prints. Hold-to-settle
+// becomes real-credit-in / real-intrinsic-out; TP/SL run on the smooth trajectory
+// (no phantom-fill blips). Output is namespaced to `-bs` files (dashboard untouched).
+// Validated against spx-bs-credit-study.ts + OptionOmega. Default 'option' = legacy.
+const PRICING = (process.env.SWEEP_PRICING ?? 'option') as 'option' | 'bs';
+const SKEW_BETA = Number(process.env.SWEEP_SKEW_BETA ?? 1.0);   // ΔIV = -β·(%move): selloff lifts IV
+const MIN_PER_YR = 252 * 390;
+const bsTag = (p: string) => PRICING === 'bs' ? p.replace(/\.json$/, '-bs.json') : p;
 const CUTOFF_HHMM = 6 * 3600; // 15:30 ET (sec from sess open)
 const SETTLE_HHMM = 6 * 3600 + 15 * 60; // 15:45 ET — force-exit window has liquid quotes — close before final 5 min
 const TRADESTART_SEC = 1800; // 10:00 ET (30 min after 9:30)
@@ -431,6 +442,19 @@ function applyExit(traj:TrajPoint[], endTs:number,
   return {exitTs: effEnd, exitV: Math.max(0, (ps - pl) + CLOSE_PENALTY_V), reason: effEnd === endTs ? 'settle-mtm' : 'flip'};
 }
 
+// BS-mode exit: TP/SL on the smooth SPX-repriced trajectory; cash-settled INTRINSIC
+// at expiry (NO close penalty — SPX cash-settles, nothing to cross). TP/SL early
+// exits DO pay CLOSE_PENALTY_V. Byte-for-byte mirror of spx-bs-credit-study.ts.
+function applyExitBS(traj:{ts:number;V:number}[], credit:number, tpFrac:number, slRiskFrac:number, width:number, settleV:number): {exitTs:number, exitV:number, reason:string} {
+  const tpV = tpFrac>0 ? (1-tpFrac)*credit : -Infinity;
+  const slV = slRiskFrac>0 ? credit + slRiskFrac*(width-credit) : Infinity;
+  for(const p of traj){
+    if(slRiskFrac>0 && p.V >= slV + CLOSE_PENALTY_V) return {exitTs:p.ts, exitV:Math.max(0, slV+CLOSE_PENALTY_V), reason:'SL'};
+    if(tpFrac>0 && p.V <= tpV - CLOSE_PENALTY_V) return {exitTs:p.ts, exitV:Math.max(0, tpV), reason:'TP'};
+  }
+  return {exitTs: traj.length ? traj[traj.length-1].ts : 0, exitV:Math.max(0,settleV), reason:'settle'};
+}
+
 // ── Aggregation ────────────────────────────────────────────────────────────
 interface AggKey { signal:string; spread:string; exit:string; }
 interface HourBucket { n:number; creditSum:number; riskSum:number; pnlSum:number; wins:number; }
@@ -639,6 +663,14 @@ for(let di=0; di<RUN_DATES.length; di++){
   const settleTs = sessOpenTs(settleDate) + SETTLE_HHMM;
   // SPX close at settle ts — for intrinsic-value settle in applyExit (0DTE only)
   const spxAtSettle = TARGET.dte === 0 ? optPx(s1, settleTs) : null;
+  // BS pricing: dense SPX 1m path from entry day → expiry, plus real SPX-at-settle
+  // (for intrinsic settle at any DTE). Built once per date; sliced per signal entry.
+  let bsPath: any[] = []; let bsSpxAtSettle = 0;
+  if (PRICING === 'bs') {
+    for (const d of tradingDaysBetween(date, settleDate)) { const ub = underlyingBars(d); if (ub) for (const b of ub) if (b.ts <= settleTs) bsPath.push(b); }
+    bsPath.sort((a,b)=>a.ts-b.ts);
+    bsSpxAtSettle = bsPath.length ? bsPath[bsPath.length-1].close : 0;
+  }
 
   // Per-variant overlap event tracking (entry/exit timestamps) for peak-concurrent calc
   const overlapMap = new Map<string, CapEvent[]>();
@@ -769,13 +801,33 @@ for(let di=0; di<RUN_DATES.length; di++){
         // intraday reversal log anyway, so flip is permanently disabled here.
         const flipTs = Infinity;
 
-        const traj = buildSpreadTrajectory(shortBars, longBars, entryTs, settleTs);
+        // Trajectory: BS-repriced off the dense SPX path (honest) or option-bar (legacy).
+        let traj: any; let bsSettleV = 0;
+        if (PRICING === 'bs') {
+          const slice = bsPath.filter(b => b.ts > entryTs && b.ts <= settleTs);
+          if (slice.length < 5) continue;
+          const totalMin = slice.length, T0 = totalMin / MIN_PER_YR;
+          const ivS0 = impliedVolFromPut(shortEntry, spxEntry, shortStrike, T0, RISK_FREE_RATE) ?? 0.15;
+          const ivL0 = impliedVolFromPut(longEntry, spxEntry, longStrike, T0, RISK_FREE_RATE) ?? ivS0;
+          const bt: {ts:number;V:number}[] = [];
+          for (let i=0;i<slice.length;i++){
+            const spot=slice[i].close, T=Math.max((totalMin-(i+1))/MIN_PER_YR,0), pct=(spot-spxEntry)/spxEntry;
+            const V=bsPutPrice(spot,shortStrike,T,Math.max(0.01,ivS0-SKEW_BETA*pct),RISK_FREE_RATE)-bsPutPrice(spot,longStrike,T,Math.max(0.01,ivL0-SKEW_BETA*pct),RISK_FREE_RATE);
+            bt.push({ts:slice[i].ts, V:Math.max(0,V)});
+          }
+          traj = bt;
+          bsSettleV = Math.max(0, Math.max(0,shortStrike-bsSpxAtSettle)-Math.max(0,longStrike-bsSpxAtSettle));
+        } else {
+          traj = buildSpreadTrajectory(shortBars, longBars, entryTs, settleTs);
+        }
 
         for(const ex of EXITS){
           if (EMIT_ONLY && !EMIT_EXITS.has(ex.label)) continue;
           // Compute natural exit, record P&L immediately, push overlap event.
           const flipTsToUse = ex.useFlip ? flipTs : Infinity;
-          const nat = applyExit(traj, settleTs, shortBars, longBars, credit, ex.tpFrac, ex.slMult, flipTsToUse,
+          const nat = PRICING === 'bs'
+            ? applyExitBS(traj, credit, ex.tpFrac, ex.slRiskFrac ?? 0, spreadWidth, bsSettleV)
+            : applyExit(traj, settleTs, shortBars, longBars, credit, ex.tpFrac, ex.slMult, flipTsToUse,
                                 isCallSpread, shortStrike, longStrike, spxAtSettle, spreadWidth, ex.slRiskFrac ?? 0);
           const pnl = (credit - nat.exitV) * 100 - SLIPPAGE_PER_SPREAD;
           const pnlGross = (credit - nat.exitV) * 100;
@@ -892,7 +944,8 @@ function summary(){
       fillModel: FILL_MODE,
       fillHalfSpread: CLOSE_HALFSPREAD_PER_LEG,
       exitGate: EXIT_GATE,
-      entryStaleSec: ENTRY_STALE_SEC});
+      entryStaleSec: ENTRY_STALE_SEC,
+      pricingModel: PRICING});
   }
   rows.sort((a,b)=>b.pnl-a.pnl);
   console.log(`\n=== CREDIT-SPREAD SWEEP (look-ahead protected, $${SLIPPAGE_PER_SPREAD}/RT slippage) ===`);
@@ -909,7 +962,7 @@ function summary(){
   }
   // MERGE with existing file so we don't wipe iron rows added by iron-sweep.
   // Strategy: keep all rows EXCEPT prior 2-leg credit-spread rows (matching this script's spread labels).
-  const SWEEP_JSON = outPath('/tmp/credit_spread_sweep.json', TARGET);
+  const SWEEP_JSON = bsTag(outPath('/tmp/credit_spread_sweep.json', TARGET));
   let existing:any[] = [];
   try { existing = JSON.parse(fs.readFileSync(SWEEP_JSON,'utf8')); } catch {}
   // Identify the spread labels THIS engine generates so a re-run REPLACES its
@@ -922,7 +975,7 @@ function summary(){
   fs.writeFileSync(SWEEP_JSON, JSON.stringify(merged,null,2));
   // Also write to viewer's expected location so dashboard sees fresh data
   // immediately without a manual copy step.
-  const STUDIO_SWEEP = outPath(path.join(process.cwd(), 'scripts/autoresearch/output/spread-sweep.json'), TARGET);
+  const STUDIO_SWEEP = bsTag(outPath(path.join(process.cwd(), 'scripts/autoresearch/output/spread-sweep.json'), TARGET));
   try { fs.writeFileSync(STUDIO_SWEEP, JSON.stringify(merged)); } catch {}
   console.log(`\nMerged: ${existing.length} prior (iron) + ${rows.length} new (credit-spread) = ${merged.length}`);
   // Daily-series emission: shared `dates` array + per-variant pnl-by-date arrays.
@@ -937,7 +990,7 @@ function summary(){
     series[k] = arr;
   }
   // Merge daily-series with existing file so iron series stay
-  const DAILY_JSON = outPath('/tmp/credit_spread_daily.json', TARGET);
+  const DAILY_JSON = bsTag(outPath('/tmp/credit_spread_daily.json', TARGET));
   let existingDaily:any = {dates:[], series:{}};
   try { existingDaily = JSON.parse(fs.readFileSync(DAILY_JSON,'utf8')); } catch {}
   // Drop prior 2-leg credit-spread keys (matched by spread label pattern in key)
@@ -974,7 +1027,7 @@ function summary(){
     mergedSeries[k] = newArr;
   }
   fs.writeFileSync(DAILY_JSON, JSON.stringify({dates: mergedDates, series: mergedSeries}));
-  const STUDIO_DAILY = outPath(path.join(process.cwd(), 'scripts/autoresearch/output/spread-daily.json'), TARGET);
+  const STUDIO_DAILY = bsTag(outPath(path.join(process.cwd(), 'scripts/autoresearch/output/spread-daily.json'), TARGET));
   try { fs.writeFileSync(STUDIO_DAILY, JSON.stringify({dates: mergedDates, series: mergedSeries})); } catch {}
   console.log(`Daily merged: ${mergedDates.length} dates × ${Object.keys(mergedSeries).length} variants`);
   console.log('Saved to /tmp/credit_spread_*.json + scripts/autoresearch/output/spread-*.json');
@@ -983,8 +1036,8 @@ function summary(){
   // Studio's Hourly Heatmap reads scripts/autoresearch/output/spread-hourly*.json;
   // iron writes its entries (with `structure`) — we APPEND credit-spread entries
   // (with `spread`) and drop any prior credit entries on re-run.
-  const HOURLY_JSON   = outPath('/tmp/credit_spread_hourly.json', TARGET);
-  const STUDIO_HOURLY = outPath(path.join(process.cwd(), 'scripts/autoresearch/output/spread-hourly.json'), TARGET);
+  const HOURLY_JSON   = bsTag(outPath('/tmp/credit_spread_hourly.json', TARGET));
+  const STUDIO_HOURLY = bsTag(outPath(path.join(process.cwd(), 'scripts/autoresearch/output/spread-hourly.json'), TARGET));
   const creditHourlyEntries: any[] = [];
   for (const [k, v] of results) {
     const [signal, spread, exit] = k.split('|');

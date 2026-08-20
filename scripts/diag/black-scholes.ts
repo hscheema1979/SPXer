@@ -48,6 +48,48 @@ export function bsPutPrice(spot: number, strike: number, T: number, vol: number,
   return strike * Math.exp(-rate * T) * normCdf(-dd2) - spot * normCdf(-dd1);
 }
 
+/** European call price. */
+export function bsCallPrice(spot: number, strike: number, T: number, vol: number, rate: number): number {
+  if (T <= 0 || vol <= 0) return Math.max(0, spot - strike);
+  const dd1 = d1(spot, strike, T, vol, rate);
+  const dd2 = dd1 - vol * Math.sqrt(T);
+  return spot * normCdf(dd1) - strike * Math.exp(-rate * T) * normCdf(dd2);
+}
+
+/**
+ * Implied vol of a call from its price, via bisection. Mirror of
+ * impliedVolFromPut: returns null when the price is not arbitrage-consistent
+ * (≤0, or below discounted intrinsic so no positive vol can reproduce it).
+ */
+export function impliedVolFromCall(
+  price: number,
+  spot: number,
+  strike: number,
+  T: number,
+  rate: number,
+  tol = 1e-6,
+  maxIter = 100
+): number | null {
+  if (price <= 0 || T <= 0) return null;
+  const intrinsic = Math.max(0, spot - strike * Math.exp(-rate * T));
+  if (price < intrinsic - 1e-9) return null; // below discounted intrinsic → no real IV
+
+  let lo = 1e-4;
+  let hi = 5.0;
+  const pLo = bsCallPrice(spot, strike, T, lo, rate);
+  const pHi = bsCallPrice(spot, strike, T, hi, rate);
+  if (price < pLo - 1e-9 || price > pHi + 1e-9) return null;
+
+  for (let i = 0; i < maxIter; i++) {
+    const mid = 0.5 * (lo + hi);
+    const pMid = bsCallPrice(spot, strike, T, mid, rate);
+    if (Math.abs(pMid - price) < tol) return mid;
+    if (pMid < price) lo = mid;
+    else hi = mid;
+  }
+  return 0.5 * (lo + hi);
+}
+
 /**
  * Implied vol of a put from its price, via bisection. Returns null when the
  * price is not arbitrage-consistent (≤0, or below intrinsic so no positive vol

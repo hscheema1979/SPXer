@@ -7,8 +7,8 @@
  * Candidates whose price can't yield a real IV (≤ intrinsic) are skipped.
  */
 import { describe, it, expect } from 'vitest';
-import { selectStrikeByDelta, type DeltaCandidate } from '../../scripts/diag/delta-grid';
-import { bsPutPrice } from '../../scripts/diag/black-scholes';
+import { selectStrikeByDelta, selectCallStrikeByDelta, type DeltaCandidate } from '../../scripts/diag/delta-grid';
+import { bsPutPrice, bsCallPrice } from '../../scripts/diag/black-scholes';
 
 const SPOT = 20000;
 const T = 5 / 252;   // 5 trading days, in years (252 trading days)
@@ -79,5 +79,36 @@ describe('selectStrikeByDelta', () => {
     const short = selectStrikeByDelta(candidates, 0.50, SPOT, T, RATE)!;
     const long = selectStrikeByDelta(candidates, 0.50, SPOT, T, RATE, new Set([short.strike]))!;
     expect(long.strike).not.toBe(short.strike);
+  });
+});
+
+describe('selectCallStrikeByDelta', () => {
+  // Same ladder, priced as calls at the known flat vol.
+  const callCand = (strike: number): DeltaCandidate => ({ strike, price: bsCallPrice(SPOT, strike, T, VOL, RATE) });
+  const strikes = [];
+  for (let k = SPOT - 2000; k <= SPOT + 2000; k += 50) strikes.push(k);
+  const candidates = strikes.map(callCand);
+
+  it('lower target |delta| (0.30) → an OTM call (strike above spot)', () => {
+    const r = selectCallStrikeByDelta(candidates, 0.30, SPOT, T, RATE)!;
+    expect(r.strike).toBeGreaterThan(SPOT);
+    expect(r.delta).toBeGreaterThan(0); // call delta positive
+    expect(Math.abs(Math.abs(r.delta) - 0.30)).toBeLessThanOrEqual(0.05);
+  });
+
+  it('monotonic: higher target delta selects a lower (or equal) call strike', () => {
+    const lo = selectCallStrikeByDelta(candidates, 0.30, SPOT, T, RATE)!;
+    const mid = selectCallStrikeByDelta(candidates, 0.50, SPOT, T, RATE)!;
+    const hi = selectCallStrikeByDelta(candidates, 0.70, SPOT, T, RATE)!;
+    expect(lo.strike).toBeGreaterThanOrEqual(mid.strike);
+    expect(mid.strike).toBeGreaterThanOrEqual(hi.strike);
+  });
+
+  it('a 0.35-delta short put and 0.35-delta short call straddle spot (condor shorts)', () => {
+    const putCand = (strike: number): DeltaCandidate => ({ strike, price: bsPutPrice(SPOT, strike, T, VOL, RATE) });
+    const sp = selectStrikeByDelta(strikes.map(putCand), 0.35, SPOT, T, RATE)!;
+    const sc = selectCallStrikeByDelta(candidates, 0.35, SPOT, T, RATE)!;
+    expect(sp.strike).toBeLessThan(SPOT);
+    expect(sc.strike).toBeGreaterThan(SPOT);
   });
 });

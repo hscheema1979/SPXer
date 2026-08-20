@@ -56,6 +56,13 @@ const GAPS = (process.env.SWEEP_DELTA_GAPS ?? '0.05')
 const EMIT = !!process.env.SWEEP_SLOT_EMIT;
 const emitRows: string[] = [];
 
+// Side selector: condor (default, both verticals) | call (bear-call SCS only) |
+// put (bull-put PCS only). Single-side builds one 2-leg defined-risk credit
+// spread, reusing the SAME BS strike selection, friction, and 16:00 settle/
+// assignment math as the condor path — guarantees cross-structure parity.
+const SIDE = (process.env.SWEEP_SIDE ?? 'condor').toLowerCase();   // condor | call | put
+const FPREFIX = SIDE === 'call' ? 'scs-slot' : SIDE === 'put' ? 'pcs-slot' : 'dc-slot';
+
 function sessOpenTs(date: string): number {
   const [y, mo, d] = date.split('-').map(Number);
   const utcNoon = new Date(Date.UTC(y, mo - 1, d, 12, 0, 0));
@@ -95,13 +102,25 @@ function nearest(list: DK[], targetAbs: number, exclude?: number): DK | null {
     const d = Math.abs(Math.abs(c.delta) - targetAbs); if (d < bd) { bd = d; best = c; } }
   return best;
 }
+// Nearest listed strike to a target STRIKE (for point-sized wings — on 0DTE a
+// wide wing is many deltas out, so delta-gap can't express it; size in points).
+function nearestStrikeK(list: DK[], targetK: number, exclude?: number): DK | null {
+  let best: DK | null = null, bd = Infinity;
+  for (const c of list) { if (exclude != null && c.strike === exclude) continue;
+    const d = Math.abs(c.strike - targetK); if (d < bd) { bd = d; best = c; } }
+  return best;
+}
+// Point-sized wings for single-side spreads (e.g. SWEEP_WING_PTS=10,25,50). When
+// set, the long leg is short ± W points (nearest listed strike); GAPS is ignored.
+const WING_PTS = (process.env.SWEEP_WING_PTS ?? '')
+  .split(',').map(s => parseFloat(s.trim())).filter(n => n > 0);
 
 const ALL = listDatesFor(TARGET);
 const N = parseInt(process.env.SWEEP_DAYS || '0', 10);
 const DATES = (Number.isFinite(N) && N > 0 && N < ALL.length) ? ALL.slice(-N) : ALL;
 const SLOTS: number[] = [];
 for (let t = 1800; t <= CUTOFF_HHMM; t += SLOT_SEC) SLOTS.push(t);
-console.error(`[${TARGET.symbol}] DELTA-condor slot study — shorts ${SHORT_DELTAS.join('/')}, gaps ${GAPS.join('/')}, ${SLOTS.length} slots, dates ${DATES.length}, ITM_CLOSE=${ITM_CLOSE}`);
+console.error(`[${TARGET.symbol}] DELTA slot study — SIDE=${SIDE}, shorts ${SHORT_DELTAS.join('/')}, gaps ${GAPS.join('/')}, ${SLOTS.length} slots, dates ${DATES.length}, ITM_CLOSE=${ITM_CLOSE}`);
 
 let traded = 0;
 for (let di = 0; di < DATES.length; di++) {
@@ -138,9 +157,54 @@ for (let di = 0; di < DATES.length; di++) {
 
     for (const shortD of SHORT_DELTAS) {
       const sp = nearest(putDK, shortD), sc = nearest(callDK, shortD);
-      if (!sp || !sc) continue;
+      if (SIDE === 'put' ? !sp : SIDE === 'call' ? !sc : (!sp || !sc)) continue;
+
+      // ── single-side credit spread (bear-call SCS / bull-put PCS) ──────────
+      if (SIDE !== 'condor') {
+        const isPut = SIDE === 'put';
+        const sh = (isPut ? sp : sc)!;
+        // wing list: point-sized (preferred for 0DTE wide wings) else delta-gap.
+        const wings: { lg: DK | null; tag: string }[] = WING_PTS.length
+          ? WING_PTS.map(w => ({ lg: nearestStrikeK(isPut ? putDK : callDK, isPut ? sh.strike - w : sh.strike + w, sh.strike), tag: `w${w}` }))
+          : GAPS.map(g => { const ld = shortD - g; return { lg: ld > 0 ? nearest(isPut ? putDK : callDK, ld, sh.strike) : null, tag: ld > 0 ? ld.toFixed(2) : 'x' }; });
+        for (const { lg, tag } of wings) {
+          if (!lg) continue;
+          if (isPut ? lg.strike >= sh.strike : lg.strike <= sh.strike) continue;   // long must be further OTM
+          const wing = Math.abs(sh.strike - lg.strike);
+          const credit = sh.px - lg.px;
+          if (credit <= 0.10 || credit >= wing * 0.95) continue;
+          const sLegs: Leg[] = [
+            { symbol: sh.sym, strike: sh.strike, sign: +1, bars: c1.contractBars.get(sh.sym) as any[] },
+            { symbol: lg.sym, strike: lg.strike, sign: -1, bars: c1.contractBars.get(lg.sym) as any[] },
+          ];
+          const grossPrem = Math.abs(sh.px) + Math.abs(lg.px);
+          const intrAt = (px: number) => isPut
+            ? Math.max(0, sh.strike - px) - Math.max(0, lg.strike - px)
+            : Math.max(0, px - sh.strike) - Math.max(0, px - lg.strike);
+          let exitV = Math.max(0, intrAt(spxAtSettle as number)), exitFriction = 0;
+          const shItm = ITM_CLOSE && spxAtItmClose != null && (isPut ? spxAtItmClose < sh.strike : spxAtItmClose > sh.strike);
+          if (shItm) {
+            const sm = optPx(sLegs[0].bars, itmCloseTs), lm = optPx(sLegs[1].bars, itmCloseTs);
+            if (sm != null && lm != null) { exitV = Math.max(0, sm - lm); exitFriction = entryFriction(Math.abs(sm) + Math.abs(lm)); }
+          }
+          const pnlGross = (credit - exitV) * 100;
+          const friction = entryFriction(grossPrem) + exitFriction;
+          const k = `${slotSec}|${shortD}|${tag}`;
+          rec(k, pnlGross, friction, credit, wing, isPut ? sh.delta : 0, isPut ? 0 : sh.delta);
+          if (EMIT) {
+            const pnlNet = pnlGross - friction;
+            emitRows.push([date, slotLabel(slotSec), shortD, lg.delta.toFixed(3), tag, spot.toFixed(2),
+              sh.strike, lg.strike, credit.toFixed(2), wing, grossPrem.toFixed(2),
+              (spxAtSettle as number).toFixed(2), exitV.toFixed(2), Math.round(pnlGross),
+              friction.toFixed(2), Math.round(pnlNet), pnlNet > 0 ? 1 : 0, sh.delta.toFixed(3)].join(','));
+          }
+        }
+        continue;
+      }
+
       for (const gap of GAPS) {
         const longD = shortD - gap; if (longD <= 0) continue;
+        if (!sp || !sc) continue;   // condor needs both sides (narrows for TS)
         const lp = nearest(putDK, longD, sp.strike), lc = nearest(callDK, longD, sc.strike);
         if (!lp || !lc) continue;
         if (lp.strike >= sp.strike || lc.strike <= sc.strike) continue;   // long must be further OTM
@@ -187,9 +251,12 @@ for (let di = 0; di < DATES.length; di++) {
           };
           const putNet = sideNet(legs[0], legs[1], true);
           const callNet = sideNet(legs[2], legs[3], false);
+          const putCredit = (sp.px - lp.px), callCredit = (sc.px - lc.px);
+          const putWing = sp.strike - lp.strike, callWing = lc.strike - sc.strike;
           emitRows.push([date, slotLabel(slotSec), shortD, longD, spot.toFixed(2), sp.strike, lp.strike, sc.strike, lc.strike,
             credit.toFixed(2), maxWing, grossPrem.toFixed(2), (spxAtSettle as number).toFixed(2), exitV.toFixed(2),
-            Math.round(pnlGross), friction.toFixed(2), Math.round(pnlNet), pnlNet > 0 ? 1 : 0, putNet, callNet].join(','));
+            Math.round(pnlGross), friction.toFixed(2), Math.round(pnlNet), pnlNet > 0 ? 1 : 0, putNet, callNet,
+            putCredit.toFixed(2), callCredit.toFixed(2), putWing, callWing].join(','));
         }
       }
     }
@@ -200,10 +267,12 @@ console.error(`  traded ${traded} days`);
 // ── Output ──────────────────────────────────────────────────────────────────
 const rows: any[] = [];
 for (const [k, b] of stats) {
-  const [slotSec, shortD, longD] = k.split('|');
+  const [slotSec, shortD, third] = k.split('|');
+  const isPts = third.startsWith('w');
   const losses = b.n - b.wins;
   rows.push({
-    slot: slotLabel(+slotSec), shortDelta: +shortD, longDelta: +longD, n: b.n,
+    slot: slotLabel(+slotSec), shortDelta: +shortD,
+    longDelta: isPts ? null : +third, wingPts: isPts ? +third.slice(1) : null, n: b.n,
     wr: +(100 * b.wins / b.n).toFixed(1),
     avgPnl: +(b.pnl / b.n).toFixed(2), totalPnl: +b.pnl.toFixed(0),
     avgWin: +(b.wins ? b.winSum / b.wins : 0).toFixed(2),
@@ -215,13 +284,15 @@ for (const [k, b] of stats) {
   });
 }
 const SYM = TARGET.symbol.toLowerCase();
-fs.writeFileSync(`/tmp/dc-slot-${SYM}.json`, JSON.stringify({
-  symbol: TARGET.symbol, selection: 'delta', days: DATES.length, dateRange: [DATES[0], DATES[DATES.length - 1]],
+fs.writeFileSync(`/tmp/${FPREFIX}-${SYM}.json`, JSON.stringify({
+  symbol: TARGET.symbol, selection: 'delta', side: SIDE, days: DATES.length, dateRange: [DATES[0], DATES[DATES.length - 1]],
   shortDeltas: SHORT_DELTAS, gaps: GAPS, itmClose: ITM_CLOSE, rows,
 }, null, 2));
-console.log(`Wrote /tmp/dc-slot-${SYM}.json (${rows.length} slot×delta rows).`);
+console.log(`Wrote /tmp/${FPREFIX}-${SYM}.json (${rows.length} slot×delta rows).`);
 if (EMIT) {
-  const hdr = 'date,slot,short_delta,long_delta,spot,short_put_k,long_put_k,short_call_k,long_call_k,credit,max_wing,gross_premium,settle_spx,exit_value,pnl_gross,friction,pnl_net,win,put_net,call_net';
-  fs.writeFileSync(`/tmp/dc-slot-trades-${SYM}.csv`, hdr + '\n' + emitRows.join('\n'));
-  console.log(`Wrote /tmp/dc-slot-trades-${SYM}.csv (${emitRows.length} rows).`);
+  const hdr = SIDE === 'condor'
+    ? 'date,slot,short_delta,long_delta,spot,short_put_k,long_put_k,short_call_k,long_call_k,credit,max_wing,gross_premium,settle_spx,exit_value,pnl_gross,friction,pnl_net,win,put_net,call_net'
+    : 'date,slot,short_delta,long_delta,wing_req,spot,short_k,long_k,credit,wing,gross_premium,settle_spx,exit_value,pnl_gross,friction,pnl_net,win,short_delta_bs';
+  fs.writeFileSync(`/tmp/${FPREFIX}-trades-${SYM}.csv`, hdr + '\n' + emitRows.join('\n'));
+  console.log(`Wrote /tmp/${FPREFIX}-trades-${SYM}.csv (${emitRows.length} rows).`);
 }

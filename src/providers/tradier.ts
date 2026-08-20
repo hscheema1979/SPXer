@@ -100,7 +100,10 @@ export async function fetchOptionsChain(
     last: o.last ?? null,
     volume: o.volume ?? null,
     openInterest: o.open_interest ?? null,
-    impliedVolatility: o.implied_volatility ?? null,
+    // Tradier carries IV inside the greeks object (ORATS): prefer the smoothed
+    // vol (smv_vol), then mid_iv. o.implied_volatility does not exist on the
+    // chain response, so the old mapping was always null.
+    impliedVolatility: o.greeks?.smv_vol ?? o.greeks?.mid_iv ?? o.implied_volatility ?? null,
     delta: o.greeks?.delta ?? null,
     gamma: o.greeks?.gamma ?? null,
     theta: o.greeks?.theta ?? null,

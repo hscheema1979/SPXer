@@ -912,9 +912,12 @@ try { existing = JSON.parse(fs.readFileSync(SWEEP_JSON,'utf8')); } catch {}
 // directional-IB rows from pre-fix geometry accumulated forever. Credit-spread
 // labels are NNoffM (1ITM/ATM/5OTM…) — never IB/IC — so a bare prefix is safe.
 const isIron = (s:string) => s.startsWith('IB') || s.startsWith('IC');
-// Drop our own (signal-based) iron rows, but PRESERVE time-based-iron rows
-// (signal "TIME …") emitted by time-iron-study.ts — they share the IB label.
-existing = existing.filter((r:any) => !(isIron(r.spread) && !String(r.signal||'').startsWith('TIME ')));
+// Foreign-namespace iron rows we must NOT drop: time-iron-study.ts ("TIME …")
+// and flat-fly-study.ts ("FLATFLY …") both emit IB-labelled rows into this same
+// file. They de-dup their own namespaces; we only own the signal-based ones.
+const isForeignIronNs = (s:any) => { const t = String(s||''); return t.startsWith('TIME ') || t.startsWith('FLATFLY '); };
+// Drop our own (signal-based) iron rows, but PRESERVE foreign-namespace iron rows.
+existing = existing.filter((r:any) => !(isIron(r.spread) && !isForeignIronNs(r.signal)));
 const merged = existing.concat(rows);
 fs.writeFileSync(SWEEP_JSON, JSON.stringify(merged));
 // Also write to the live viewer location so the dashboard picks it up
@@ -929,8 +932,9 @@ try { existingDaily = JSON.parse(fs.readFileSync(DAILY_JSON,'utf8')); } catch {}
 // Drop prior iron series keys
 for(const k of Object.keys(existingDaily.series||{})){
   const parts = k.split('|');
-  // Preserve time-based-iron series (signal "TIME …") even though spread is IB.
-  if(parts.length>=2 && (parts[1].startsWith('IB') || parts[1].startsWith('IC')) && !parts[0].startsWith('TIME ')) delete existingDaily.series[k];
+  // Preserve foreign-namespace iron series ("TIME …" / "FLATFLY …") even though spread is IB.
+  const foreignNs = parts[0].startsWith('TIME ') || parts[0].startsWith('FLATFLY ');
+  if(parts.length>=2 && (parts[1].startsWith('IB') || parts[1].startsWith('IC')) && !foreignNs) delete existingDaily.series[k];
 }
 const allDatesSet = new Set<string>(existingDaily.dates || []);
 for(const v of results.values()) for(const d of v.daily.keys()) allDatesSet.add(d);
@@ -966,7 +970,7 @@ const HOURLY_JSON = outPath('/tmp/iron_hourly.json', TARGET);
 const STUDIO_HOURLY = outPath(path.join(process.cwd(), 'scripts/autoresearch/output/spread-hourly.json'), TARGET);
 // Preserve time-based-iron hourly rows (signal "TIME …") from time-iron-study.ts.
 let hourlyOut:any[] = [];
-try { const raw = JSON.parse(fs.readFileSync(HOURLY_JSON,'utf8')); hourlyOut = (Array.isArray(raw)?raw:Object.values(raw)).filter((e:any)=>String(e?.signal||'').startsWith('TIME ')); } catch {}
+try { const raw = JSON.parse(fs.readFileSync(HOURLY_JSON,'utf8')); hourlyOut = (Array.isArray(raw)?raw:Object.values(raw)).filter((e:any)=>{ const s = String(e?.signal||''); return s.startsWith('TIME ') || s.startsWith('FLATFLY '); }); } catch {}
 for(const [k,v] of results){
   const [signal,structure,exit] = k.split('|');
   const byHour:Record<number, any> = {};

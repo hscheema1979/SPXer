@@ -61,7 +61,6 @@ async function generateReport(targetDate: string, inst: string) {
     FROM read_parquet('${barPath}')
     WHERE symbol = '${underlyingSymbol}' AND ts >= ${dayStart} AND ts <= ${dayEnd}
     ORDER BY ts ASC
-    LIMIT 1000
   `);
 
   if (underlyingBars.length === 0) {
@@ -99,11 +98,17 @@ async function generateReport(targetDate: string, inst: string) {
     if (bars.length === 0) continue;
 
     const offset = Math.round((contract.strike - atmStrike) / 5) * 5;
+    const barOpen = bars[0].open;
+    const barClose = bars[bars.length - 1].close;
+    const change = barClose - barOpen;
     contractData.push({
       symbol: contract.symbol,
       type: contract.type,
       strike: contract.strike,
       offset,
+      open: barOpen,
+      close: barClose,
+      change,
       bars: bars.map(b => [b.ts, b.open, b.high, b.low, b.close, b.volume]),
     });
   }
@@ -113,6 +118,7 @@ async function generateReport(targetDate: string, inst: string) {
     open: underlyingOpen,
     atmStrike,
     etOffset: etOffsetSec,
+    underlyingBars: underlyingBars.map(b => [b.ts, b.open, b.high, b.low, b.close, b.volume]),
     contracts: contractData,
   };
 

@@ -18,7 +18,9 @@ import {
   bsCallDelta,
   bsPutDelta,
   bsPutPrice,
+  bsCallPrice,
   impliedVolFromPut,
+  impliedVolFromCall,
 } from '../../scripts/diag/black-scholes';
 
 const near = (a: number, b: number, eps = 1e-3) => Math.abs(a - b) <= eps;
@@ -106,6 +108,47 @@ describe('impliedVolFromPut (round-trip inversion)', () => {
     const iv = impliedVolFromPut(price, 100, 95, 0.4, 0)!;
     const delta = bsPutDelta(100, 95, 0.4, iv, 0);
     const directDelta = bsPutDelta(100, 95, 0.4, vol, 0);
+    expect(near(delta, directDelta, 1e-3)).toBe(true);
+  });
+});
+
+describe('bsCallPrice', () => {
+  it('ATM 1y 20% vol call price ≈ put price (rate 0, parity)', () => {
+    // At rate 0 and S=K, call and put prices are equal.
+    expect(near(bsCallPrice(100, 100, 1, 0.20, 0), bsPutPrice(100, 100, 1, 0.20, 0), 1e-6)).toBe(true);
+  });
+  it('satisfies put-call parity at a non-ATM strike: C - P = S - K e^{-rT}', () => {
+    const lhs = bsCallPrice(100, 95, 0.5, 0.25, 0.03) - bsPutPrice(100, 95, 0.5, 0.25, 0.03);
+    const rhs = 100 - 95 * Math.exp(-0.03 * 0.5);
+    expect(near(lhs, rhs, 1e-6)).toBe(true);
+  });
+});
+
+describe('impliedVolFromCall (round-trip inversion)', () => {
+  it('recovers the vol used to generate the price', () => {
+    for (const vol of [0.10, 0.20, 0.35, 0.50]) {
+      const price = bsCallPrice(100, 105, 0.5, vol, 0);
+      const iv = impliedVolFromCall(price, 100, 105, 0.5, 0);
+      expect(iv).not.toBeNull();
+      expect(near(iv!, vol, 1e-3)).toBe(true);
+    }
+  });
+
+  it('returns null when price is below intrinsic (no real IV)', () => {
+    // Call intrinsic at S=120,K=100 is 20; a price below that is impossible.
+    expect(impliedVolFromCall(5, 120, 100, 0.25, 0)).toBeNull();
+  });
+
+  it('returns null for non-positive price', () => {
+    expect(impliedVolFromCall(0, 100, 100, 0.25, 0)).toBeNull();
+  });
+
+  it('price→IV→delta round-trips for an OTM call', () => {
+    const vol = 0.27;
+    const price = bsCallPrice(100, 110, 0.3, vol, 0);
+    const iv = impliedVolFromCall(price, 100, 110, 0.3, 0)!;
+    const delta = bsCallDelta(100, 110, 0.3, iv, 0);
+    const directDelta = bsCallDelta(100, 110, 0.3, vol, 0);
     expect(near(delta, directDelta, 1e-3)).toBe(true);
   });
 });
