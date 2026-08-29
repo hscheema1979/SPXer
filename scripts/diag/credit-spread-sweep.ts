@@ -16,6 +16,7 @@ dotenv.config({ quiet: true } as any);
 import { readBarCacheFile } from '../../src/replay/bar-cache-file';
 import { resolveSymbolTarget, listDatesFor, loadDay, outPath } from './sweep-symbol';
 import { shardDates, dumpResults, loadShardsInto, mergeStateFile, knownDates } from './sweep-shard';
+import { CAP_POLICIES, capDayNet, capSummary, type CapEvent } from './side-cap';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -64,6 +65,15 @@ const FILL_MODE = (process.env.SWEEP_FILL_MODE ?? 'hard') as 'soft' | 'hard';
 //   SWEEP_EXIT_GATE = 'shorts-fresh' (default) | 'none' (legacy optimistic, no gate).
 const EXIT_GATE = (process.env.SWEEP_EXIT_GATE ?? 'shorts-fresh') as 'shorts-fresh' | 'none';
 const GATE_SHORTS = EXIT_GATE === 'shorts-fresh';
+
+// ── Entry liquidity gate (shorts-fresh AT ENTRY) ────────────────────────────
+// The exit gate above protects TP/SL fills, but the ENTRY credit is still built
+// from optPx() last-prints which carry a stale close forward. On thin chains
+// (NDX 0DTE short legs are >2min stale ~40% of minutes) this fabricates a credit
+// you could never fill — the dominant source of phantom edge in the NDX audit.
+// SWEEP_ENTRY_STALE_SEC=N rejects entries where the SHORT leg's mark is older
+// than N sec at entryTs-1.  Default 0 = DISABLED (reproduces historical numbers).
+const ENTRY_STALE_SEC = process.env.SWEEP_ENTRY_STALE_SEC ? parseInt(process.env.SWEEP_ENTRY_STALE_SEC) : 0;
 const MIN_ALIGN = 3, CROSS_WIN = 60;
 const FAST0 = 3, SLOW0 = 15; // tier-0 unused for spreads but signal engine wants it
 const CUTOFF_HHMM = 6 * 3600; // 15:30 ET (sec from sess open)
@@ -275,6 +285,10 @@ function findStrike(c1:any, type:'C'|'P', targetK:number): string|null {
   return best;
 }
 function optPx(bars:any[],ts:number):number|null{for(let i=bars.length-1;i>=0;i--)if(bars[i].ts<=ts)return bars[i].close;return null;}
+// Age (sec) of the last printed bar at-or-before ts (Infinity if none). Bar cache
+// holds only real prints (no synthetic fill), so age = ts − lastBar.ts. Used by
+// the entry-staleness gate (ENTRY_STALE_SEC).
+function markAge(bars:any[],ts:number):number{for(let i=bars.length-1;i>=0;i--)if(bars[i].ts<=ts)return ts-bars[i].ts;return Infinity;}
 
 // Build the spread-value trajectory from entryTs+1 to endTs as a list of {ts, V}.
 // Linear walk through both bar arrays (O(N+M)), instead of per-timestamp re-scan.
@@ -377,6 +391,7 @@ interface Stat {
   peakConcurrent:number; evictions:number;
   durationSumSec:number;
   perHour: Map<number, HourBucket>;        // ET hour (9..15) → bucket
+  capNets:number[];                        // cumulative net under each CAP_POLICIES entry (per-side cap scan)
 }
 const results = new Map<string, Stat>();
 function recK(s:string,sp:string,ex:string){return `${s}|${sp}|${ex}`;}
@@ -393,7 +408,7 @@ function etHour(ts: number): number {
 
 function rec(s:string,sp:string,ex:string, pnl:number, date:string, credit:number, width:number, durationSec:number = 0, entryTs:number = 0, maxRisk:number = 0){
   const k=recK(s,sp,ex);
-  let v=results.get(k); if(!v){v={pnl:0,n:0,wins:0,daily:new Map(),creditSum:0,widthSum:0,peakConcurrent:0,evictions:0,durationSumSec:0,perHour:new Map()}; results.set(k,v);}
+  let v=results.get(k); if(!v){v={pnl:0,n:0,wins:0,daily:new Map(),creditSum:0,widthSum:0,peakConcurrent:0,evictions:0,durationSumSec:0,perHour:new Map(),capNets:new Array(CAP_POLICIES.length).fill(0)}; results.set(k,v);}
   v.pnl+=pnl; v.n++; if(pnl>0)v.wins++; v.daily.set(date,(v.daily.get(date)??0)+pnl);
   v.creditSum+=credit; v.widthSum+=width;
   v.durationSumSec += durationSec;
@@ -438,6 +453,11 @@ const EMIT_KEYS = (() => {
   if (!raw) return null;
   return new Set(raw.split(/[\n,]/).map(s=>s.trim()).filter(Boolean));
 })();
+// EMIT-ONLY: narrow the matrix to the emit keys and skip dashboard writes — fast
+// per-config trade re-emission under current code (without clobbering the sweep JSON).
+const EMIT_ONLY = !!process.env.SWEEP_EMIT_ONLY && !!EMIT_KEYS;
+const EMIT_SIGNALS = new Set<string>(), EMIT_SPREADS = new Set<string>(), EMIT_EXITS = new Set<string>();
+if (EMIT_KEYS) for (const k of EMIT_KEYS) { const [s, sp, e] = k.split('|'); EMIT_SIGNALS.add(s); EMIT_SPREADS.add(sp); EMIT_EXITS.add(e); }
 const EMIT_DIR = process.env.SWEEP_EMIT_TRADES_DIR
   || path.join(process.cwd(), 'scripts/autoresearch/output/spread-trades');
 const EMIT_BUFFER = new Map<string, Map<string, DayEmit>>();   // key → date → DayEmit
@@ -517,7 +537,7 @@ if (STATE_FILE && !process.env.SWEEP_MERGE && !process.env.SWEEP_SHARD) {
     console.error(`[incremental] no state file — bootstrap full ${SWEEP_DATES.length} dates`);
   }
 }
-console.error(`[${TARGET.symbol}] Dates: ${ALL_DATES.length}${process.env.SWEEP_SHARD ? ` (shard ${process.env.SWEEP_SHARD} → ${SWEEP_DATES.length})` : ''}`);
+console.error(`[${TARGET.symbol}] Dates: ${ALL_DATES.length}${process.env.SWEEP_SHARD ? ` (shard ${process.env.SWEEP_SHARD} → ${SWEEP_DATES.length})` : ''} | exitGate=${EXIT_GATE} entryStaleSec=${ENTRY_STALE_SEC || 'off'} fill=${FILL_MODE}`);
 
 for(let di=0; di<RUN_DATES.length; di++){
   const date = RUN_DATES[di];
@@ -535,9 +555,10 @@ for(let di=0; di<RUN_DATES.length; di++){
   const spxAtSettle = optPx(s1, settle);
 
   // Per-variant overlap event tracking (entry/exit timestamps) for peak-concurrent calc
-  const overlapMap = new Map<string, Array<{entry:number, exit:number}>>();
+  const overlapMap = new Map<string, CapEvent[]>();
 
   for(const sig of SIGNALS){
+    if (EMIT_ONLY && !EMIT_SIGNALS.has(sig.label)) continue;
     const {entries,dirLog} = detectSignals(date, sig, c1, p1);
     entries.sort((a,b) => a.entryTs - b.entryTs);
 
@@ -547,6 +568,7 @@ for(let di=0; di<RUN_DATES.length; di++){
       if(spxEntry==null) continue;
 
       for(const sp of SPREADS){
+        if (EMIT_ONLY && !EMIT_SPREADS.has(sp.label)) continue;
         const isCallSpread = ev.dir === 'bear';
         const shortLetter:'C'|'P' = isCallSpread ? 'C' : 'P';
         const shortK_target = isCallSpread ? spxEntry + sp.shortOffset : spxEntry - sp.shortOffset;
@@ -561,6 +583,9 @@ for(let di=0; di<RUN_DATES.length; di++){
         const shortEntry = optPx(shortBars, ev.entryTs-1);
         const longEntry  = optPx(longBars,  ev.entryTs-1);
         if(shortEntry==null||longEntry==null) continue;
+        // Entry staleness gate (default off). Credit realism depends on the SHORT
+        // leg being freshly printed; reject if its mark is too stale at entry.
+        if(ENTRY_STALE_SEC > 0 && markAge(shortBars, ev.entryTs-1) > ENTRY_STALE_SEC) continue;
         const credit = shortEntry - longEntry;
         if(credit <= 0.05) continue;
         if(credit > sp.width * 0.95) continue;
@@ -576,6 +601,7 @@ for(let di=0; di<RUN_DATES.length; di++){
         const traj = buildSpreadTrajectory(shortBars, longBars, ev.entryTs, settle);
 
         for(const ex of EXITS){
+          if (EMIT_ONLY && !EMIT_EXITS.has(ex.label)) continue;
           // Compute natural exit, record P&L immediately, push overlap event.
           const flipTsToUse = ex.useFlip ? flipTs : Infinity;
           const nat = applyExit(traj, settle, shortBars, longBars, credit, ex.tpFrac, ex.slMult, flipTsToUse,
@@ -588,7 +614,7 @@ for(let di=0; di<RUN_DATES.length; di++){
 
           const k = `${sig.label}|${sp.label}|${ex.label}`;
           let evs = overlapMap.get(k); if(!evs){evs=[]; overlapMap.set(k, evs);}
-          evs.push({entry: ev.entryTs, exit: nat.exitTs});
+          evs.push({entry: ev.entryTs, exit: nat.exitTs, side: isCallSpread ? 'call' : 'put', pnl});
 
           // Per-trade emission (no-op unless this variant key is in EMIT_KEYS).
           if (EMIT_KEYS && EMIT_KEYS.has(k)) {
@@ -640,6 +666,8 @@ for(let di=0; di<RUN_DATES.length; di++){
     let cur = 0, peak = 0;
     for(const e of events){ cur += e.delta; if(cur > peak) peak = cur; }
     if(peak > stat.peakConcurrent) stat.peakConcurrent = peak;
+    // Per-side cap scan: accumulate today's capped net for each policy (drop-and-wait).
+    for(let i=0;i<CAP_POLICIES.length;i++) stat.capNets[i] += capDayNet(evs, CAP_POLICIES[i].pool, CAP_POLICIES[i].c, CAP_POLICIES[i].p);
   }
   overlapMap.clear();
 }
@@ -667,7 +695,10 @@ function summary(){
       ? +(v.durationSumSec / (numActiveDays * SESSION_SEC)).toFixed(2)
       : 0;
     const avgRiskCapacity = +(avgConcurrent * avgMaxRisk).toFixed(0);
+    // Shared-pool cap scan (pool + per-side sub-cap): current baseline, best sub-cap at pool 11, best overall.
+    const cap = capSummary(v.capNets, 'call', 'put');
     rows.push({signal,spread,exit,pnl:v.pnl,n:v.n,wr,dd:mdd,ratio,pos,
+      ...cap,
       avgCredit:+avgCredit.toFixed(3),avgMaxRisk:+avgMaxRisk.toFixed(0),
       avgPnlPerTrade:+(v.pnl/Math.max(1,v.n)).toFixed(2),
       peakConcurrent:v.peakConcurrent, evictions:v.evictions,
@@ -676,7 +707,9 @@ function summary(){
       avgDurMin:+avgDurMin.toFixed(1),
       // Fill-model provenance — see iron-sweep.ts for context.
       fillModel: FILL_MODE,
-      fillHalfSpread: CLOSE_HALFSPREAD_PER_LEG});
+      fillHalfSpread: CLOSE_HALFSPREAD_PER_LEG,
+      exitGate: EXIT_GATE,
+      entryStaleSec: ENTRY_STALE_SEC});
   }
   rows.sort((a,b)=>b.pnl-a.pnl);
   console.log(`\n=== CREDIT-SPREAD SWEEP (look-ahead protected, $${SLIPPAGE_PER_SPREAD}/RT slippage) ===`);
@@ -805,6 +838,8 @@ function summary(){
 // shards don't share the EMIT_BUFFER. Outside the summary() gate so it fires
 // in both shard-worker and serial runs.
 flushTrades();
+
+if (EMIT_ONLY) process.exit(0);   // emit-only: skip summary + dashboard writes
 
 if (process.env.SWEEP_SHARD_OUT) {
   // Worker: dump this shard's partial accumulator; do NOT run the

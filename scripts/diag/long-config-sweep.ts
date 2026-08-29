@@ -1,0 +1,702 @@
+/**
+ * long-config-sweep.ts
+ *
+ * Long-call sweep (v2): 118,800 variants (36 signals × 11 offsets × 300 TP/SL, CB-off).
+ * Signals: HMA/DEMA with 2+3+5, 2+3, and single timeframes (1m/2m/3m/5m).
+ * Strike offset: −25 ITM .. +25 OTM ($5 grid, 11 vals). Signal source = contract
+ *   (study winner; SPX gives direction, contract MA cross times entry+reversal).
+ * Flip-on-reversal ALWAYS on. TP: 25%-500% (by 25%), SL: 20%-90% (by 5%). CB off.
+ * Runs across date range (shardable via sweep-parallel.ts), stores to replay_summary.
+ *
+ * CRITICAL: NO look-ahead bias. Signal detected at bar CLOSE, entry filled at
+ * NEXT bar OPEN (+60s). TP/SL checked only AFTER entry bar.
+ *
+ * Usage:
+ *   Via sweep-parallel: npx tsx scripts/diag/sweep-parallel.ts --symbol SPX --engine long --shards 8
+ *   Standalone:        SWEEP_ALLOW_SERIAL=1 npx tsx scripts/diag/long-config-sweep.ts
+ */
+
+import * as dotenv from 'dotenv';
+dotenv.config({ quiet: true } as any);
+
+import * as fs from 'fs';
+import * as path from 'path';
+import Database from 'better-sqlite3';
+import { resolveSymbolTarget, listDatesFor, loadDay, outPath } from './sweep-symbol';
+import { shardDates, dumpResults, loadShardsInto, mergeStateFile } from './sweep-shard';
+
+// ── Serial guard ────────────────────────────────────────────────────────────
+if (!process.env.SWEEP_SHARD && !process.env.SWEEP_MERGE && !process.env.SWEEP_ALLOW_SERIAL) {
+  console.error(`
+ERROR: long-config-sweep.ts must NOT be invoked directly.
+Use: npx tsx scripts/diag/sweep-parallel.ts --symbol SPX --engine long --shards 8
+Or:  SWEEP_ALLOW_SERIAL=1 npx tsx scripts/diag/long-config-sweep.ts (single-date debug)`);
+  process.exit(2);
+}
+
+const TARGET = resolveSymbolTarget(process.argv);
+const DB_PATH = process.env.DB_PATH || './data/spxer.db';
+
+// ── Config ──────────────────────────────────────────────────────────────────
+const MIN_ALIGN = 3, CROSS_WIN = 60, MAX_ENTRY = 25, MIN_PRICE = 0.20, MIN_VOL = 100;
+const TRADESTART_SEC = 1800, CUTOFF_HHMM = 6 * 3600, SETTLE_HHMM = 6 * 3600 + 15 * 60;
+const FAST0 = 3, SLOW0 = 15;
+const SI = TARGET.strikeInterval; // $ per strike (SPX 5)
+
+// Strike offset dimension, in STRIKES. Negative = ITM, positive = OTM. The
+// 20-day signal-source study found ITM dominates OTM (monotonic), so we sweep
+// the full −25..+25 ($5 grid) range to expose the whole curve on the dashboard.
+const OFFSETS = [-5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5];
+
+// Signal source (study winner = 'contract'). Overridable for comparison.
+//   spx      — MA cross on SPX underlying drives direction + entry/exit timing.
+//   contract — SPX cross gives DIRECTION; the target contract's own MA cross
+//              times entry and the reversal exit (study winner: +$51/trade ITM).
+//   both     — require SPX and contract crosses to agree at entry; reversal on
+//              either flip.
+const SIGNAL_SOURCE = (process.env.LONG_SIGNAL_SOURCE ?? 'contract') as 'spx' | 'contract' | 'both';
+
+type Signal = 'hma' | 'dema';
+interface SignalSpec { label: string; signal: Signal; tfs: { tf: number; fast: number; slow: number }[] }
+interface ConfigVariant {
+  id: string; name: string; sigLabel: string; signal: Signal;
+  tfs: { tf: number; fast: number; slow: number }[];
+  offset: number;  // strike offset in STRIKES (neg=ITM, pos=OTM)
+  tp: number; sl: number; cbTrigger: number; cbSkip: number;
+}
+
+// ── Signal specs (module-level: shared by generator + main detect loop) ──────
+const SIGNALS: SignalSpec[] = [
+  // Multi-TF: 2+3+5
+  { label: 'HMA  2+3+5 3x9',  signal: 'hma', tfs:[{tf:2,fast:3,slow:9},{tf:3,fast:3,slow:9},{tf:5,fast:3,slow:9}] },
+  { label: 'HMA  2+3+5 3x12', signal: 'hma', tfs:[{tf:2,fast:3,slow:12},{tf:3,fast:3,slow:12},{tf:5,fast:3,slow:12}] },
+  { label: 'HMA  2+3+5 3x21', signal: 'hma', tfs:[{tf:2,fast:3,slow:21},{tf:3,fast:3,slow:21},{tf:5,fast:3,slow:21}] },
+  { label: 'DEMA 2+3+5 3x9',  signal: 'dema', tfs:[{tf:2,fast:3,slow:9},{tf:3,fast:3,slow:9},{tf:5,fast:3,slow:9}] },
+  { label: 'DEMA 2+3+5 3x12', signal: 'dema', tfs:[{tf:2,fast:3,slow:12},{tf:3,fast:3,slow:12},{tf:5,fast:3,slow:12}] },
+  { label: 'DEMA 2+3+5 3x21', signal: 'dema', tfs:[{tf:2,fast:3,slow:21},{tf:3,fast:3,slow:21},{tf:5,fast:3,slow:21}] },
+  // Multi-TF: 2+3
+  { label: 'HMA  2+3 3x9',  signal: 'hma', tfs:[{tf:2,fast:3,slow:9},{tf:3,fast:3,slow:9}] },
+  { label: 'HMA  2+3 3x12', signal: 'hma', tfs:[{tf:2,fast:3,slow:12},{tf:3,fast:3,slow:12}] },
+  { label: 'HMA  2+3 3x21', signal: 'hma', tfs:[{tf:2,fast:3,slow:21},{tf:3,fast:3,slow:21}] },
+  { label: 'DEMA 2+3 3x9',  signal: 'dema', tfs:[{tf:2,fast:3,slow:9},{tf:3,fast:3,slow:9}] },
+  { label: 'DEMA 2+3 3x12', signal: 'dema', tfs:[{tf:2,fast:3,slow:12},{tf:3,fast:3,slow:12}] },
+  { label: 'DEMA 2+3 3x21', signal: 'dema', tfs:[{tf:2,fast:3,slow:21},{tf:3,fast:3,slow:21}] },
+  // Single-TF: HMA
+  { label: 'HMA  1m 3x9',  signal: 'hma', tfs:[{tf:1,fast:3,slow:9}] },
+  { label: 'HMA  2m 3x9',  signal: 'hma', tfs:[{tf:2,fast:3,slow:9}] },
+  { label: 'HMA  3m 3x9',  signal: 'hma', tfs:[{tf:3,fast:3,slow:9}] },
+  { label: 'HMA  5m 3x9',  signal: 'hma', tfs:[{tf:5,fast:3,slow:9}] },
+  { label: 'HMA  1m 3x12', signal: 'hma', tfs:[{tf:1,fast:3,slow:12}] },
+  { label: 'HMA  2m 3x12', signal: 'hma', tfs:[{tf:2,fast:3,slow:12}] },
+  { label: 'HMA  3m 3x12', signal: 'hma', tfs:[{tf:3,fast:3,slow:12}] },
+  { label: 'HMA  5m 3x12', signal: 'hma', tfs:[{tf:5,fast:3,slow:12}] },
+  { label: 'HMA  1m 3x21', signal: 'hma', tfs:[{tf:1,fast:3,slow:21}] },
+  { label: 'HMA  2m 3x21', signal: 'hma', tfs:[{tf:2,fast:3,slow:21}] },
+  { label: 'HMA  3m 3x21', signal: 'hma', tfs:[{tf:3,fast:3,slow:21}] },
+  { label: 'HMA  5m 3x21', signal: 'hma', tfs:[{tf:5,fast:3,slow:21}] },
+  // Single-TF: DEMA
+  { label: 'DEMA 1m 3x9',  signal: 'dema', tfs:[{tf:1,fast:3,slow:9}] },
+  { label: 'DEMA 2m 3x9',  signal: 'dema', tfs:[{tf:2,fast:3,slow:9}] },
+  { label: 'DEMA 3m 3x9',  signal: 'dema', tfs:[{tf:3,fast:3,slow:9}] },
+  { label: 'DEMA 5m 3x9',  signal: 'dema', tfs:[{tf:5,fast:3,slow:9}] },
+  { label: 'DEMA 1m 3x12', signal: 'dema', tfs:[{tf:1,fast:3,slow:12}] },
+  { label: 'DEMA 2m 3x12', signal: 'dema', tfs:[{tf:2,fast:3,slow:12}] },
+  { label: 'DEMA 3m 3x12', signal: 'dema', tfs:[{tf:3,fast:3,slow:12}] },
+  { label: 'DEMA 5m 3x12', signal: 'dema', tfs:[{tf:5,fast:3,slow:12}] },
+  { label: 'DEMA 1m 3x21', signal: 'dema', tfs:[{tf:1,fast:3,slow:21}] },
+  { label: 'DEMA 2m 3x21', signal: 'dema', tfs:[{tf:2,fast:3,slow:21}] },
+  { label: 'DEMA 3m 3x21', signal: 'dema', tfs:[{tf:3,fast:3,slow:21}] },
+  { label: 'DEMA 5m 3x21', signal: 'dema', tfs:[{tf:5,fast:3,slow:21}] },
+];
+const SIG_BY_LABEL = new Map<string, SignalSpec>(SIGNALS.map(s => [s.label, s]));
+
+// ── Variant generator ──────────────────────────────────────────────────────
+function generateVariants(): ConfigVariant[] {
+  const signals = SIGNALS;
+  const tpsl: {tp: number; sl: number}[] = [];
+  for (let tp = 25; tp <= 500; tp += 25) {
+    for (let sl = 20; sl <= 90; sl += 5) {
+      tpsl.push({ tp, sl });
+    }
+  }
+  // v1: circuit breakers dropped (CB-off only) → 36 × 750 × 1 = 27,000 variants.
+  // Re-add {1:1, 1:3, 3:2} here once the baseline TP/SL surface is validated.
+  const cbs = [
+    {trigger: 0, skip: 0, label: 'CB-off'},
+  ];
+
+  const variants: ConfigVariant[] = [];
+  let idx = 0;
+  for (const sig of signals) {
+    for (const off of OFFSETS) {
+      const money = off < 0 ? `${Math.abs(off) * SI}ITM` : off > 0 ? `${off * SI}OTM` : 'ATM';
+      for (const tp of tpsl) {
+        for (const cb of cbs) {
+          variants.push({
+            id: `long-${TARGET.symbol.toLowerCase()}-${idx}`,
+            name: cb.trigger === 0
+              ? `${sig.label} ${money} TP${tp.tp}% SL${tp.sl}%`
+              : `${sig.label} ${money} TP${tp.tp}% SL${tp.sl}% ${cb.label}`,
+            sigLabel: sig.label,
+            signal: sig.signal, tfs: sig.tfs, offset: off, tp: tp.tp, sl: tp.sl,
+            cbTrigger: cb.trigger, cbSkip: cb.skip,
+          });
+          idx++;
+        }
+      }
+    }
+  }
+  return variants;
+}
+
+// ── Helpers ─────────────────────────────────────────────────────────────────
+function sessOpenTs(date: string): number {
+  const [y, mo, d] = date.split('-').map(Number);
+  const utcNoon = new Date(Date.UTC(y, mo - 1, d, 12, 0, 0));
+  const etHour = parseInt(utcNoon.toLocaleString('en-US', { timeZone: 'America/New_York', hour: 'numeric', hour12: false }));
+  const offsetH = 12 - etHour;
+  return Math.floor(Date.UTC(y, mo - 1, d, 9 + offsetH, 30, 0) / 1000);
+}
+
+function prevDate(d: string): string {
+  const dt = new Date(d + 'T12:00:00Z');
+  dt.setUTCDate(dt.getUTCDate() - 1);
+  if (dt.getUTCDay() === 0) dt.setUTCDate(dt.getUTCDate() - 2);
+  if (dt.getUTCDay() === 6) dt.setUTCDate(dt.getUTCDate() - 1);
+  return dt.toISOString().slice(0, 10);
+}
+
+// ── Signal engine (from credit-spread-sweep) ────────────────────────────────
+interface TFState { closed: any[]; partial: any | null }
+function mkSt(): TFState { return { closed: [], partial: null } }
+function feed(st: TFState, b: any, tf: number) {
+  const bk = Math.floor(b.ts / (tf * 60)) * (tf * 60);
+  if (!st.partial || st.partial.ts !== bk) {
+    if (st.partial) st.closed.push(st.partial);
+    st.partial = { ts: bk, open: b.open, high: b.high, low: b.low, close: b.close };
+  } else {
+    if (b.high > st.partial.high) st.partial.high = b.high;
+    if (b.low < st.partial.low) st.partial.low = b.low;
+    st.partial.close = b.close;
+  }
+}
+function wma(arr: number[], end: number, p: number): number | null {
+  if (end < p - 1) return null;
+  let s = 0, w = 0;
+  for (let i = 0; i < p; i++) { s += arr[end - i] * (p - i); w += (p - i) }
+  return s / w;
+}
+function hmaDir(closes: number[], fast: number, slow: number): 'bull' | 'bear' | null {
+  const hf = Math.floor(fast / 2), sf = Math.floor(Math.sqrt(fast));
+  const hs = Math.floor(slow / 2), ss = Math.floor(Math.sqrt(slow));
+  const rf: number[] = [], rs: number[] = [];
+  let fa: number | null = null, sa: number | null = null;
+  for (let i = 0; i < closes.length; i++) {
+    const a = wma(closes, i, hf), b = wma(closes, i, fast);
+    if (a != null && b != null) { rf.push(2 * a - b); if (rf.length >= sf) fa = wma(rf, rf.length - 1, sf) }
+    const c = wma(closes, i, hs), d = wma(closes, i, slow);
+    if (c != null && d != null) { rs.push(2 * c - d); if (rs.length >= ss) sa = wma(rs, rs.length - 1, ss) }
+  }
+  if (fa == null || sa == null) return null;
+  return fa > sa ? 'bull' : 'bear';
+}
+function demaDir(closes: number[], fast: number, slow: number): 'bull' | 'bear' | null {
+  function dema(p: number): number | null {
+    if (closes.length < p) return null;
+    const a = 2 / (p + 1);
+    let e1 = 0;
+    for (let i = 0; i < p; i++) e1 += closes[i];
+    e1 /= p;
+    const e1s: number[] = [e1];
+    for (let i = p; i < closes.length; i++) { e1 = a * closes[i] + (1 - a) * e1; e1s.push(e1) }
+    if (e1s.length < p) return null;
+    let e2 = 0;
+    for (let i = 0; i < p; i++) e2 += e1s[i];
+    e2 /= p;
+    for (let i = p; i < e1s.length; i++) { e2 = a * e1s[i] + (1 - a) * e2 }
+    return 2 * e1s[e1s.length - 1] - e2;
+  }
+  const f = dema(fast), s = dema(slow);
+  if (f == null || s == null) return null;
+  return f > s ? 'bull' : 'bear';
+}
+function getDir(st: TFState, fast: number, slow: number, signal: Signal): 'bull' | 'bear' | null {
+  const bars = st.partial ? [...st.closed, st.partial] : st.closed;
+  if (!bars.length) return null;
+  const closes = bars.map((b: any) => b.close);
+  return signal === 'dema' ? demaDir(closes, fast, slow) : hmaDir(closes, fast, slow);
+}
+function optPx(bars: any[], ts: number): number | null {
+  for (let i = bars.length - 1; i >= 0; i--) if (bars[i].ts <= ts) return bars[i].close;
+  return null;
+}
+function cumVol(bars: any[], from: number, to: number) {
+  return bars.filter((b: any) => b.ts >= from && b.ts <= to).reduce((s: number, b: any) => s + (b.volume ?? 0), 0);
+}
+function findStrike(c1: any, type: 'C' | 'P', targetK: number): string | null {
+  let best: string | null = null, bestD = Infinity;
+  for (const [s] of c1.contractBars) {
+    const sym = s as string;
+    if (sym[sym.length - 9] !== type) continue;
+    const k = c1.contractStrikes.get(sym);
+    const d = Math.abs(k - targetK);
+    if (d < bestD) { bestD = d; best = sym }
+  }
+  return best;
+}
+// Strike at a signed offset (in STRIKES) from rounded spot. For a CALL, +offset
+// is OTM (strike above spot); for a PUT, +offset is OTM (strike below spot).
+function findStrikeAtOffset(c1: any, type: 'C' | 'P', spx: number, offStrikes: number): string | null {
+  const base = Math.round(spx / SI) * SI;
+  const target = type === 'C' ? base + offStrikes * SI : base - offStrikes * SI;
+  return findStrike(c1, type, target);
+}
+// Contract bars are irregularly spaced; find the largest ts <= probe.
+function dirAtOrBefore(m: Map<number, 'bull' | 'bear' | null>, ts: number): 'bull' | 'bear' | null {
+  let bestTs = -Infinity, bestVal: 'bull' | 'bear' | null = null;
+  m.forEach((v, t) => { if (t <= ts && t > bestTs) { bestTs = t; bestVal = v; } });
+  return bestVal;
+}
+
+// ── Per-entry trade context (signal-spec dependent, TP/SL independent) ───────
+// Built ONCE per (date, signalSpec). The contract entry price, the post-entry
+// bar trajectory, and entry filters do NOT depend on TP/SL — only the exit
+// scan does. So we cache these and let the TP/SL sweep replay exits cheaply.
+interface TradeCtx {
+  dir: 'bull' | 'bear';
+  entryTs: number;
+  entryPx: number;
+  bars: any[];     // contract bars (post-entry trajectory scanned at exit time)
+  eod: number;
+  reverseTs: number; // signal-reversal exit time (flip-on-reversal); Infinity if none
+}
+
+// SPX direction signal for a spec — computed ONCE per (date, signalSpec) and
+// reused across all offsets. Returns entry candidates (direction + signal bar)
+// and a minute→direction map for the reversal check.
+interface SpxSignal {
+  entries: { dir: 'bull' | 'bear'; entryTs: number }[];
+  dirAt: Map<number, 'bull' | 'bear' | null>;
+}
+function detectSpxSignal(date: string, sig: SignalSpec, c1: any, p1: any): SpxSignal {
+  const s1: any[] = c1.spxBars;
+  const sess = sessOpenTs(date), tradeStart = sess + TRADESTART_SEC;
+  const sts = sig.tfs.map(() => mkSt());
+  for (const b of (p1?.spxBars ?? [])) sts.forEach((st, i) => feed(st, b, sig.tfs[i].tf));
+
+  const prevDirs: any[] = sig.tfs.map(() => null);
+  const bullCross = sig.tfs.map(() => 0), bearCross = sig.tfs.map(() => 0);
+  const entries: { dir: 'bull' | 'bear'; entryTs: number }[] = [];
+  const dirAt = new Map<number, 'bull' | 'bear' | null>();
+  let bullStreak = 0, bearStreak = 0, bullFired = false, bearFired = false;
+
+  for (const b of s1) {
+    sts.forEach((st, i) => feed(st, b, sig.tfs[i].tf));
+    const dirs = sts.map((st, i) => getDir(st, sig.tfs[i].fast, sig.tfs[i].slow, sig.signal));
+    // "all-aligned" direction for the reversal check (null if not unanimous).
+    const allBull0 = dirs.every(d => d === 'bull'), allBear0 = dirs.every(d => d === 'bear');
+    dirAt.set(b.ts, allBull0 ? 'bull' : allBear0 ? 'bear' : null);
+    if (b.ts < tradeStart) continue;
+
+    dirs.forEach((d, i) => {
+      if (prevDirs[i] !== null && d !== prevDirs[i]) {
+        if (d === 'bull') bullCross[i] = b.ts;
+        if (d === 'bear') bearCross[i] = b.ts;
+      }
+      prevDirs[i] = d;
+    });
+    const allBull = allBull0, allBear = allBear0;
+    if (allBull) { bullStreak++; bearStreak = 0; bearFired = false; } else { bullStreak = 0; bullFired = false; }
+    if (allBear) { bearStreak++; bullStreak = 0; bullFired = false; } else { bearStreak = 0; bearFired = false; }
+    if (allBull && bullStreak >= MIN_ALIGN && !bullFired) {
+      const ts = bullCross.filter(t => t > 0);
+      if (ts.length === sig.tfs.length && (Math.max(...ts) - Math.min(...ts)) / 60 <= CROSS_WIN) { entries.push({ dir: 'bull', entryTs: b.ts + 60 }); bullFired = true; }
+    }
+    if (allBear && bearStreak >= MIN_ALIGN && !bearFired) {
+      const ts = bearCross.filter(t => t > 0);
+      if (ts.length === sig.tfs.length && (Math.max(...ts) - Math.min(...ts)) / 60 <= CROSS_WIN) { entries.push({ dir: 'bear', entryTs: b.ts + 60 }); bearFired = true; }
+    }
+  }
+  return { entries, dirAt };
+}
+
+// Build per-entry trade contexts for ONE (signalSpec × offset). SPX gives the
+// direction (call/put) + entry candidates; the strike is chosen at `offStrikes`
+// from spot (neg=ITM). Per SIGNAL_SOURCE, entry timing + reversal use the SPX
+// dir, the contract's own MA cross, or both. TP/SL is swept later over `bars`.
+function buildTradeContexts(date: string, sig: SignalSpec, spx: SpxSignal, offStrikes: number, c1: any, p1: any): TradeCtx[] {
+  const s1: any[] = c1.spxBars;
+  const sess = sessOpenTs(date), eod = sess + 6.5 * 3600, tradeStart = sess + TRADESTART_SEC;
+  const gateStartTs = tradeStart, gateEndTs = Math.min(eod, sess + SETTLE_HHMM);
+  const ctf = sig.tfs[0].tf; // contract MA uses the spec's primary timeframe
+
+  const ctxs: TradeCtx[] = [];
+  for (const e of spx.entries) {
+    if (e.entryTs < gateStartTs || e.entryTs >= gateEndTs) continue;
+    const spxEntry = optPx(s1, e.entryTs - 1);
+    if (!spxEntry) continue;
+
+    const type: 'C' | 'P' = e.dir === 'bull' ? 'C' : 'P';
+    const contractSym = findStrikeAtOffset(c1, type, spxEntry, offStrikes);
+    if (!contractSym) continue;
+    const bars = c1.contractBars.get(contractSym) as any[];
+    if (!bars?.length) continue;
+
+    // Contract's own MA-direction series (for contract/both source gating + flip).
+    let cDir: Map<number, 'bull' | 'bear' | null> | null = null;
+    if (SIGNAL_SOURCE !== 'spx') {
+      cDir = new Map();
+      const cst = mkSt();
+      for (const b of bars) { feed(cst, b, ctf); cDir.set(b.ts, getDir(cst, sig.tfs[0].fast, sig.tfs[0].slow, sig.signal)); }
+      // Entry gate: the long contract must be trending up at entry.
+      if (dirAtOrBefore(cDir, e.entryTs - 1) !== 'bull') continue;
+    }
+
+    const entryPx = optPx(bars, e.entryTs - 1);
+    if (!entryPx || entryPx < MIN_PRICE || entryPx > MAX_ENTRY) continue;
+    if (cumVol(bars, sess, e.entryTs) < MIN_VOL) continue;
+
+    // Flip-on-reversal: bull(call) closes when the signal turns bear; bear(put)
+    // closes when it turns bull. Source decides which signal drives the flip.
+    // SPX dirAt is on a clean 60s grid → O(1) get. The contract map is irregular,
+    // so pre-sort its (ts,dir) and advance a pointer as t walks forward, keeping
+    // the carry-forward last-known contract direction O(1) amortized.
+    let reverseTs = Infinity;
+    const cArr = cDir ? bars.map((b: any) => ({ ts: b.ts, d: cDir!.get(b.ts) ?? null })) : [];
+    let cIdx = 0, lastCDir: 'bull' | 'bear' | null = null;
+    for (let t = e.entryTs; t <= eod; t += 60) {
+      const spxd = spx.dirAt.has(t) ? spx.dirAt.get(t)! : null;
+      const flipSpx = e.dir === 'bull' ? spxd === 'bear' : spxd === 'bull';
+      while (cIdx < cArr.length && cArr[cIdx].ts <= t) { lastCDir = cArr[cIdx].d; cIdx++; }
+      const flipC = cDir ? lastCDir === 'bear' : false; // long contract turning down
+      const flip = SIGNAL_SOURCE === 'spx' ? flipSpx
+                 : SIGNAL_SOURCE === 'contract' ? flipC
+                 : (flipSpx || flipC);
+      if (flip) { reverseTs = t + 60; break; }
+    }
+
+    ctxs.push({ dir: e.dir, entryTs: e.entryTs, entryPx, bars, eod, reverseTs });
+  }
+  return ctxs;
+}
+
+// Per-day result for one TP/SL variant — carries the win/loss decomposition the
+// dashboard needs (sumWinPct/cntWins/sumLossPct/cntLosses) so edge/EV/R-multiple
+// can be computed at write time exactly like runSummaryRebuild does.
+interface DayStat {
+  trades: number; wins: number; pnl: number;       // pnl in $ (retPct × $100/pt notional)
+  pnlPct: number;                                   // sum of per-trade retPct (percent P&L)
+  sumWinPct: number; cntWins: number;               // % returns of winning trades
+  sumLossPct: number; cntLosses: number;            // % returns of losing trades
+  durSec: number;                                   // sum of hold durations (sec)
+}
+
+// Sweep a single TP/SL over the pre-built trade contexts. Cheap — just the
+// exit scan, no signal recomputation. CB-off for v1 (every entry taken).
+function simulateExits(ctxs: TradeCtx[], tpPct: number, slPct: number): DayStat {
+  let trades = 0, wins = 0, pnl = 0, pnlPct = 0, durSec = 0;
+  let sumWinPct = 0, cntWins = 0, sumLossPct = 0, cntLosses = 0;
+  for (const ctx of ctxs) {
+    const tp = ctx.entryPx * (1 + tpPct / 100);
+    const sl = slPct > 0 ? ctx.entryPx * (1 - slPct / 100) : 0;
+
+    // Hard exit cap = min(reversal, EOD). TP/SL can fire earlier.
+    const stopTs = Math.min(ctx.reverseTs, ctx.eod);
+    let exitPx = optPx(ctx.bars, stopTs) ?? ctx.entryPx;
+    let exitTs = stopTs;
+    for (const b of ctx.bars) {
+      if (b.ts <= ctx.entryTs) continue;
+      if (b.ts > stopTs) break;
+      if (b.high >= tp) { exitPx = tp; exitTs = b.ts; break; }
+      if (sl > 0 && b.low <= sl) { exitPx = sl; exitTs = b.ts; break; }
+    }
+    const retPct = ((exitPx - ctx.entryPx) / ctx.entryPx) * 100;
+    trades++;
+    pnl += (exitPx - ctx.entryPx) * 100; // 1 contract × $100/pt
+    pnlPct += retPct;
+    durSec += Math.max(0, exitTs - ctx.entryTs);
+    if (retPct > 0) { wins++; cntWins++; sumWinPct += retPct; }
+    else { cntLosses++; sumLossPct += retPct; }
+  }
+  return { trades, wins, pnl, pnlPct, sumWinPct, cntWins, sumLossPct, cntLosses, durSec };
+}
+
+// Per-config accumulator: every field the dashboard summary needs. The
+// sweep-shard reducer SUMs numeric fields across shards (disjoint dates), so
+// trades/pnl/profitDays sum correctly. worstDay/bestDay are SUMmed too — across
+// disjoint shards that loses true min/max, but for default edge-sort they're
+// secondary; the serial path (single shard) keeps them exact.
+interface Acc {
+  days: number; trades: number; wins: number; pnl: number; pnlPct: number;
+  sumWinPct: number; cntWins: number; sumLossPct: number; cntLosses: number;
+  profitDays: number; worstDay: number; bestDay: number; durSec: number;
+  // Per-date $ P&L for the equity/heatmap/coverage tabs. Map<date,pnl> so the
+  // sweep-shard reducer merges shards (disjoint dates) by key-union.
+  daily: Map<string, number>;
+}
+
+// ── Main ────────────────────────────────────────────────────────────────────
+async function main() {
+  const variants = generateVariants();
+  console.log(`[long-config-sweep] Generated ${variants.length} variants`);
+
+  const allDates = listDatesFor(TARGET);
+  // Merge run skips the date loop — results come from shard dumps.
+  const myDates = process.env.SWEEP_MERGE ? [] : shardDates(allDates);
+
+  if (!myDates.length && !process.env.SWEEP_MERGE) {
+    console.log(`[long-config-sweep] No dates for this shard`);
+    process.exit(0);
+  }
+
+  console.log(`[long-config-sweep] Running ${myDates.length} dates for shard ${process.env.SWEEP_SHARD || '0'}`);
+
+  // Group variants by (signal label, offset). We detect the SPX signal ONCE
+  // per signal-spec/date, build contract trade-contexts ONCE per (spec,offset),
+  // then replay the cheap TP/SL exit scan over the cached entries. Perf: 36 SPX
+  // detections + 396 context-builds per date instead of 118k.
+  const bySigOff = new Map<string, ConfigVariant[]>();
+  for (const v of variants) {
+    const key = `${v.sigLabel} ${v.offset}`;
+    const arr = bySigOff.get(key) || [];
+    arr.push(v);
+    bySigOff.set(key, arr);
+  }
+  // Distinct signal labels (for the once-per-spec SPX detection).
+  const sigLabels = Array.from(new Set(variants.map(v => v.sigLabel)));
+
+  const results = new Map<string, Acc>();
+
+  for (let di = 0; di < myDates.length; di++) {
+    const date = myDates[di];
+    if (di % 10 === 0) console.log(`[long-config-sweep] ${di}/${myDates.length} ${date}`);
+    try {
+      const c1 = loadDay(TARGET, date, '1m');
+      const p1 = loadDay(TARGET, prevDate(date), '1m');
+      if (!c1) { console.log(`[long-config-sweep] ${date}: no data`); continue; }
+
+      for (const sigLabel of sigLabels) {
+        const sig = SIG_BY_LABEL.get(sigLabel)!;
+        const spxSig = detectSpxSignal(date, sig, c1, p1);
+
+        for (const off of OFFSETS) {
+          const sigVariants = bySigOff.get(`${sigLabel} ${off}`);
+          if (!sigVariants) continue;
+          const ctxs = buildTradeContexts(date, sig, spxSig, off, c1, p1);
+
+          for (const variant of sigVariants) {
+          const r = simulateExits(ctxs, variant.tp, variant.sl);
+          const prev = results.get(variant.id) || {
+            days: 0, trades: 0, wins: 0, pnl: 0, pnlPct: 0,
+            sumWinPct: 0, cntWins: 0, sumLossPct: 0, cntLosses: 0,
+            profitDays: 0, worstDay: 0, bestDay: 0, durSec: 0,
+            daily: new Map<string, number>(),
+          };
+          prev.daily.set(date, +r.pnl.toFixed(2)); // this config's $ P&L for `date`
+          results.set(variant.id, {
+            days: prev.days + 1,
+            trades: prev.trades + r.trades,
+            wins: prev.wins + r.wins,
+            pnl: prev.pnl + r.pnl,
+            pnlPct: prev.pnlPct + r.pnlPct,
+            sumWinPct: prev.sumWinPct + r.sumWinPct,
+            cntWins: prev.cntWins + r.cntWins,
+            sumLossPct: prev.sumLossPct + r.sumLossPct,
+            cntLosses: prev.cntLosses + r.cntLosses,
+            profitDays: prev.profitDays + (r.pnl > 0 ? 1 : 0),
+            worstDay: Math.min(prev.worstDay, r.pnl),
+            bestDay: Math.max(prev.bestDay, r.pnl),
+            durSec: prev.durSec + r.durSec,
+            daily: prev.daily,
+          });
+          }
+        }
+      }
+    } catch (e: any) {
+      console.error(`[long-config-sweep] ${date}: ${e.message}`);
+    }
+  }
+
+  // ── Shard/merge finalize (mirrors credit-spread-sweep) ─────────────────────
+  // Worker (SWEEP_SHARD_OUT): dump partial accumulator only — NO DB write.
+  // Merge (SWEEP_MERGE): load all shard dumps, reduce, then write to DB.
+  // Serial (neither): write directly.
+  if (process.env.SWEEP_SHARD_OUT) {
+    dumpResults(results, process.env.SWEEP_SHARD_OUT);
+    let totalTrades = 0; results.forEach(r => { totalTrades += r.trades; });
+    console.log(`[long-config-sweep] Shard dumped: ${results.size} configs, ${totalTrades} trades`);
+    return;
+  }
+
+  if (process.env.SWEEP_MERGE) {
+    loadShardsInto(process.env.SWEEP_MERGE, results as any);
+  }
+
+  writeToDb(variants, results as Map<string, Acc>);
+  writeLongSweepJson(variants, results as Map<string, Acc>);
+
+  let totalTrades = 0; results.forEach(r => { totalTrades += r.trades; });
+  console.log(`[long-config-sweep] Completed: ${results.size} configs, ${totalTrades} trades`);
+}
+
+// Emit the flat long-sweep.json the studio backtest page loads (source:'long'
+// rows). Schema mirrors spread-sweep.json's relevant fields so the existing
+// filter/sort UI works unchanged; long-specific fields (tp/sl/maType/tfClass).
+function writeLongSweepJson(variants: ConfigVariant[], results: Map<string, Acc>) {
+  const rows: any[] = [];
+  const dailyByKey: Record<string, Record<string, number>> = {}; // vkey → {date: pnl}
+  const allDatesSet = new Set<string>();
+  for (const variant of variants) {
+    const res = results.get(variant.id);
+    if (!res || res.days <= 0 || res.trades <= 0) continue;
+
+    const wr = res.trades > 0 ? (100 * res.wins) / res.trades : 0;
+    const avgWin = res.cntWins > 0 ? res.sumWinPct / res.cntWins : 0;
+    const avgLoss = res.cntLosses > 0 ? res.sumLossPct / res.cntLosses : 0; // negative
+    const ratio = avgLoss !== 0 ? avgWin / Math.abs(avgLoss) : 0;            // R-multiple
+    const avgDurMin = res.trades > 0 ? res.durSec / res.trades / 60 : 0;
+    const maType = variant.signal === 'dema' ? 'DEMA' : 'HMA';
+    const off = variant.offset;
+    const moneyness = off < 0 ? `${Math.abs(off) * SI}ITM` : off > 0 ? `${off * SI}OTM` : 'ATM';
+    const signalStr = variant.tfs.length > 1
+      ? `${maType} ${variant.tfs.map(t => t.tf).join('+')} ${variant.tfs[0].fast}x${variant.tfs[0].slow}`
+      : `${maType} ${variant.tfs[0].tf}m ${variant.tfs[0].fast}x${variant.tfs[0].slow}`;
+    const exitStr = `${variant.tp}TP/${variant.sl}SL`;
+    // variantKey MUST match the studio viewer's: long::signal::moneyness::exit
+    const vkey = `long::${signalStr}::${moneyness}::${exitStr}`;
+    res.daily.forEach((pnl, d) => { dailyByKey[vkey] ??= {}; dailyByKey[vkey][d] = pnl; allDatesSet.add(d); });
+
+    rows.push({
+      source: 'long',
+      configId: variant.id,
+      signal: signalStr,
+      spread: 'long',
+      exit: exitStr,
+      tp: variant.tp,
+      sl: variant.sl,
+      offset: off,            // strikes (neg=ITM)
+      moneyness,              // "25ITM" / "ATM" / "25OTM" — for the Offset filter/column
+      maType,
+      tfClass: variant.tfs.length > 1 ? 'multi' : `${variant.tfs[0].tf}m`,
+      pnl: +res.pnl.toFixed(1),               // dollars (1 contract)
+      pnlPct: +res.pnlPct.toFixed(1),         // sum of per-trade retPct
+      n: res.trades,
+      wins: res.wins,
+      wr: +wr.toFixed(2),
+      dd: +Math.abs(res.worstDay).toFixed(1), // proxy: worst single-day loss
+      ratio: +ratio.toFixed(2),
+      pos: res.profitDays,
+      worstDay: +res.worstDay.toFixed(1),
+      bestDay: +res.bestDay.toFixed(1),
+      avgCredit: 0,
+      avgMaxRisk: 0,
+      avgPnlPerTrade: res.trades > 0 ? +(res.pnl / res.trades).toFixed(2) : 0,
+      avgDurMin: +avgDurMin.toFixed(1),
+      numActiveDays: res.days,
+    });
+  }
+
+  const outFile = path.join(process.cwd(), 'scripts/autoresearch/output', `long-sweep${TARGET.outSuffix}.json`);
+  fs.mkdirSync(path.dirname(outFile), { recursive: true });
+  fs.writeFileSync(outFile, JSON.stringify(rows));
+  console.log(`[long-config-sweep] Wrote ${rows.length} rows → ${outFile}`);
+
+  // long-daily.json: {dates:[...sorted], series:{vkey:[perDatePnl aligned to dates]}}
+  // for the Equity/Heatmap/Coverage/Regime/Correlation tabs (fetched per key).
+  const dates = Array.from(allDatesSet).sort();
+  const dateIdx = new Map(dates.map((d, i) => [d, i]));
+  const series: Record<string, number[]> = {};
+  for (const vkey of Object.keys(dailyByKey)) {
+    const arr = new Array(dates.length).fill(0);
+    const m = dailyByKey[vkey];
+    for (const d of Object.keys(m)) arr[dateIdx.get(d)!] = m[d];
+    series[vkey] = arr;
+  }
+  const dailyFile = path.join(process.cwd(), 'scripts/autoresearch/output', `long-daily${TARGET.outSuffix}.json`);
+  fs.writeFileSync(dailyFile, JSON.stringify({ dates, series }));
+  console.log(`[long-config-sweep] Wrote ${Object.keys(series).length} daily series (${dates.length} dates) → ${dailyFile}`);
+}
+
+// Compute dashboard metrics (edge/EV/R-multiple/winRate) the same way
+// runSummaryRebuild does, and upsert summary + config rows.
+function writeToDb(variants: ConfigVariant[], results: Map<string, Acc>) {
+  const db = new Database(DB_PATH);
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS replay_summary (
+        configId TEXT PRIMARY KEY,
+        days INTEGER, totalTrades INTEGER, totalWins INTEGER,
+        totalPnl REAL, worstDay REAL, bestDay REAL, profitDays INTEGER,
+        sumWinPct REAL, cntWins INTEGER, sumLossPct REAL, cntLosses INTEGER,
+        ev REAL, edge REAL, rMultiple REAL, winRate REAL,
+        avgDailyPnl REAL, avgPnlPerTrade REAL
+      );
+      CREATE TABLE IF NOT EXISTS replay_configs (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        description TEXT,
+        config_json TEXT NOT NULL,
+        baselineConfigId TEXT,
+        createdAt INTEGER NOT NULL,
+        updatedAt INTEGER NOT NULL
+      )
+    `);
+
+    const now = Math.floor(Date.now() / 1000);
+    const summaryStmt = db.prepare(`
+      INSERT OR REPLACE INTO replay_summary
+      (configId, days, totalTrades, totalWins, totalPnl, worstDay, bestDay, profitDays,
+       sumWinPct, cntWins, sumLossPct, cntLosses,
+       winRate, avgDailyPnl, avgPnlPerTrade, ev, edge, rMultiple)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    const configStmt = db.prepare(`
+      INSERT OR REPLACE INTO replay_configs
+      (id, name, description, config_json, createdAt, updatedAt)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `);
+
+    const tx = db.transaction(() => {
+      for (const variant of variants) {
+        const res = results.get(variant.id);
+        if (!res || res.days <= 0) continue;
+
+        const winRate = res.trades > 0 ? res.wins / res.trades : 0;
+        const avgDailyPnl = res.pnl / res.days;
+        const avgPnlPerTrade = res.trades > 0 ? res.pnl / res.trades : 0;
+        const avgWin = res.cntWins > 0 ? res.sumWinPct / res.cntWins : 0;        // %
+        const avgLoss = res.cntLosses > 0 ? res.sumLossPct / res.cntLosses : 0;  // % (negative)
+        const ev = (res.trades > 0 && res.cntWins > 0 && res.cntLosses > 0)
+          ? winRate * avgWin + (1 - winRate) * avgLoss : 0;
+        const denom = avgWin + Math.abs(avgLoss);
+        const edge = (res.trades > 0 && res.cntWins > 0 && res.cntLosses > 0 && denom > 0)
+          ? winRate - Math.abs(avgLoss) / denom : 0;
+        const rMultiple = (res.cntLosses > 0 && avgLoss !== 0 && res.cntWins > 0)
+          ? avgWin / Math.abs(avgLoss) : 0;
+
+        summaryStmt.run(
+          variant.id, res.days, res.trades, res.wins, res.pnl,
+          res.worstDay, res.bestDay, res.profitDays,
+          res.sumWinPct, res.cntWins, res.sumLossPct, res.cntLosses,
+          winRate, avgDailyPnl, avgPnlPerTrade, ev, edge, rMultiple
+        );
+
+        const configJson = JSON.stringify({
+          signal: variant.signal, timeframes: variant.tfs,
+          offset: variant.offset, signalSource: SIGNAL_SOURCE,
+          tp: variant.tp, sl: variant.sl,
+          cbTrigger: variant.cbTrigger, cbSkip: variant.cbSkip,
+        });
+        configStmt.run(variant.id, variant.name, `Long-call sweep: ${variant.name}`, configJson, now, now);
+      }
+    });
+    tx();
+  } finally {
+    db.close();
+  }
+}
+
+main().catch(e => {
+  console.error('[long-config-sweep] Error:', e);
+  process.exit(1);
+});

@@ -39,7 +39,7 @@ describe('resolveSymbolTarget — hardcoded BASES (must stay stable)', () => {
     });
   });
 
-  it('NDX resolves to the $10 index profile', () => {
+  it('NDX resolves to the nominal $10 index profile (real grid derived per-expiry at sweep time)', () => {
     const t = resolveSymbolTarget(['--symbol', 'NDX']);
     expect(t).toMatchObject({ optionPrefix: 'NDXP', strikeInterval: 10, profileId: 'ndx-0dte' });
   });

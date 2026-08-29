@@ -24,7 +24,7 @@ export interface SymbolTarget {
   profileId: string;       // parquet dir: 'spx-0dte' | 'spy-1dte' | …
   optionPrefix: string;    // OCC root: 'SPXW' | 'SPY' | 'QQQ'
   outSuffix: string;       // '' for SPX-0dte (legacy), else '-{sym}[-{n}dte]'
-  strikeInterval: number;  // $ between adjacent strikes: SPX 5, SPY/QQQ 1, NDX 10
+  strikeInterval: number;  // $ between adjacent strikes (fallback/nominal): SPX 5, SPY/QQQ 1, NDX 10. The multi-DTE sweep derives the real grid per-expiry from listed strikes (strike-grid.ts).
 }
 
 interface SymbolBase { symbol: string; optionPrefix: string; defaultDte: number; strikeInterval: number }

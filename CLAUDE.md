@@ -2,48 +2,39 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Current Branch Status: `feat/shorts-fresh-fill-study`
+
+This branch focuses on **replay/backtest analysis and EOD pipelines only**. Live trading services (event handler, position monitor, data service, Schwaber) have been temporarily removed from this branch to streamline development. These services exist unchanged on `master` and can be restored if needed.
+
+**See `CODE-REVIEW-2026-05-22.md` for detailed audit of compilation errors, test failures, and architectural issues.**
+
+### ⚠️ Known Issues (Must Fix)
+- 15 TypeScript compilation errors (or-levels stub, type mismatches)
+- 27 test failures
+- OR-levels and pivot-levels implementations stubbed out
+- Replay viewer API routes are overly complex (3400+ lines in one file)
+
 ## What is SPXer
 
-SPXer is a trading system with **independent services** sharing a unified core:
+SPXer is a trading system with **independent services** sharing a unified core. On this branch, only the replay/backtest system and analytics services are active.
 
-### Service Architecture (v2.0 — Independent Services)
+### Service Architecture (Replay Focus — This Branch)
 
-**CRITICAL**: All services are now **100% independent** with direct Tradier API connections. The data service (`spxer`) is **OPTIONAL for live trading** — it's only needed for the replay viewer and historical data access.
+| Service | Purpose | Status | Note |
+|---------|---------|--------|------|
+| **replay engine** | Config-driven backtesting | ✅ Active | `src/replay/machine.ts` |
+| **replay viewer** | Web UI for replay results | ✅ Active | `npm run viewer` on port 3601 |
+| **EOD pipeline** | Nightly replay + sweep aggregation | ✅ Active | `npm run eod` |
+| **Admin viewer** | Config/result management | ✅ Active | Embedded in replay viewer |
 
-| Service | Purpose | Data Source | Required for Live Trading |
-|---------|---------|-------------|---------------------------|
-| **spxer** | Market data pipeline + replay viewer | Tradier REST, ThetaData WS | ❌ NO (only for replay) |
-| **event-handler** | Signal detection + entry execution | Tradier REST (independent) | ✅ YES |
-| **position-monitor** | Exit observer (pure logger) | Tradier REST (independent) | ✅ YES (recommended) |
-| **schwaber** | Schwab ETF trading (SPY/QQQ) | SPXer data service + Schwab API | ❌ NO (optional) |
+### Live Trading Services (Deleted from This Branch)
+These exist on `master` but have been removed here during refactoring:
+- ❌ **Data service** (`npm run dev`) — Market data pipeline
+- ❌ **Event handler** (`npm run handler`) — Live trading agent
+- ❌ **Position monitor** — Exit observer
+- ❌ **Schwaber** (`npm run schwaber`) — Schwab ETF trader
 
-**Key principle**: Live trading continues even if `spxer` crashes. Both `event-handler` and `position-monitor` have direct Tradier API connections.
-
-### 1. Data Service (`npm run dev`) — OPTIONAL
-
-An always-on 24/5 market data pipeline that polls SPX/ES futures, tracks ~250-480 SPXW 0DTE options contracts via a sticky band model, builds 1m OHLCV bars with a full indicator battery, and serves enriched data over REST + WebSocket on port 3600.
-
-**Required for**: Replay viewer, historical data access, dashboard visualization
-**NOT required for**: Live trading (event-handler and position-monitor are independent)
-
-### 2. Event Handler (`npm run handler`) — PRIMARY
-
-Event-driven deterministic execution driven by option contract HMA crosses. **100% independent** — fetches data directly from Tradier REST API, executes via `PositionOrderManager`, persists state to `account.db`. 0DTE SPX options on margin account (6YA51425). Supports single configs and basket configs (multi-strike) in one process.
-
-**Three execution modes**:
-- **SIMULATION** (`AGENT_EXECUTION_MODE=SIMULATION`) — Live signals with locally-simulated orders (safest for testing)
-- **PAPER** (`AGENT_PAPER=true`) — Live signals + Tradier paper account (not recommended — often broken)
-- **LIVE** (`AGENT_PAPER=false`) — Live signals + Tradier production account
-
-### 3. Position Monitor (`position_monitor.ts`) — RECOMMENDED
-
-Pure observer service that monitors open positions and logs state. Polls `account.db` for positions, fetches prices from Tradier REST API, evaluates exit conditions (TP/SL, time, reversal), and logs broker state changes. Does NOT execute trades — event handler handles all actions.
-
-### 4. Schwaber (`npm run schwaber`) — OPTIONAL
-
-Schwab ETF trading agent for SPY/QQQ (or any equity). Uses the same HMA3×17 cross signal, polls SPX HMA bars from the SPXer data service, executes via Schwab Trader API (OAuth2).
-
-### 5. Replay System (`npm run replay`)
+### Replay System (`npm run replay` — CURRENT FOCUS)
 
 A config-driven backtesting engine that replays historical days through the same signal detection → scanner → judge pipeline, using an in-memory bar cache for performance.
 
@@ -53,67 +44,62 @@ A config-driven backtesting engine that replays historical days through the same
 
 **Previous signal source (v1.0 - deprecated)**: The event handler used to subscribe to WebSocket signals emitted by the data service (`contract_signal:{hmaPair}` channels). This has been replaced with independent Tradier REST API polling for maximum fault isolation.
 
-## Commands
+## Commands (Current Branch)
 
 ```bash
-# Data Service (OPTIONAL for live trading)
-npm run dev              # Start data service (tsx src/index.ts) on port 3600
-
-# Trading Handler (Event-Driven — PRIMARY)
-npm run handler          # Event-driven handler (uses AGENT_EXECUTION_MODE env var)
-npm run handler:live     # Event-driven handler with real orders (AGENT_PAPER=false)
-# Or use aliases:
-npm run agent            # Same as handler (event-driven, paper mode)
-npm run agent:live       # Same as handler:live (event-driven, live mode)
-
-# SIMULATION Mode (safest for testing — live signals, local simulated orders)
-AGENT_EXECUTION_MODE=SIMULATION npm run handler
-
-# Position Monitor (RECOMMENDED — pure observer, no execution)
-npx tsx position_monitor.ts  # Polls account.db, logs exit conditions
-
-# Schwaber (Schwab ETF trading — optional)
-npm run schwaber         # Schwab agent (paper mode)
-npm run schwaber:live    # Schwab agent (live mode)
-
-# Legacy Polling Agent (DEPRECATED — archived, do not use)
-npm run agent:legacy     # Old polling agent (paper mode)
-npm run agent:legacy:live # Old polling agent (live mode)
-
-# Query Positions
-npx tsx scripts/show-basket-positions.ts  # Show all positions by basket member
-
-# Replay & Testing
+# Replay & Analysis (ACTIVE ON THIS BRANCH)
 npm run replay           # Single-day replay (tsx src/replay/cli.ts run)
-npm run backtest         # Multi-day replay, no AI
-npm run viewer           # Replay viewer web UI (tsx src/server/replay-server.ts)
+npm run backtest         # Multi-day replay, no scanners/judges
+npm run viewer           # Replay viewer web UI (port 3601) — main UI
+npm run start            # Alias for viewer
+
+# EOD Pipeline (nightly data refresh)
+npm run eod              # Run end-of-day pipeline (incremental replay + sweep)
 
 # Development
-npm run build            # TypeScript compile to dist/
-npm run test             # Run all tests (vitest run)
+npm run build            # TypeScript compile to dist/ [BROKEN — 15 TS errors]
+npm run test             # Run all tests (vitest run) [27 tests failing]
 npm run test:watch       # Run tests in watch mode
+```
+
+### ❌ Commands Deleted (Exist on master, Not Here)
+```bash
+# These commands no longer exist on this branch:
+npm run dev              # Data service — deleted
+npm run handler          # Event handler — deleted
+npm run agent            # Agent alias — deleted
+npm run schwaber         # Schwab trader — deleted
+npx tsx position_monitor.ts  # Position monitor — deleted
 ```
 
 ## Architecture
 
 ### Shared Core (`src/core/`) — Single Source of Truth
 
-Both the live agent and replay system import all deterministic trading logic from `src/core/`. **Never duplicate this logic.**
+The replay system imports all deterministic trading logic from `src/core/`. **Never duplicate this logic.**
 
 ```
 src/core/
-├── types.ts              — Direction, Signal, Position, ExitCheck, CoreBar, PriceGetter
-├── signal-detector.ts    — Config-driven: RSI crosses, HMA crosses, EMA crosses, price crosses
-├── position-manager.ts   — Pure checkExit(): SL, TP, signal reversal, time exit
-├── position-sizer.ts     — computeQty() from Config.sizing
-├── risk-guard.ts         — Pure isRiskBlocked(): positions, trades/day, daily loss, cooldown
-├── regime-gate.ts        — isRegimeBlocked() per regime SignalGate
-├── strike-selector.ts    — selectStrike() OTM contract selection from Config.strikeSelector
-├── indicator-engine.ts   — HMA, RSI, Bollinger, EMA, ATR, VWAP (incremental)
-├── friction.ts           — Always-on baseline cost: half-spread + commission per side
-├── fill-model.ts         — Order-type slippage on top of friction (SL book-walk, entry book-walk)
-└── index.ts              — Barrel re-exports
+├── types.ts                  — Signal, Direction, Position, ExitContext
+├── signal-detector.ts        — detectSignals(): HMA crosses, RSI, EMA, price-based
+├── position-manager.ts       — checkExit(): SL, TP, signal reversal, time-based
+├── position-sizer.ts         — computeQty(): dynamic sizing from Config
+├── entry-gate.ts             — checkEntryGates(): risk checks, cooldown, time window
+├── risk-guard.ts             — Max daily loss, max positions, trades/day limit
+├── regime-gate.ts            — isRegimeBlocked(): regime-based entry filtering
+├── strike-selector.ts        — selectStrike(): OTM contract selection from band
+├── strategy-engine.ts        — detectSignal(), signal state tracking
+├── trade-manager.ts          — evaluateEntry(), evaluateExit()
+├── reentry-evaluator.ts      — Handle TP re-entry chains
+├── indicator-engine.ts       — HMA, RSI, Bollinger, EMA, ATR, VWAP, KC
+├── friction.ts               — Spread + commission cost model
+├── fill-model.ts             — Slippage: book-walk, participation-rate gates
+├── bar-validator.ts          — OHLCV gap detection, synthetic bar handling
+├── option-tick.ts            — Option tick size rounding
+└── index.ts                  — Barrel re-exports
 ```
+
+**Key principle**: Replay system imports these and calls them directly. Live agents (when restored on master) do the same. Same code path = identical behavior.
 
 ### Timezone Helpers (`src/utils/et-time.ts`)
 
@@ -142,127 +128,87 @@ src/config/
 
 All subsystems share the same `Config` type. Configs are stored as JSON in the `replay_configs` table of `spxer.db` via `ReplayStore`. Both replay and live agents load configs by ID from this single table. Test a config in replay → set `AGENT_CONFIG_ID` → deploy to live.
 
-### Data Service Pipeline (`src/index.ts` entry point)
+### Replay System (`src/replay/`) — CURRENT FOCUS
 
-```
-Providers (fetch raw data)     Pipeline (process)           Storage + Serving
-─────────────────────────     ──────────────────           ─────────────────
-providers/tradier.ts    ──┐    pipeline/bar-builder.ts      storage/db.ts (SQLite WAL)
-providers/yahoo.ts      ──┼──► pipeline/indicator-engine.ts storage/queries.ts
-providers/tv-screener.ts──┘    pipeline/aggregator.ts       storage/archiver.ts (parquet → GDrive)
-                               pipeline/spx/contract-tracker.ts  server/http.ts (REST API)
-                               pipeline/spx/scheduler.ts         server/ws.ts (WebSocket broadcast)
-```
-
-Note: `src/pipeline/indicator-engine.ts` is a re-export shim — actual indicator logic lives in `src/core/indicator-engine.ts`. Tier-specific indicator computations are in `src/pipeline/indicators/tier1.ts` and `tier2.ts`.
-
-**Time-based data flow**: No overnight data collection (Yahoo ES removed). Tradier SPX timesales start at 8:00 AM ET (RTH mode); SPX underlying indicators warm up pre-market from this poll. The option stream uses a **single-phase wake at 09:22 ET** — 8 minutes before market open. Pre-market SPX from Tradier is firm enough by 09:22 to pick the ideal ±100 strike band; one subscribe event (~200 contracts to Theta WS + Tradier WS) settles well before 9:30 so OPRA prints flow instantly at open. No re-lock phase, no subscribe-storm at market open. Controlled by `OPTION_STREAM_WAKE_ET` in `src/config.ts`. Market holidays and early-close days are hardcoded in `src/config.ts`. (The fill-model Phases 1–4 in `docs/FILL-MODEL.md` and bracket-rollout Phases in `docs/BRACKET-PLAN.md` are a different namespace — unrelated to the option-stream schedule.)
-
-**Live data provider architecture**:
-- **Options WS** — ThetaData is primary (`src/providers/thetadata-stream.ts`, `ws://127.0.0.1:25520/v1/events`), Tradier is cold standby (`src/pipeline/spx/option-stream.ts`). `thetaIsPrimary()` in `src/index.ts` returns `thetaStream.isConnected()` — pure connection-state switch, no hysteresis window. On ATM 0DTE, Theta fires OPRA trades continuously; if Theta's WS drops, Tradier takes over instantly. Both streams feed the same `PriceLine`; Tradier's onTick returns early whenever Theta is connected, so there's no double-count.
-- **SPX underlying** — Tradier HTTP streaming PriceStream (`src/agent/price-stream.ts`) for full 1m OHLCV candle building.
-- **Order execution** — Tradier is the only path. Account 6YA51425 (margin).
-- **Historical backfill** — SPX from Polygon (`I:SPX` index aggregates), options from ThetaData REST (`fetchOptionTimesales`). The `replay_bars.source` column tracks origin (`'polygon'` | `'thetadata'` | `'live'` | `'aggregated'`). Replay engine reads all sources without filter — source merging is transparent. Polygon subscription is retained for SPX historical only.
-
-**Contract lifecycle**: Contracts follow `UNSEEN → ACTIVE → STICKY → EXPIRED`. Once a contract enters the ±$100 strike band around SPX, it's tracked until expiry — never dropped early. This is the "sticky band model" in `contract-tracker.ts`.
-
-**Indicator engine**: Incremental computation (not recomputed from scratch). Tier 1 (all instruments): HMA 5/19/25, EMA 9/21, RSI 14, Bollinger Bands, ATR 14, VWAP. Tier 2 (underlying only): EMA 50/200, SMA 20/50, Stochastic, CCI, Momentum, MACD, ADX. State is maintained per-symbol in memory via `IndicatorState`.
-
-**Bar interpolation**: Options go minutes without trades. Gaps 2-60 min get linear interpolation (`synthetic: true, gapType: 'interpolated'`). Gaps >60 min get flat fill (`gapType: 'stale'`). Indicators are computed on synthetic bars for continuity.
-
-**Live candle validation (PriceLine)**: For live 0DTE option bars, SPXer uses `PriceLine` (`src/pipeline/price-line.ts`) — a minimal price tracker that records only the last price per minute per symbol, then validates against REST quote mids before storing. This is simpler than full candle building and more resistant to stale/replay ticks from ThetaData reconnects. The validation flow at each minute boundary:
-1. Tick stream (Theta or Tradier WS) feeds `PriceLine.processTick()` / `PriceLine.processQuote()`
-2. `PriceLine.snapshotAndFlush()` collects forming price points from past minutes
-3. Fetches `fetchBatchQuotes()` for active band contracts, sorted by ATM proximity (nearest strikes first for minimal validation lag)
-4. For each symbol: if `|streamClose - restMid| / streamClose > 5%`, override close with REST mid
-5. Bars are then built via `rawToBar()` and stored — H/L are carried forward from prior bars for context
-
-**Status monitoring**: The data service runs a 5-minute status loop (see `src/index.ts`) that logs system health: uptime, provider status, SPX data freshness, tracked contract counts, and option stream connectivity. A standalone `scripts/status-monitor.sh` provides comprehensive monitoring (PM2, data service, broker positions, signals, errors, resources).
-
-**Why PriceLine instead of candles**: SPX candles use full OHLCV (high-liquidity underlying). 0DTE options have sparse prints — H/L from quote-only bars are noise. PriceLine captures close-only which is all HMA needs. Full replay bars still come from historical parquet/SQLite with complete OHLCV data.
-
-### Trading Agent (`event_handler_mvp.ts`) — EVENT-DRIVEN
-
-The live trading system uses an **event-driven architecture** that replaced the old polling-based `spx_agent.ts` (see [Event-Driven Handler](#event-driven-handler-working--replaces-polling-agent) section for migration details). It is **pure deterministic** — no LLM scanners or judges in the loop.
-
-**IMPORTANT**: The event handler is now **100% independent** of the data service. It fetches all data directly from Tradier REST API — no WebSocket subscription needed.
-
-**Signal flow (independent architecture):**
-1. **Timer triggers**: At :00 seconds every minute
-2. **Fetch SPX timesales**: Direct from Tradier REST API
-3. **Compute HMA(3)×HMA(12)**: Locally from fetched timesales
-4. **Fetch option timesales**: Direct from Tradier REST API (ITM5 call/put)
-5. **Aggregate to 3m bars**: Locally
-6. **Detect HMA cross**: On last 2 bars
-7. **PositionOrderManager.evaluate()**: Checks HMA pair match, direction, risk gates, cooldown
-8. **Execution**: Strike selection → OTOCO bracket order (TP + SL at broker)
-9. **Exit**: SPX underlying HMA cross reverses → close all positions + flip to opposite direction
-10. **Real-time fills**: `AccountStream` (Tradier WS) pushes fills, updates `account.db` state
-
-**Previous WebSocket-based flow (deprecated)**: The event handler used to subscribe to `contract_signal:{hmaPair}` channels from the data service. This has been replaced with independent Tradier REST API polling for maximum fault isolation.
-
-**Basket configs** are fully supported — one process handles multiple strike offsets internally via `basketMembers` Map. No account-lock needed.
-
-```
-event_handler_mvp.ts (main loop — margin account 6YA51425)
-├── WebSocket subscribe to contract_signal channels
-├── Load configs from DB (AGENT_CONFIG_ID or AGENT_CONFIG_IDS)
-├── PositionOrderManager.evaluate(signal, configId, config) — entry decisions
-│   └── checkEntryGates() from src/core/ — same as replay
-├── trade-executor.ts — Tradier order execution (OTOCO brackets)
-├── AccountStream — real-time fill detection via Tradier WS
-└── All state persisted to data/account.db (positions, orders, config_state)
-```
-
-**Config**: Loaded from DB by `AGENT_CONFIG_ID` (single) or `AGENT_CONFIG_IDS` (comma-separated) env var. Same config tested in replay → deploy live.
-
-#### Legacy Agent (ARCHIVED)
-
-The old polling-based `spx_agent.ts` has been **archived** (moved to `archive/removed-*/`). It has been replaced by the event-driven handler which is:
-- 78% smaller (~570 vs 1585 lines)
-- ~1 second latency vs 10-30 second polling
-- Crash-safe with SQLite persistence
-- Multi-config support in one process
-
-See `docs/EVENT_HANDLER_ARCHITECTURE.md` and `EVENT_HANDLER_E2E_SUCCESS.md` for full migration details.
-
-#### Modules still in codebase (used by replay, NOT by live agents)
-
-```
-agent/regime-classifier.ts    — classifies market regime (disabled in live config)
-agent/market-narrative.ts     — per-scanner rolling narrative (disabled in live config)
-agent/pre-session-agent.ts    — overnight + pre-market analysis
-agent/judgment-engine.ts      — two-tier: LLM scanners → optional judge escalation
-agent/model-clients.ts        — direct HTTP calls to all LLM providers
-agent/price-action.ts         — price action triggers (session break, range expansion)
-agent/types.ts                — agent-specific type definitions
-```
-
-### Replay System (`src/replay/`)
+The replay engine is the core of this branch:
 
 ```
 src/replay/
-├── machine.ts        — Core replay engine: in-memory bar cache, imports all logic from src/core/
-├── cli.ts            — Unified CLI: run, backtest, results, days, configs subcommands
-├── config.ts         — Re-exports from src/config/defaults.ts
-├── types.ts          — Re-exports Config as ReplayConfig
-├── store.ts          — SQLite store for replay runs and results (data/spxer.db)
-├── prompt-library.ts — 18 scanner prompts: 2 original + 8 session-specific + 5 regime + 3 calendar
-├── metrics.ts        — ET time helpers, symbol filters, composite score computation
-├── cli-config.ts     — CLI flag parsing for config overrides
-├── framework.ts      — Cycle snapshot builder for agent injection
-└── index.ts          — Barrel exports
+├── machine.ts              — Core replay engine: bar cache, signal detection, trade execution
+├── cli.ts                  — CLI: run (single day), backtest (multi-day), results, sweep
+├── store.ts                — SQLite store for configs, runs, results
+├── basket-runner.ts        — Multi-member basket config support
+├── batch-worker.ts         — Multi-day parallel replay via child processes
+├── bar-cache-file.ts       — Binary cache (.brc) for 1m bars (performance optimization)
+├── metrics.ts              — Trade analysis: win rate, Sharpe, P&L, drawdown
+├── framework.ts            — Cycle snapshot builder
+├── types.ts                — ReplayConfig, Trade, ReplayResult types
+├── cli-config.ts           — CLI flag parsing
+├── index.ts                — Barrel exports
+└── prompt-library.ts       — Scanner/judge prompts (18 templates)
 ```
 
-**Performance-critical**: `machine.ts` uses an in-memory bar cache — loads all bars for a date once from SQLite, then iterates with binary search. Mar 20 (159K bars, 648 contracts) replays in ~5 seconds. NEVER go back to SQL-per-tick (caused OOM at 3+ GB per process with 8 parallel sessions).
+**Performance**: Replay is **fast** — Mar 20 (159K bars) replays in ~5 seconds using in-memory bar cache.
 
-**Edge framework paper** (`docs/edge-framework-paper.html`): A self-contained HTML paper with live data fetched from `/replay/api/sweep` endpoints. Charts (equity curves, quarterly walk-forward, monthly edge) pull from `/replay/api/sweep/:configId/daily` for configs with 267 days of data. Served at `GET /replay/paper`. The three chart render functions (`renderEquityCurve`, `renderQuarterChart`, `renderMonthlyChart`) call their respective API endpoints at page load; ensure the `renderHardcodedCharts()` flow is consistent with the chart canvas IDs.
+**Data sources**: Priority: BRC file → Parquet → SQLite. Parquet is primary for historical data; SQLite fallback when parquet missing.
 
-**Storage architecture**: Two tiers — **parquet** for historical bar data, **SQLite** (`spxer.db`) for everything else.
-- **Parquet** (`data/parquet/bars/{profile}/{date}.parquet`): All historical bar data (SPX, NDX, options). 268 dates × ~60K bars each. **Primary data source for replay** — the replay engine reads parquet first, falls back to SQLite `replay_bars` table only if parquet is missing for a date.
-- **SQLite** (`data/spxer.db`): Single database for everything. Live pipeline data (`bars`, `contracts`), replay backfill (`replay_bars`), configs (`replay_configs`), results (`replay_runs`, `replay_results`, `replay_jobs`), leaderboard, optimizer results.
-- **One DB, one env var**: `DB_PATH` (defaults to `data/spxer.db`). The old `REPLAY_DB_PATH` env var and separate `replay.db` file are gone — fully cleaned up 2026-04-22. `REPLAY_DB_DEFAULT` and `REPLAY_META_DB` in `src/storage/replay-db.ts` both resolve to `spxer.db`.
-- **Replay bar loading priority**: (1) binary bar-cache file → (2) parquet → (3) SQLite `replay_bars` table. The live `bars` table is never read by replay.
+### Replay Viewer & APIs (`src/server/`)
+
+**Main files**:
+- `replay-server.ts` — Express server entry point (port 3601)
+- `replay-routes.ts` — API endpoints (3400+ lines, needs splitting)
+- `sweep-manager-routes.ts` — Sweep aggregation endpoints
+- `admin-routes.ts` — Config CRUD
+- Multiple viewer HTML files for different analysis views
+
+**⚠️ Issue**: `replay-routes.ts` is monolithic and mixes concerns (routes, queries, level computation). Needs splitting into `replay-query.ts`, `replay-levels.ts`, etc. See CODE-REVIEW for details.
+
+### Data Pipeline (`src/pipeline/`)
+
+```
+src/pipeline/
+├── bar-builder.ts          — OHLCV bar construction from timesales
+├── aggregator.ts           — 5m/15m/1h from 1m bars
+├── indicator-engine.ts     — Wrapper/shim to src/core/indicator-engine
+├── mtf-builder.ts          — Multi-timeframe construction
+├── indicators/
+│   ├── tier1.ts            — HMA, EMA, RSI, Bollinger, ATR, KC, VWAP
+│   └── tier2.ts            — SMA, Stochastic, MACD, ADX (unused in replay)
+└── (deleted: contract-tracker, scheduler, price-stream, option-stream, etc.)
+```
+
+**Note**: `src/pipeline/indicator-engine.ts` is a **re-export shim** — actual logic lives in `src/core/indicator-engine.ts` and `src/pipeline/indicators/tier1.ts`.
+
+### Instrument Management (`src/instruments/`)
+
+Multi-instrument support (SPX, NDX, SPY, QQQ, etc.):
+
+```
+src/instruments/
+├── types.ts                — InstrumentProfile, BackfillStrategy
+├── registry.ts             — Symbol → profile mapping
+├── profiles/
+│   ├── spx-0dte.ts         — SPX 0DTE profile
+│   ├── ndx-0dte.ts         — NDX 0DTE profile
+│   └── spy-1dte.ts         — SPY 1DTE profile
+├── discovery.ts            — Auto-detect profile from symbol
+├── profile-store.ts        — Load/save profiles to DB
+├── symbol-format.ts        — Tradier ↔ standard symbol conversion
+├── backfill-routing.ts     — Data source routing (Polygon, ThetaData, etc.)
+└── seed-profiles.ts        — Initialize default profiles
+```
+
+### Indicator Architecture (Tier 1 + Tier 2)
+
+**Tier 1** (all instruments): HMA, EMA, RSI, Bollinger Bands, ATR, KC (Keltner Channel), VWAP
+- Defined in `src/pipeline/indicators/tier1.ts`
+- Called by replay engine for all bars
+
+**Tier 2** (underlyings only): EMA 50/200, SMA, Stochastic, CCI, Momentum, MACD, ADX
+- Defined in `src/pipeline/indicators/tier2.ts`
+- Used only for regime classification (not in replay core)
+
+**Incremental computation**: Indicators maintain rolling window state (HMA uses 25-bar max). Never recomputed from scratch — only updated per new bar.
 
 ### Autoresearch System (`scripts/autoresearch/`)
 
@@ -321,78 +267,36 @@ Third-party model keys: `KIMI_API_KEY`, `GLM_API_KEY`, `MINIMAX_API_KEY` (with c
 
 Other: `POLYGON_API_KEY` (historical data backfill), `LITELLM_BASE_URL` + `LITELLM_KEY` (LiteLLM proxy), `GDRIVE_REMOTE` (archival), `LOG_LEVEL`
 
-## REST API (port 3600)
+## REST API (port 3601 — Replay Viewer)
 
-### Core Data Endpoints
-- `GET /health` — Service status, uptime, mode, SPX price, DB size, provider health, tracked/active contracts, WS clients
-- `GET /spx/snapshot` — Latest SPX (or ES overnight) bar with all indicators
-- `GET /spx/bars?tf=1m&n=100` — SPX bar history (max 2000 bars)
-- `GET /contracts/active` — All ACTIVE + STICKY contracts
-- `GET /contracts/:symbol/bars?tf=1m&n=100` — Contract bar history
-- `GET /contracts/:symbol/latest` — Latest 1m bar for a specific contract
-- `GET /chain?expiry=YYYY-MM-DD` — Full options chain for an expiry
-- `GET /chain/expirations` — Available tracked expiry dates
-- `GET /underlying/context` — Market context snapshot (ES, NQ, VX, sectors via TradingView screener)
+**Status**: Replay viewer is active. ⚠️ Data service endpoints (port 3600) are deleted on this branch.
 
-### Signal Endpoints
-- `GET /signal/latest` — Last HMA cross signal (or `{ signal: null }` if none yet)
+### Main UI & Config Management
+- `GET /` — Main replay viewer HTML (charts, config search, results)
+- `GET /admin` — Admin viewer (config CRUD, sweep management)
+- `GET /sweep` — Sweep viewer (parameter sweep analysis)
 
-### Agent Endpoints (consumed by dashboard)
-- `GET /agent/status` — Current agent status (from status file)
-- `GET /agent/activity?n=50` — Recent agent activity log entries (max 200)
-- `GET /agent/mode` — Current execution mode (SIMULATION/PAPER/LIVE)
-- `GET /agent/simulation` — Simulation mode stats (orders, fills, positions)
+### Replay Execution & Results
+- `GET /api/dates?instrument=SPX|NDX` — Available replay dates
+- `GET /api/configs` — All saved configs (filtered by day count unless `?all=1`)
+- `GET /api/config/:id` — Single config details
+- `GET /api/defaults` — Default config values
+- `POST /api/run` — Trigger single-day replay
+- `POST /api/run-batch` — Trigger multi-day parallel replay
+- `GET /api/job/:jobId` — Check background job status
+- `GET /api/jobs` — List all jobs
+- `GET /api/results?configId=X&date=Y` — Replay trade results
 
-### Replay Viewer (mounted at `/replay`)
-- `GET /replay` — Replay viewer HTML UI
-- `GET /replay/api/dates` — Available replay dates
-- `GET /replay/api/configs` — All saved configs
-- `GET /replay/api/config/:id` — Single config details
-- `GET /replay/api/defaults` — Default config values
-- `GET /replay/api/results?configId=X&date=Y` — Replay results
-- `GET /replay/api/bars?date=X&symbol=Y&tf=1m` — Historical bars for replay
-- `GET /replay/api/contracts?date=X` — Contracts for a replay date
-- `POST /replay/api/run` — Trigger a single-day replay
-- `POST /replay/api/run-batch` — Trigger multi-day batch replay (background job)
-- `GET /replay/api/job/:jobId` — Check batch job status
-- `GET /replay/api/jobs` — List all batch jobs
-- `GET /replay/api/sweep?configId=X` — Parameter sweep results
-- `GET /replay/api/config/:configId/analysis?dates=X` — Per-config trade analysis
-- `GET /replay/api/sweep/:configId/daily` — Daily P&L breakdown for sweep
-- `GET /replay/api/live/*` — Proxy to live data service
-- `GET /replay/sweep` — Sweep viewer HTML UI
-- `GET /replay/paper` — Edge framework paper (live data from `/replay/api/sweep/:configId/daily`)
+### Analysis & Aggregation
+- `GET /api/sweep?configId=X` — Parameter sweep results (multi-date aggregated)
+- `GET /api/sweep/:configId/daily` — Daily P&L breakdown per date
+- `GET /api/config/:configId/analysis?dates=YYYY-MM-DD,YYYY-MM-DD` — Trade analysis across dates
+- `GET /api/or-levels?date=&orMinutes=30` — Opening Range levels (computed or cached)
+- `GET /api/pivot-levels?date=` — Pivot point levels
 
-## WebSocket (port 3600, path `/ws`)
-
-Real-time streaming of bars, signals, and market context. Connect to `ws://host:3600/ws`.
-
-### Subscribe/Unsubscribe
-```json
-{ "action": "subscribe", "channel": "spx" }
-{ "action": "subscribe", "channel": "signals" }
-{ "action": "subscribe", "channel": "contract", "symbol": "SPXW260401C06600000" }
-{ "action": "subscribe", "channel": "chain", "expiry": "2026-04-01" }
-{ "action": "unsubscribe", "channel": "spx" }
-```
-
-### Message Types
-
-| Type | Channel | Description |
-|------|---------|-------------|
-| `spx_bar` | `spx` | New 1m SPX/ES bar with all indicators. Fires each poll cycle (~10s). |
-| `hma_cross_signal` | `signals`, `spx` | **HMA(fast)×HMA(slow) crossover on SPX underlying detected on candle close.** Informational — used by dashboards and monitors. The live agents do NOT use this WebSocket event for trade entries; they poll option contract bars directly and use `detectSignals()`. Fields: `direction`, `ts`, `price`, `hmaFast`, `hmaSlow`. |
-| `contract_bar` | `contract:{symbol}` | New 1m bar for a tracked options contract. |
-| `chain_update` | `chain:{expiry}` | Options chain refresh for an expiry date. |
-| `market_context` | (all) | ES, NQ, VX, sector snapshot from TradingView screener. |
-| `heartbeat` | (all) | Keepalive every 30s. |
-| `service_shutdown` | (all) | Data service shutting down. |
-
-### Signal-Driven Architecture
-
-The `hma_cross_signal` WebSocket event fires from the data pipeline when `detectHmaCrossSignal()` sees HMA(fast)×HMA(slow) cross on the **SPX underlying** on a newly closed candle. This is consumed by dashboards and monitors.
-
-**Live agents do not use this WebSocket event for trade decisions.** They poll the data service each cycle, fetch option contract bars at `signalTimeframe` via the REST API, and call `detectSignals()` directly — the same function the replay system uses. The entry trigger is an HMA cross on the **option contract's own price series**, not the SPX underlying.
+### Historical Data
+- `GET /api/bars?date=X&symbol=Y&tf=1m` — Historical 1m bars
+- `GET /api/contracts?date=X` — Contracts available for a replay date
 
 ## Testing
 
@@ -409,245 +313,32 @@ tests/
 └── smoke.test.ts — End-to-end smoke tests
 ```
 
-## Design Decisions
+## Design Decisions (Replay Focus)
 
-- **ES and SPX are separate bar series** — no price stitching. Consumers request SPX; SPXer routes to the correct source by time of day.
+- **Core modules are the single source of truth** — `src/core/` contains all deterministic trading logic (signal detection, exit conditions, risk checks, strike selection). Replay imports these directly. Never duplicate trading logic.
 - **Higher timeframes (5m/15m/1h) are aggregated from 1m bars**, never fetched independently.
-- **Tradier batch quotes** — all options quotes use the batch endpoint (max 50 symbols/call), never one call per contract.
 - **Contract symbol format** — Tradier canonical: `SPXW260318C05000000` (SPXW + YYMMDD + C/P + 8-digit zero-padded strike × 1000).
-- **Archival** — Expired contracts exported to parquet via DuckDB, uploaded to Google Drive via rclone. Hot DB target < 500MB.
-- **OTM only** — Strike selector targets $0.20-$8.00 OTM contracts. We don't buy ITM. On emergency signals, prefer ~$1.00 strikes for maximum gamma exposure.
-- **Core modules are the single source of truth** — `src/core/` contains all deterministic trading logic (signal detection, exit conditions, risk checks, strike selection). The live agent wraps core functions with stateful classes for price fetching and daily loss tracking. The replay system calls core functions directly. Never duplicate trading logic in `src/agent/`.
-- **Anticipation over reaction** — Scanners build narrative state across the session. When they escalate, it's "here's how we got here and what I'm watching" — not "I see something now."
-- **Price action first, RSI second** — The system triggers on session high/low breaks, candle range spikes, and V-reversals. RSI is a confirmation filter, not the primary trigger.
-- **Scanner prompts are neutral** — Raw OHLC bars + RSI value + contract chain. No guidance on what RSI means.
-- **LLMs advise, code executes** — Scanners/judges classify regime (advisory). Strike selection and trade execution are deterministic — no LLM in the hot path.
-- **All ET timezone handling goes through `src/utils/et-time.ts`** — The server runs in UTC. Never use the `new Date(date.toLocaleString('en-US', { timeZone: 'America/New_York' }))` round-trip pattern — it silently interprets the ET-formatted string as UTC, causing times to be 4–5 hours off. Use the shared helpers: `getETOffsetMs()`, `todayET()`, `nowET()`, `etTimeToUnixTs()`. These use `Intl.DateTimeFormat` internally and handle EST/EDT automatically.
-- **Bracket orders (OTOCO) for server-side TP/SL** — Live orders use Tradier OTOCO: entry triggers an OCO pair (TP limit + SL stop). If the agent crashes, Tradier enforces exits. On early exit (scannerReverse), the agent cancels OCO legs before selling. Paper mode uses software-only monitoring. On startup, agents reconcile open positions from the broker via `positions.reconcileFromBroker()` — adopting orphaned positions and submitting missing OCO protection.
-- **Dynamic position sizing** — 15% of account buying power per trade (fetched from Tradier via `src/agent/account-balance.ts`, cached 5 minutes). Refreshed daily. Falls back to `baseDollarsPerTrade` config value if API fetch fails.
-- **Smart order types** — Market order if bid-ask spread ≤ $0.75 (configurable via `maxSpreadForMarket`). Limit order at ask price if spread is wider. Exits always use market orders (speed > price on exit). Logic in `src/agent/trade-executor.ts`.
-- **Broker is the sole source of truth for P&L** — The live agent must NEVER compute P&L internally from its own fill records. On 2026-04-20 the agent reported -$12,593 daily P&L while the broker showed +$8,916 — a $21.5K error caused by: (a) using ask-at-signal-time as entry price instead of actual fill price, (b) only syncing broker P&L at session start then drifting all day on agent math, (c) bracket TP/SL fills at broker not getting P&L recorded (position just vanishes). The fix: `src/agent/broker-pnl.ts` polls Tradier's `/accounts/{id}/orders` endpoint (same-day accuracy with broker avg_fill_price), falling back to `/accounts/{id}/gainloss` for T+1 settled values. The agent's `dailyPnl` variable and the risk guard's max-daily-loss check must source from these endpoints, not from `(fillPrice - entryPrice) * qty * 100` calculations. **If you see agent code computing P&L from fill prices, that is a bug. Delete it and use the broker API.**
-- **Position reconciliation on startup** — Agents query Tradier for open positions on boot and adopt orphaned ones, submitting missing OCO protection. Survives PM2 restarts and crashes without leaving unmanaged positions.
-- **Execution routing is agent-owned, not config-owned** — The `Config` defines trading strategy (signals, exits, risk). The agent defines where orders go. The SPX agent hardcodes `{ symbol: 'SPX', optionPrefix: 'SPXW', strikeDivisor: 1, strikeInterval: 5, accountId: '6YA51425' }`. Test in replay → set CONFIG_ID → deploy.
-- **Trade friction model** — Always-on $0.05 half-spread + $0.35 commission per side (`src/core/friction.ts`). Applied to all P&L calculations (backtest and live). `frictionEntry()` adds half-spread to buy price, typed exits (`frictionTpExit` / `frictionSlExit` / `frictionMarketExit`) apply the right exit cost per order type (TP limits pay no half-spread — you provide liquidity), `computeRealisticPnl()` wraps entry + exit + commission via an `exitKind` parameter.
-- **Fill model (Phases 1-4)** — Execution realism on top of friction. See [`docs/FILL-MODEL.md`](docs/FILL-MODEL.md) for the full spec. Phase 1: TP/SL fill clamped to the exact level (not bar close) when `config.exit.exitPricing === 'intrabar'` — both-breached tie resolved by `config.position.intrabarTieBreaker`. Phase 2: size/spread/EOD-scaled slippage on SL stop-market fills (`slipSellPrice` in `src/core/fill-model.ts`). Phase 3: size-proportional book-walk on market buys (`slipBuyPrice`). Phase 4: participation-rate liquidity gate — caps qty to `floor(bar.volume × config.fill.participationRate)` and skips the trade entirely if the capped qty falls below `config.fill.minContracts`. All knobs live under `config.fill` and default to realistic-but-conservative values (see `src/config/defaults.ts:204`). Setting slippage knobs to 0 and omitting `participationRate` reproduces pre-phase behavior. This replaces the pre-2026-04 phantom-sizing regime where configs could "trade" thousands of contracts into 30-contract bars and TPs got credited from bar-close prices past the limit.
+- **OTM only** — Strike selector targets $0.20-$8.00 OTM contracts in replay.
+- **All ET timezone handling goes through `src/utils/et-time.ts`** — The server runs in UTC. **Never** use `new Date(date.toLocaleString(...))` — it silently misinterprets ET as UTC. Use: `getETOffsetMs()`, `todayET()`, `nowET()`, `etTimeToUnixTs()`.
+- **Trade friction model** — Always-on $0.05 half-spread + $0.35 commission per side in all P&L calculations. See `src/core/friction.ts`.
+- **Fill model (Phases 1-4)** — Execution realism on top of friction. See `docs/FILL-MODEL.md` for spec. Phase 4 includes participation-rate liquidity gates.
+- **Immutable data** — Use object spreads, never mutate in-place.
+- **Indicator computation** — Incremental state-based (see `src/core/indicator-engine.ts`), never from scratch.
 
-## Event-Driven Handler (WORKING — replaces polling agent)
+## Database Architecture (Replay Focus)
 
-**Status**: ✅ PROVEN — `event_handler_mvp.ts` successfully executed live paper trades on 2026-04-22. Complete E2E pipeline validated.
+Single database for all replay data:
 
-### Before: Polling Architecture (`spx_agent.ts` — 1585 lines)
+| Database | Purpose |
+|----------|---------|
+| `data/spxer.db` | Configs (`replay_configs`), runs, results, sweeps, jobs |
 
-```
-every 10 seconds:
-  fetch contract bars → detectSignals() → filter → enter
-  check exits → close if TP/SL/reversal
-```
+**Optional data sources**:
+- **Parquet** (`data/parquet/bars/{profile}/{date}.parquet`) — Historical bars (primary source)
+- **SQLite replay_bars** — Backup if parquet missing
+- **BRC cache files** (`data/cache/{date}_1m.full.brc`) — Binary optimized cache
 
-**Problems**:
-- Polling hallucinations — agent checks so frequently it catches transient states
-- Noisy warnings, repeated status messages
-- API load from continuous polling
-- 10-30 second latency on signal detection
-- In-memory position state lost on crash
-
-### After: Event-Driven Architecture (`event_handler_mvp.ts` — ~570 lines)
-
-**CRITICAL**: The event handler is now **100% independent** of the data service. All data is fetched directly from Tradier REST API.
-
-```
-Event Handler (event_handler_mvp.ts):
-  - Timer fires at :00 seconds every minute
-  - Fetches SPX timesales from Tradier REST API (independent)
-  - Computes HMA(3)×HMA(12) locally
-  - Fetches option timesales from Tradier REST API (ITM5 call/put)
-  - Aggregates to 3m bars locally
-  - Detects HMA cross on last 2 bars
-  - Loads N configs (single or multiple via AGENT_CONFIG_ID/IDS)
-  - Delegates entry decisions to PositionOrderManager.evaluate()
-  - Uses checkEntryGates() from core (same as replay)
-  - Persists all state to data/account.db (crash-safe)
-  - Receives real-time fills via AccountStream (Tradier WS)
-
-PositionOrderManager (src/agent/position-order-manager.ts):
-  - evaluate(signal, configId, config) → Decision (open/flip/skip)
-  - openPosition(signal, configId, config, qty, basketMember) → positionId
-  - onOrderEvent(event) — real-time fill detection via AccountStream
-  - reconcileFromBroker(configId, config, brokerPositions) — startup sync
-  - All state persisted to data/account.db (positions, orders, config_state)
-
-AccountStream (src/agent/account-stream.ts):
-  - Connects to wss://ws.tradier.com/v1/accounts/events
-  - Pushes order fills in real-time (replaces polling waitForFill)
-  - Auto-reconnect with exponential backoff
-```
-
-**Benefits of independence**:
-- No dependency on spxer data service — live trading continues even if spxer crashes
-- Single source of truth (Tradier API) for all market data
-- Simpler architecture — no WebSocket subscription management
-- Fault isolation — each service can fail independently
-
-**Benefits**:
-- No hallucinations — only act on real state changes
-- Multi-config support — one process runs N strategies
-- ~1 second latency vs 10-30 second polling
-- Crash-safe — all state in SQLite, survives PM2 restarts
-- Same entry gates as replay (checkEntryGates from core)
-- Real-time fills via Tradier account stream (no polling)
-
-### Database Architecture
-
-Three separate databases, isolated by concern:
-
-| Database | Purpose | Tables |
-|----------|---------|--------|
-| `data/spxer.db` | Replay configs, runs, results, leaderboard | `replay_configs`, `replay_runs`, `replay_results`, `replay_jobs` |
-| `data/account.db` | Live trading state (positions, orders, config state) | `positions`, `orders`, `config_state` |
-| `data/live/YYYY-MM-DD.db` | Bar/indicator/signal data (sacred, never mixed) | `bars`, `contracts` |
-
-**Account DB schema** (`data/account.db`):
-- `positions`: id, config_id, symbol, side, strike, expiry, entry_price, quantity, stop_loss, take_profit, high_water, status (OPENING/OPEN/CLOSING/CLOSED/ORPHANED), opened_at, closed_at, close_reason, close_price, basket_member, reentry_depth
-- `orders`: id, position_id, tradier_id, bracket_id, tp_leg_id, sl_leg_id, side, order_type, status, fill_price, quantity, error, submitted_at, filled_at
-- `config_state`: config_id, daily_pnl, trades_completed, last_entry_ts, session_signal_count
-
-### Position Lifecycle
-
-```
-OPENING → (entry fill via AccountStream) → OPEN
-OPEN → (TP/SL/exit fill) → CLOSED
-OPENING → (order rejected) → CLOSED
-OPEN → (not found at broker on startup) → ORPHANED
-```
-
-### Offset-Based Signal Channels (Historical — Informational Only)
-
-The data service still emits WebSocket signals for dashboards and monitors, but the event handler no longer uses them (it's now independent).
-
-```
-Channel format: {offsetLabel}:{hmaFast}_{hmaSlow}:{side}
-Examples:
-  otm5:3_12:call    — $25 OTM call, HMA(3)×HMA(12)
-  atm:5_19:put      — at-the-money put, HMA(5)×HMA(19)
-  itm3:3_12:call    — $15 ITM call, HMA(3)×HMA(12)
-```
-
-**Note**: These channels are consumed by dashboards and monitoring tools, but NOT by the live event handler (which fetches data directly from Tradier REST API).
-
-Offset label computation: `round((strike - spxPrice) / STRIKE_INTERVAL)` where positive = OTM, negative = ITM.
-
-The WS server supports both exact match (`contract_signal:otm5:3_12:call`) and HMA-pair-only match (`contract_signal:3_12`) for backward compatibility.
-
-### Decision Flow
-
-```
-Signal received on contract_signal:{pair}
-  → Health gate (data freshness)
-  → HMA pair match (config vs signal)
-  → PositionOrderManager.evaluate(signal, configId, config):
-      1. Wrong day? (expiry !== todayET) → skip
-      2. Transition in progress? (OPENING/CLOSING) → skip
-      3. Same direction open? → skip
-      4. Opposite direction open? → flip
-      5. Max positions? → skip
-      6. checkEntryGates() from core (risk, time window, cooldown) → skip/pass
-      7. All clear → open
-  → If open: execute via trade-executor + persist to account.db
-  → If flip: close existing via trade-executor, then open new
-```
-
-### Startup Reconciliation
-
-On boot, `reconcileFromBroker()` syncs broker state with account.db:
-1. Broker has open position not in DB → adopt as OPENING
-2. DB has OPEN position not at broker → mark ORPHANED
-3. Both agree → no-op
-
-### E2E Testing
-
-Integration tests use real infrastructure — no mocks:
-- **Data flow**: ThetaData WS stream → data service → offset-based signals
-- **Execution**: Tradier paper account (AGENT_PAPER=true)
-- **Verification**: account.db state + broker positions match
-
-Existing E2E test: `tests/e2e/integration.test.ts` covers the full pipeline.
-
-## Scanning & Judgment Agents
-
-> **Note**: The live trading agent (`spx_agent.ts`) does **NOT** use scanners or judges — it is deterministic execution with `scanners.enabled: false` and `judges.enabled: false`. The scanner/judge infrastructure below is used by the replay system, live-monitor, and autoresearch.
-
-### Scanners (Tier 1) — "What do you see?"
-Fast, cheap models called every 15-60s with raw market data.
-
-| Model | Provider | Speed | API |
-|-------|----------|-------|-----|
-| **Kimi K2.5** | Moonshot | ~2.6s | api.kimi.com/coding/ |
-| **ZAI GLM-5** | Zhipu AI | ~3-5s | api.z.ai/api/anthropic |
-| **MiniMax M2.7** | MiniMax | ~40-47s | api.minimax.io/anthropic |
-
-### Judges (Tier 2) — "Should we trade?"
-Claude models that review scanner output + full market context. `AGENT_ACTIVE_JUDGE` env var selects which judge's decision is executed (default: sonnet).
-
-| Model | Speed | Notes |
-|-------|-------|-------|
-| **Claude Haiku** | Fast | Quick tiebreaker, momentum reader |
-| **Claude Sonnet** | Medium | Structured, decisive (default judge) |
-| **Claude Opus** | Slow | Deep reasoning, sometimes overly cautious |
-
-### Model Call Strategy: Direct HTTP Only
-
-**All LLM calls use direct HTTP via `fetch` + `AbortController`, NOT the Agent SDK's `query()` iterator.** The SDK iterator does not support cancellation — timeouts leave iterators running in the background, causing OOM in batch workloads.
-
-All calls route through `askModel()` in `src/agent/model-clients.ts` with `forceDirect=true`. All providers use the Anthropic Messages API format (`/v1/messages`).
-
-## PM2 Processes
-
-All processes managed via `ecosystem.config.js`. Start with `pm2 start ecosystem.config.js`.
-
-| Name | Purpose |
-|------|---------|
-| spxer | Data pipeline — collects SPX/ES/options bars, serves REST + WebSocket (port 3600) — **OPTIONAL for live trading** |
-| event-handler | Event-driven trading agent — supports basket configs (single process, multi-strike) — **100% independent** |
-| position-monitor | Position exit observer — pure logger, does NOT execute trades — **100% independent** |
-| schwaber | Schwab ETF trading agent (SPY/QQQ) — optional |
-| metrics-collector | Ops metrics collection (Prometheus pushgateway) |
-| replay-viewer | Replay viewer web UI (port 3601) |
-| daily-journal | Cron job — generates trading journal at 4:15 PM ET |
-
-### Basket Configs in the Event Handler
-
-**STATUS**: ✅ **WORKING** — Basket configs are supported natively by the event handler. No account-lock needed — one process handles multiple strike offsets internally.
-
-**Architecture**:
-- Basket configs (e.g., `spx-hma3x12-itm5-basket-3strike-tp125x-sl25-3m-15c-$10000`) define multiple strike members (ITM5, ATM, OTM5)
-- The event handler loads the basket config and tracks which member each position belongs to via `basketMembers: Map<positionId, basketMemberId>`
-- When a signal fires, all basket members are evaluated independently
-- Each member enters its own position based on its strike offset
-- Positions are tracked separately but managed in one process
-
-**Position sizing**:
-- If config has `$10000` base sizing and 3 members, total exposure = $30K per signal
-- For a $50K account, that's 60% of buying power (aggressive but manageable)
-- For an $80K account, that's 37.5% (safer)
-
-**Running basket configs**:
-```bash
-# Paper mode
-AGENT_CONFIG_ID="spx-hma3x12-itm5-basket-3strike-tp125x-sl25-3m-15c-$10000" AGENT_PAPER=true npm run handler
-
-# Live mode
-AGENT_CONFIG_ID="spx-hma3x12-itm5-basket-3strike-tp125x-sl25-3m-15c-$10000" AGENT_PAPER=false npm run handler
-```
-
-**Why this works better than multiple agents**:
-- No account-lock needed (single process)
-- No Tradier tag field dependency
-- Position separation via internal tracking, not broker tags
-- Simpler deployment (one PM2 process instead of 3 or 6)
-
-## Replay Library
-
-`replay-library/` contains per-day markdown replay logs and SCORECARD.md. 22 trading days backfilled (Feb 20 → Mar 20, 2026) from Polygon.
+**Bar loading priority**: (1) BRC cache → (2) Parquet → (3) SQLite
 
 ## Autoresearch Key Findings (Sessions 1-8)
 
@@ -661,15 +352,59 @@ AGENT_CONFIG_ID="spx-hma3x12-itm5-basket-3strike-tp125x-sl25-3m-15c-$10000" AGEN
 | EMA hurts | — | s8: enabling drops score 83→54 |
 | RSI thresholds don't matter | — | s2: 15/85 ≈ 20/80 ≈ 25/75 ≈ 30/70 |
 
+## Known Issues on This Branch (feat/shorts-fresh-fill-study)
+
+**See `CODE-REVIEW-2026-05-22.md` for full audit and recommendations.**
+
+### Compilation Errors (15 Total) — MUST FIX
+
+1. **OR-levels stub mismatch** (12 errors in `replay-routes.ts`)
+   - File: `src/storage/or-levels.ts` is stubbed with wrong function signatures
+   - Impact: Functions called with wrong arg count (e.g., `ensureOrLevelsTable()` called with db param but expects 0 args)
+   - Fix: Update stub signatures to match call sites, or restore full implementation from git history
+
+2. **Missing Config.config property** (1 error in `replay-server.ts:50`)
+   - Impact: `res.json({ config: sessionConfig.config })` → property doesn't exist
+   - Fix: Check `sessionConfig` shape and adjust response structure
+
+3. **Query parameter type mismatches** (2 errors in `sweep-manager-routes.ts`)
+   - Impact: `req.query` returns `string | string[]` but assigned as string
+   - Fix: Add array handling logic
+
+### Test Failures (27 Total) — Blocking Quality Gate
+
+- 450 passing, 27 failing (94.3% pass rate)
+- Failures likely due to OR-levels stub and missing implementations
+- Action: Run `npm run test` with verbose output to identify root causes
+
+### Stubbed Implementations
+
+```
+src/storage/or-levels.ts       — Opening Range level computation (STUB)
+src/storage/pivot-levels.ts    — Pivot level computation (STUB?)
+```
+
+These were deleted from working tree; stubs added to prevent boot errors. Need restoration or full implementation.
+
+### Architectural Debt
+
+| Issue | Impact | Effort |
+|-------|--------|--------|
+| `replay-routes.ts` (3400+ lines) | Unmaintainable, mixed concerns | Split into 5 files |
+| Config type duplication | Confusion between Config/ReplayConfig | Unify to single type |
+| Indicator architecture split | Unclear which file owns what | Document in CLAUDE.md |
+
+---
+
 ## For AI Agents Working In This Codebase
 
 ### Where to Start
 
-1. **Start in `/src`** — All application logic lives in `src/`. Root scripts are entry points and utilities.
-2. **Understand the data pipeline** — Read `src/index.ts`, then `src/pipeline/` and `src/providers/`.
+1. **FIRST: Read CODE-REVIEW-2026-05-22.md** — Understand current status, blockers, and what's broken
+2. **Start in `/src`** — All application logic lives in `src/`. Root scripts are entry points and utilities.
 3. **Understand core trading logic** — Read `src/core/` — this is the single source of truth for signals, exits, risk, and strike selection.
 4. **Follow the types** — All types defined in `src/types.ts`, `src/core/types.ts`, and `src/config/types.ts`. Don't create ad-hoc types.
-5. **Check this file first** — Design decisions and known patterns documented above. Read before major changes.
+5. **Understand the replay system** — Read `src/replay/machine.ts` → it's the heart of this branch
 
 ### Testing Requirements
 
