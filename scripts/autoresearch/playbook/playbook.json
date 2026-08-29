@@ -1,0 +1,1078 @@
+{
+  "version": 79,
+  "updated": "2026-08-29",
+  "note": "Regime-indexed strategy playbook. Built by this session; gap cells are co-owned with the parallel gap-research session. Matrix entries seeded from in-sample regime x strategy P&L; the nightly cycle promotes them to status=confirmed only after a strict train/test out-of-sample hold.",
+  "validation_bar": {
+    "split": "chronological 70/30 train/test per regime",
+    "metric": "expectancy ($/trade) NET of realistic fills (SPX hs=0.40, NDX hs=0.65)",
+    "min_trades_test": 10,
+    "tail": "one max-loss must be survivable vs accumulated wins",
+    "rule": "WR is NOT a pass criterion (negative-skew trap); expectancy + tail only",
+    "promote": "status=confirmed requires positive test-split expectancy AND positive train-split expectancy"
+  },
+  "regimes": [
+    "gap_go",
+    "gap_fade",
+    "gap_chop",
+    "trend",
+    "trend_vol",
+    "chop",
+    "quiet_range",
+    "mixed"
+  ],
+  "strategy_library": {
+    "smc_otm_put_hold": {
+      "engine": "smc-credit",
+      "desc": "sweep+BOS -> OTM put credit spread held to settle (reversal/premium)",
+      "fits": [
+        "chop",
+        "quiet_range",
+        "gap_chop",
+        "gap_fade",
+        "trend"
+      ]
+    },
+    "iron_condor": {
+      "engine": "iron",
+      "desc": "delta-wing condor, premium sell (range/chop)",
+      "fits": [
+        "chop",
+        "quiet_range",
+        "gap_chop"
+      ]
+    },
+    "iron_fly": {
+      "engine": "iron",
+      "desc": "ATM iron fly, theta (tight range)",
+      "fits": [
+        "quiet_range",
+        "chop"
+      ]
+    },
+    "theta_burner": {
+      "engine": "theta-burner-study",
+      "desc": "delta-targeted laddered condor hold-to-settle",
+      "fits": [
+        "quiet_range",
+        "chop",
+        "gap_chop"
+      ]
+    },
+    "directional_credit": {
+      "engine": "credit",
+      "desc": "directional credit spread WITH the move (continuation)",
+      "fits": [
+        "gap_go",
+        "trend",
+        "trend_vol"
+      ],
+      "status": "TODO - candidate for the regimes SMC loses in"
+    },
+    "or_fade": {
+      "engine": "or-fade-sweep",
+      "desc": "opening-range fade",
+      "fits": [
+        "gap_fade",
+        "chop"
+      ]
+    }
+  },
+  "matrix": {
+    "SPX": {
+      "gap_go": [
+        {
+          "variant": "DEMA 2+3+5 3x21|IB w10|TP35 only",
+          "train_per_trade": 43.6,
+          "test_per_trade": 18.2,
+          "est_test_trades": 192,
+          "trades_per_day": 12,
+          "dollar_per_day_test": 218,
+          "day_win_rate": 50,
+          "status": "confirmed"
+        },
+        {
+          "variant": "DEMA 2+3+5 3x21|IB w10|TP50 only",
+          "train_per_trade": 47.9,
+          "test_per_trade": 13.7,
+          "est_test_trades": 192,
+          "trades_per_day": 12,
+          "dollar_per_day_test": 164,
+          "day_win_rate": 44,
+          "status": "confirmed"
+        },
+        {
+          "variant": "DEMA 2+3+5 3x21|IB w10|TP50 SL3x",
+          "train_per_trade": 47.9,
+          "test_per_trade": 13.7,
+          "est_test_trades": 192,
+          "trades_per_day": 12,
+          "dollar_per_day_test": 164,
+          "day_win_rate": 44,
+          "status": "confirmed"
+        }
+      ],
+      "gap_fade": [
+        {
+          "variant": "DEMA 2+3 3x21|IB w50|TP75 only",
+          "train_per_trade": 369.6,
+          "test_per_trade": 267.3,
+          "est_test_trades": 247,
+          "trades_per_day": 16.5,
+          "dollar_per_day_test": 4409,
+          "day_win_rate": 73,
+          "status": "confirmed"
+        },
+        {
+          "variant": "DEMA 2+3 3x21|IB w50|hold-to-settle",
+          "train_per_trade": 315.8,
+          "test_per_trade": 258.1,
+          "est_test_trades": 247,
+          "trades_per_day": 16.5,
+          "dollar_per_day_test": 4256,
+          "day_win_rate": 73,
+          "status": "confirmed"
+        },
+        {
+          "variant": "DEMA 2+3 3x21|IC 10w50|hold-to-settle",
+          "train_per_trade": 261.3,
+          "test_per_trade": 253.1,
+          "est_test_trades": 247,
+          "trades_per_day": 16.4,
+          "dollar_per_day_test": 4163,
+          "day_win_rate": 73,
+          "status": "confirmed"
+        }
+      ],
+      "gap_chop": [
+        {
+          "variant": "DEMA 2m 3x9|IB w50|hold-to-settle",
+          "train_per_trade": 298.4,
+          "test_per_trade": 559.7,
+          "est_test_trades": 474,
+          "trades_per_day": 29.6,
+          "dollar_per_day_test": 16594,
+          "day_win_rate": 94,
+          "status": "confirmed"
+        },
+        {
+          "variant": "DEMA 2m 3x9|IC 10w50|hold-to-settle",
+          "train_per_trade": 290.3,
+          "test_per_trade": 559.7,
+          "est_test_trades": 472,
+          "trades_per_day": 29.5,
+          "dollar_per_day_test": 16523,
+          "day_win_rate": 94,
+          "status": "confirmed"
+        },
+        {
+          "variant": "DEMA 2m 3x9|IB w50|TP75 only",
+          "train_per_trade": 303.7,
+          "test_per_trade": 556.6,
+          "est_test_trades": 474,
+          "trades_per_day": 29.6,
+          "dollar_per_day_test": 16501,
+          "day_win_rate": 94,
+          "status": "confirmed"
+        }
+      ],
+      "trend": [
+        {
+          "variant": "HMA  3m 3x9|IC 20w50|hold-to-settle",
+          "train_per_trade": 118.9,
+          "test_per_trade": 45.1,
+          "est_test_trades": 745,
+          "trades_per_day": 39.2,
+          "dollar_per_day_test": 1769,
+          "day_win_rate": 74,
+          "status": "confirmed"
+        },
+        {
+          "variant": "HMA  2+3 3x12|IC 20w50|hold-to-settle",
+          "train_per_trade": 109.7,
+          "test_per_trade": 42.2,
+          "est_test_trades": 681,
+          "trades_per_day": 35.8,
+          "dollar_per_day_test": 1512,
+          "day_win_rate": 68,
+          "status": "confirmed"
+        },
+        {
+          "variant": "DEMA 2+3 3x21|IC 20w50|hold-to-settle",
+          "train_per_trade": 128.1,
+          "test_per_trade": 35.9,
+          "est_test_trades": 311,
+          "trades_per_day": 16.3,
+          "dollar_per_day_test": 588,
+          "day_win_rate": 68,
+          "status": "confirmed"
+        }
+      ],
+      "trend_vol": [
+        {
+          "variant": "DEMA 5m 3x21|10ITM w10|TP75 only",
+          "train_per_trade": 42.8,
+          "test_per_trade": 174.3,
+          "est_test_trades": 66,
+          "trades_per_day": 11,
+          "dollar_per_day_test": 1910,
+          "day_win_rate": 83,
+          "status": "confirmed"
+        },
+        {
+          "variant": "DEMA 5m 3x21|10ITM w20|TP75 only",
+          "train_per_trade": 11.2,
+          "test_per_trade": 174.3,
+          "est_test_trades": 66,
+          "trades_per_day": 11,
+          "dollar_per_day_test": 1914,
+          "day_win_rate": 67,
+          "status": "confirmed"
+        },
+        {
+          "variant": "DEMA 5m 3x21|15ITM w10|TP75 only",
+          "train_per_trade": 47.5,
+          "test_per_trade": 174.2,
+          "est_test_trades": 65,
+          "trades_per_day": 10.9,
+          "dollar_per_day_test": 1893,
+          "day_win_rate": 67,
+          "status": "confirmed"
+        }
+      ],
+      "chop": [
+        {
+          "variant": "HMA  5m 3x9|IB w50|hold-to-settle",
+          "train_per_trade": 345.9,
+          "test_per_trade": 282.2,
+          "est_test_trades": 416,
+          "trades_per_day": 32,
+          "dollar_per_day_test": 9029,
+          "day_win_rate": 69,
+          "status": "confirmed"
+        },
+        {
+          "variant": "HMA  5m 3x9|IB w50|TP75 only",
+          "train_per_trade": 345.9,
+          "test_per_trade": 281.2,
+          "est_test_trades": 416,
+          "trades_per_day": 32,
+          "dollar_per_day_test": 8995,
+          "day_win_rate": 69,
+          "status": "confirmed"
+        },
+        {
+          "variant": "DEMA 2+3+5 3x12|IB w50|hold-to-settle",
+          "train_per_trade": 338.2,
+          "test_per_trade": 262.2,
+          "est_test_trades": 228,
+          "trades_per_day": 17.6,
+          "dollar_per_day_test": 4604,
+          "day_win_rate": 69,
+          "status": "confirmed"
+        }
+      ],
+      "quiet_range": [
+        {
+          "variant": "DEMA 2+3+5 3x21|IB w50|hold-to-settle",
+          "train_per_trade": 482.8,
+          "test_per_trade": 641.6,
+          "est_test_trades": 123,
+          "trades_per_day": 12.3,
+          "dollar_per_day_test": 7872,
+          "day_win_rate": 90,
+          "status": "confirmed"
+        },
+        {
+          "variant": "DEMA 2+3+5 3x21|IB w50|TP75 only",
+          "train_per_trade": 482.8,
+          "test_per_trade": 621.5,
+          "est_test_trades": 123,
+          "trades_per_day": 12.3,
+          "dollar_per_day_test": 7625,
+          "day_win_rate": 90,
+          "status": "confirmed"
+        },
+        {
+          "variant": "DEMA 2+3+5 3x21|IB w40|hold-to-settle",
+          "train_per_trade": 460.5,
+          "test_per_trade": 593.7,
+          "est_test_trades": 123,
+          "trades_per_day": 12.3,
+          "dollar_per_day_test": 7283,
+          "day_win_rate": 90,
+          "status": "confirmed"
+        }
+      ],
+      "mixed": [
+        {
+          "variant": "HMA  2+3+5 3x21|IB±25 w25|hold-to-settle",
+          "train_per_trade": 35.3,
+          "test_per_trade": 116.4,
+          "est_test_trades": 279,
+          "trades_per_day": 23.3,
+          "dollar_per_day_test": 2708,
+          "day_win_rate": 83,
+          "status": "confirmed"
+        },
+        {
+          "variant": "HMA  2+3+5 3x21|IB±25 w25|TP75 only",
+          "train_per_trade": 35.3,
+          "test_per_trade": 116.4,
+          "est_test_trades": 279,
+          "trades_per_day": 23.3,
+          "dollar_per_day_test": 2708,
+          "day_win_rate": 83,
+          "status": "confirmed"
+        },
+        {
+          "variant": "HMA  2+3 3x21|IB±25 w25|hold-to-settle",
+          "train_per_trade": 36.2,
+          "test_per_trade": 105.1,
+          "est_test_trades": 342,
+          "trades_per_day": 28.5,
+          "dollar_per_day_test": 2996,
+          "day_win_rate": 58,
+          "status": "confirmed"
+        }
+      ]
+    },
+    "NDX": {
+      "gap_go": [
+        {
+          "variant": "DEMA 2+3+5 3x12|IC 20w100|TP75 only",
+          "train_per_trade": 644.3,
+          "test_per_trade": 832.5,
+          "est_test_trades": 279,
+          "trades_per_day": 16.4,
+          "dollar_per_day_test": 13681,
+          "day_win_rate": 76,
+          "status": "confirmed"
+        },
+        {
+          "variant": "DEMA 2+3+5 3x12|IB w100|TP75 only",
+          "train_per_trade": 1076.6,
+          "test_per_trade": 759.8,
+          "est_test_trades": 272,
+          "trades_per_day": 16,
+          "dollar_per_day_test": 12172,
+          "day_win_rate": 65,
+          "status": "confirmed"
+        },
+        {
+          "variant": "DEMA 2+3+5 3x12|IC 30w100|TP75 only",
+          "train_per_trade": 699.7,
+          "test_per_trade": 754.1,
+          "est_test_trades": 281,
+          "trades_per_day": 16.5,
+          "dollar_per_day_test": 12456,
+          "day_win_rate": 76,
+          "status": "confirmed"
+        }
+      ],
+      "gap_fade": [
+        {
+          "variant": "DEMA 2+3 3x21|IC 40w100|TP75 only",
+          "train_per_trade": 1059.3,
+          "test_per_trade": 2204.6,
+          "est_test_trades": 346,
+          "trades_per_day": 15.7,
+          "dollar_per_day_test": 34634,
+          "day_win_rate": 86,
+          "status": "confirmed"
+        },
+        {
+          "variant": "DEMA 2+3+5 3x21|IC 40w100|TP75 only",
+          "train_per_trade": 892.4,
+          "test_per_trade": 2172.5,
+          "est_test_trades": 257,
+          "trades_per_day": 11.7,
+          "dollar_per_day_test": 25389,
+          "day_win_rate": 82,
+          "status": "confirmed"
+        },
+        {
+          "variant": "DEMA 2+3 3x12|IC 30w100|TP50 only",
+          "train_per_trade": 987.4,
+          "test_per_trade": 2157.3,
+          "est_test_trades": 464,
+          "trades_per_day": 21.1,
+          "dollar_per_day_test": 45525,
+          "day_win_rate": 100,
+          "status": "confirmed"
+        }
+      ],
+      "gap_chop": [
+        {
+          "variant": "DEMA 1m 3x12|IB w100|TP50 only",
+          "train_per_trade": 1360.7,
+          "test_per_trade": 1763.7,
+          "est_test_trades": 984,
+          "trades_per_day": 36.5,
+          "dollar_per_day_test": 64296,
+          "day_win_rate": 85,
+          "status": "confirmed"
+        },
+        {
+          "variant": "DEMA 1m 3x12|IB w100|TP50 SL3x",
+          "train_per_trade": 1333.2,
+          "test_per_trade": 1763.6,
+          "est_test_trades": 984,
+          "trades_per_day": 36.5,
+          "dollar_per_day_test": 64294,
+          "day_win_rate": 85,
+          "status": "confirmed"
+        },
+        {
+          "variant": "DEMA 1m 3x12|IB w100|TP50 SL4x",
+          "train_per_trade": 1353.6,
+          "test_per_trade": 1758.6,
+          "est_test_trades": 984,
+          "trades_per_day": 36.5,
+          "dollar_per_day_test": 64109,
+          "day_win_rate": 85,
+          "status": "confirmed"
+        }
+      ],
+      "trend": [
+        {
+          "variant": "DEMA 2+3 3x21|IB w100|TP35 only",
+          "train_per_trade": 434.7,
+          "test_per_trade": 1435.9,
+          "est_test_trades": 182,
+          "trades_per_day": 15.1,
+          "dollar_per_day_test": 21748,
+          "day_win_rate": 83,
+          "status": "confirmed"
+        },
+        {
+          "variant": "DEMA 2+3 3x21|IB w80|TP35 only",
+          "train_per_trade": 485.2,
+          "test_per_trade": 1408.1,
+          "est_test_trades": 176,
+          "trades_per_day": 14.7,
+          "dollar_per_day_test": 20669,
+          "day_win_rate": 92,
+          "status": "confirmed"
+        },
+        {
+          "variant": "DEMA 2+3+5 3x21|IB w100|TP35 only",
+          "train_per_trade": 388.3,
+          "test_per_trade": 1364.8,
+          "est_test_trades": 134,
+          "trades_per_day": 11.2,
+          "dollar_per_day_test": 15235,
+          "day_win_rate": 83,
+          "status": "confirmed"
+        }
+      ],
+      "trend_vol": [
+        {
+          "variant": "DEMA 2+3+5 3x9|IC 20w100|TP25 only",
+          "train_per_trade": 481.8,
+          "test_per_trade": 1207.4,
+          "est_test_trades": 76,
+          "trades_per_day": 19,
+          "dollar_per_day_test": 22969,
+          "day_win_rate": 100,
+          "status": "confirmed"
+        },
+        {
+          "variant": "DEMA 2+3+5 3x9|IC 20w100|TP25 SL3x",
+          "train_per_trade": 448.6,
+          "test_per_trade": 1207.4,
+          "est_test_trades": 76,
+          "trades_per_day": 19,
+          "dollar_per_day_test": 22969,
+          "day_win_rate": 100,
+          "status": "confirmed"
+        },
+        {
+          "variant": "DEMA 2+3+5 3x9|IC 20w100|TP20 only",
+          "train_per_trade": 472.3,
+          "test_per_trade": 1137.9,
+          "est_test_trades": 76,
+          "trades_per_day": 19,
+          "dollar_per_day_test": 21647,
+          "day_win_rate": 100,
+          "status": "confirmed"
+        }
+      ],
+      "chop": [
+        {
+          "variant": "DEMA 2+3+5 3x21|IB w100|TP50 only",
+          "train_per_trade": 1734.1,
+          "test_per_trade": 1935.1,
+          "est_test_trades": 78,
+          "trades_per_day": 11.2,
+          "dollar_per_day_test": 21602,
+          "day_win_rate": 86,
+          "status": "confirmed"
+        },
+        {
+          "variant": "DEMA 2+3+5 3x21|IB w100|TP75 only",
+          "train_per_trade": 1274.7,
+          "test_per_trade": 1927.7,
+          "est_test_trades": 78,
+          "trades_per_day": 11.2,
+          "dollar_per_day_test": 21519,
+          "day_win_rate": 71,
+          "status": "confirmed"
+        },
+        {
+          "variant": "DEMA 2+3+5 3x21|IB w100|TP50 SL3x",
+          "train_per_trade": 1734.1,
+          "test_per_trade": 1837.5,
+          "est_test_trades": 78,
+          "trades_per_day": 11.2,
+          "dollar_per_day_test": 20513,
+          "day_win_rate": 86,
+          "status": "confirmed"
+        }
+      ],
+      "quiet_range": [
+        {
+          "variant": "DEMA 2+3 3x21|IB w100|TP75 only",
+          "train_per_trade": 1524,
+          "test_per_trade": 1947.9,
+          "est_test_trades": 91,
+          "trades_per_day": 15.1,
+          "dollar_per_day_test": 29503,
+          "day_win_rate": 83,
+          "status": "confirmed"
+        },
+        {
+          "variant": "HMA  5m 3x12|IB w100|TP75 only",
+          "train_per_trade": 1296,
+          "test_per_trade": 1932.5,
+          "est_test_trades": 158,
+          "trades_per_day": 26.4,
+          "dollar_per_day_test": 51030,
+          "day_win_rate": 83,
+          "status": "confirmed"
+        },
+        {
+          "variant": "DEMA 2+3+5 3x12|IB w100|TP75 only",
+          "train_per_trade": 1497.9,
+          "test_per_trade": 1847.9,
+          "est_test_trades": 96,
+          "trades_per_day": 16,
+          "dollar_per_day_test": 29603,
+          "day_win_rate": 83,
+          "status": "confirmed"
+        }
+      ],
+      "mixed": [
+        {
+          "variant": "DEMA 2+3+5 3x9|IB w100|TP75 only",
+          "train_per_trade": 1600.1,
+          "test_per_trade": 1432.7,
+          "est_test_trades": 241,
+          "trades_per_day": 18.5,
+          "dollar_per_day_test": 26539,
+          "day_win_rate": 92,
+          "status": "confirmed"
+        },
+        {
+          "variant": "DEMA 2+3+5 3x12|IB w80|TP75 only",
+          "train_per_trade": 1618.7,
+          "test_per_trade": 1432.4,
+          "est_test_trades": 201,
+          "trades_per_day": 15.5,
+          "dollar_per_day_test": 22140,
+          "day_win_rate": 85,
+          "status": "confirmed"
+        },
+        {
+          "variant": "DEMA 2+3+5 3x12|IB w100|TP75 only",
+          "train_per_trade": 1766.6,
+          "test_per_trade": 1432,
+          "est_test_trades": 208,
+          "trades_per_day": 16,
+          "dollar_per_day_test": 22940,
+          "day_win_rate": 85,
+          "status": "confirmed"
+        }
+      ]
+    }
+  },
+  "uncovered": {
+    "SPX": [],
+    "NDX": []
+  },
+  "theory_log": [
+    {
+      "date": "2026-06-14",
+      "theory": "SMC sweep+BOS OTM-put-hold is regime-dependent: profitable in contained regimes, loses in directional ones",
+      "result": "SUPPORTED (in-sample): +$54..197/trade in chop/fade/range/trend; -$164/-$174 in trend_vol/gap_go. Needs OOS confirmation.",
+      "action": "seed matrix; flag trend_vol+gap_go as needing a directional strategy instead"
+    },
+    {
+      "date": "2026-06-14",
+      "theory": "nightly regime-attribution + OOS rebuild",
+      "result": "SPX: 7/8 regimes covered; uncovered=[trend_vol] | NDX: 5/8 regimes covered; uncovered=[trend_vol,chop,quiet_range]",
+      "action": "matrix rebuilt from latest dashboard daily P&L"
+    },
+    {
+      "date": "2026-06-15",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-06-15",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-06-16",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-06-17",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-06-18",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-06-19",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-06-20",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-06-21",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-06-22",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-06-23",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-06-24",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-06-25",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-06-26",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-06-27",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-06-28",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-06-29",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-06-30",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-07-01",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-07-02",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-07-03",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-07-04",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-07-05",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-07-06",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-07-07",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-07-08",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-07-09",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-07-10",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-07-11",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-07-12",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-07-13",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-07-14",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-07-15",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-07-16",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-07-17",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-07-18",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-07-19",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-07-20",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-07-21",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-07-22",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-07-23",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-07-24",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-07-25",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-07-26",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-07-27",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-07-28",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-07-29",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-07-30",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-07-31",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-08-01",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-08-02",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-08-03",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-08-04",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-08-05",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-08-06",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-08-07",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-08-08",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-08-09",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-08-10",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-08-11",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-08-12",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-08-13",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-08-14",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-08-15",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-08-16",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-08-17",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-08-18",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-08-19",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-08-20",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-08-21",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-08-22",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-08-23",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-08-24",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-08-25",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-08-26",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-08-27",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-08-28",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-08-29",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    }
+  ]
+}
