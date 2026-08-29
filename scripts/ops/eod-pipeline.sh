@@ -44,7 +44,7 @@ TODAY=$(TZ=America/New_York date +%F)
 # for the script's lifetime and auto-releases on ANY exit, including crashes.
 # ─────────────────────────────────────────────────────────────────────────────
 LOCK="$STATE_DIR/eod.lock"
-exec 9>"$LOCK"
+exec 9<>"$LOCK"
 if ! flock -n 9; then
   log "skip — previous run still active (holder pid $(cat "$LOCK" 2>/dev/null || echo '?')); not overlapping"
   exit 0
