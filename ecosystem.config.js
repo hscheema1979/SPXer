@@ -47,6 +47,32 @@ module.exports = {
       merge_logs: true,
     },
 
+    // ── FR-003 Backtest Lab (:3702) ───────────────────────────────
+    // Long-lived HTTP service that spawns the diag engines (stockx-backtest,
+    // long-config-single, sweep-parallel) for the spxer-studio Backtest page.
+    // The studio proxies /spxer/backtest-lab/api/* to 127.0.0.1:3702, so the
+    // bind stays loopback-only. Scripts live in scripts/backtest-lab/; engine
+    // + spec + job artifacts land in scripts/autoresearch/output/backtest-lab/
+    // (gitignored, like the rest of autoresearch output). Restart after any
+    // edit there: pm2 restart backtest-lab.
+    {
+      name: 'backtest-lab',
+      script: 'npx',
+      args: 'tsx scripts/backtest-lab/server.ts',
+      cwd: '/home/ubuntu/SPXer',
+      autorestart: true,
+      watch: false,
+      max_memory_restart: '512M',
+      env: {
+        NODE_ENV: 'production',
+        LAB_PORT: 3702,
+      },
+      log_date_format: 'YYYY-MM-DD HH:mm:ss',
+      error_file: '/home/ubuntu/.pm2/logs/backtest-lab-error.log',
+      out_file: '/home/ubuntu/.pm2/logs/backtest-lab-out.log',
+      merge_logs: true,
+    },
+
     // ── Daily Backfill (cron) ─────────────────────────────────────
     // Runs at 4:30 PM ET (20:30 UTC in EDT, 21:30 UTC in EST). Auto-discovers
     // ALL profiles with replay data (SPX, NDX, etc.) and backfills today's
