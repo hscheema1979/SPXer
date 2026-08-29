@@ -151,8 +151,11 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
   if (p === "/api/run" && method === "POST") {
     const body = parseJsonBody(await readBody(req))
     if (!body.ok) return sendJson(res, (body as any).status ?? 400, { error: body.error })
-    const spec = (body.value as { spec?: BacktestSpec }).spec
-    if (!spec) return sendJson(res, 400, { error: "body must be { spec: BacktestSpec }" })
+    // Accept both the UI's `{ spec }` wrapper and a bare spec — the FR-003
+    // spec's frozen CHECK posts the fixture file directly.
+    const v = body.value as { spec?: BacktestSpec; type?: string; underlying?: unknown }
+    const spec = v.spec ?? (("type" in v && "underlying" in v ? (v as BacktestSpec) : undefined))
+    if (!spec) return sendJson(res, 400, { error: "body must be { spec: BacktestSpec } or a bare spec" })
     const verdict = validateSpec(spec, capabilities())
     if (!verdict.ok) return sendJson(res, 422, { errors: verdict.errors })
     upsertSpec(spec) // the library always holds what was run
