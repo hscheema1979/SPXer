@@ -1,7 +1,7 @@
 # gate evidence — FR-001 → test
 
-- run: 2026-08-29T15:58:46.709Z
-- head before: 78d7f3ca2 on feat/multi-dte-credit-sweep
+- run: 2026-08-30T12:42:11.081Z
+- head before: 1d935e8c7 on feat/multi-dte-credit-sweep
 - checks: 12/12 passed
 
 ## CHECK: npm run build
