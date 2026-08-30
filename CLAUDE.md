@@ -38,7 +38,7 @@ and each weekday's cron fire stacked another orphaned tree — 37 leaked
 processes at peak. Three layers now bound every run:
 
 1. **Per-step timeouts** (`scripts/diag/sweep-process.ts`, used by `sweep-parallel.ts`): every child is detached (own process group), wall-clock-bounded (`SWEEP_WORKER_TIMEOUT_S` 2700s / `SWEEP_MERGE_TIMEOUT_S` 900s), has stdout drained, and dies with the wrapper on SIGINT/SIGTERM. Engine merge paths exit explicitly (`process.exit(0)`).
-2. **Pipeline mutex + bound** (`eod-pipeline.sh`): `flock -n` on `data/sweep-state/eod.lock` (a second fire logs `skip — previous run still active` and exits 0) and a 2h-per-symbol `timeout -k 60s` wrapper.
+2. **Pipeline mutex + bound** (`eod-pipeline.sh`): `flock -n` on `data/sweep-state/eod.lock` (a second fire logs `skip — previous run still active (holder pid N)` and exits 0) and a 2h-per-symbol `timeout -k 60s` wrapper. The lock fd must open with `exec 9<>"$LOCK"` — read-write, non-truncating. `9>` truncates at `open()`, so a contender wipes the holder's pid just before reading it (the skip line logged empty until this was caught; pinned by `tests/ops/eod-lock.test.ts`).
 3. **Reaper** (`scripts/ops/sweep-reaper.sh`, cron `13,43 * * * *`): kills any sweep-family process tree older than 6h (`SWEEP_REAP_AGE_H`), `--dry-run` to preview.
 
 Freshness is monitored by `check-data-pipeline.sh` TIER 9 + `eodFreshnessStatus()` in `src/ops/pipeline-health.ts` (warn >72h, fail >96h without a `=== EOD pipeline done ===` line).
