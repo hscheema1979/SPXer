@@ -194,6 +194,11 @@ export interface Config {
      *   +10 = OTM10, -10 = ITM10, etc.
      *  Aligns with basket member conventions. */
     atmOffset?: number;
+    /** Optional explicit strike whitelist. When set (non-empty), ONLY contracts whose
+     *  strike is in this list are eligible for signal detection and selection — the
+     *  search band and moneyness mode still apply on top. Used for strategies that pin
+     *  trading to specific levels (e.g. opening-range high/low strikes). Set per-run. */
+    allowedStrikes?: number[];
   };
 
   timeWindows: {

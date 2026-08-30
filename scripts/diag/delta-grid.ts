@@ -8,7 +8,7 @@
  * skipped. This is how the multi-DTE sweep targets constant-delta short legs
  * without greeks in the data feed.
  */
-import { impliedVolFromPut, bsPutDelta } from './black-scholes';
+import { impliedVolFromPut, bsPutDelta, impliedVolFromCall, bsCallDelta } from './black-scholes';
 
 export interface DeltaCandidate {
   strike: number;
@@ -45,6 +45,37 @@ export function selectStrikeByDelta(
     const iv = impliedVolFromPut(c.price, spot, c.strike, T, rate);
     if (iv === null) continue; // price not arbitrage-consistent → skip
     const delta = bsPutDelta(spot, c.strike, T, iv, rate);
+    const dist = Math.abs(Math.abs(delta) - targetAbsDelta);
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = { strike: c.strike, delta, price: c.price };
+    }
+  }
+
+  return best;
+}
+
+/**
+ * Call-side mirror of selectStrikeByDelta. Picks the candidate CALL strike whose
+ * BS-computed delta (positive) is closest to targetAbsDelta. IV is inverted from
+ * the observed call mark; candidates whose price can't yield a real IV are skipped.
+ */
+export function selectCallStrikeByDelta(
+  candidates: DeltaCandidate[],
+  targetAbsDelta: number,
+  spot: number,
+  T: number,
+  rate: number,
+  excludeStrikes?: ReadonlySet<number>
+): DeltaSelection | null {
+  let best: DeltaSelection | null = null;
+  let bestDist = Infinity;
+
+  for (const c of candidates) {
+    if (excludeStrikes && excludeStrikes.has(c.strike)) continue;
+    const iv = impliedVolFromCall(c.price, spot, c.strike, T, rate);
+    if (iv === null) continue;
+    const delta = bsCallDelta(spot, c.strike, T, iv, rate);
     const dist = Math.abs(Math.abs(delta) - targetAbsDelta);
     if (dist < bestDist) {
       bestDist = dist;

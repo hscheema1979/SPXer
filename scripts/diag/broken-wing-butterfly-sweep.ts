@@ -611,3 +611,7 @@ if (process.env.SWEEP_MERGE) {
 
   console.error(`[bwb-sweep] merged: ${existing.length} prior + ${rows.length} new = ${merged.length} total rows`);
 }
+
+// FR-001: all output above is written synchronously — exit explicitly rather
+// than trusting the event loop to drain (see iron-sweep.ts tail).
+process.exit(0);

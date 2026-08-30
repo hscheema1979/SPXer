@@ -852,3 +852,7 @@ if (process.env.SWEEP_SHARD_OUT) {
   // next nightly run only replays the following day.
   if (STATE_FILE) { dumpResults(results, STATE_FILE); console.error(`[incremental] state saved → ${STATE_FILE}`); }
 }
+
+// FR-001: everything above writes synchronously — exit explicitly rather than
+// trusting the event loop to drain (see iron-sweep.ts tail for the incident).
+process.exit(0);

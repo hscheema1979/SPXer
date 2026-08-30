@@ -116,6 +116,31 @@ else
     warn "Could not verify SPX data freshness"
 fi
 
+# EOD pipeline freshness (FR-001): the nightly eod-pipeline hung SILENTLY for
+# three weeks (2026-07-31 → 2026-08-19) — the only symptom was a growing pile
+# of orphaned sweep processes and stale NDX state. Alert on the age of the
+# last "=== EOD pipeline done ===" line instead. Thresholds mirror
+# eodFreshnessStatus() in src/ops/pipeline-health.ts: warn >72h (weekend-
+# tolerant), fail >96h (Monday-holiday-tolerant).
+EOD_LOG="$SPXER_DIR/logs/eod-pipeline.log"
+if [ -f "$EOD_LOG" ]; then
+    LAST_DONE_TS=$(grep '=== EOD pipeline done ===' "$EOD_LOG" | tail -1 | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}' | head -1)
+    if [ -n "$LAST_DONE_TS" ]; then
+        LAST_DONE_EPOCH=$(date -d "${LAST_DONE_TS}Z" +%s 2>/dev/null || echo 0)
+        NOW_EPOCH=$(date +%s)
+        EOD_AGE_H=$(( (NOW_EPOCH - LAST_DONE_EPOCH) / 3600 ))
+        if [ "$EOD_AGE_H" -le 72 ]; then
+            check_pass "EOD pipeline fresh: last complete run ${EOD_AGE_H}h ago"
+        elif [ "$EOD_AGE_H" -le 96 ]; then
+            warn "EOD pipeline stale: last complete run ${EOD_AGE_H}h ago"
+        else
+            check_fail "EOD pipeline VERY stale: last complete run ${EOD_AGE_H}h ago (hung? check logs/eod-pipeline.log + sweep-reaper.log)"
+        fi
+    else
+        warn "No completed EOD pipeline run found in logs/eod-pipeline.log"
+    fi
+fi
+
 echo
 
 # ============================================================================

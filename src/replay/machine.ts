@@ -28,6 +28,7 @@ import { resolveSlippage, slipBuyPrice } from '../core/fill-model';
 import { roundToOptionTick } from '../core/option-tick';
 import type { Signal, CoreBar, Direction } from '../core/types';
 import { makeHMAState, hmaStep, makeKCState, kcStep } from '../pipeline/indicators/tier1';
+import { aggregate } from '../pipeline/aggregator';
 import { readBarCacheFile, writeBarCacheFile, hasCacheFile } from './bar-cache-file';
 
 // ── Strategy engine (signal detection + trade decisions) ──────────────────
@@ -87,6 +88,19 @@ interface BarCache {
   contractBars: Map<string, Bar[]>;     // symbol → bars, sorted by ts
   contractStrikes: Map<string, number>; // symbol → strike price
   timestamps: number[];                 // SPX timestamps for the session
+  // Bar duration in seconds. A bar with open ts `b.ts` only CLOSES at `b.ts + tfSeconds`,
+  // so it must not be visible to "as-of atTs" lookups until then — otherwise the engine
+  // reads a bar's close/indicators at its open time, which is look-ahead bias (1 min on 1m,
+  // `tf` min on aggregated bars). Accessors gate on `b.ts + tfSeconds <= atTs`. Default 60.
+  tfSeconds?: number;
+}
+
+/** Bar duration in seconds for a timeframe label ('1m','2m','3m','5m','10m','15m','30m','1h'). */
+function tfToSeconds(tf: string): number {
+  const m = /^(\d+)\s*([mh])$/.exec((tf || '1m').trim());
+  if (!m) return 60;
+  const n = parseInt(m[1], 10);
+  return m[2] === 'h' ? n * 3600 : n * 60;
 }
 
 // All denormalized indicator columns in replay_bars (order matters for SELECT)
@@ -120,6 +134,7 @@ function loadBarCache(
 ): BarCache {
   // Load bars at the requested timeframe directly from DB (pre-computed by build-mtf-bars.ts)
   const tf = timeframe || '1m';
+  const tfSecs = tfToSeconds(tf);  // stamped on the cache so accessors can gate on bar closure
   const skipContractInd = opts?.skipContractIndicators ?? false;
   const date = opts?.date;
   const underlyingSymbol = opts?.underlyingSymbol ?? 'SPX';
@@ -129,7 +144,7 @@ function loadBarCache(
   const cacheKeyTf = underlyingSymbol === 'SPX' ? tf : `${underlyingSymbol}_${tf}`;
   if (date && hasCacheFile(date, cacheKeyTf, skipContractInd)) {
     const cached = readBarCacheFile(date, cacheKeyTf, skipContractInd);
-    if (cached) return cached;
+    if (cached) { cached.tfSeconds = tfSecs; return cached; }
   }
 
   // ── Try parquet file (preferred over SQLite for historical data) ──
@@ -146,11 +161,38 @@ function loadBarCache(
       skipContractIndicators: skipContractInd,
     });
     if (cache.spxBars.length > 0) {
+      cache.tfSeconds = tfSecs;
       // Write binary cache for next run
       try { writeBarCacheFile(cache, date, cacheKeyTf, skipContractInd); } catch {}
       return cache;
     }
     // Fall through to SQLite if parquet returned no data
+  }
+
+  // ── Aggregate from 1m when the requested TF isn't materialized ──
+  // Parquet/SQLite often hold only 1m bars; higher TFs are aggregated from 1m
+  // (CLAUDE.md: "Higher timeframes are aggregated from 1m bars, never fetched
+  // independently"). Without this, an un-materialized TF falls through to a
+  // SQLite table that may not exist and throws — silently dropping most dates.
+  if (tf !== '1m') {
+    const base = loadBarCache(db, start, end, symbolRange, '1m', opts);
+    if (base.spxBars.length > 0) {
+      const periodSec = tfToSeconds(tf);
+      const aggSpx = aggregate(base.spxBars as any, tf as any, periodSec);
+      const aggContracts = new Map<string, Bar[]>();
+      for (const [sym, bars] of base.contractBars) {
+        aggContracts.set(sym, aggregate(bars as any, tf as any, periodSec) as any);
+      }
+      const aggCache: BarCache = {
+        spxBars: aggSpx as any,
+        contractBars: aggContracts,
+        contractStrikes: base.contractStrikes,
+        timestamps: aggSpx.map(b => b.ts),
+        tfSeconds: periodSec,
+      };
+      if (date) { try { writeBarCacheFile(aggCache, date, cacheKeyTf, skipContractInd); } catch {} }
+      return aggCache;
+    }
   }
 
   const spxRows = db.prepare(`
@@ -197,7 +239,7 @@ function loadBarCache(
     if (!contractStrikes.has(r.symbol)) contractStrikes.set(r.symbol, r.strike);
   }
 
-  const cache: BarCache = { spxBars, contractBars, contractStrikes, timestamps };
+  const cache: BarCache = { spxBars, contractBars, contractStrikes, timestamps, tfSeconds: tfSecs };
 
   // ── Write binary cache for next run ──
   if (date) {
@@ -469,15 +511,16 @@ function ensureKcFields(cache: BarCache, tf: string, config: ReplayConfig, verbo
 // ── In-memory lookups (no SQL per tick) ────────────────────────────────────
 
 function getSpxBarsAt(cache: BarCache, atTs: number, n = 25): Bar[] {
-  // Binary search for the position
+  // Only bars that have CLOSED by atTs are visible (open ts + tfSeconds <= atTs).
+  const tfs = cache.tfSeconds ?? 60;
   let hi = cache.spxBars.length - 1;
   let lo = 0;
   while (lo <= hi) {
     const mid = (lo + hi) >>> 1;
-    if (cache.spxBars[mid].ts <= atTs) lo = mid + 1;
+    if (cache.spxBars[mid].ts + tfs <= atTs) lo = mid + 1;
     else hi = mid - 1;
   }
-  // hi is the last bar with ts <= atTs
+  // hi is the last bar that has closed by atTs
   const end = hi + 1;
   const start = Math.max(0, end - n);
   return cache.spxBars.slice(start, end);
@@ -485,24 +528,27 @@ function getSpxBarsAt(cache: BarCache, atTs: number, n = 25): Bar[] {
 
 function getContractBarsAt(
   cache: BarCache, spxPrice: number, strikeRange: number, atTs: number, n = 3,
+  allowedStrikes?: Set<number>,
 ): Map<string, Bar[]> {
   const result = new Map<string, Bar[]>();
   const lo = spxPrice - strikeRange;
   const hi = spxPrice + strikeRange;
+  const tfs = cache.tfSeconds ?? 60;  // only bars closed by atTs are visible
 
   for (const [symbol, bars] of cache.contractBars) {
     const strike = cache.contractStrikes.get(symbol)!;
     if (strike < lo || strike > hi) continue;
+    if (allowedStrikes && !allowedStrikes.has(strike)) continue;
 
-    // Find bars up to atTs using binary search
+    // Find bars CLOSED by atTs (ts + tfSeconds <= atTs) using binary search
     let right = bars.length - 1;
     let left = 0;
     while (left <= right) {
       const mid = (left + right) >>> 1;
-      if (bars[mid].ts <= atTs) left = mid + 1;
+      if (bars[mid].ts + tfs <= atTs) left = mid + 1;
       else right = mid - 1;
     }
-    // right is the last bar with ts <= atTs
+    // right is the last bar that has closed by atTs
     if (right < 0) continue;
     const end = right + 1;
     const start = Math.max(0, end - n);
@@ -521,11 +567,12 @@ function getOptionHmaDirection(
 ): 'bullish' | 'bearish' | null {
   const bars = cache.contractBars.get(symbol);
   if (!bars || bars.length === 0) return null;
-  // Binary search for last bar with ts <= atTs
+  const tfs = cache.tfSeconds ?? 60;
+  // Binary search for last bar CLOSED by atTs (ts + tfSeconds <= atTs)
   let left = 0, right = bars.length - 1;
   while (left <= right) {
     const mid = (left + right) >>> 1;
-    if (bars[mid].ts <= atTs) left = mid + 1;
+    if (bars[mid].ts + tfs <= atTs) left = mid + 1;
     else right = mid - 1;
   }
   if (right < 0) return null;
@@ -542,17 +589,18 @@ function getPosPriceAt(
   cache: BarCache, side: string, strike: number, symbolFilter: string, atTs: number,
 ): number | null {
   const cpPattern = side === 'call' ? /C\d/ : /P\d/;
+  const tfs = cache.tfSeconds ?? 60;
   for (const [symbol, bars] of cache.contractBars) {
     const s = cache.contractStrikes.get(symbol)!;
     if (s !== strike) continue;
     if (!cpPattern.test(symbol)) continue;
 
-    // Binary search for bar at atTs
+    // Binary search for last bar CLOSED by atTs (ts + tfSeconds <= atTs)
     let right = bars.length - 1;
     let left = 0;
     while (left <= right) {
       const mid = (left + right) >>> 1;
-      if (bars[mid].ts <= atTs) left = mid + 1;
+      if (bars[mid].ts + tfs <= atTs) left = mid + 1;
       else right = mid - 1;
     }
     if (right >= 0) return bars[right].close;
@@ -565,16 +613,18 @@ function getPosBarAt(
   cache: BarCache, side: string, strike: number, symbolFilter: string, atTs: number,
 ): { close: number; high: number; low: number; open?: number; spread?: number } | null {
   const cpPattern = side === 'call' ? /C\d/ : /P\d/;
+  const tfs = cache.tfSeconds ?? 60;
   for (const [symbol, bars] of cache.contractBars) {
     const s = cache.contractStrikes.get(symbol)!;
     if (s !== strike) continue;
     if (!cpPattern.test(symbol)) continue;
 
+    // last bar CLOSED by atTs (ts + tfSeconds <= atTs)
     let right = bars.length - 1;
     let left = 0;
     while (left <= right) {
       const mid = (left + right) >>> 1;
-      if (bars[mid].ts <= atTs) left = mid + 1;
+      if (bars[mid].ts + tfs <= atTs) left = mid + 1;
       else right = mid - 1;
     }
     if (right >= 0) {
@@ -1364,6 +1414,8 @@ export async function runReplay(
     // Pending TP re-entries collected during the position-monitor pass; opened after the loop
     const pendingTpReentries: { side: 'call' | 'put'; ts: number; rootId: string; depth: number }[] = [];
     const strikeRange = config.strikeSelector.strikeSearchRange;
+    const allowedStrikesSet = config.strikeSelector.allowedStrikes?.length
+      ? new Set(config.strikeSelector.allowedStrikes) : undefined;
     const spreadModel = resolveSpreadModel(config);
     let accountValue = config.sizing.startingAccountValue ?? 10000;
     let prevSpxHmaFast: number | null = null;
@@ -1534,7 +1586,7 @@ export async function runReplay(
           }
 
           // Use selectStrike() for parity with live agent and runStrategy()
-          const flipContracts = getContractBarsAt(cache1m, spx.close, strikeRange, ts);
+          const flipContracts = getContractBarsAt(cache1m, spx.close, strikeRange, ts, 3, allowedStrikesSet);
           const flipDirection: Direction = flip.side === 'call' ? 'bullish' : 'bearish';
           const flipCandidates: StrikeCandidate[] = [];
           for (const [sym, bars] of flipContracts) {
@@ -1613,7 +1665,7 @@ export async function runReplay(
           }
 
           // Re-run strike selection at current SPX (old contract is now ITM/expensive)
-          const reContracts = getContractBarsAt(cache1m, spx.close, strikeRange, ts);
+          const reContracts = getContractBarsAt(cache1m, spx.close, strikeRange, ts, 3, allowedStrikesSet);
           const reDirection: Direction = pending.side === 'call' ? 'bullish' : 'bearish';
           const reCandidates: StrikeCandidate[] = [];
           for (const [sym, bars] of reContracts) {
@@ -1675,7 +1727,7 @@ export async function runReplay(
 
       let optionSignals: Signal[];
       // contractBars from the default signal TF — also used for price filtering below
-      const contractBars = getContractBarsAt(signalCache, spx.close, strikeRange, ts);
+      const contractBars = getContractBarsAt(signalCache, spx.close, strikeRange, ts, 3, allowedStrikesSet);
 
       if (allSameTf) {
         // Fast path: all signal types use the same timeframe
@@ -1697,7 +1749,7 @@ export async function runReplay(
         if (config.signals.enablePriceCrossHma) getGroup(priceCrossHmaTf).enablePxHma = true;
 
         for (const [tf, group] of tfGroups) {
-          const tfBars = getContractBarsAt(getTfCache(tf), spx.close, strikeRange, ts);
+          const tfBars = getContractBarsAt(getTfCache(tf), spx.close, strikeRange, ts, 3, allowedStrikesSet);
           const subConfig = {
             ...config,
             signals: {

@@ -70,10 +70,11 @@ function parseFixedConfigs(spec: string): FixedConfig[] {
   if (!spec.trim()) return [];
   const out: FixedConfig[] = [];
   for (const part of spec.split(',')) {
-    const m = part.trim().match(/^(3x9|3x12):(\d+)(ITM|OTM|ATM):(\d+):(\d+)$/i);
+    // Optional TF prefix, e.g. "5m/3x21:0ATM:25:20" (defaults to 3m).
+    const m = part.trim().match(/^(?:(\d+)m\/)?(\d+x\d+):(\d+)(ITM|OTM|ATM):(\d+):(\d+)$/i);
     if (!m) throw new Error(`bad --configs entry: ${part}`);
-    const [, sigKey, offN, offDir, tp, sl] = m;
-    const sigLabel = `HMA 3m ${sigKey.toLowerCase()}`;
+    const [, tfm, sigKey, offN, offDir, tp, sl] = m;
+    const sigLabel = `HMA ${tfm || '3'}m ${sigKey.toLowerCase()}`;
     const off = offDir.toUpperCase() === 'ATM' ? 0 : (offDir.toUpperCase() === 'ITM' ? -Number(offN) : Number(offN));
     out.push({ sigLabel, offset: off, tp: Number(tp), sl: Number(sl) });
   }
@@ -82,6 +83,16 @@ function parseFixedConfigs(spec: string): FixedConfig[] {
 const FIXED_CONFIGS = parseFixedConfigs(argVal('--configs', ''));
 const OUT_PATH = argVal('--out', '');
 const EMIT_TRADES = process.argv.includes('--emit-trades');
+// Optional execution friction. Default 0/0 → raw (exit-entry)*100, preserving
+// the dashboard-feed behavior. --half-spread is option price points paid on
+// EACH side (entry buys higher, exit sells lower); --commission is $/contract
+// per side. Standard SPXer model: --half-spread 0.05 --commission 0.35.
+const HALF_SPREAD = parseFloat(argVal('--half-spread', '0'));
+const COMMISSION  = parseFloat(argVal('--commission', '0'));
+// When a single bar's range straddles BOTH the TP and SL, the default
+// (optimistic) path books the TP. --sl-first flips that to assume the stop
+// triggered first — the conservative bound for path ambiguity.
+const SL_FIRST = process.argv.includes('--sl-first');
 const GATE_START_OVR = argVal('--gate-start', '');  // 'HH:MM' overrides 9:30
 const GATE_END_OVR   = argVal('--gate-end', '');    // 'HH:MM' overrides 12:00
 function hhmmToMin(s: string, def: number): number {
@@ -100,10 +111,50 @@ const GATE_END_HHMM   = hhmmToMin(GATE_END_OVR,   12 * 60);        // default 12
 const SETTLE_SEC = 6 * 3600 + 15 * 60;  // 16:15 ET (hard exit cap from EOD)
 
 interface SignalSpec { label: string; tfs: { tf: number; fast: number; slow: number }[] }
-const SIGNALS: SignalSpec[] = [
-  { label: 'HMA 3m 3x9',  tfs: [{ tf: 3, fast: 3, slow: 9 }] },
-  { label: 'HMA 3m 3x12', tfs: [{ tf: 3, fast: 3, slow: 12 }] },
-];
+
+// Full HMA-only signal universe (DEMA dropped per user). 18 signals:
+//   4 single-TF (1m, 2m, 3m, 5m) × 3 MA-pairs (3x9, 3x12, 3x21) = 12
+//   2 multi-TF stacks (2+3, 2+3+5) × 3 MA-pairs                  =  6
+// Use --signals to filter to a subset (e.g. one MA-pair × one TF for chunked
+// runs). When --signals is empty, ALL 18 are included.
+function buildAllSignals(): SignalSpec[] {
+  const out: SignalSpec[] = [];
+  const pairs: { fast: number; slow: number; tag: string }[] = [
+    { fast: 3, slow: 9,  tag: '3x9'  },
+    { fast: 3, slow: 12, tag: '3x12' },
+    { fast: 3, slow: 21, tag: '3x21' },
+    { fast: 3, slow: 50, tag: '3x50' },
+  ];
+  for (const tf of [1, 2, 3, 5]) {
+    for (const p of pairs) {
+      out.push({ label: `HMA ${tf}m ${p.tag}`, tfs: [{ tf, fast: p.fast, slow: p.slow }] });
+    }
+  }
+  for (const p of pairs) {
+    out.push({ label: `HMA 2+3 ${p.tag}`, tfs: [
+      { tf: 2, fast: p.fast, slow: p.slow },
+      { tf: 3, fast: p.fast, slow: p.slow },
+    ]});
+  }
+  for (const p of pairs) {
+    out.push({ label: `HMA 2+3+5 ${p.tag}`, tfs: [
+      { tf: 2, fast: p.fast, slow: p.slow },
+      { tf: 3, fast: p.fast, slow: p.slow },
+      { tf: 5, fast: p.fast, slow: p.slow },
+    ]});
+  }
+  return out;
+}
+const ALL_SIGNALS = buildAllSignals();
+const SIGNALS_FILTER = argVal('--signals', '');
+const SIGNALS: SignalSpec[] = SIGNALS_FILTER
+  ? ALL_SIGNALS.filter(s => SIGNALS_FILTER.split(',').map(x => x.trim()).includes(s.label))
+  : ALL_SIGNALS;
+if (SIGNALS_FILTER && SIGNALS.length === 0) {
+  console.error(`No signals matched --signals='${SIGNALS_FILTER}'. Available:`);
+  for (const s of ALL_SIGNALS) console.error(`  ${s.label}`);
+  process.exit(2);
+}
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 function sessOpenTs(date: string): number {
@@ -196,6 +247,13 @@ interface TradeCtx {
   bars: any[];
   eod: number;
   reverseTs: number;
+  // Carried through for per-trade emission. None of these affect simulation;
+  // they're forensic detail for downstream analysis.
+  strike: number;
+  alignStart: number;   // session ts when the streak that triggered entry began
+  bullCross: number;    // most recent bull cross at entry (signal-spec scope)
+  bearCross: number;    // most recent bear cross at entry
+  tier: 2 | 3;          // 3 = SPX direction agreed with contract at entry
 }
 
 function buildContexts(target: SymbolTarget, date: string, sig: SignalSpec, offsetStrikes: number): TradeCtx[] {
@@ -213,20 +271,27 @@ function buildContexts(target: SymbolTarget, date: string, sig: SignalSpec, offs
   const gateEndTs = sess + (GATE_END_HHMM - (9 * 60 + 30)) * 60;
 
   const tf = sig.tfs[0].tf, fast = sig.tfs[0].fast, slow = sig.tfs[0].slow;
+  const TIER_FAST = 3, TIER_SLOW = 15;  // 1m HMA(3x15) on SPX — same as long-sweep.ts's FAST0/SLOW0
 
-  // Warm tier state from prev-day session bars so HMA can fire on the first
-  // post-session 3m bar (≈ 9:33 ET).
+  // Warm signal-spec TF state from prev-day session bars so HMA can fire on
+  // the first post-session bar (e.g. 9:33 ET on 3m TF).
   const st = mkSt();
   for (const b of (p1?.spxBars ?? [])) feed(st, b, tf);
+  // Tier state: 1m HMA on SPX, used to label entries Tier 3 (1m direction
+  // agrees with trade direction) vs Tier 2. Also warmed from prev-day.
+  const tierSt = mkSt();
+  for (const b of (p1?.spxBars ?? [])) feed(tierSt, b, 1);
 
   const prevDir: { v: 'bull' | 'bear' | null } = { v: null };
   let bullCross = 0, bearCross = 0;
   const dirAt = new Map<number, 'bull' | 'bear' | null>();
   let bullStreak = 0, bearStreak = 0, bullFired = false, bearFired = false;
-  const entries: { dir: 'bull' | 'bear'; entryTs: number }[] = [];
+  let bullAlignStart = 0, bearAlignStart = 0;
+  const entries: { dir: 'bull' | 'bear'; entryTs: number; alignStart: number; bullCross: number; bearCross: number; tier: 2 | 3 }[] = [];
 
   for (const b of s1) {
     feed(st, b, tf);
+    feed(tierSt, b, 1);
     const d = getDir(st, fast, slow);
     dirAt.set(b.ts, d);
     if (prevDir.v !== null && d !== prevDir.v) {
@@ -235,14 +300,30 @@ function buildContexts(target: SymbolTarget, date: string, sig: SignalSpec, offs
     }
     prevDir.v = d;
     if (b.ts < gateStartTs) continue;
-    if (d === 'bull') { bullStreak++; bearStreak = 0; bearFired = false; }
-    else if (d === 'bear') { bearStreak++; bullStreak = 0; bullFired = false; }
-    else { bullStreak = 0; bearStreak = 0; }
+    if (d === 'bull') {
+      if (bullStreak === 0) bullAlignStart = b.ts;
+      bullStreak++; bearStreak = 0; bearFired = false;
+    } else if (d === 'bear') {
+      if (bearStreak === 0) bearAlignStart = b.ts;
+      bearStreak++; bullStreak = 0; bullFired = false;
+    } else {
+      bullStreak = 0; bearStreak = 0; bullAlignStart = 0; bearAlignStart = 0;
+    }
     if (d === 'bull' && bullStreak >= MIN_ALIGN && !bullFired && bullCross > 0) {
-      if ((b.ts - bullCross) / 60 <= CROSS_WIN) { entries.push({ dir: 'bull', entryTs: b.ts + 60 }); bullFired = true; }
+      if ((b.ts - bullCross) / 60 <= CROSS_WIN) {
+        const tierDir = getDir(tierSt, TIER_FAST, TIER_SLOW);
+        const tier: 2 | 3 = tierDir === 'bull' ? 3 : 2;
+        entries.push({ dir: 'bull', entryTs: b.ts + 60, alignStart: bullAlignStart, bullCross, bearCross, tier });
+        bullFired = true;
+      }
     }
     if (d === 'bear' && bearStreak >= MIN_ALIGN && !bearFired && bearCross > 0) {
-      if ((b.ts - bearCross) / 60 <= CROSS_WIN) { entries.push({ dir: 'bear', entryTs: b.ts + 60 }); bearFired = true; }
+      if ((b.ts - bearCross) / 60 <= CROSS_WIN) {
+        const tierDir = getDir(tierSt, TIER_FAST, TIER_SLOW);
+        const tier: 2 | 3 = tierDir === 'bear' ? 3 : 2;
+        entries.push({ dir: 'bear', entryTs: b.ts + 60, alignStart: bearAlignStart, bullCross, bearCross, tier });
+        bearFired = true;
+      }
     }
   }
 
@@ -256,6 +337,7 @@ function buildContexts(target: SymbolTarget, date: string, sig: SignalSpec, offs
     if (!sym) continue;
     const bars = c1.contractBars.get(sym) as any[];
     if (!bars?.length) continue;
+    const strike = (c1.contractStrikes?.get(sym) ?? 0) as number;
 
     // Contract's own HMA direction for entry gate + flip-on-reversal exit.
     const cDir = new Map<number, 'bull' | 'bear' | null>();
@@ -279,86 +361,159 @@ function buildContexts(target: SymbolTarget, date: string, sig: SignalSpec, offs
       if (flipSpx || flipC) { reverseTs = t + 60; break; }
     }
 
-    ctxs.push({ dir: e.dir, entryTs: e.entryTs, entryPx, bars, eod, reverseTs });
+    ctxs.push({
+      dir: e.dir, entryTs: e.entryTs, entryPx, bars, eod, reverseTs,
+      strike, alignStart: e.alignStart, bullCross: e.bullCross, bearCross: e.bearCross, tier: e.tier,
+    });
   }
   return ctxs;
 }
 
 // ── Exit simulator (cheap; sweeps TP/SL on cached contexts) ─────────────────
-interface Stat { trades: number; wins: number; pnl: number; pnlPct: number; sumWinPct: number; sumLossPct: number; cntWins: number; cntLosses: number; }
-function emptyStat(): Stat { return { trades: 0, wins: 0, pnl: 0, pnlPct: 0, sumWinPct: 0, sumLossPct: 0, cntWins: 0, cntLosses: 0 }; }
-function simulate(ctxs: TradeCtx[], tpPct: number, slPct: number): Stat {
-  const s = emptyStat();
-  for (const ctx of ctxs) {
-    const tp = ctx.entryPx * (1 + tpPct / 100);
-    const sl = slPct > 0 ? ctx.entryPx * (1 - slPct / 100) : 0;
-    const stopTs = Math.min(ctx.reverseTs, ctx.eod);
-    let exitPx = optPx(ctx.bars, stopTs) ?? ctx.entryPx;
-    for (const b of ctx.bars) {
-      if (b.ts <= ctx.entryTs) continue;
-      if (b.ts > stopTs) break;
-      if (b.high >= tp) { exitPx = tp; break; }
-      if (sl > 0 && b.low <= sl) { exitPx = sl; break; }
-    }
-    const retPct = ((exitPx - ctx.entryPx) / ctx.entryPx) * 100;
-    s.trades++;
-    s.pnl += (exitPx - ctx.entryPx) * 100;  // 1 contract × 100 multiplier
-    s.pnlPct += retPct;
-    if (retPct > 0) { s.wins++; s.cntWins++; s.sumWinPct += retPct; }
-    else { s.cntLosses++; s.sumLossPct += retPct; }
-  }
-  return s;
+interface Stat {
+  trades: number; wins: number; pnl: number; pnlPct: number;
+  sumWinPct: number; sumLossPct: number; cntWins: number; cntLosses: number;
+  hourly: { [hour: string]: HourBucket };   // per-entry-hour aggregates
+  entryPxSum: number;                       // for avgEntryPx (post-merge)
 }
-
-// Trade-level variant used by the fixed-configs path. Emits one row per trade
-// with entry/exit time-of-day so a post-processor can bucket by hour. Kept
-// separate from simulate() because the grid sweep doesn't need this overhead.
-interface TradeRow {
-  date: string;
-  dir: 'bull' | 'bear';
-  entryTs: number;
-  exitTs: number;
-  entryPx: number;
-  exitPx: number;
-  pnl: number;
-  reason: 'TP' | 'SL' | 'reverse' | 'EOD';
+function emptyStat(): Stat {
+  return {
+    trades: 0, wins: 0, pnl: 0, pnlPct: 0,
+    sumWinPct: 0, sumLossPct: 0, cntWins: 0, cntLosses: 0,
+    hourly: {}, entryPxSum: 0,
+  };
 }
-function simulateWithTrades(ctxs: TradeCtx[], tpPct: number, slPct: number, date: string): { stat: Stat; trades: TradeRow[] } {
+// 30-min bucket label, ET. Buckets the session: 0930, 1000, 1030, ..., 1530.
+// Trades entered in [HH:MM, HH:MM+30) land in the bucket labeled HH:MM.
+function etBucketOf(ts: number): string {
+  const d = new Date(ts * 1000);
+  const parts = d.toLocaleString('en-US', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: false });
+  const m = parts.match(/(\d{2}):(\d{2})/);
+  if (!m) return '0000';
+  const hh = m[1].padStart(2, '0');
+  const mm = +m[2] < 30 ? '00' : '30';
+  return `${hh}${mm}`;
+}
+// Simulate exits for one TP/SL cell over the supplied contexts. Returns the
+// aggregate stat AND per-trade Exit records keyed by the entry's index in the
+// variant's shared entries[] array. baseIdx is the index into entries[] of the
+// FIRST ctx in ctxs (subsequent ctxs are baseIdx+1, +2, ...).
+function simulate(ctxs: TradeCtx[], tpPct: number, slPct: number, baseIdx: number): { stat: Stat; exits: Exit[] } {
   const s = emptyStat();
-  const rows: TradeRow[] = [];
-  for (const ctx of ctxs) {
+  const exits: Exit[] = [];
+  for (let ci = 0; ci < ctxs.length; ci++) {
+    const ctx = ctxs[ci];
     const tp = ctx.entryPx * (1 + tpPct / 100);
     const sl = slPct > 0 ? ctx.entryPx * (1 - slPct / 100) : 0;
     const stopTs = Math.min(ctx.reverseTs, ctx.eod);
     let exitPx = optPx(ctx.bars, stopTs) ?? ctx.entryPx;
     let exitTs = stopTs;
-    let reason: TradeRow['reason'] = ctx.reverseTs <= ctx.eod ? 'reverse' : 'EOD';
+    let reason: 'T' | 'S' | 'R' | 'E' = ctx.reverseTs <= ctx.eod ? 'R' : 'E';
     for (const b of ctx.bars) {
       if (b.ts <= ctx.entryTs) continue;
       if (b.ts > stopTs) break;
-      if (b.high >= tp) { exitPx = tp; exitTs = b.ts; reason = 'TP'; break; }
-      if (sl > 0 && b.low <= sl) { exitPx = sl; exitTs = b.ts; reason = 'SL'; break; }
+      const hitTp = b.high >= tp;
+      const hitSl = sl > 0 && b.low <= sl;
+      // On a straddle bar (both hit), SL_FIRST books the stop, else the target.
+      if (hitTp && hitSl && SL_FIRST) { exitPx = sl; exitTs = b.ts; reason = 'S'; break; }
+      if (hitTp) { exitPx = tp; exitTs = b.ts; reason = 'T'; break; }
+      if (hitSl) { exitPx = sl; exitTs = b.ts; reason = 'S'; break; }
     }
+    // Round-trip friction: half-spread paid on both entry and exit, plus
+    // commission per side. Zero by default (dashboard parity).
+    const frictionCost = HALF_SPREAD * 2 * 100 + COMMISSION * 2;
     const retPct = ((exitPx - ctx.entryPx) / ctx.entryPx) * 100;
+    const tradePnl = (exitPx - ctx.entryPx) * 100 - frictionCost;
     s.trades++;
-    s.pnl += (exitPx - ctx.entryPx) * 100;
+    s.pnl += tradePnl;
     s.pnlPct += retPct;
-    if (retPct > 0) { s.wins++; s.cntWins++; s.sumWinPct += retPct; }
+    s.entryPxSum += ctx.entryPx;
+    const hr = etBucketOf(ctx.entryTs);
+    const hb = s.hourly[hr] || (s.hourly[hr] = { pnl: 0, n: 0, wins: 0 });
+    hb.pnl += tradePnl; hb.n += 1;
+    if (tradePnl > 0) { s.wins++; s.cntWins++; s.sumWinPct += retPct; hb.wins += 1; }
     else { s.cntLosses++; s.sumLossPct += retPct; }
-    rows.push({ date, dir: ctx.dir, entryTs: ctx.entryTs, exitTs, entryPx: ctx.entryPx, exitPx, pnl: (exitPx - ctx.entryPx) * 100, reason });
+    exits.push({
+      i: baseIdx + ci,
+      xs: exitTs,
+      xp: +exitPx.toFixed(2),
+      p: +tradePnl.toFixed(2),
+      r: reason,
+    });
   }
-  return { stat: s, trades: rows };
+  return { stat: s, exits };
 }
+
+// Legacy alias kept so older fixed-configs JSON files still parse. The
+// canonical trade row is now CellTrade (cell.tradeRows[]); simulateWithTrades
+// was removed when simulate() began emitting tradeRows directly.
+type TradeRow = CellTrade;
 
 // Process a date slice for one symbol: build contexts AND run the grid.
 // Returns per-signal aggregated stats keyed by `tp|sl`. Stats are additive
 // across disjoint dates, so the parent can SUM shards. profitDays/daysWithTrade
 // are also additive (each date belongs to exactly one shard).
-interface CellAgg { trades: number; wins: number; pnl: number; daysWithTrade: number; profitDays: number; }
+// dailyPnl / hourlyPnl: powered the older "aggregate only" path. Now that we
+// emit the full trade list per cell, the UI can recompute these on the fly,
+// but we keep them so existing consumers (equity curve, daily heatmap, hourly
+// heatmap) work without scanning trades.
+// trades: full trade list for this cell. Drives concurrent-position cap and
+// budget simulation in the UI. ~6,000 trades/cell × 96 TP/SL × 11 offsets per
+// chunk → ~6 MB extra per cell when minified, ~600 MB total per 9-chunk run.
+interface HourBucket { pnl: number; n: number; wins: number }
+
+// Entry record — written ONCE per (label × offset × date). All TP/SL cells for
+// that (signal × offset × date) share entries by index. Cuts JSON ~75% vs
+// duplicating entry fields in every cell.
+//   d   date "YYYY-MM-DD"
+//   es  entryTs (Unix seconds, UTC)
+//   px  entryPx ($ per option)
+//   dr  direction 'B' (bull/call) or 'S' (bear/put)
+//   k   strike (option strike price)
+//   t   tier 2 or 3 — entry-quality tier (3 = SPX direction agrees with contract)
+//   as  alignStart — when the streak that fired this trade began
+//   bc  bullCross — latest bull-cross at entry (0 if n/a)
+//   sc  bearCross — latest bear-cross at entry
+interface Entry {
+  d: string;
+  es: number;
+  px: number;
+  dr: 'B' | 'S';
+  k: number;
+  t: 2 | 3;
+  as: number;
+  bc: number;
+  sc: number;
+}
+// Exit record — per cell, parallel-indexed to the variant's entries array.
+//   i  entry index in variant's entries[]
+//   xs exitTs
+//   xp exitPx
+//   p  pnl $ (1 contract × $100 multiplier)
+//   r  exit reason 'T' (TP), 'S' (SL), 'R' (reverse), 'E' (EOD)
+interface Exit {
+  i: number;
+  xs: number;
+  xp: number;
+  p: number;
+  r: 'T' | 'S' | 'R' | 'E';
+}
+// CellTrade is a recomposed view of (entry + exit) used by downstream consumers
+// that don't want to merge the two streams themselves. Not stored on disk.
+type CellTrade = Entry & Omit<Exit, 'i'>;
+
+interface CellAgg {
+  trades: number; wins: number; pnl: number;
+  daysWithTrade: number; profitDays: number;
+  dailyPnl: { [date: string]: number };
+  hourlyPnl: { [hour: string]: HourBucket };
+  entryPxSum: number; entryPxN: number;
+  exits: Exit[];   // parallel-indexed to the variant's entries[]
+}
 interface ShardResult {
   symbol: string;
   dates: string[];
-  perSignal: { [label: string]: { contextCount: number; cells: { [tpSlKey: string]: CellAgg }; trades?: TradeRow[] } };
+  perSignal: { [label: string]: { contextCount: number; cells: { [tpSlKey: string]: CellAgg }; entries: Entry[]; trades?: TradeRow[] } };
 }
 
 // Composite label = `${sigLabel} @ ${offsetTag}`; offset is in STRIKES (neg=ITM).
@@ -370,9 +525,66 @@ function offsetTag(off: number): string {
 
 interface Variant { label: string; sig: SignalSpec; offset: number; }
 
-function runShard(target: SymbolTarget, dates: string[], grids: { [label: string]: { tp: number; sl: number }[] }, variants: Variant[], emitTrades: boolean): ShardResult {
+function newCell(): CellAgg {
+  return { trades: 0, wins: 0, pnl: 0, daysWithTrade: 0, profitDays: 0, dailyPnl: {}, hourlyPnl: {}, entryPxSum: 0, entryPxN: 0, exits: [] };
+}
+
+function foldStat(cell: CellAgg, s: Stat, date: string) {
+  if (s.trades === 0) return;
+  cell.trades += s.trades; cell.wins += s.wins; cell.pnl += s.pnl;
+  cell.daysWithTrade += 1; if (s.pnl > 0) cell.profitDays += 1;
+  cell.dailyPnl[date] = +s.pnl.toFixed(2);
+  cell.entryPxSum += s.entryPxSum;
+  cell.entryPxN += s.trades;
+  for (const [hr, hb] of Object.entries(s.hourly)) {
+    const acc = cell.hourlyPnl[hr] || (cell.hourlyPnl[hr] = { pnl: 0, n: 0, wins: 0 });
+    acc.pnl += hb.pnl; acc.n += hb.n; acc.wins += hb.wins;
+  }
+}
+
+function runShard(target: SymbolTarget, dates: string[], grids: { [label: string]: { tp: number; sl: number }[] }, variants: Variant[], _emitTrades: boolean): ShardResult {
+  // Streaming-sidecar design: trade-level data (entries + exits) is written
+  // DIRECTLY to per-(variant, cell) sidecar files during the sweep, never
+  // accumulated in memory. The slot.cells[] / slot.entries[] in-memory state
+  // holds only aggregates, so this scales to arbitrary date counts.
   const out: ShardResult = { symbol: target.symbol, dates, perSignal: {} };
-  for (const v of variants) out.perSignal[v.label] = { contextCount: 0, cells: {}, trades: emitTrades ? [] : undefined };
+  for (const v of variants) out.perSignal[v.label] = { contextCount: 0, cells: {}, entries: [], trades: undefined };
+
+  // Sidecar setup. Parent passes STUDY_SIDECAR_DIR via env; we write
+  // NDJSON shard files into it. Each line is one JSON value.
+  const sidecarDir = process.env.STUDY_SIDECAR_DIR;
+  const shardIdx = process.env.STUDY_SHARD ?? '0';
+  let entryFds: { [variantLabel: string]: number } = {};
+  let exitFds: { [cellKey: string]: number } = {};  // cellKey = `${label}::TP${tp}_SL${sl}`
+  function slugify(s: string): string {
+    return s.replace(/[^A-Za-z0-9]+/g, '_').replace(/_+$/g, '');
+  }
+  function entryFileFor(label: string): number | null {
+    if (!sidecarDir) return null;
+    if (entryFds[label] !== undefined) return entryFds[label];
+    const fname = `${slugify(target.symbol)}__${slugify(label)}__entries__shard${shardIdx}.ndjson`;
+    const fd = fs.openSync(path.join(sidecarDir, fname), 'a');
+    entryFds[label] = fd;
+    return fd;
+  }
+  function exitFileFor(label: string, tp: number, sl: number): number | null {
+    if (!sidecarDir) return null;
+    const k = `${label}::${tp}|${sl}`;
+    if (exitFds[k] !== undefined) return exitFds[k];
+    const fname = `${slugify(target.symbol)}__${slugify(label)}__TP${tp}_SL${sl}__shard${shardIdx}.ndjson`;
+    const fd = fs.openSync(path.join(sidecarDir, fname), 'a');
+    exitFds[k] = fd;
+    return fd;
+  }
+  function appendLine(fd: number, obj: any): void {
+    fs.writeSync(fd, JSON.stringify(obj) + '\n');
+  }
+  function closeAllFds(): void {
+    for (const fd of Object.values(entryFds)) { try { fs.closeSync(fd); } catch {} }
+    for (const fd of Object.values(exitFds))  { try { fs.closeSync(fd); } catch {} }
+    entryFds = {};
+    exitFds = {};
+  }
 
   let di = 0;
   for (const date of dates) {
@@ -383,35 +595,74 @@ function runShard(target: SymbolTarget, dates: string[], grids: { [label: string
       const slot = out.perSignal[v.label];
       slot.contextCount += ctxs.length;
       if (!ctxs.length) continue;
+
+      // Track entry indices so this shard's exits reference the same indices
+      // that the post-merge entries array will use. baseIdx counts THIS WORKER's
+      // entry tally so far; mergeShards offsets across shards.
+      const baseIdx = slot.entries.length;
+      const entryFd = entryFileFor(v.label);
+      for (const ctx of ctxs) {
+        const entry: Entry = {
+          d: date,
+          es: ctx.entryTs,
+          px: +ctx.entryPx.toFixed(2),
+          dr: ctx.dir === 'bull' ? 'B' : 'S',
+          k: ctx.strike,
+          t: ctx.tier,
+          as: ctx.alignStart,
+          bc: ctx.bullCross,
+          sc: ctx.bearCross,
+        };
+        // In-memory entries: count-only stub (we just need length for baseIdx).
+        // The actual entry object lives in the sidecar file.
+        slot.entries.push(null as any);
+        if (entryFd !== null) appendLine(entryFd, entry);
+      }
+
       const grid = grids[v.label] || [];
       for (const g of grid) {
         const key = `${g.tp}|${g.sl}`;
-        if (emitTrades) {
-          const { stat: s, trades } = simulateWithTrades(ctxs, g.tp, g.sl, date);
-          const cell = slot.cells[key] || (slot.cells[key] = { trades: 0, wins: 0, pnl: 0, daysWithTrade: 0, profitDays: 0 });
-          if (s.trades > 0) {
-            cell.trades += s.trades; cell.wins += s.wins; cell.pnl += s.pnl;
-            cell.daysWithTrade += 1; if (s.pnl > 0) cell.profitDays += 1;
-          }
-          // Only one (tp,sl) per variant is meaningful when emitTrades=true
-          // (the fixed-configs path). Stitch trades onto the variant slot.
-          slot.trades!.push(...trades);
-        } else {
-          const s = simulate(ctxs, g.tp, g.sl);
-          const cell = slot.cells[key] || (slot.cells[key] = { trades: 0, wins: 0, pnl: 0, daysWithTrade: 0, profitDays: 0 });
-          if (s.trades > 0) {
-            cell.trades += s.trades; cell.wins += s.wins; cell.pnl += s.pnl;
-            cell.daysWithTrade += 1; if (s.pnl > 0) cell.profitDays += 1;
-          }
+        const { stat: s, exits } = simulate(ctxs, g.tp, g.sl, baseIdx);
+        const cell = slot.cells[key] || (slot.cells[key] = newCell());
+        foldStat(cell, s, date);
+        if (exits.length) {
+          const fd = exitFileFor(v.label, g.tp, g.sl);
+          if (fd !== null) for (const ex of exits) appendLine(fd, ex);
         }
+        // cell.exits stays empty in memory — written to sidecar instead.
       }
     }
-    if (++di % 10 === 0) process.stderr.write(`  [shard ${process.env.STUDY_SHARD ?? '?'} ${target.symbol}] ${di}/${dates.length}\n`);
+    if (++di % 10 === 0) process.stderr.write(`  [shard ${shardIdx} ${target.symbol}] ${di}/${dates.length}\n`);
   }
+  closeAllFds();
   return out;
 }
 
-interface Row { tp: number; sl: number; trades: number; wins: number; winRate: number; pnl: number; avgPnl: number; daysWithTrade: number; profitDays: number; }
+interface Row {
+  tp: number; sl: number; trades: number; wins: number; winRate: number;
+  pnl: number; avgPnl: number; daysWithTrade: number; profitDays: number;
+  maxDrawdown: number;
+  dailyPnl: { [date: string]: number };
+  hourlyPnl: { [hour: string]: HourBucket };
+  avgEntryPx: number;
+  // Row.exits references the variant's shared entries[] array. Cells alone
+  // are not self-contained; downstream consumers must join with entries.
+  exits: Exit[];
+}
+// Max drawdown = largest peak-to-trough drop on the cumulative equity curve
+// (in dollars). Walks dailyPnl in date order, tracks running peak, returns
+// max(peak - cum). Returns positive number — the "depth" of the deepest valley.
+function maxDrawdownFromDaily(dailyPnl: { [date: string]: number }): number {
+  const dates = Object.keys(dailyPnl).sort();
+  let cum = 0, peak = 0, maxDd = 0;
+  for (const d of dates) {
+    cum += dailyPnl[d];
+    if (cum > peak) peak = cum;
+    const dd = peak - cum;
+    if (dd > maxDd) maxDd = dd;
+  }
+  return +maxDd.toFixed(2);
+}
 function cellToRow(tp: number, sl: number, c: CellAgg): Row {
   return {
     tp, sl,
@@ -420,23 +671,50 @@ function cellToRow(tp: number, sl: number, c: CellAgg): Row {
     pnl: +c.pnl.toFixed(2),
     avgPnl: c.trades > 0 ? +(c.pnl / c.trades).toFixed(2) : 0,
     daysWithTrade: c.daysWithTrade, profitDays: c.profitDays,
+    maxDrawdown: maxDrawdownFromDaily(c.dailyPnl || {}),
+    dailyPnl: c.dailyPnl || {},
+    hourlyPnl: c.hourlyPnl || {},
+    avgEntryPx: c.entryPxN > 0 ? +(c.entryPxSum / c.entryPxN).toFixed(2) : 0,
+    exits: c.exits || [],
   };
 }
-function mergeShards(shards: ShardResult[]): { perSignal: { [label: string]: { contextCount: number; cells: { [k: string]: CellAgg }; trades?: TradeRow[] } }, dates: string[] } {
-  const perSignal: { [label: string]: { contextCount: number; cells: { [k: string]: CellAgg }; trades?: TradeRow[] } } = {};
+function mergeShards(shards: ShardResult[]): { perSignal: { [label: string]: { contextCount: number; cells: { [k: string]: CellAgg }; entries: Entry[]; trades?: TradeRow[] } }, dates: string[] } {
+  const perSignal: { [label: string]: { contextCount: number; cells: { [k: string]: CellAgg }; entries: Entry[]; trades?: TradeRow[] } } = {};
   const dates: string[] = [];
   for (const sh of shards) {
     for (const d of sh.dates) dates.push(d);
     for (const label of Object.keys(sh.perSignal)) {
-      const slot = perSignal[label] || (perSignal[label] = { contextCount: 0, cells: {} });
+      const slot = perSignal[label] || (perSignal[label] = { contextCount: 0, cells: {}, entries: [] });
       slot.contextCount += sh.perSignal[label].contextCount;
+
+      // Each shard has its own entries[] indexed from 0. Capture the merged
+      // entries array's length BEFORE concat — that's the offset to add to
+      // every exit.i emitted by this shard.
+      const entryOffset = slot.entries.length;
+      const shardEntries = sh.perSignal[label].entries || [];
+      slot.entries.push(...shardEntries);
+
       for (const [k, cell] of Object.entries(sh.perSignal[label].cells)) {
-        const acc = slot.cells[k] || (slot.cells[k] = { trades: 0, wins: 0, pnl: 0, daysWithTrade: 0, profitDays: 0 });
+        const acc = slot.cells[k] || (slot.cells[k] = newCell());
         acc.trades += cell.trades;
         acc.wins += cell.wins;
         acc.pnl += cell.pnl;
         acc.daysWithTrade += cell.daysWithTrade;
         acc.profitDays += cell.profitDays;
+        acc.entryPxSum += cell.entryPxSum || 0;
+        acc.entryPxN   += cell.entryPxN   || 0;
+        // dailyPnl shards are disjoint by date — union.
+        if (cell.dailyPnl) for (const [d, v] of Object.entries(cell.dailyPnl)) acc.dailyPnl[d] = v as number;
+        // hourlyPnl: accumulate (same hour can occur across shards).
+        if (cell.hourlyPnl) for (const [hr, hb] of Object.entries(cell.hourlyPnl)) {
+          const a = acc.hourlyPnl[hr] || (acc.hourlyPnl[hr] = { pnl: 0, n: 0, wins: 0 });
+          const b = hb as HourBucket;
+          a.pnl += b.pnl; a.n += b.n; a.wins += b.wins;
+        }
+        // Exits: rewrite their .i to point into the merged entries[] array.
+        if (cell.exits && cell.exits.length) {
+          for (const ex of cell.exits) acc.exits.push({ ...ex, i: ex.i + entryOffset });
+        }
       }
       if (sh.perSignal[label].trades && sh.perSignal[label].trades!.length) {
         slot.trades = slot.trades || [];
@@ -497,7 +775,7 @@ if (process.env.STUDY_SHARD_MODE === '1') {
   main().catch(e => { console.error(e); process.exit(1); });
 }
 
-function dispatchShards(target: SymbolTarget, dates: string[], grids: { [label: string]: { tp: number; sl: number }[] }, variants: Variant[], workers: number, emitTrades: boolean = false): Promise<ShardResult[]> {
+function dispatchShards(target: SymbolTarget, dates: string[], grids: { [label: string]: { tp: number; sl: number }[] }, variants: Variant[], workers: number, emitTrades: boolean = false, sidecarDir: string | null = null): Promise<ShardResult[]> {
   if (!dates.length) return Promise.resolve([]);
   const W = Math.max(1, Math.min(workers, dates.length));
   // Round-robin shard so each worker gets a similar mix of high/low-volume days.
@@ -509,7 +787,7 @@ function dispatchShards(target: SymbolTarget, dates: string[], grids: { [label: 
 
   return Promise.all(shards.map((shardDates, idx) => new Promise<ShardResult>((resolve, reject) => {
     if (!shardDates.length) {
-      resolve({ symbol: target.symbol, dates: [], perSignal: Object.fromEntries(variants.map(v => [v.label, { contextCount: 0, cells: {} }])) });
+      resolve({ symbol: target.symbol, dates: [], perSignal: Object.fromEntries(variants.map(v => [v.label, { contextCount: 0, cells: {}, entries: [] }])) });
       return;
     }
     // Forward gate overrides to the child so its module-level constants match
@@ -518,7 +796,12 @@ function dispatchShards(target: SymbolTarget, dates: string[], grids: { [label: 
     const childArgs: string[] = [];
     if (GATE_START_OVR) childArgs.push('--gate-start', GATE_START_OVR);
     if (GATE_END_OVR)   childArgs.push('--gate-end',   GATE_END_OVR);
-    const child = fork(__filename, childArgs, { env: { ...process.env, STUDY_SHARD_MODE: '1', STUDY_SHARD: String(idx) }, silent: false });
+    if (HALF_SPREAD)    childArgs.push('--half-spread', String(HALF_SPREAD));
+    if (COMMISSION)     childArgs.push('--commission',  String(COMMISSION));
+    if (SL_FIRST)       childArgs.push('--sl-first');
+    const childEnv: NodeJS.ProcessEnv = { ...process.env, STUDY_SHARD_MODE: '1', STUDY_SHARD: String(idx) };
+    if (sidecarDir) childEnv.STUDY_SIDECAR_DIR = sidecarDir;
+    const child = fork(__filename, childArgs, { env: childEnv, silent: false });
     let settled = false;
     child.on('message', (msg: any) => {
       if (settled) return;
@@ -546,6 +829,21 @@ async function main() {
   // Coarse grid: TP 25..300 step 25 × SL 20..90 step 10  →  12 × 8 = 96 combos
   const coarseGrid = buildGrid(25, 300, 25, 20, 90, 10);
   console.log(`Coarse grid: ${coarseGrid.length} TP/SL combos per (signal × offset)`);
+
+  // Sidecar dir (computed early, passed to workers). Workers stream per-cell
+  // entries + exits to NDJSON files here. Parent's chunk JSON stays small,
+  // referencing sidecars by relative path.
+  const outFile = OUT_PATH
+    ? (path.isAbsolute(OUT_PATH) ? OUT_PATH : path.join(process.cwd(), OUT_PATH))
+    : path.join(process.cwd(), 'scripts/autoresearch/output/hma3m-tpsl-study.json');
+  fs.mkdirSync(path.dirname(outFile), { recursive: true });
+  const sidecarDir = outFile + '.exits';
+  fs.mkdirSync(sidecarDir, { recursive: true });
+  // Wipe any pre-existing sidecar files (stale from a previous run on the same
+  // outFile name). Otherwise NDJSON appends would compound results.
+  for (const f of fs.readdirSync(sidecarDir)) {
+    try { fs.unlinkSync(path.join(sidecarDir, f)); } catch {}
+  }
 
   const output: any = { generatedAt: new Date().toISOString(), days: DAYS, cutoff: cutoffStr, workers: WORKERS, offsetsBySym: OFFSETS_BY_SYM, symbols: {} };
 
@@ -575,7 +873,7 @@ async function main() {
       const variants = [...variantByLabel.values()];
       console.log(`\n[${symbol}] ${allDates.length} dates ${allDates[0]} … ${allDates[allDates.length - 1]} — ${variants.length} fixed configs${EMIT_TRADES ? ' (with trade-level emission)' : ''}`);
       const t0 = Date.now();
-      const shards = await dispatchShards(target, allDates, cellsByLabel, variants, WORKERS, EMIT_TRADES);
+      const shards = await dispatchShards(target, allDates, cellsByLabel, variants, WORKERS, EMIT_TRADES, sidecarDir);
       const merged = mergeShards(shards);
       console.log(`[${symbol}] done in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
 
@@ -602,7 +900,7 @@ async function main() {
     console.log(`\n[${symbol}] ${allDates.length} dates ${allDates[0]} … ${allDates[allDates.length - 1]} — ${variants.length} variants (${SIGNALS.length} sig × ${offsets.length} offset) — pass1 (coarse)`);
     const t0 = Date.now();
 
-    const shards1 = await dispatchShards(target, allDates, coarseGrids, variants, WORKERS);
+    const shards1 = await dispatchShards(target, allDates, coarseGrids, variants, WORKERS, false, sidecarDir);
     const merged1 = mergeShards(shards1);
     console.log(`[${symbol}] pass1 done in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
 
@@ -632,7 +930,16 @@ async function main() {
       const rg: { tp: number; sl: number }[] = [];
       for (const tp of [...tpSet].sort((a, b) => a - b)) for (const sl of [...slSet].sort((a, b) => a - b)) rg.push({ tp, sl });
       refineGrids[v.label] = rg;
-      symOut.signals[v.label] = { contextCount: ctxCount, coarse: coarseRows, topCoarse: topC, refine: [], topRefine: [] };
+      // Emit the variant's shared entries[] alongside cells. Each row's
+      // exits[].i is an index into this entries array.
+      symOut.signals[v.label] = {
+        contextCount: ctxCount,
+        entries: slot.entries || [],
+        coarse: coarseRows,
+        topCoarse: topC,
+        refine: [],
+        topRefine: [],
+      };
     }
 
     const hasRefine = Object.values(refineGrids).some(g => g.length > 0);
@@ -640,7 +947,7 @@ async function main() {
       const refineCombos = Object.values(refineGrids).reduce((s, g) => s + g.length, 0);
       console.log(`\n[${symbol}] pass2 (refine) — ${refineCombos} total TP/SL combos across ${variants.length} variants`);
       const t1 = Date.now();
-      const shards2 = await dispatchShards(target, allDates, refineGrids, variants, WORKERS);
+      const shards2 = await dispatchShards(target, allDates, refineGrids, variants, WORKERS, false, sidecarDir);
       const merged2 = mergeShards(shards2);
       console.log(`[${symbol}] pass2 done in ${((Date.now() - t1) / 1000).toFixed(1)}s`);
 
@@ -662,10 +969,101 @@ async function main() {
     }
   }
 
-  const outFile = OUT_PATH
-    ? (path.isAbsolute(OUT_PATH) ? OUT_PATH : path.join(process.cwd(), OUT_PATH))
-    : path.join(process.cwd(), 'scripts/autoresearch/output/hma3m-tpsl-study.json');
-  fs.mkdirSync(path.dirname(outFile), { recursive: true });
-  fs.writeFileSync(outFile, JSON.stringify(output, null, 2));
+  // outFile + sidecarDir were created at the top of main(). Workers have been
+  // streaming entries + exits to sidecarDir during the sweep, so here we only
+  // need to write the small chunk file: aggregates + meta. Each row gets an
+  // exitsCount derived from the merged cell stats; the actual exit rows live
+  // in sidecar NDJSON files written by the workers.
+  const exitsBasename = path.basename(sidecarDir);
+  function slug(s: string): string {
+    return s.replace(/[^A-Za-z0-9]+/g, '_').replace(/_+$/g, '');
+  }
+  // Annotate each row with the sidecar filename pattern (one per shard).
+  // Reader has to load all 4 shard NDJSON files for a given cell and concat.
+  function decorateRows(sym: string, sigLabel: string, rows: any[]): any[] {
+    return rows.map((row: any) => {
+      const fnamePrefix = `${slug(sym)}__${slug(sigLabel)}__TP${row.tp}_SL${row.sl}__shard`;
+      return { ...row, exitsFilePrefix: `${exitsBasename}/${fnamePrefix}`, exitsCount: row.trades };
+    });
+  }
+  // Walk the output and decorate coarse/refine rows. Modifies in place.
+  for (const sym of Object.keys(output.symbols || {})) {
+    const symVal = output.symbols[sym];
+    for (const sigLabel of Object.keys(symVal.signals || {})) {
+      const sig = symVal.signals[sigLabel];
+      if (Array.isArray(sig.coarse)) sig.coarse = decorateRows(sym, sigLabel, sig.coarse);
+      if (Array.isArray(sig.refine)) sig.refine = decorateRows(sym, sigLabel, sig.refine);
+    }
+  }
+  // Annotate the variant slot with its entries-sidecar filename pattern so
+  // downstream tooling can find the per-shard NDJSON entries files.
+  for (const sym of Object.keys(output.symbols || {})) {
+    const symVal = output.symbols[sym];
+    for (const sigLabel of Object.keys(symVal.signals || {})) {
+      const sig = symVal.signals[sigLabel];
+      sig.entriesFilePrefix = `${exitsBasename}/${slug(sym)}__${slug(sigLabel)}__entries__shard`;
+      // The in-memory entries[] holds null stubs (one per entry seen) just so
+      // mergeShards' baseIdx math works. Drop them before write — readers
+      // should load entries from the sidecar NDJSON files instead.
+      delete sig.entries;
+    }
+  }
+  function streamOutput(filePath: string, root: any): void {
+    const fd = fs.openSync(filePath, 'w');
+    const write = (s: string) => fs.writeSync(fd, s);
+    try {
+      write('{');
+      let firstTop = true;
+      for (const [topKey, topVal] of Object.entries(root)) {
+        if (!firstTop) write(',');
+        firstTop = false;
+        write(JSON.stringify(topKey) + ':');
+        if (topKey !== 'symbols') { write(JSON.stringify(topVal)); continue; }
+        write('{');
+        let firstSym = true;
+        for (const [sym, symVal] of Object.entries(topVal as any)) {
+          if (!firstSym) write(',');
+          firstSym = false;
+          write(JSON.stringify(sym) + ':{');
+          let firstSymKey = true;
+          for (const [symKey, symKeyVal] of Object.entries(symVal as any)) {
+            if (!firstSymKey) write(',');
+            firstSymKey = false;
+            write(JSON.stringify(symKey) + ':');
+            if (symKey !== 'signals') { write(JSON.stringify(symKeyVal)); continue; }
+            write('{');
+            let firstSig = true;
+            for (const [sigLabel, sigVal] of Object.entries(symKeyVal as any)) {
+              if (!firstSig) write(',');
+              firstSig = false;
+              write(JSON.stringify(sigLabel) + ':{');
+              let firstField = true;
+              for (const [fk, fv] of Object.entries(sigVal as any)) {
+                if (!firstField) write(',');
+                firstField = false;
+                write(JSON.stringify(fk) + ':');
+                if (Array.isArray(fv) && fv.length > 500) {
+                  write('[');
+                  for (let i = 0; i < fv.length; i++) {
+                    if (i > 0) write(',');
+                    write(JSON.stringify(fv[i]));
+                  }
+                  write(']');
+                } else {
+                  write(JSON.stringify(fv));
+                }
+              }
+              write('}');
+            }
+            write('}');
+          }
+          write('}');
+        }
+        write('}');
+      }
+      write('}');
+    } finally { fs.closeSync(fd); }
+  }
+  streamOutput(outFile, output);
   console.log(`\n✓ wrote ${outFile}`);
 }

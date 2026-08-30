@@ -39,6 +39,10 @@ const OUT_DIR = path.join(process.cwd(), 'scripts/autoresearch/output');
 
 if (!INS.length) { console.error('usage: --in <path>::<window> [--in ...] [--hourly <path>::<window>] [--ticker hma3m]'); process.exit(2); }
 
+interface HourBucket { pnl: number; n: number; wins: number }
+// Cap result at a specific maxConcurrent contracts level. Mirrors the spread
+// risk-cache shape so the Studio applyCapFromRiskCache() helper picks it up.
+interface CapResult { cumPnl: number; wr: number; maxDD: number; n: number }
 interface Row {
   source: string; configId: string; symbol: string;
   signal: string; spread: string; exit: string;
@@ -48,6 +52,106 @@ interface Row {
   posDays: number; negDays: number; pos: number; worstDay: number; bestDay: number;
   avgCredit: number; avgMaxRisk: number; avgPnlPerTrade: number; avgDurMin: number;
   numActiveDays: number;
+  // 30-min bucket pnl/trade/win counts keyed by HHMM (e.g. "0930", "1530").
+  // Drives the time-of-day filter and per-row hourly heatmap in the UI.
+  hourlyPnl: { [bucket: string]: HourBucket };
+  // Mean entry price per contract. Multiply by $100 for per-contract capital.
+  avgEntryPx: number;
+  // peakConcurrent + capResults populate the cap-sim machinery the Studio
+  // already has for spreads. captureFraction() uses peakConcurrent+avgMaxRisk
+  // for the live dial; applyCapFromRiskCache() uses capResults for exact
+  // snap-to-cap values.
+  peakConcurrent?: number;
+}
+
+// ── Trade-paired loader ─────────────────────────────────────────────────────
+// Walks per-shard NDJSON files (entries + exits) for one cell and returns
+// trades sorted by entry timestamp. Entries and exits are paired by `i` index
+// within each shard; the merged trade list is the global pool.
+interface Trade { es: number; xs: number; px: number; p: number; }
+function loadTradesForCell(chunkBase: string, exitsBasename: string, entriesPrefix: string, exitsPrefix: string, shardCount = 4): Trade[] {
+  const trades: Trade[] = [];
+  for (let s = 0; s < shardCount; s++) {
+    const entryFile = path.join(chunkBase, `${exitsBasename}/${entriesPrefix.slice(exitsBasename.length + 1)}${s}.ndjson`);
+    const exitFile  = path.join(chunkBase, `${exitsBasename}/${exitsPrefix.slice(exitsBasename.length + 1)}${s}.ndjson`);
+    if (!fs.existsSync(entryFile) || !fs.existsSync(exitFile)) continue;
+    const entries: { d: string; es: number; px: number; dr: string; k: number; t: number }[] = [];
+    for (const line of fs.readFileSync(entryFile, 'utf8').split('\n')) {
+      if (line) entries.push(JSON.parse(line));
+    }
+    for (const line of fs.readFileSync(exitFile, 'utf8').split('\n')) {
+      if (!line) continue;
+      const ex = JSON.parse(line);
+      const e = entries[ex.i];
+      if (!e) continue;
+      trades.push({ es: e.es, xs: ex.xs, px: e.px, p: ex.p });
+    }
+  }
+  trades.sort((a, b) => a.es - b.es);
+  return trades;
+}
+
+// ── Cap simulator ───────────────────────────────────────────────────────────
+// Walks trades chronologically with a hard cap on concurrent open contracts.
+// At each entry, tries to open `nominal` contracts; truncates to (cap - currently
+// open) if not enough headroom. Skips if 0 contracts fit.
+// Returns { cumPnl, wr, maxDD, n } at this cap level.
+function simulateCap(trades: Trade[], cap: number, nominalPerTrade = 1): CapResult {
+  if (!trades.length || cap <= 0) return { cumPnl: 0, wr: 0, maxDD: 0, n: 0 };
+  // open = list of { releaseTs, contracts } sorted by releaseTs
+  const open: { rs: number; c: number }[] = [];
+  let cum = 0, peak = 0, maxDd = 0, wins = 0, n = 0;
+  function releaseAndCount(now: number): number {
+    let still = 0;
+    for (let i = open.length - 1; i >= 0; i--) {
+      if (open[i].rs <= now) {
+        open.splice(i, 1);
+      } else {
+        still += open[i].c;
+      }
+    }
+    return still;
+  }
+  for (const t of trades) {
+    const currentlyOpen = releaseAndCount(t.es);
+    const headroom = cap - currentlyOpen;
+    if (headroom <= 0) continue;
+    const contracts = Math.min(nominalPerTrade, headroom);
+    if (contracts <= 0) continue;
+    open.push({ rs: t.xs, c: contracts });
+    const pnl = t.p * contracts;
+    cum += pnl;
+    if (cum > peak) peak = cum;
+    const dd = peak - cum;
+    if (dd > maxDd) maxDd = dd;
+    if (pnl > 0) wins += 1;
+    n += 1;
+  }
+  return {
+    cumPnl: +cum.toFixed(2),
+    wr: n > 0 ? +((wins / n) * 100).toFixed(2) : 0,
+    maxDD: +maxDd.toFixed(2),
+    n,
+  };
+}
+
+// peakConcurrent = max number of overlapping trades at any moment, ignoring caps.
+function peakConcurrentOf(trades: Trade[]): number {
+  if (!trades.length) return 0;
+  // Sweep events: +1 at entry, -1 at exit. Sort by ts; ties: exits before entries
+  // so a position closing at the same instant a new one opens isn't double-counted.
+  const events: { ts: number; d: number }[] = [];
+  for (const t of trades) {
+    events.push({ ts: t.es, d: +1 });
+    events.push({ ts: t.xs, d: -1 });
+  }
+  events.sort((a, b) => a.ts - b.ts || a.d - b.d);
+  let cur = 0, peak = 0;
+  for (const ev of events) {
+    cur += ev.d;
+    if (cur > peak) peak = cur;
+  }
+  return peak;
 }
 
 function moneynessTag(off: number): string {
@@ -72,26 +176,22 @@ for (const spec of INS) {
   const j = JSON.parse(fs.readFileSync(abs, 'utf8'));
 
   for (const [symbol, sd] of Object.entries<any>(j.symbols || {})) {
-    const dates: string[] = sd.dates || [];
     for (const [label, sig] of Object.entries<any>(sd.signals || {})) {
-      // label = "HMA 3m 3x9 @ 15ITM TP60/SL12" (fixed-configs path)
-      const m = label.match(/^(HMA 3m \dx\d+)\s+@\s+(\d+(?:ITM|OTM)|ATM)\s+TP(\d+)\/SL(\d+)$/);
-      if (!m) { console.warn(`skip non-fixed label: ${label}`); continue; }
-      const [, sigBase, money, tpStr, slStr] = m;
-      const tp = +tpStr, sl = +slStr;
+      // Two label shapes:
+      //   (A) fixed-configs: "HMA 3m 3x9 @ 15ITM TP60/SL12" → one Row per label
+      //   (B) full-grid:     "HMA 3m 3x9 @ 15ITM"          → one Row per coarse cell (TP/SL pair)
+      const mFixed = label.match(/^(HMA \d+m \d+x\d+|HMA 2\+3 \d+x\d+|HMA 2\+3\+5 \d+x\d+)\s+@\s+(\d+(?:ITM|OTM)|ATM)\s+TP(\d+)\/SL(\d+)$/);
+      const mGrid  = label.match(/^(HMA \d+m \d+x\d+|HMA 2\+3 \d+x\d+|HMA 2\+3\+5 \d+x\d+)\s+@\s+(\d+(?:ITM|OTM)|ATM)$/);
+      if (!mFixed && !mGrid) { console.warn(`skip unrecognized label: ${label}`); continue; }
+
+      const sigBase = (mFixed || mGrid)![1];
+      const money = (mFixed || mGrid)![2];
       const offset = money === 'ATM' ? 0 : money.endsWith('ITM') ? -parseInt(money) : parseInt(money);
 
-      const fixedRow = sig.fixed?.[0];
-      if (!fixedRow) { console.warn(`no fixed row for ${label}`); continue; }
-      const { trades: n, wins, winRate, pnl, avgPnl, daysWithTrade, profitDays } = fixedRow;
-      const losses = n - wins;
-      const wr = +(winRate * 100).toFixed(2);
-      const negDays = daysWithTrade - profitDays;
-
-      // Compute hold-time, ratio (avg-win-pct / |avg-loss-pct|), and per-day
-      // P&L extremes from the trade stream when available. The morning-only
-      // sweep had no --emit-trades originally so sig.trades may be missing;
-      // those rows show 0 for HoldMin and ratio (cosmetic).
+      // The trade stream lets us compute hold-time, win/loss ratio, and per-day
+      // extremes. Only populated when --emit-trades was on. For the full-grid
+      // chunks it's empty (chunks 1-3 lost trades because the save path didn't
+      // propagate them); for the focused fixed-configs runs it's present.
       let avgDurMin = 0, ratio = 0, worstDay = 0, bestDay = 0;
       const tradeArr: any[] = sig.trades || [];
       if (tradeArr.length) {
@@ -113,38 +213,88 @@ for (const spec of INS) {
         bestDay  = +Math.max(...pnls).toFixed(2);
       }
 
-      // Embed window in the dashboard `signal` so each window is its own row.
       const dashSignal = `${sigBase} ${window}`;
-      const tag = window.replace(/[^0-9]/g, '');  // e.g. "0930-1200" → "09301200"
-      const configId = `hma3m-spx-${fastSlowFromSig(sigBase).toLowerCase()}-${money.toLowerCase()}-tp${tp}-sl${sl}-w${tag}`;
+      const tag = window.replace(/[^0-9]/g, '');
 
-      rows.push({
-        source: 'long', configId, symbol: 'SPX',
-        signal: dashSignal,
-        spread: `long ${money}`,         // shows in Spread column → "long 15ITM"
-        exit: `TP${tp}/SL${sl}`,
-        tp, sl, offset,
-        moneyness: money,
-        maType: maTypeFromSig(sigBase),
-        tfClass: tfClassFromSig(sigBase),
-        pnl: +pnl.toFixed(2),
-        pnlPct: 0,                       // not meaningful for $-denominated long
-        n, wins, losses,
-        wr,
-        dd: 0,                           // not computed (would need equity curve)
-        ratio,
-        sharpe: 0,
-        profitFactor: losses > 0 ? +(wins / losses).toFixed(3) : 0,
-        expectancy: +avgPnl.toFixed(3),
-        posDays: profitDays, negDays,
-        // pos = profitable-day count (Backtest table "+days" column reads this)
-        pos: profitDays,
-        worstDay, bestDay,
-        avgCredit: 0, avgMaxRisk: 0,
-        avgPnlPerTrade: +avgPnl.toFixed(2),
-        avgDurMin,
-        numActiveDays: daysWithTrade,
-      });
+      // Sidecar bookkeeping for cap-sim. When the cell has an exitsFilePrefix
+      // (full-grid path) we load its trades during pushRow and compute
+      // peakConcurrent + capResults. The chunk's sidecars live alongside the
+      // chunk file: <chunkFile>.exits/.
+      const chunkDir = path.dirname(abs);
+      const exitsBasename = path.basename(abs) + '.exits';
+      const sigEntriesPrefix = sig.entriesFilePrefix as string | undefined;
+
+      // Inner helper: emit one Row given (tp, sl, aggregate-stats).
+      // Accepts an optional `maxDrawdown` from the cell (now populated by the
+      // engine via the dailyPnl series); falls back to 0 for old chunks/configs.
+      // hourlyPnl + avgEntryPx are also propagated when present.
+      function pushRow(tp: number, sl: number, agg: { trades: number; wins: number; pnl: number; daysWithTrade: number; profitDays: number; winRate?: number; avgPnl?: number; maxDrawdown?: number; hourlyPnl?: { [bucket: string]: HourBucket }; avgEntryPx?: number; exitsFilePrefix?: string; }) {
+        const n = agg.trades, wins = agg.wins;
+        const losses = n - wins;
+        const winRate = typeof agg.winRate === 'number' ? agg.winRate : (n > 0 ? wins / n : 0);
+        const wr = +(winRate * 100).toFixed(2);
+        const pnl = agg.pnl;
+        const avgPnl = typeof agg.avgPnl === 'number' ? agg.avgPnl : (n > 0 ? pnl / n : 0);
+        const daysWithTrade = agg.daysWithTrade;
+        const profitDays = agg.profitDays;
+        const negDays = daysWithTrade - profitDays;
+        // dd is dollar drawdown (positive value, depth of deepest valley).
+        const dd = +(agg.maxDrawdown ?? 0).toFixed(2);
+        const ddRatio = dd > 0 ? +(pnl / dd).toFixed(2) : 0;
+        const configId = `hma3m-spx-${fastSlowFromSig(sigBase).toLowerCase()}-${money.toLowerCase()}-tp${tp}-sl${sl}-w${tag}`;
+
+        // Skipped: cap-sim for longs (peakConcurrent / capResults). Long
+        // strategies flip-on-reversal — they don't accumulate open positions
+        // the way credit spreads do. Sidecar data is preserved so future
+        // analysis can still drill into trades, but the cap dropdown is
+        // structurally meaningless for longs. avgMaxRisk is left at 0 since
+        // it would only feed the disabled captureFraction path.
+        const avgEntryPx = agg.avgEntryPx ?? 0;
+        const avgMaxRisk = 0;
+
+        rows.push({
+          source: 'long', configId, symbol: 'SPX',
+          signal: dashSignal,
+          spread: `long ${money}`,
+          exit: `TP${tp}/SL${sl}`,
+          tp, sl, offset,
+          moneyness: money,
+          maType: maTypeFromSig(sigBase),
+          tfClass: tfClassFromSig(sigBase),
+          pnl: +pnl.toFixed(2),
+          pnlPct: 0,
+          n, wins, losses,
+          wr,
+          dd,
+          ratio: ddRatio > 0 ? ddRatio : ratio,
+          sharpe: 0,
+          profitFactor: losses > 0 ? +(wins / losses).toFixed(3) : 0,
+          expectancy: +avgPnl.toFixed(3),
+          posDays: profitDays, negDays,
+          pos: profitDays,
+          worstDay, bestDay,
+          avgCredit: 0, avgMaxRisk,
+          avgPnlPerTrade: +avgPnl.toFixed(2),
+          avgDurMin,
+          numActiveDays: daysWithTrade,
+          hourlyPnl: agg.hourlyPnl || {},
+          avgEntryPx: +avgEntryPx.toFixed(2),
+        });
+      }
+
+      if (mFixed) {
+        // Fixed-configs path: one row per label, TP/SL come from the label.
+        const tp = +mFixed[3], sl = +mFixed[4];
+        const fixedRow = sig.fixed?.[0];
+        if (!fixedRow) { console.warn(`no fixed row for ${label}`); continue; }
+        pushRow(tp, sl, fixedRow);
+      } else {
+        // Full-grid path: emit one Row per coarse cell. Each cell already has
+        // trades / wins / pnl / daysWithTrade / profitDays / winRate / avgPnl.
+        for (const cell of (sig.coarse || [])) {
+          if (cell.trades > 0) pushRow(cell.tp, cell.sl, cell);
+        }
+      }
     }
   }
 }
@@ -187,14 +337,35 @@ if (!fs.existsSync(spreadStub)) {
       const dates: string[] = sd.dates || [];
       dates.forEach((d: string) => allDates.add(d));
       for (const [label, sig] of Object.entries<any>(sd.signals || {})) {
-        const m = label.match(/^(HMA 3m \dx\d+)\s+@\s+(\d+(?:ITM|OTM)|ATM)\s+TP(\d+)\/SL(\d+)$/);
-        if (!m) continue;
-        const [, sigBase, money, tpStr, slStr] = m;
+        // Two label shapes — same as the table reshape above.
+        const mFixed = label.match(/^(HMA \d+m \d+x\d+|HMA 2\+3 \d+x\d+|HMA 2\+3\+5 \d+x\d+)\s+@\s+(\d+(?:ITM|OTM)|ATM)\s+TP(\d+)\/SL(\d+)$/);
+        const mGrid  = label.match(/^(HMA \d+m \d+x\d+|HMA 2\+3 \d+x\d+|HMA 2\+3\+5 \d+x\d+)\s+@\s+(\d+(?:ITM|OTM)|ATM)$/);
+        if (!mFixed && !mGrid) continue;
+        const sigBase = (mFixed || mGrid)![1];
+        const money = (mFixed || mGrid)![2];
         const dashSignal = `${sigBase} ${window}`;
-        const key = `${dashSignal}|long ${money}|TP${tpStr}/SL${slStr}`;
-        const dayMap = dailyByVariant.get(key) || new Map<string, number>();
-        for (const t of (sig.trades || [])) dayMap.set(t.date, (dayMap.get(t.date) || 0) + t.pnl);
-        dailyByVariant.set(key, dayMap);
+
+        // Native long-row key shape: matches `variantKey(r)` in the Studio
+        // frontend ("long::sig::money::exit"), so no translation needed at
+        // the fetch boundary. The Backtest page now uses dedicated long-*
+        // endpoints, NOT the spread-* ones.
+        if (mFixed) {
+          const tpStr = mFixed[3], slStr = mFixed[4];
+          const key = `long::${dashSignal}::${money}::TP${tpStr}/SL${slStr}`;
+          const dayMap = dailyByVariant.get(key) || new Map<string, number>();
+          for (const t of (sig.trades || [])) dayMap.set(t.date, (dayMap.get(t.date) || 0) + t.pnl);
+          dailyByVariant.set(key, dayMap);
+        } else {
+          for (const cell of (sig.coarse || [])) {
+            if (!cell.dailyPnl) continue;
+            const key = `long::${dashSignal}::${money}::TP${cell.tp}/SL${cell.sl}`;
+            const dayMap = dailyByVariant.get(key) || new Map<string, number>();
+            for (const [d, v] of Object.entries<number>(cell.dailyPnl)) {
+              dayMap.set(d, (dayMap.get(d) || 0) + (v as number));
+            }
+            dailyByVariant.set(key, dayMap);
+          }
+        }
       }
     }
   }
@@ -203,7 +374,7 @@ if (!fs.existsSync(spreadStub)) {
   for (const [key, dayMap] of dailyByVariant) {
     series[key] = sortedDates.map(d => +(dayMap.get(d) || 0).toFixed(2));
   }
-  const dailyOut = path.join(OUT_DIR, `spread-daily-${TICKER}.json`);
+  const dailyOut = path.join(OUT_DIR, `long-daily-${TICKER}.json`);
   fs.writeFileSync(dailyOut, JSON.stringify({ dates: sortedDates, series }, null, 2));
   console.log(`✓ wrote ${dailyOut} — ${Object.keys(series).length} series × ${sortedDates.length} dates`);
 }
@@ -318,11 +489,17 @@ if (!fs.existsSync(spreadStub)) {
 }
 
 // ── Hourly file ─────────────────────────────────────────────────────────────
-// Shape consumed by /api/etf-long-hourly: { hours: string[], series: { "sig|spread|exit": number[] } }
-// where key matches the table row's signal|spread|exit join exactly.
+// Two outputs for compatibility:
+//   etf-long-hourly-<ticker>.json   — old flat-array shape (kept for older callers)
+//   spread-hourly-<ticker>.json     — canonical Studio shape that /api/spreads/hourly
+//                                     serves: { "0": { signal, structure, exit,
+//                                     hours: { "10": { n, avgPnl, wr, totalPnl } } } }
+// Only the focused-configs runs with trade rows can populate hourly (the full
+// grid chunks don't emit trades). Other rows will render "—" in the heatmap.
 if (HOURLY_INS.length) {
   const HOURS = ['09', '10', '11', '12', '13', '14', '15'];
-  const series: { [k: string]: number[] } = {};
+  const flatSeries: { [k: string]: number[] } = {};   // legacy etf-long-hourly shape
+  const studioHourly: { [idx: string]: any } = {};    // canonical spread-hourly shape
 
   function etHour(ts: number): string {
     const d = new Date(ts * 1000);
@@ -330,6 +507,7 @@ if (HOURLY_INS.length) {
     return hh.padStart(2, '0');
   }
 
+  let studioIdx = 0;
   for (const spec of HOURLY_INS) {
     const [file, window] = spec.split('::');
     if (!file || !window) { console.error(`bad --hourly: ${spec}`); process.exit(2); }
@@ -337,26 +515,56 @@ if (HOURLY_INS.length) {
     const j = JSON.parse(fs.readFileSync(abs, 'utf8'));
     for (const [_sym, sd] of Object.entries<any>(j.symbols || {})) {
       for (const [label, sig] of Object.entries<any>(sd.signals || {})) {
-        const m = label.match(/^(HMA 3m \dx\d+)\s+@\s+(\d+(?:ITM|OTM)|ATM)\s+TP(\d+)\/SL(\d+)$/);
-        if (!m) continue;
-        const [, sigBase, money, tpStr, slStr] = m;
+        // Same label-matching as the table reshape — supports all signal families.
+        const mFixed = label.match(/^(HMA \d+m \d+x\d+|HMA 2\+3 \d+x\d+|HMA 2\+3\+5 \d+x\d+)\s+@\s+(\d+(?:ITM|OTM)|ATM)\s+TP(\d+)\/SL(\d+)$/);
+        if (!mFixed) continue;
+        const [, sigBase, money, tpStr, slStr] = mFixed;
         const dashSignal = `${sigBase} ${window}`;
         const spread = `long ${money}`;
         const exit = `TP${tpStr}/SL${slStr}`;
-        const key = `${dashSignal}|${spread}|${exit}`;
-        const arr = Array(HOURS.length).fill(0);
+        // Native variant key (matches Studio variantKey() for source="long").
+        const key = `long::${dashSignal}::${money}::${exit}`;
+
+        // Per-hour stats from trade rows.
+        const flatArr = Array(HOURS.length).fill(0);
+        const perHour: { [h: string]: { n: number; wins: number; sumPnl: number } } = {};
+        for (const h of HOURS) perHour[h] = { n: 0, wins: 0, sumPnl: 0 };
         for (const t of (sig.trades || [])) {
-          const idx = HOURS.indexOf(etHour(t.entryTs));
-          if (idx >= 0) arr[idx] += t.pnl;
+          const h = etHour(t.entryTs);
+          if (!(h in perHour)) continue;
+          flatArr[HOURS.indexOf(h)] += t.pnl;
+          perHour[h].n += 1;
+          if (t.pnl > 0) perHour[h].wins += 1;
+          perHour[h].sumPnl += t.pnl;
         }
-        series[key] = arr.map(v => +v.toFixed(2));
+        flatSeries[key] = flatArr.map(v => +v.toFixed(2));
+
+        const hoursOut: { [h: string]: any } = {};
+        for (const h of HOURS) {
+          const b = perHour[h];
+          if (b.n === 0) continue;
+          hoursOut[h] = {
+            n: b.n,
+            avgPnl: +(b.sumPnl / b.n).toFixed(2),
+            wr: +((b.wins / b.n) * 100).toFixed(1),
+            totalPnl: +b.sumPnl.toFixed(2),
+          };
+        }
+        // Native long shape: store under the variant key directly so the
+        // /api/long-hourly endpoint can do a single lookup without rebuilding
+        // a `signal|spread|exit` join.
+        studioHourly[String(studioIdx++)] = { variantKey: key, signal: dashSignal, spread, exit, hours: hoursOut };
       }
     }
   }
 
   const hourlyOut = path.join(OUT_DIR, `etf-long-hourly-${TICKER}.json`);
-  fs.writeFileSync(hourlyOut, JSON.stringify({ hours: HOURS, series }, null, 2));
-  console.log(`✓ wrote ${hourlyOut} — ${Object.keys(series).length} series`);
+  fs.writeFileSync(hourlyOut, JSON.stringify({ hours: HOURS, series: flatSeries }, null, 2));
+  console.log(`✓ wrote ${hourlyOut} — ${Object.keys(flatSeries).length} series (legacy shape)`);
+
+  const studioOut = path.join(OUT_DIR, `long-hourly-${TICKER}.json`);
+  fs.writeFileSync(studioOut, JSON.stringify(studioHourly, null, 2));
+  console.log(`✓ wrote ${studioOut} — ${Object.keys(studioHourly).length} variants (long shape)`);
 }
 
 // Dashboard auto-discovers via /api/etf-profiles glob.

@@ -32,6 +32,7 @@ const BASES: Record<string, SymbolBase> = {
   SPX: { symbol: 'SPX', optionPrefix: 'SPXW', defaultDte: 0, strikeInterval: 5 },
   SPY: { symbol: 'SPY', optionPrefix: 'SPY',  defaultDte: 0, strikeInterval: 1 },
   QQQ: { symbol: 'QQQ', optionPrefix: 'QQQ',  defaultDte: 0, strikeInterval: 1 },
+  XSP: { symbol: "XSP", optionPrefix: "XSP",  defaultDte: 0, strikeInterval: 1 },
   NDX: { symbol: 'NDX', optionPrefix: 'NDXP', defaultDte: 0, strikeInterval: 10 },
 };
 

@@ -58,7 +58,7 @@ const INTERVALS_MIN = (process.env.SWEEP_TIME_INTERVALS ?? '15,30,60')
 const WIDTHS_S = (process.env.SWEEP_TIME_WIDTHS ?? '10,20,30,40,50')
   .split(',').map(s => parseInt(s.trim(), 10)).filter(n => Number.isFinite(n) && n > 0);
 
-interface ExitSpec { label: string; tpFrac: number; slRiskFrac: number; maxHoldMin?: number; }
+export interface ExitSpec { label: string; tpFrac: number; slRiskFrac: number; maxHoldMin?: number; }
 const EXITS: ExitSpec[] = [
   { label: 'hold-to-settle', tpFrac: 0,    slRiskFrac: 0 },
   { label: 'TP5 only',       tpFrac: 0.05, slRiskFrac: 0 },
@@ -75,6 +75,44 @@ const EXITS: ExitSpec[] = [
   { label: 'TP10 close@30m', tpFrac: 0.10, slRiskFrac: 0, maxHoldMin: 30 },
   { label: 'TP15 close@30m', tpFrac: 0.15, slRiskFrac: 0, maxHoldMin: 30 },
 ];
+// SWEEP_TIME_EXITS=csv of exit labels → restrict to those (default: all).
+// When the selected exits are all settle/intrinsic (no TP/SL/time-stop), the
+// minute-by-minute trajectory is unused, so we skip buildTrajectory entirely —
+// e.g. a hold-to-settle-only run is ~10× faster.
+const EXIT_FILTER = process.env.SWEEP_TIME_EXITS
+  ? new Set(process.env.SWEEP_TIME_EXITS.split(',').map(s => s.trim()).filter(Boolean))
+  : null;
+const ACTIVE_EXITS = EXIT_FILTER ? EXITS.filter(e => EXIT_FILTER.has(e.label)) : EXITS;
+
+// ── Per-trade emission (additive, env-gated; schema mirrors iron-sweep) ──────
+// SWEEP_EMIT_TRADES_KEYS="signal|structure|exit,…" enables per-trade dumps for
+// the listed variants only (newline- or comma-separated). SWEEP_EMIT_ONLY=1
+// narrows the matrix to exactly those keys' interval/width/exit AND skips the
+// dashboard writes — fast, non-destructive per-config emission. Keys look like
+// "TIME 30m|IB w30|hold-to-settle" (same string key() produces below).
+const EMIT_KEYS = (() => {
+  const raw = process.env.SWEEP_EMIT_TRADES_KEYS;
+  if (!raw) return null;
+  return new Set(raw.split(/[\n,]/).map(s => s.trim()).filter(Boolean));
+})();
+const EMIT_ONLY = !!process.env.SWEEP_EMIT_ONLY && !!EMIT_KEYS;
+function parseEmitKey(k: string): { iv: number; wS: number; ex: string } {
+  const [sig, st, ex] = k.split('|');
+  const iv = parseInt(sig.match(/TIME\s+(\d+)m/)?.[1] || '0', 10);
+  const pts = parseInt(st.match(/w(\d+)/)?.[1] || '0', 10);
+  return { iv, wS: pts / SI, ex };
+}
+const EMIT_PARSED = EMIT_KEYS ? [...EMIT_KEYS].map(parseEmitKey) : [];
+// EMIT_ONLY derives the matrix straight from the keys (so a non-default width
+// like w30 → wS=6 works without also passing SWEEP_TIME_WIDTHS).
+const RUN_INTERVALS = EMIT_ONLY ? [...new Set(EMIT_PARSED.map(p => p.iv))].filter(n => n > 0) : INTERVALS_MIN;
+const RUN_WIDTHS    = EMIT_ONLY ? [...new Set(EMIT_PARSED.map(p => p.wS))].filter(n => n > 0) : WIDTHS_S;
+const RUN_EXITS     = EMIT_ONLY ? EXITS.filter(e => EMIT_PARSED.some(p => p.ex === e.label)) : ACTIVE_EXITS;
+const NEED_TRAJ = RUN_EXITS.some(e => e.tpFrac > 0 || e.slRiskFrac > 0 || e.maxHoldMin);
+// SWEEP_TIME_HOURLY_ONLY=1 → write ONLY the hourly file; leave the existing
+// sweep/daily TIME rows untouched. Use this when regenerating a SUBSET of exits
+// (e.g. just hold-to-settle) so the run doesn't shrink the full sweep/daily set.
+const HOURLY_ONLY = !!process.env.SWEEP_TIME_HOURLY_ONLY;
 
 // ── Session helpers (verbatim from iron-sweep) ──────────────────────────────
 function sessOpenTs(date: string): number {
@@ -95,14 +133,14 @@ function findStrike(c1: any, type: 'C' | 'P', targetK: number): string | null {
     const k = c1.contractStrikes.get(sym); const d = Math.abs(k - targetK); if (d < bestD) { bestD = d; best = sym; } }
   return best;
 }
-function optPx(bars: any[], ts: number): number | null { for (let i = bars.length - 1; i >= 0; i--) if (bars[i].ts <= ts) return bars[i].close; return null; }
-function markAge(bars: any[], ts: number): number { for (let i = bars.length - 1; i >= 0; i--) if (bars[i].ts <= ts) return ts - bars[i].ts; return Infinity; }
+export function optPx(bars: any[], ts: number): number | null { for (let i = bars.length - 1; i >= 0; i--) if (bars[i].ts <= ts) return bars[i].close; return null; }
+export function markAge(bars: any[], ts: number): number { for (let i = bars.length - 1; i >= 0; i--) if (bars[i].ts <= ts) return ts - bars[i].ts; return Infinity; }
 
-interface Leg { bars: any[]; sign: number; strike: number; symbol: string; }
-interface TrajPoint { ts: number; V: number; shortsFresh: boolean; }
+export interface Leg { bars: any[]; sign: number; strike: number; symbol: string; }
+export interface TrajPoint { ts: number; V: number; shortsFresh: boolean; }
 
 // buildTrajectory — verbatim from iron-sweep (incl. shorts-fresh flag).
-function buildTrajectory(legs: Leg[], entryTs: number, endTs: number): TrajPoint[] {
+export function buildTrajectory(legs: Leg[], entryTs: number, endTs: number): TrajPoint[] {
   const tsSet = new Set<number>();
   for (const lg of legs) for (const b of lg.bars) if (b.ts > entryTs && b.ts <= endTs) tsSet.add(b.ts);
   const tsList = [...tsSet].sort((a, b) => a - b);
@@ -125,7 +163,7 @@ function buildTrajectory(legs: Leg[], entryTs: number, endTs: number): TrajPoint
 // applyExit — verbatim from iron-sweep, minus the flip path (time-based = no flip).
 // closeTs = forced close time (time-stop or settle). settleTs = the true 15:45 expiry boundary.
 // When closeTs < settleTs we MTM the structure (early time-stop); only at settleTs do we use 0DTE intrinsic.
-function applyExit(traj: TrajPoint[], closeTs: number, settleTs: number, legs: Leg[], credit: number, tpFrac: number,
+export function applyExit(traj: TrajPoint[], closeTs: number, settleTs: number, legs: Leg[], credit: number, tpFrac: number,
                    spxAtSettle: number | null, wingWidth: number, slRiskFrac: number)
                   : { exitTs: number; exitV: number; reason: string } {
   const tpV = tpFrac > 0 ? (1 - tpFrac) * credit : -Infinity;
@@ -183,7 +221,7 @@ function rec(k: string, pnlGross: number, date: string, credit: number, width: n
   hb.n++; hb.creditSum += credit; hb.riskSum += maxRisk; hb.pnlSum += net; if (net > 0) hb.wins++;
 }
 
-function buildLegs(c1: any, center: number, wingWidth: number): Leg[] | null {
+export function buildLegs(c1: any, center: number, wingWidth: number): Leg[] | null {
   const Ksp = center, Klp = center - wingWidth, Ksc = center, Klc = center + wingWidth;
   const sym_sp = findStrike(c1, 'P', Ksp), sym_lp = findStrike(c1, 'P', Klp);
   const sym_sc = findStrike(c1, 'C', Ksc), sym_lc = findStrike(c1, 'C', Klc);
@@ -197,17 +235,112 @@ function buildLegs(c1: any, center: number, wingWidth: number): Leg[] | null {
   ];
 }
 
+// ── Per-trade emission record + sink (schema mirrors iron-sweep's) ──────────
+export interface TimeTradeRecord {
+  entryTs: number; exitTs: number; durationSec: number;
+  dir: 'bull' | 'bear';                       // sign of the entry 30-min SPX drift (flies are direction-free)
+  spxAtEntry: number; spxAtExit: number; drift30: number; center: number;
+  shortPutSymbol: string;  shortPutStrike: number;  shortPutEntryMark: number;  shortPutExitMark: number;
+  longPutSymbol: string;   longPutStrike: number;   longPutEntryMark: number;   longPutExitMark: number;
+  shortCallSymbol: string; shortCallStrike: number; shortCallEntryMark: number; shortCallExitMark: number;
+  longCallSymbol: string;  longCallStrike: number;  longCallEntryMark: number;  longCallExitMark: number;
+  netCredit: number; netExitDebit: number; wingWidth: number; maxRisk: number;
+  tpFrac: number; slMult: number;
+  pnlGross: number; pnlNet: number;
+  exitReason: string;
+}
+interface TimeDayEmit {
+  date: string; signal: string; structure: string; exit: string;
+  spxOpen: number; spxClose: number; spxSettle: number | null;
+  trades: TimeTradeRecord[];
+  spxBars: any[];
+  contractBars: Record<string, any[]>;
+}
+export function slugify(k: string) { return k.replace(/[|]/g, '__').replace(/\s+/g, '_'); }
+
+// buildTimeTradeRecord — pure: turn a settled trade into the emitted record.
+// legs are positional [shortPut, longPut, shortCall, longCall] (see buildLegs).
+// At 0DTE expiry exit marks are SPX-vs-strike intrinsic; otherwise leg close.
+export function buildTimeTradeRecord(a: {
+  legs: Leg[]; entryTs: number; exitTs: number; exitV: number; exitReason: string;
+  credit: number; wingWidth: number; center: number; tpFrac: number; slRiskFrac: number;
+  spxAtEntry: number; spxAtExit: number; spxAtSettle: number | null; drift30: number;
+  entriesPx: number[]; slippage: number;
+}): TimeTradeRecord {
+  const { legs, entriesPx } = a;
+  const exitMark = (lg: Leg, isPut: boolean) => {
+    if (a.exitReason === 'expiry' && a.spxAtSettle != null)
+      return isPut ? Math.max(0, lg.strike - a.spxAtSettle) : Math.max(0, a.spxAtSettle - lg.strike);
+    return optPx(lg.bars, a.exitTs) ?? 0;
+  };
+  const pnlGross = (a.credit - a.exitV) * 100;
+  const maxRisk = (a.wingWidth - a.credit) * 100;
+  return {
+    entryTs: a.entryTs, exitTs: a.exitTs, durationSec: Math.max(0, a.exitTs - a.entryTs),
+    dir: a.drift30 >= 0 ? 'bull' : 'bear',
+    spxAtEntry: a.spxAtEntry, spxAtExit: a.spxAtExit, drift30: a.drift30, center: a.center,
+    shortPutSymbol: legs[0].symbol, shortPutStrike: legs[0].strike, shortPutEntryMark: entriesPx[0], shortPutExitMark: exitMark(legs[0], true),
+    longPutSymbol: legs[1].symbol,  longPutStrike: legs[1].strike,  longPutEntryMark: entriesPx[1],  longPutExitMark: exitMark(legs[1], true),
+    shortCallSymbol: legs[2].symbol, shortCallStrike: legs[2].strike, shortCallEntryMark: entriesPx[2], shortCallExitMark: exitMark(legs[2], false),
+    longCallSymbol: legs[3].symbol,  longCallStrike: legs[3].strike,  longCallEntryMark: entriesPx[3],  longCallExitMark: exitMark(legs[3], false),
+    netCredit: a.credit, netExitDebit: a.exitV, wingWidth: a.wingWidth, maxRisk,
+    tpFrac: a.tpFrac, slMult: a.slRiskFrac,
+    pnlGross, pnlNet: pnlGross - a.slippage,
+    exitReason: a.exitReason,
+  };
+}
+
+const EMIT_DIR = process.env.SWEEP_EMIT_TRADES_DIR
+  || path.join(process.cwd(), 'scripts/autoresearch/output/time-trades');
+const EMIT_BUFFER = new Map<string, Map<string, TimeDayEmit>>();
+function emitTimeTrade(k: string, date: string, hdr: { spxOpen: number; spxClose: number; spxSettle: number | null },
+                       tr: TimeTradeRecord, spxBars: any[], legs: Array<{ symbol: string; bars: any[] }>) {
+  if (!EMIT_KEYS || !EMIT_KEYS.has(k)) return;
+  let byDate = EMIT_BUFFER.get(k); if (!byDate) { byDate = new Map(); EMIT_BUFFER.set(k, byDate); }
+  let d = byDate.get(date);
+  if (!d) {
+    const [signal, structure, exit] = k.split('|');
+    d = { date, signal, structure, exit, spxOpen: hdr.spxOpen, spxClose: hdr.spxClose, spxSettle: hdr.spxSettle, trades: [], spxBars, contractBars: {} };
+    byDate.set(date, d);
+  }
+  d.trades.push(tr);
+  for (const lg of legs) if (!d.contractBars[lg.symbol]) d.contractBars[lg.symbol] = lg.bars;
+}
+function compactBars(bars: any[]): number[][] {
+  const out: number[][] = new Array(bars.length);
+  for (let i = 0; i < bars.length; i++) { const b = bars[i]; out[i] = [b.ts, b.open, b.high, b.low, b.close, b.volume ?? 0]; }
+  return out;
+}
+function flushTrades() {
+  if (!EMIT_KEYS || EMIT_BUFFER.size === 0) return;
+  fs.mkdirSync(EMIT_DIR, { recursive: true });
+  let nFiles = 0, nTrades = 0;
+  for (const [k, byDate] of EMIT_BUFFER) {
+    const sub = path.join(EMIT_DIR, slugify(k));
+    fs.mkdirSync(sub, { recursive: true });
+    for (const [date, day] of byDate) {
+      day.trades.sort((a, b) => a.entryTs - b.entryTs);
+      const compact = { ...day, spxBars: compactBars(day.spxBars),
+        contractBars: Object.fromEntries(Object.entries(day.contractBars).map(([sym, b]) => [sym, compactBars(b as any[])])) };
+      fs.writeFileSync(path.join(sub, `${date}.json`), JSON.stringify(compact));
+      nFiles++; nTrades += day.trades.length;
+    }
+  }
+  console.error(`[time-trades] emitted ${nTrades} trades across ${nFiles} files under ${EMIT_DIR}`);
+}
+
 function prevDate(d: string) { const dt = new Date(d + 'T12:00:00Z'); dt.setUTCDate(dt.getUTCDate() - 1);
   if (dt.getUTCDay() === 0) dt.setUTCDate(dt.getUTCDate() - 2); if (dt.getUTCDay() === 6) dt.setUTCDate(dt.getUTCDate() - 1);
   return dt.toISOString().slice(0, 10); }
 
 // ── Main ────────────────────────────────────────────────────────────────────
+function main() {
 const ALL = listDatesFor(TARGET);
 // Default to a 20-day viability window unless SWEEP_DAYS overrides.
 const N = parseInt(process.env.SWEEP_DAYS || '20', 10);
 const DATES = (Number.isFinite(N) && N > 0 && N < ALL.length) ? ALL.slice(-N) : ALL;
 
-console.error(`[${TARGET.symbol}] TIME-iron study — dates: ${DATES.length} (of ${ALL.length}), intervals: ${INTERVALS_MIN.join('/')}m, widths: ${WIDTHS_S.map(w => w * SI).join('/')}, exits: ${EXITS.length} | exitGate=${EXIT_GATE} fill=${FILL_MODE}`);
+console.error(`[${TARGET.symbol}] TIME-iron study — dates: ${DATES.length} (of ${ALL.length}), intervals: ${RUN_INTERVALS.join('/')}m, widths: ${RUN_WIDTHS.map(w => w * SI).join('/')}, exits: ${RUN_EXITS.length}${EMIT_ONLY ? ' (EMIT-ONLY)' : ''} | exitGate=${EXIT_GATE} fill=${FILL_MODE}`);
 
 for (let di = 0; di < DATES.length; di++) {
   const date = DATES[di];
@@ -221,12 +354,12 @@ for (let di = 0; di < DATES.length; di++) {
   const spxAtSettle = optPx(s1, settle);
   const dayEvents = new Map<string, Array<{ e: number; x: number }>>();
 
-  for (const intervalMin of INTERVALS_MIN) {
+  for (const intervalMin of RUN_INTERVALS) {
     for (const entryTs of timeEntries(date, intervalMin)) {
       const center = optPx(s1, entryTs - 1);
       if (center == null) continue;
 
-      for (const wS of WIDTHS_S) {
+      for (const wS of RUN_WIDTHS) {
         const wingWidth = wS * SI;
         const legs = buildLegs(c1, center, wingWidth);
         if (!legs) continue;
@@ -239,8 +372,8 @@ for (let di = 0; di < DATES.length; di++) {
         if (credit <= 0.10) continue;
         if (credit >= wingWidth * 0.95) continue;
 
-        const traj = buildTrajectory(legs, entryTs, settle);
-        for (const ex of EXITS) {
+        const traj = NEED_TRAJ ? buildTrajectory(legs, entryTs, settle) : [];
+        for (const ex of RUN_EXITS) {
           const closeTs = ex.maxHoldMin ? Math.min(settle, entryTs + ex.maxHoldMin * 60) : settle;
           const nat = applyExit(traj, closeTs, settle, legs, credit, ex.tpFrac, spxAtSettle, wingWidth, ex.slRiskFrac);
           const pnlGross = (credit - nat.exitV) * 100;
@@ -249,6 +382,21 @@ for (let di = 0; di < DATES.length; di++) {
           rec(k, pnlGross, date, credit, wingWidth, entryTs, durationSec);
           let evs = dayEvents.get(k); if (!evs) { evs = []; dayEvents.set(k, evs); }
           evs.push({ e: entryTs, x: nat.exitTs });
+
+          // Per-trade emission (no-op unless this variant key is in EMIT_KEYS).
+          if (EMIT_KEYS && EMIT_KEYS.has(k)) {
+            const spx30Prior = optPx(s1, entryTs - 1 - 30 * 60);
+            const drift30 = spx30Prior != null ? center - spx30Prior : 0;
+            const tr = buildTimeTradeRecord({
+              legs, entryTs, exitTs: nat.exitTs, exitV: nat.exitV, exitReason: nat.reason,
+              credit, wingWidth, center, tpFrac: ex.tpFrac, slRiskFrac: ex.slRiskFrac,
+              spxAtEntry: center, spxAtExit: optPx(s1, nat.exitTs) ?? center, spxAtSettle, drift30,
+              entriesPx: entriesPx as number[], slippage: SLIPPAGE_PER_STRUCTURE,
+            });
+            const spxOpen = s1[0]?.close ?? center;
+            const spxClose = s1[s1.length - 1]?.close ?? center;
+            emitTimeTrade(k, date, { spxOpen, spxClose, spxSettle: spxAtSettle }, tr, s1, legs);
+          }
         }
       }
     }
@@ -262,6 +410,9 @@ for (let di = 0; di < DATES.length; di++) {
     const v = results.get(k); if (v && peak > v.peakConcurrent) v.peakConcurrent = peak;
   }
 }
+
+// EMIT-ONLY: dump per-trade files and stop — never touch the dashboard JSONs.
+if (EMIT_ONLY) { flushTrades(); return; }
 
 // ── Report + studio output (iron-sweep schema → shared spreads dashboard) ─────
 const SESSION_SEC = 20700; // 10:00 → 15:45 ET
@@ -341,11 +492,20 @@ function writeHourly(base: string) {
   }
   fs.writeFileSync(f, JSON.stringify(existing));
 }
-const sweepF = writeSweep('/tmp/credit_spread_sweep.json');
-writeSweep(path.join(process.cwd(), 'scripts/autoresearch/output/spread-sweep.json'));
-writeDaily('/tmp/credit_spread_daily.json');
-writeDaily(path.join(process.cwd(), 'scripts/autoresearch/output/spread-daily.json'));
+// HOURLY_ONLY: skip sweep/daily rewrites so a subset run (e.g. hold-to-settle
+// only) never shrinks the existing full TIME row set in those files.
+if (!HOURLY_ONLY) {
+  writeSweep('/tmp/credit_spread_sweep.json');
+  writeSweep(path.join(process.cwd(), 'scripts/autoresearch/output/spread-sweep.json'));
+  writeDaily('/tmp/credit_spread_daily.json');
+  writeDaily(path.join(process.cwd(), 'scripts/autoresearch/output/spread-daily.json'));
+}
 writeHourly('/tmp/iron_hourly.json');
 writeHourly(path.join(process.cwd(), 'scripts/autoresearch/output/spread-hourly.json'));
 console.log(`\nMerged ${rows.length} TIME variants into the spreads dashboard (sweep + daily + hourly). Filter signal "TIME 15m/30m/60m", width via spread "IB w…".`);
 fs.writeFileSync('/tmp/time-iron-study.json', JSON.stringify({ symbol: TARGET.symbol, days: DATES.length, dateRange: [DATES[0], DATES[DATES.length - 1]], rows }, null, 2));
+// Per-trade emission also runs alongside a normal (non-EMIT_ONLY) dashboard run.
+flushTrades();
+}
+
+if (process.argv[1] && /time-iron-study\.ts$/.test(process.argv[1])) main();
