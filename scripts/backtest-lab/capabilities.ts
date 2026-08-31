@@ -11,6 +11,7 @@
 // bare worktree), capabilities come back empty rather than invented.
 import * as fs from "node:fs"
 import * as path from "node:path"
+import { fileURLToPath } from "node:url"
 import type {
   EngineCapabilities,
   MaType,
@@ -19,9 +20,16 @@ import type {
 } from "./contract.ts"
 import { SHARES_ENTRY_TRIGGERS, SHARES_EXIT_TRIGGERS } from "./contract.ts"
 
+// CJS-safe root resolution: derive the root from THIS file's location, not
+// cwd — PM2's shim cwd is not the SPXer checkout. tsx always sets
+// import.meta.url; the __filename fallback covers the CJS transform.
+const thisFile =
+  typeof import.meta.url === "string"
+    ? fileURLToPath(import.meta.url)
+    : (globalThis as { __filename?: string }).__filename ?? ""
 export const SPXER_ROOT = process.env.SPXER_ROOT
   ? path.resolve(process.env.SPXER_ROOT)
-  : path.resolve(import.meta.dirname, "../..")
+  : path.resolve(path.dirname(thisFile), "../..")
 const BARS_ROOT = path.join(SPXER_ROOT, "data/parquet/bars")
 const REGISTRY_PATH = path.join(SPXER_ROOT, "scripts/diag/sweep-registry.json")
 

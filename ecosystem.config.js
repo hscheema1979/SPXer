@@ -57,8 +57,10 @@ module.exports = {
     // edit there: pm2 restart backtest-lab.
     {
       name: 'backtest-lab',
-      script: 'npx',
-      args: 'tsx scripts/backtest-lab/server.ts',
+      // Direct tsx-binary invocation — `script: 'npx'` crashes under PM2 with
+      // ERR_INVALID_ARG_TYPE (npx mis-resolves cwd when PM2 execs it).
+      script: 'node_modules/.bin/tsx',
+      args: 'scripts/backtest-lab/server.ts',
       cwd: '/home/ubuntu/SPXer',
       autorestart: true,
       watch: false,
