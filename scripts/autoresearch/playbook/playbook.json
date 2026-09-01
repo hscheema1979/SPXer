@@ -1,6 +1,6 @@
 {
-  "version": 79,
-  "updated": "2026-08-29",
+  "version": 80,
+  "updated": "2026-08-31",
   "note": "Regime-indexed strategy playbook. Built by this session; gap cells are co-owned with the parallel gap-research session. Matrix entries seeded from in-sample regime x strategy P&L; the nightly cycle promotes them to status=confirmed only after a strict train/test out-of-sample hold.",
   "validation_bar": {
     "split": "chronological 70/30 train/test per regime",
@@ -1070,6 +1070,12 @@
     },
     {
       "date": "2026-08-29",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-08-31",
       "theory": "nightly regime-attribution + per-trade OOS rebuild",
       "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
       "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
