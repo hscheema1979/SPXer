@@ -3426,3 +3426,47 @@ Regime distribution:
 
 playbook.json updated (v80). SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]
 ===== done 2026-08-31T06:40:21Z =====
+===== playbook cycle 2026-09-01T06:30:01Z =====
+SPX: classified 350/350 days → /home/ubuntu/SPXer/scripts/autoresearch/playbook/regimes-spx.json
+Regime distribution:
+  trend           63  (18.0%)
+  gap_chop        53  (15.1%)
+  gap_go          52  (14.9%)
+  gap_fade        49  (14.0%)
+  chop            43  (12.3%)
+  mixed           39  (11.1%)
+  quiet_range     32  (9.1%)
+  trend_vol       19  (5.4%)
+NDX: classified 352/352 days → /home/ubuntu/SPXer/scripts/autoresearch/playbook/regimes-ndx.json
+Regime distribution:
+  gap_chop        89  (25.3%)
+  gap_fade        74  (21.0%)
+  gap_go          55  (15.6%)
+  mixed           42  (11.9%)
+  trend           39  (11.1%)
+  chop            22  (6.3%)
+  quiet_range     19  (5.4%)
+  trend_vol       12  (3.4%)
+
+[SPX] regime coverage — PER-TRADE expectancy (OOS, est_test_trades>=10):
+  gap_go        DEMA 2+3+5 3x21|IB w10|TP35 only  train $43.6/t  test $18.2/t  (192 tr, 12/day, day-wr 50)
+  gap_fade      DEMA 2+3 3x21|IB w50|TP75 only  train $369.6/t  test $267.4/t  (247 tr, 16.5/day, day-wr 73)
+  gap_chop      DEMA 2m 3x9|IB w50|hold-to-settle  train $298.5/t  test $559.9/t  (474 tr, 29.6/day, day-wr 94)
+  trend         HMA  3m 3x9|IC 20w50|hold-to-settle  train $119/t  test $45.1/t  (745 tr, 39.2/day, day-wr 74)
+  trend_vol     DEMA 5m 3x21|10ITM w10|TP75 only  train $42.8/t  test $174.5/t  (66 tr, 10.9/day, day-wr 83)
+  chop          HMA  5m 3x9|IB w50|hold-to-settle  train $346/t  test $282.3/t  (416 tr, 32/day, day-wr 69)
+  quiet_range   DEMA 2+3+5 3x21|IB w50|hold-to-settle  train $483/t  test $641.8/t  (123 tr, 12.3/day, day-wr 90)
+  mixed         HMA  2+3+5 3x21|10ITM w20|hold-to-settle  train $35.3/t  test $75.5/t  (285 tr, 23.7/day, day-wr 75)
+
+[NDX] regime coverage — PER-TRADE expectancy (OOS, est_test_trades>=10):
+  gap_go        DEMA 2+3+5 3x12|IC 20w100|TP75 only  train $643.4/t  test $831.4/t  (280 tr, 16.5/day, day-wr 76)
+  gap_fade      DEMA 2+3 3x21|IC 40w100|TP75 only  train $1058.1/t  test $2202.1/t  (346 tr, 15.7/day, day-wr 86)
+  gap_chop      DEMA 1m 3x12|IB w100|TP50 only  train $1360.9/t  test $1764/t  (984 tr, 36.4/day, day-wr 85)
+  trend         DEMA 2+3 3x21|IB w100|TP35 only  train $434.1/t  test $1434/t  (182 tr, 15.2/day, day-wr 83)
+  trend_vol     DEMA 2+3+5 3x9|IC 20w100|TP25 only  train $481.4/t  test $1206.5/t  (76 tr, 19/day, day-wr 100)
+  chop          DEMA 2+3+5 3x21|IB w100|TP50 only  train $1731.5/t  test $1932.2/t  (78 tr, 11.2/day, day-wr 86)
+  quiet_range   DEMA 2+3 3x21|IB w100|TP75 only  train $1522/t  test $1945.4/t  (91 tr, 15.2/day, day-wr 83)
+  mixed         HMA  2+3+5 3x21|IB w100|TP50 only  train $1469.8/t  test $1213.1/t  (284 tr, 21.9/day, day-wr 85)
+
+playbook.json updated (v81). SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]
+===== done 2026-09-01T06:40:40Z =====

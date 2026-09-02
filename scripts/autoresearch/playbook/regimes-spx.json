@@ -7763,5 +7763,24 @@
       "trend20_above",
       "chop_day"
     ]
+  },
+  {
+    "date": "2026-08-31",
+    "gapPct": 0,
+    "gapBucket": "flat",
+    "gapDir": "flat",
+    "dayRangePct": 0.6044015892610841,
+    "bodyPct": -0.33221988236148287,
+    "trendiness": 0.5496674533361847,
+    "orRangePct": 0.46228098384805216,
+    "orBreak": "none",
+    "rvol": 0.4947260546613327,
+    "rvolPctile": 0.38333333333333336,
+    "trend20": "below",
+    "gapFilled": false,
+    "primary": "mixed",
+    "tags": [
+      "trend20_below"
+    ]
   }
 ]

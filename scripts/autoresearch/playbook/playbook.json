@@ -1,6 +1,6 @@
 {
-  "version": 80,
-  "updated": "2026-08-31",
+  "version": 81,
+  "updated": "2026-09-01",
   "note": "Regime-indexed strategy playbook. Built by this session; gap cells are co-owned with the parallel gap-research session. Matrix entries seeded from in-sample regime x strategy P&L; the nightly cycle promotes them to status=confirmed only after a strict train/test out-of-sample hold.",
   "validation_bar": {
     "split": "chronological 70/30 train/test per regime",
@@ -115,7 +115,7 @@
         {
           "variant": "DEMA 2+3 3x21|IB w50|TP75 only",
           "train_per_trade": 369.6,
-          "test_per_trade": 267.3,
+          "test_per_trade": 267.4,
           "est_test_trades": 247,
           "trades_per_day": 16.5,
           "dollar_per_day_test": 4409,
@@ -134,8 +134,8 @@
         },
         {
           "variant": "DEMA 2+3 3x21|IC 10w50|hold-to-settle",
-          "train_per_trade": 261.3,
-          "test_per_trade": 253.1,
+          "train_per_trade": 261.4,
+          "test_per_trade": 253.2,
           "est_test_trades": 247,
           "trades_per_day": 16.4,
           "dollar_per_day_test": 4163,
@@ -146,8 +146,8 @@
       "gap_chop": [
         {
           "variant": "DEMA 2m 3x9|IB w50|hold-to-settle",
-          "train_per_trade": 298.4,
-          "test_per_trade": 559.7,
+          "train_per_trade": 298.5,
+          "test_per_trade": 559.9,
           "est_test_trades": 474,
           "trades_per_day": 29.6,
           "dollar_per_day_test": 16594,
@@ -157,7 +157,7 @@
         {
           "variant": "DEMA 2m 3x9|IC 10w50|hold-to-settle",
           "train_per_trade": 290.3,
-          "test_per_trade": 559.7,
+          "test_per_trade": 559.8,
           "est_test_trades": 472,
           "trades_per_day": 29.5,
           "dollar_per_day_test": 16523,
@@ -166,8 +166,8 @@
         },
         {
           "variant": "DEMA 2m 3x9|IB w50|TP75 only",
-          "train_per_trade": 303.7,
-          "test_per_trade": 556.6,
+          "train_per_trade": 303.8,
+          "test_per_trade": 556.8,
           "est_test_trades": 474,
           "trades_per_day": 29.6,
           "dollar_per_day_test": 16501,
@@ -178,7 +178,7 @@
       "trend": [
         {
           "variant": "HMA  3m 3x9|IC 20w50|hold-to-settle",
-          "train_per_trade": 118.9,
+          "train_per_trade": 119,
           "test_per_trade": 45.1,
           "est_test_trades": 745,
           "trades_per_day": 39.2,
@@ -188,7 +188,7 @@
         },
         {
           "variant": "HMA  2+3 3x12|IC 20w50|hold-to-settle",
-          "train_per_trade": 109.7,
+          "train_per_trade": 109.8,
           "test_per_trade": 42.2,
           "est_test_trades": 681,
           "trades_per_day": 35.8,
@@ -211,9 +211,9 @@
         {
           "variant": "DEMA 5m 3x21|10ITM w10|TP75 only",
           "train_per_trade": 42.8,
-          "test_per_trade": 174.3,
+          "test_per_trade": 174.5,
           "est_test_trades": 66,
-          "trades_per_day": 11,
+          "trades_per_day": 10.9,
           "dollar_per_day_test": 1910,
           "day_win_rate": 83,
           "status": "confirmed"
@@ -221,7 +221,7 @@
         {
           "variant": "DEMA 5m 3x21|10ITM w20|TP75 only",
           "train_per_trade": 11.2,
-          "test_per_trade": 174.3,
+          "test_per_trade": 174.4,
           "est_test_trades": 66,
           "trades_per_day": 11,
           "dollar_per_day_test": 1914,
@@ -231,7 +231,7 @@
         {
           "variant": "DEMA 5m 3x21|15ITM w10|TP75 only",
           "train_per_trade": 47.5,
-          "test_per_trade": 174.2,
+          "test_per_trade": 174.3,
           "est_test_trades": 65,
           "trades_per_day": 10.9,
           "dollar_per_day_test": 1893,
@@ -242,8 +242,8 @@
       "chop": [
         {
           "variant": "HMA  5m 3x9|IB w50|hold-to-settle",
-          "train_per_trade": 345.9,
-          "test_per_trade": 282.2,
+          "train_per_trade": 346,
+          "test_per_trade": 282.3,
           "est_test_trades": 416,
           "trades_per_day": 32,
           "dollar_per_day_test": 9029,
@@ -252,7 +252,7 @@
         },
         {
           "variant": "HMA  5m 3x9|IB w50|TP75 only",
-          "train_per_trade": 345.9,
+          "train_per_trade": 346,
           "test_per_trade": 281.2,
           "est_test_trades": 416,
           "trades_per_day": 32,
@@ -262,8 +262,8 @@
         },
         {
           "variant": "DEMA 2+3+5 3x12|IB w50|hold-to-settle",
-          "train_per_trade": 338.2,
-          "test_per_trade": 262.2,
+          "train_per_trade": 338.3,
+          "test_per_trade": 262.3,
           "est_test_trades": 228,
           "trades_per_day": 17.6,
           "dollar_per_day_test": 4604,
@@ -274,8 +274,8 @@
       "quiet_range": [
         {
           "variant": "DEMA 2+3+5 3x21|IB w50|hold-to-settle",
-          "train_per_trade": 482.8,
-          "test_per_trade": 641.6,
+          "train_per_trade": 483,
+          "test_per_trade": 641.8,
           "est_test_trades": 123,
           "trades_per_day": 12.3,
           "dollar_per_day_test": 7872,
@@ -284,8 +284,8 @@
         },
         {
           "variant": "DEMA 2+3+5 3x21|IB w50|TP75 only",
-          "train_per_trade": 482.8,
-          "test_per_trade": 621.5,
+          "train_per_trade": 483,
+          "test_per_trade": 621.7,
           "est_test_trades": 123,
           "trades_per_day": 12.3,
           "dollar_per_day_test": 7625,
@@ -294,8 +294,8 @@
         },
         {
           "variant": "DEMA 2+3+5 3x21|IB w40|hold-to-settle",
-          "train_per_trade": 460.5,
-          "test_per_trade": 593.7,
+          "train_per_trade": 460.6,
+          "test_per_trade": 593.9,
           "est_test_trades": 123,
           "trades_per_day": 12.3,
           "dollar_per_day_test": 7283,
@@ -305,33 +305,33 @@
       ],
       "mixed": [
         {
-          "variant": "HMA  2+3+5 3x21|IB±25 w25|hold-to-settle",
+          "variant": "HMA  2+3+5 3x21|10ITM w20|hold-to-settle",
           "train_per_trade": 35.3,
-          "test_per_trade": 116.4,
+          "test_per_trade": 75.5,
+          "est_test_trades": 285,
+          "trades_per_day": 23.7,
+          "dollar_per_day_test": 1791,
+          "day_win_rate": 75,
+          "status": "confirmed"
+        },
+        {
+          "variant": "HMA  2+3+5 3x21|IB±25 w25|hold-to-settle",
+          "train_per_trade": 56.3,
+          "test_per_trade": 69.1,
           "est_test_trades": 279,
           "trades_per_day": 23.3,
-          "dollar_per_day_test": 2708,
+          "dollar_per_day_test": 1608,
           "day_win_rate": 83,
           "status": "confirmed"
         },
         {
           "variant": "HMA  2+3+5 3x21|IB±25 w25|TP75 only",
-          "train_per_trade": 35.3,
-          "test_per_trade": 116.4,
+          "train_per_trade": 56.3,
+          "test_per_trade": 69.1,
           "est_test_trades": 279,
           "trades_per_day": 23.3,
-          "dollar_per_day_test": 2708,
+          "dollar_per_day_test": 1608,
           "day_win_rate": 83,
-          "status": "confirmed"
-        },
-        {
-          "variant": "HMA  2+3 3x21|IB±25 w25|hold-to-settle",
-          "train_per_trade": 36.2,
-          "test_per_trade": 105.1,
-          "est_test_trades": 342,
-          "trades_per_day": 28.5,
-          "dollar_per_day_test": 2996,
-          "day_win_rate": 58,
           "status": "confirmed"
         }
       ]
@@ -340,19 +340,19 @@
       "gap_go": [
         {
           "variant": "DEMA 2+3+5 3x12|IC 20w100|TP75 only",
-          "train_per_trade": 644.3,
-          "test_per_trade": 832.5,
-          "est_test_trades": 279,
-          "trades_per_day": 16.4,
+          "train_per_trade": 643.4,
+          "test_per_trade": 831.4,
+          "est_test_trades": 280,
+          "trades_per_day": 16.5,
           "dollar_per_day_test": 13681,
           "day_win_rate": 76,
           "status": "confirmed"
         },
         {
           "variant": "DEMA 2+3+5 3x12|IB w100|TP75 only",
-          "train_per_trade": 1076.6,
-          "test_per_trade": 759.8,
-          "est_test_trades": 272,
+          "train_per_trade": 1075,
+          "test_per_trade": 758.7,
+          "est_test_trades": 273,
           "trades_per_day": 16,
           "dollar_per_day_test": 12172,
           "day_win_rate": 65,
@@ -360,8 +360,8 @@
         },
         {
           "variant": "DEMA 2+3+5 3x12|IC 30w100|TP75 only",
-          "train_per_trade": 699.7,
-          "test_per_trade": 754.1,
+          "train_per_trade": 698.8,
+          "test_per_trade": 753.1,
           "est_test_trades": 281,
           "trades_per_day": 16.5,
           "dollar_per_day_test": 12456,
@@ -372,8 +372,8 @@
       "gap_fade": [
         {
           "variant": "DEMA 2+3 3x21|IC 40w100|TP75 only",
-          "train_per_trade": 1059.3,
-          "test_per_trade": 2204.6,
+          "train_per_trade": 1058.1,
+          "test_per_trade": 2202.1,
           "est_test_trades": 346,
           "trades_per_day": 15.7,
           "dollar_per_day_test": 34634,
@@ -382,8 +382,8 @@
         },
         {
           "variant": "DEMA 2+3+5 3x21|IC 40w100|TP75 only",
-          "train_per_trade": 892.4,
-          "test_per_trade": 2172.5,
+          "train_per_trade": 891.2,
+          "test_per_trade": 2169.7,
           "est_test_trades": 257,
           "trades_per_day": 11.7,
           "dollar_per_day_test": 25389,
@@ -392,9 +392,9 @@
         },
         {
           "variant": "DEMA 2+3 3x12|IC 30w100|TP50 only",
-          "train_per_trade": 987.4,
-          "test_per_trade": 2157.3,
-          "est_test_trades": 464,
+          "train_per_trade": 986.4,
+          "test_per_trade": 2155.3,
+          "est_test_trades": 465,
           "trades_per_day": 21.1,
           "dollar_per_day_test": 45525,
           "day_win_rate": 100,
@@ -404,30 +404,30 @@
       "gap_chop": [
         {
           "variant": "DEMA 1m 3x12|IB w100|TP50 only",
-          "train_per_trade": 1360.7,
-          "test_per_trade": 1763.7,
+          "train_per_trade": 1360.9,
+          "test_per_trade": 1764,
           "est_test_trades": 984,
-          "trades_per_day": 36.5,
+          "trades_per_day": 36.4,
           "dollar_per_day_test": 64296,
           "day_win_rate": 85,
           "status": "confirmed"
         },
         {
           "variant": "DEMA 1m 3x12|IB w100|TP50 SL3x",
-          "train_per_trade": 1333.2,
-          "test_per_trade": 1763.6,
+          "train_per_trade": 1333.4,
+          "test_per_trade": 1764,
           "est_test_trades": 984,
-          "trades_per_day": 36.5,
+          "trades_per_day": 36.4,
           "dollar_per_day_test": 64294,
           "day_win_rate": 85,
           "status": "confirmed"
         },
         {
           "variant": "DEMA 1m 3x12|IB w100|TP50 SL4x",
-          "train_per_trade": 1353.6,
-          "test_per_trade": 1758.6,
+          "train_per_trade": 1353.8,
+          "test_per_trade": 1758.9,
           "est_test_trades": 984,
-          "trades_per_day": 36.5,
+          "trades_per_day": 36.4,
           "dollar_per_day_test": 64109,
           "day_win_rate": 85,
           "status": "confirmed"
@@ -436,18 +436,18 @@
       "trend": [
         {
           "variant": "DEMA 2+3 3x21|IB w100|TP35 only",
-          "train_per_trade": 434.7,
-          "test_per_trade": 1435.9,
+          "train_per_trade": 434.1,
+          "test_per_trade": 1434,
           "est_test_trades": 182,
-          "trades_per_day": 15.1,
+          "trades_per_day": 15.2,
           "dollar_per_day_test": 21748,
           "day_win_rate": 83,
           "status": "confirmed"
         },
         {
           "variant": "DEMA 2+3 3x21|IB w80|TP35 only",
-          "train_per_trade": 485.2,
-          "test_per_trade": 1408.1,
+          "train_per_trade": 484.5,
+          "test_per_trade": 1406.1,
           "est_test_trades": 176,
           "trades_per_day": 14.7,
           "dollar_per_day_test": 20669,
@@ -456,8 +456,8 @@
         },
         {
           "variant": "DEMA 2+3+5 3x21|IB w100|TP35 only",
-          "train_per_trade": 388.3,
-          "test_per_trade": 1364.8,
+          "train_per_trade": 387.7,
+          "test_per_trade": 1362.7,
           "est_test_trades": 134,
           "trades_per_day": 11.2,
           "dollar_per_day_test": 15235,
@@ -468,8 +468,8 @@
       "trend_vol": [
         {
           "variant": "DEMA 2+3+5 3x9|IC 20w100|TP25 only",
-          "train_per_trade": 481.8,
-          "test_per_trade": 1207.4,
+          "train_per_trade": 481.4,
+          "test_per_trade": 1206.5,
           "est_test_trades": 76,
           "trades_per_day": 19,
           "dollar_per_day_test": 22969,
@@ -478,8 +478,8 @@
         },
         {
           "variant": "DEMA 2+3+5 3x9|IC 20w100|TP25 SL3x",
-          "train_per_trade": 448.6,
-          "test_per_trade": 1207.4,
+          "train_per_trade": 448.3,
+          "test_per_trade": 1206.5,
           "est_test_trades": 76,
           "trades_per_day": 19,
           "dollar_per_day_test": 22969,
@@ -488,8 +488,8 @@
         },
         {
           "variant": "DEMA 2+3+5 3x9|IC 20w100|TP20 only",
-          "train_per_trade": 472.3,
-          "test_per_trade": 1137.9,
+          "train_per_trade": 472,
+          "test_per_trade": 1137.1,
           "est_test_trades": 76,
           "trades_per_day": 19,
           "dollar_per_day_test": 21647,
@@ -500,8 +500,8 @@
       "chop": [
         {
           "variant": "DEMA 2+3+5 3x21|IB w100|TP50 only",
-          "train_per_trade": 1734.1,
-          "test_per_trade": 1935.1,
+          "train_per_trade": 1731.5,
+          "test_per_trade": 1932.2,
           "est_test_trades": 78,
           "trades_per_day": 11.2,
           "dollar_per_day_test": 21602,
@@ -510,8 +510,8 @@
         },
         {
           "variant": "DEMA 2+3+5 3x21|IB w100|TP75 only",
-          "train_per_trade": 1274.7,
-          "test_per_trade": 1927.7,
+          "train_per_trade": 1272.8,
+          "test_per_trade": 1924.8,
           "est_test_trades": 78,
           "trades_per_day": 11.2,
           "dollar_per_day_test": 21519,
@@ -520,8 +520,8 @@
         },
         {
           "variant": "DEMA 2+3+5 3x21|IB w100|TP50 SL3x",
-          "train_per_trade": 1734.1,
-          "test_per_trade": 1837.5,
+          "train_per_trade": 1731.5,
+          "test_per_trade": 1834.8,
           "est_test_trades": 78,
           "trades_per_day": 11.2,
           "dollar_per_day_test": 20513,
@@ -532,18 +532,18 @@
       "quiet_range": [
         {
           "variant": "DEMA 2+3 3x21|IB w100|TP75 only",
-          "train_per_trade": 1524,
-          "test_per_trade": 1947.9,
+          "train_per_trade": 1522,
+          "test_per_trade": 1945.4,
           "est_test_trades": 91,
-          "trades_per_day": 15.1,
+          "trades_per_day": 15.2,
           "dollar_per_day_test": 29503,
           "day_win_rate": 83,
           "status": "confirmed"
         },
         {
           "variant": "HMA  5m 3x12|IB w100|TP75 only",
-          "train_per_trade": 1296,
-          "test_per_trade": 1932.5,
+          "train_per_trade": 1295.8,
+          "test_per_trade": 1932.1,
           "est_test_trades": 158,
           "trades_per_day": 26.4,
           "dollar_per_day_test": 51030,
@@ -552,8 +552,8 @@
         },
         {
           "variant": "DEMA 2+3+5 3x12|IB w100|TP75 only",
-          "train_per_trade": 1497.9,
-          "test_per_trade": 1847.9,
+          "train_per_trade": 1495.8,
+          "test_per_trade": 1845.3,
           "est_test_trades": 96,
           "trades_per_day": 16,
           "dollar_per_day_test": 29603,
@@ -563,32 +563,32 @@
       ],
       "mixed": [
         {
-          "variant": "DEMA 2+3+5 3x9|IB w100|TP75 only",
-          "train_per_trade": 1600.1,
-          "test_per_trade": 1432.7,
-          "est_test_trades": 241,
-          "trades_per_day": 18.5,
-          "dollar_per_day_test": 26539,
-          "day_win_rate": 92,
-          "status": "confirmed"
-        },
-        {
-          "variant": "DEMA 2+3+5 3x12|IB w80|TP75 only",
-          "train_per_trade": 1618.7,
-          "test_per_trade": 1432.4,
-          "est_test_trades": 201,
-          "trades_per_day": 15.5,
-          "dollar_per_day_test": 22140,
+          "variant": "HMA  2+3+5 3x21|IB w100|TP50 only",
+          "train_per_trade": 1469.8,
+          "test_per_trade": 1213.1,
+          "est_test_trades": 284,
+          "trades_per_day": 21.9,
+          "dollar_per_day_test": 26515,
           "day_win_rate": 85,
           "status": "confirmed"
         },
         {
-          "variant": "DEMA 2+3+5 3x12|IB w100|TP75 only",
-          "train_per_trade": 1766.6,
-          "test_per_trade": 1432,
-          "est_test_trades": 208,
-          "trades_per_day": 16,
-          "dollar_per_day_test": 22940,
+          "variant": "HMA  2+3+5 3x21|IB w100|TP50 SL3x",
+          "train_per_trade": 1469.8,
+          "test_per_trade": 1213.1,
+          "est_test_trades": 284,
+          "trades_per_day": 21.9,
+          "dollar_per_day_test": 26515,
+          "day_win_rate": 85,
+          "status": "confirmed"
+        },
+        {
+          "variant": "HMA  2+3+5 3x21|IB w100|TP50 SL4x",
+          "train_per_trade": 1469.8,
+          "test_per_trade": 1213.1,
+          "est_test_trades": 284,
+          "trades_per_day": 21.9,
+          "dollar_per_day_test": 26515,
           "day_win_rate": 85,
           "status": "confirmed"
         }
@@ -1076,6 +1076,12 @@
     },
     {
       "date": "2026-08-31",
+      "theory": "nightly regime-attribution + per-trade OOS rebuild",
+      "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
+      "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
+    },
+    {
+      "date": "2026-09-01",
       "theory": "nightly regime-attribution + per-trade OOS rebuild",
       "result": "SPX: 8/8 regimes covered; uncovered=[] | NDX: 8/8 regimes covered; uncovered=[]",
       "action": "matrix rebuilt; expectancy normalized per-trade (n/activeDays)"
