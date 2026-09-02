@@ -102,13 +102,6 @@ function appendLog(job: LabJob, chunk: string): void {
 
 // ── Result folding ──────────────────────────────────────────────────────────
 
-/** resolveSymbolTarget outSuffix rule: SPX 0DTE keeps the legacy bare name. */
-function sweepOutSuffix(symbol: string, dte: number): string {
-  const s = symbol.toLowerCase()
-  if (s === "spx" && dte === 0) return ""
-  return `-${s}${dte === 0 ? "" : `-${dte}dte`}`
-}
-
 /**
  * Last stdout line is the engine result contract. Only exit 0 jobs reach here.
  * Field names are the engines OWN (summary.trades / summary.totalPnl / …) —
@@ -117,7 +110,9 @@ function sweepOutSuffix(symbol: string, dte: number): string {
 function foldResult(engine: EngineKind, spec: BacktestSpec, stdout: string, outputPaths: string[]): LabJobResult {
   const lastLine = [...stdout.split("\n")].reverse().find((l) => l.trim().length > 0) ?? ""
   if (engine === "sweep-regen") {
-    return { deepLink: `/dashboard/spreads?profile=${sweepOutSuffix(spec.underlying.symbol, spec.underlying.dte as number)}` }
+    // FR-003 consolidation: sweep results live under the Backtest Lab's
+    // Sweeps tab (the old /dashboard/spreads route redirects there).
+    return { deepLink: `/dashboard/backtest?tab=sweeps` }
   }
   let parsed: any
   try {
