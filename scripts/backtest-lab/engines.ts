@@ -115,6 +115,7 @@ export function buildArgs(
   }
 
   if (runRequest.engine === "long-option") {
+    const jsonOut = path.join(OUT_DIR, `${jobId}.json`)
     const b = runRequest.body as {
       ticker: string; symbol: string; tf: number; fast: number; slow: number; offset: number
       tp?: number; sl?: number; gateStart: string; gateEnd: string
@@ -133,6 +134,8 @@ export function buildArgs(
       "--ticker", String(b.ticker),
       // Without this the engine defaulted to HMA whatever the dialog said.
       "--signal", String(b.indicator ?? "hma"),
+      // Per-fill artifact: contract traded, entry/exit, P&L, exit reason.
+      "--json-out", jsonOut,
     ]
     if (dte) args.push("--dte", dte)
     // sl 0 is the engine's own "no stop" encoding (slPct > 0 check in
@@ -157,7 +160,7 @@ export function buildArgs(
       }
       args.push("--dates", csv2(dates))
     }
-    return { script: `${DIAG}/long-config-single.ts`, args, outputPaths: [] }
+    return { script: `${DIAG}/long-config-single.ts`, args, outputPaths: [jsonOut] }
   }
 
   // sweep-regen — sweep-parallel.ts forwards --symbol/--dte to the engine and

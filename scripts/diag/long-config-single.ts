@@ -202,6 +202,13 @@ function dirAtOrBefore(m: Map<number, 'bull' | 'bear' | null>, ts: number): 'bul
   m.forEach((v, t) => { if (t <= ts && t > bestTs) { bestTs = t; bestVal = v; } });
   return bestVal;
 }
+/** Exact HH:MM ET for a trade-log row (etBucketOf rounds to the half hour). */
+function etOf(ts: number): string {
+  return new Date(ts * 1000).toLocaleString('en-US', {
+    timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: false,
+  });
+}
+
 function etBucketOf(ts: number): string {
   const d = new Date(ts * 1000);
   const parts = d.toLocaleString('en-US', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: false });
@@ -221,6 +228,7 @@ interface TradeCtx {
   eod: number;
   reverseTs: number;
   strike: number;
+  symbol: string;   // OCC contract actually traded — the log has to name it
 }
 function buildContexts(target: SymbolTarget, date: string, tf: number, fast: number, slow: number, offsetStrikes: number): TradeCtx[] {
   const c1 = loadDay(target, date, '1m');
@@ -301,29 +309,62 @@ function buildContexts(target: SymbolTarget, date: string, tf: number, fast: num
       if (flipSpx || flipC) { reverseTs = t + 60; break; }
     }
 
-    ctxs.push({ dir: e.dir, entryTs: e.entryTs, entryPx, bars, eod, reverseTs, strike });
+    ctxs.push({ dir: e.dir, entryTs: e.entryTs, entryPx, bars, eod, reverseTs, strike, symbol: sym });
   }
   return ctxs;
 }
 
 // ── Simulate one TP/SL cell ─────────────────────────────────────────────────
 interface HourBucket { pnl: number; n: number; wins: number }
-interface DayStat { pnl: number; wins: number; trades: number; entryPxSum: number; hourly: { [hr: string]: HourBucket } }
-function simulateDay(ctxs: TradeCtx[], tpPct: number, slPct: number): DayStat {
-  const s: DayStat = { pnl: 0, wins: 0, trades: 0, entryPxSum: 0, hourly: {} };
+/** One row per fill — what the run actually did, so a result can be checked. */
+export interface TradeLogRow {
+  date: string;
+  dir: 'bull' | 'bear';
+  side: 'C' | 'P';
+  symbol: string;      // OCC contract traded
+  strike: number;
+  entryET: string;
+  exitET: string;
+  holdMin: number;
+  entryPx: number;
+  exitPx: number;
+  pnl: number;         // dollars, 1 contract (x100)
+  retPct: number;
+  reason: 'TP' | 'SL' | 'reverse' | 'EOD';
+}
+interface DayStat { pnl: number; wins: number; trades: number; entryPxSum: number; hourly: { [hr: string]: HourBucket }; log: TradeLogRow[] }
+function simulateDay(ctxs: TradeCtx[], tpPct: number, slPct: number, date = ''): DayStat {
+  const s: DayStat = { pnl: 0, wins: 0, trades: 0, entryPxSum: 0, hourly: {}, log: [] };
   for (const ctx of ctxs) {
     const tp = ctx.entryPx * (1 + tpPct / 100);
     const sl = slPct > 0 ? ctx.entryPx * (1 - slPct / 100) : 0;
     const stopTs = Math.min(ctx.reverseTs, ctx.eod);
     let exitPx = optPx(ctx.bars, stopTs) ?? ctx.entryPx;
+    let exitTs = stopTs;
+    let reason: TradeLogRow['reason'] = stopTs < ctx.eod ? 'reverse' : 'EOD';
     for (const b of ctx.bars) {
       if (b.ts <= ctx.entryTs) continue;
       if (b.ts > stopTs) break;
-      if (b.high >= tp) { exitPx = tp; break; }
-      if (sl > 0 && b.low <= sl) { exitPx = sl; break; }
+      if (b.high >= tp) { exitPx = tp; exitTs = b.ts; reason = 'TP'; break; }
+      if (sl > 0 && b.low <= sl) { exitPx = sl; exitTs = b.ts; reason = 'SL'; break; }
     }
     const retPct = ((exitPx - ctx.entryPx) / ctx.entryPx) * 100;
     const tradePnl = (exitPx - ctx.entryPx) * 100;
+    s.log.push({
+      date,
+      dir: ctx.dir,
+      side: ctx.symbol[10] === 'P' ? 'P' : 'C',
+      symbol: ctx.symbol,
+      strike: ctx.strike,
+      entryET: etOf(ctx.entryTs),
+      exitET: etOf(exitTs),
+      holdMin: Math.max(0, Math.round((exitTs - ctx.entryTs) / 60)),
+      entryPx: +ctx.entryPx.toFixed(2),
+      exitPx: +exitPx.toFixed(2),
+      pnl: +tradePnl.toFixed(2),
+      retPct: +retPct.toFixed(1),
+      reason,
+    });
     s.trades++;
     s.pnl += tradePnl;
     s.entryPxSum += ctx.entryPx;
@@ -355,6 +396,7 @@ function main() {
   process.stderr.write(`long-config-single — symbol=${TARGET.symbol} tf=${TF} ${FAST}x${SLOW} offset=${OFFSET} tp=${TP_PCT} sl=${SL_PCT} window=${GATE_START}-${GATE_END} dates=${dates.length}\n`);
 
   let totalTrades = 0, totalWins = 0, totalPnl = 0, daysWithTrade = 0, profitDays = 0;
+  const tradeLog: TradeLogRow[] = [];
   let entryPxSum = 0;
   const dailyPnl: { [date: string]: number } = {};
   const hourly: { [hr: string]: HourBucket } = {};
@@ -365,7 +407,8 @@ function main() {
     try { ctxs = buildContexts(TARGET, date, TF, FAST, SLOW, OFFSET); }
     catch (e: any) { process.stderr.write(`  ${date}: ${e.message}\n`); continue; }
     if (!ctxs.length) { di++; continue; }
-    const s = simulateDay(ctxs, TP_PCT, SL_PCT);
+    const s = simulateDay(ctxs, TP_PCT, SL_PCT, date);
+    tradeLog.push(...s.log);
     if (s.trades === 0) { di++; continue; }
     totalTrades += s.trades;
     totalWins += s.wins;
@@ -461,6 +504,32 @@ function main() {
   filtered.push(row);
   fs.writeFileSync(outFile, JSON.stringify(filtered, null, 2));
   process.stderr.write(`✓ wrote row to ${outFile} (configId=${configId})\n`);
+
+  // --json-out <path>: the full artifact — summary row PLUS every fill, so a
+  // run can be checked line by line (which contract, in at what, out at what,
+  // why). The shares engine already emits one; long-option had none, which is
+  // why a Lab option run had no trade log to inspect.
+  const jsonOut = argVal('--json-out', '');
+  if (jsonOut) {
+    try {
+      fs.mkdirSync(path.dirname(jsonOut), { recursive: true });
+      fs.writeFileSync(jsonOut, JSON.stringify({
+        configId,
+        symbol: TARGET.symbol,
+        profileId: TARGET.profileId,
+        params: {
+          tf: TF, fast: FAST, slow: SLOW, offset: OFFSET, signal: SIGNAL,
+          tpPct: TP_PCT, slPct: SL_PCT, gateStart: GATE_START, gateEnd: GATE_END,
+          dates: dates.length, firstDate: dates[0], lastDate: dates[dates.length - 1],
+        },
+        row,
+        trades: tradeLog,
+      }, null, 2));
+      process.stderr.write(`✓ wrote artifact ${jsonOut} (${tradeLog.length} trades)\n`);
+    } catch (e: any) {
+      process.stderr.write(`! json-out failed: ${e.message}\n`);
+    }
+  }
   process.stderr.write(`  trades=${totalTrades} wr=${wr}% pnl=$${totalPnl.toFixed(0)} dd=$${ddPos.toFixed(0)} ratio=${ratio}\n`);
 
   // ── long-daily-<ticker>.json: per-variant per-date P&L series ───────────────

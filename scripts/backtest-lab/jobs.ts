@@ -134,10 +134,11 @@ function foldResult(engine: EngineKind, spec: BacktestSpec, stdout: string, outp
       artifactPath: outputPaths[0],
     }
   }
-  // long-option: last line is { configId, row }
+  // long-option: last line is { configId, row }; the trade log lives in the
+  // --json-out artifact so the run can be checked fill by fill.
   const r = parsed?.row
-  if (!r) return {}
-  return { kpis: { n: r.n, wr: r.wr, pnl: r.pnl, dd: r.dd } }
+  if (!r) return { artifactPath: outputPaths[0] }
+  return { kpis: { n: r.n, wr: r.wr, pnl: r.pnl, dd: r.dd }, artifactPath: outputPaths[0] }
 }
 
 // ── Queue ───────────────────────────────────────────────────────────────────
