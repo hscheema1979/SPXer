@@ -338,6 +338,9 @@ export function specToRunRequest(spec: BacktestSpec): RunRequest {
         fast: spec.entry.fast,
         slow: spec.entry.slow,
         offset: (spec.structure as { offset: number }).offset,
+        // The engine's --signal. Dropped before this, so the indicator menu
+        // was decorative for option specs.
+        indicator: spec.entry.indicator,
         tp: tp ? Math.round(tp.value) : undefined,
         sl: sl ? Math.round(sl.value) : undefined,
         gateStart: spec.entry.windowET.start,

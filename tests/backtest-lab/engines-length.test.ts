@@ -83,3 +83,16 @@ describe('buildArgs — long-option', () => {
     expect(() => buildArgs(specToRunRequest(spec), 'job-test')).toThrow(/no spx-0dte dates/);
   });
 });
+
+describe('buildArgs — long-option indicator', () => {
+  const spx = coverageFor('spx-0dte');
+
+  it.skipIf(!spx)('passes the spec indicator through as --signal', () => {
+    for (const ind of ['hma', 'dema', 'ema', 'sma', 'wma'] as const) {
+      const spec = defaultSpec('long-option') as BacktestSpec;
+      spec.entry.indicator = ind;
+      const { args } = buildArgs(specToRunRequest(spec), 'job-test');
+      expect(argOf(args, '--signal')).toBe(ind);
+    }
+  });
+});

@@ -382,7 +382,9 @@ function optionProfiles(): ProfileCoverage[] {
 // The long engine takes whole minutes (contract.tfMinutes); it is MA-cross
 // driven on the same 1m parquet. 2m/3m are the sweep-grid TFs, 1m/5m the edges.
 const LONG_TIMEFRAMES = ["1m", "2m", "3m", "5m"] as const
-const OPTION_INDICATORS: MaType[] = ["hma", "dema"] // engine --signal whitelist
+// long-config-single.ts --signal whitelist (MA_KINDS). ema/sma/wma were added
+// there so an option spec means the same thing the shares menu does.
+const OPTION_INDICATORS: MaType[] = ["hma", "dema", "ema", "sma", "wma"]
 
 export function buildCapabilities(): EngineCapabilities {
   const candidates = optionCandidates()

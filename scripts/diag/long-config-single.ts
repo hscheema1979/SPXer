@@ -42,7 +42,16 @@ const TICKER = argVal('--ticker', 'spxhma');
 const DATES_OVR = argVal('--dates', '');
 // Moving-average kind for the cross: 'hma' (default, preserves parity with the
 // hma3m study) or 'dema'. Mirrors the optionx engine's signal.maType.
-const SIGNAL = (argVal('--signal', 'hma').toLowerCase() === 'dema' ? 'dema' : 'hma') as 'hma' | 'dema';
+// MA kind for the cross. hma/dema were the original pair (parity with the
+// hma3m study); ema/sma/wma were added so the Lab's indicator menu means the
+// same thing for options as it does for shares — before that an option spec
+// silently ran HMA no matter what the dialog said.
+const MA_KINDS = ['hma', 'dema', 'ema', 'sma', 'wma'] as const;
+type MaKind = typeof MA_KINDS[number];
+const SIGNAL: MaKind = (() => {
+  const raw = argVal('--signal', 'hma').toLowerCase();
+  return (MA_KINDS as readonly string[]).includes(raw) ? (raw as MaKind) : 'hma';
+})();
 
 // ── Filters (verbatim from hma3m-tpsl-study) ────────────────────────────────
 const MIN_ALIGN = 3, CROSS_WIN = 60, MIN_PRICE = 0.20, MIN_VOL = 100;
@@ -131,11 +140,49 @@ function demaDir(closes: number[], fast: number, slow: number): 'bull' | 'bear' 
   if (f == null || s == null) return null;
   return f > s ? 'bull' : 'bear';
 }
+/** Plain EMA, SMA-seeded — the same seeding demaDir uses for its first pass. */
+function ema(closes: number[], p: number): number | null {
+  if (closes.length < p) return null;
+  const a = 2 / (p + 1);
+  let e = 0;
+  for (let i = 0; i < p; i++) e += closes[i];
+  e /= p;
+  for (let i = p; i < closes.length; i++) e = a * closes[i] + (1 - a) * e;
+  return e;
+}
+function emaDir(closes: number[], fast: number, slow: number): 'bull' | 'bear' | null {
+  const f = ema(closes, fast), s = ema(closes, slow);
+  if (f == null || s == null) return null;
+  return f > s ? 'bull' : 'bear';
+}
+function sma(closes: number[], p: number): number | null {
+  if (closes.length < p) return null;
+  let t = 0;
+  for (let i = closes.length - p; i < closes.length; i++) t += closes[i];
+  return t / p;
+}
+function smaDir(closes: number[], fast: number, slow: number): 'bull' | 'bear' | null {
+  const f = sma(closes, fast), s = sma(closes, slow);
+  if (f == null || s == null) return null;
+  return f > s ? 'bull' : 'bear';
+}
+function wmaDir(closes: number[], fast: number, slow: number): 'bull' | 'bear' | null {
+  const f = wma(closes, closes.length - 1, fast), s = wma(closes, closes.length - 1, slow);
+  if (f == null || s == null) return null;
+  return f > s ? 'bull' : 'bear';
+}
+
 function getDir(st: TFState, fast: number, slow: number): 'bull' | 'bear' | null {
   const bars = st.partial ? [...st.closed, st.partial] : st.closed;
   if (!bars.length) return null;
   const closes = bars.map((b: any) => b.close);
-  return SIGNAL === 'dema' ? demaDir(closes, fast, slow) : hmaDir(closes, fast, slow);
+  switch (SIGNAL) {
+    case 'dema': return demaDir(closes, fast, slow);
+    case 'ema': return emaDir(closes, fast, slow);
+    case 'sma': return smaDir(closes, fast, slow);
+    case 'wma': return wmaDir(closes, fast, slow);
+    default: return hmaDir(closes, fast, slow);
+  }
 }
 function findStrikeAtSpot(c1: any, type: 'C' | 'P', spx: number, si: number, offsetStrikes: number): string | null {
   const base = Math.round(spx / si) * si;

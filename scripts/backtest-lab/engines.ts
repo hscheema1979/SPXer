@@ -119,6 +119,7 @@ export function buildArgs(
       ticker: string; symbol: string; tf: number; fast: number; slow: number; offset: number
       tp?: number; sl?: number; gateStart: string; gateEnd: string
       startDate?: string; endDate?: string; lengthPreset?: LengthPreset
+      indicator?: string
     }
     const dte = /-(\d+)dte$/.exec(b.ticker)?.[1]
     const args: string[] = [
@@ -130,6 +131,8 @@ export function buildArgs(
       "--gate-start", String(b.gateStart),
       "--gate-end", String(b.gateEnd),
       "--ticker", String(b.ticker),
+      // Without this the engine defaulted to HMA whatever the dialog said.
+      "--signal", String(b.indicator ?? "hma"),
     ]
     if (dte) args.push("--dte", dte)
     // sl 0 is the engine's own "no stop" encoding (slPct > 0 check in
