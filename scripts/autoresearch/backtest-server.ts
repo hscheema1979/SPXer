@@ -56,6 +56,11 @@ app.get("/api/etf-long-daily",(req,res)=>{try{const suffix=symbolSuffix(req);con
 app.get("/api/etf-long-hourly",(req,res)=>{try{const suffix=symbolSuffix(req);const f=path.join(__dirname,"output",`etf-long-hourly${suffix}.json`);if(!fs.existsSync(f))return res.json({hours:[],series:{}});const all=JSON.parse(fs.readFileSync(f,"utf8"));const keysParam=req.query.keys;if(!keysParam)return res.json({hours:all.hours,series:{}});const keys=keysParam.split("\n").filter(Boolean);const series={};for(const k of keys)if(all.series[k])series[k]=all.series[k];res.json({hours:all.hours,series})}catch(e){res.status(500).json({error:e.message})}});
 
 // ── ETF inverse pairs study (long vs short inverse pairs) ───────────────────────
+// GET /api/etf-pairs/available → [{ pair, value, t1, t2 }] for every generated
+// analysis on disk. The Pairs page used to hardcode 8 majors, 5 of which have
+// no data here, so most of its menu 404'd. Registered BEFORE /api/etf-pairs so
+// the literal path is not swallowed by it.
+app.get("/api/etf-pairs/available",(_req,res)=>{try{const dir=path.join(__dirname,"output");const out=fs.readdirSync(dir).map(f=>/^etf-long-pairs-([A-Z0-9]+)-([A-Z0-9]+)\.json$/.exec(f)).filter(m=>!!m).map(m=>({t1:m[1],t2:m[2],value:`${m[1]}-${m[2]}`,pair:`${m[1]}/${m[2]}`})).sort((a,b)=>a.value.localeCompare(b.value));res.json(out)}catch(e){res.status(500).json({error:e.message})}});
 app.get("/api/etf-pairs",(req,res)=>{try{const pair=String(req.query.pair||"SOXL-SOXS").toUpperCase();const[t1,t2]=(pair.includes("-")?pair.split("-"):[pair,"UNKNOWN"]).map(s=>s.trim());const f=path.join(__dirname,"output",`etf-long-pairs-${t1}-${t2}.json`);if(!fs.existsSync(f))return res.status(404).json({error:`no pairs analysis for ${pair}; run: npx tsx scripts/diag/etf-long-pairs-study.ts --pair ${t1},${t2}`});res.json(JSON.parse(fs.readFileSync(f,"utf8")))}catch(e){res.status(500).json({error:e.message})}});
 
 // ── On-demand single-config long backtest ────────────────────────────────────
