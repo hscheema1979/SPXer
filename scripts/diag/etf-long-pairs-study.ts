@@ -20,8 +20,12 @@ import * as path from 'path';
 const OUT_DIR = path.resolve(process.cwd(), 'scripts/autoresearch/output');
 
 function argVal(name: string): string | undefined {
-  const f = process.argv.find(a => a.startsWith(`--${name}=`));
-  return f ? f.split('=').slice(1).join('=') : undefined;
+  const eq = process.argv.find(a => a.startsWith(`--${name}=`));
+  if (eq) return eq.split('=').slice(1).join('=');
+  // Space form too: the /api/etf-pairs 404 tells the operator to run
+  // `--pair SOXL,SOXS`, and that has to be the command that actually works.
+  const i = process.argv.indexOf(`--${name}`);
+  return i >= 0 && i + 1 < process.argv.length ? process.argv[i + 1] : undefined;
 }
 
 interface SweepRow {
@@ -90,12 +94,28 @@ function studyPairs() {
 
   console.error(`  ${t1}: ${rows1.length} configs | ${t2}: ${rows2.length} configs`);
 
-  // For each pair of best configs, compute combined metrics
+  // For each pair of best configs, compute combined metrics.
+  //
+  // The cross product is rows1 × rows2 — 6336 × 6336 ≈ 40M pairs on the
+  // current sweeps. Materialising that array is what made this study
+  // unrunnable (it never returned, so /api/etf-pairs 404'd forever and the ETF
+  // Pairs page could never load). The arithmetic is cheap; only the array was
+  // fatal. So we still visit EVERY pair — exact, no sampling — and keep just
+  // the best KEEP of them, compacting whenever the buffer doubles.
+  const KEEP = Math.max(topN, 50);
   const combined: CombinedConfig[] = [];
+  let worstKept = -Infinity;
+  let visited = 0;
+  const compact = () => {
+    combined.sort((a, b) => b.combinedRatio - a.combinedRatio);
+    combined.length = Math.min(combined.length, KEEP);
+    worstKept = combined.length >= KEEP ? combined[combined.length - 1].combinedRatio : -Infinity;
+  };
 
   // Strategy 1: Long T1 + Short T2 (bet on T1 outperformance)
   for (const r1 of rows1) {
     for (const r2 of rows2) {
+      visited++;
       // Simple combination: buy T1 long, sell T2 short
       // P&L = T1.pnl - T2.pnl (inverse means T2 loses when underlying gains)
       const combinedPnl = r1.pnl - r2.pnl;
@@ -116,6 +136,7 @@ function studyPairs() {
       // For now, use 1 - corr as proxy (higher = better hedge)
       const hedgeQuality = Math.abs(r1.pnlPct + r2.pnlPct) < Math.abs(r1.pnlPct) ? 0.8 : 0.2;
 
+      if (combined.length >= KEEP && combinedRatio <= worstKept) continue;
       combined.push({
         configA: r1,
         configB: r2,
@@ -126,13 +147,15 @@ function studyPairs() {
         combinedRatio,
         hedgeQuality,
       });
+      if (combined.length >= KEEP * 2) compact();
     }
   }
+  compact();
 
   // Sort by combined ratio (best risk-adjusted return)
   combined.sort((a, b) => b.combinedRatio - a.combinedRatio);
 
-  console.error(`  Combined ${combined.length} pair possibilities`);
+  console.error(`  Combined ${visited.toLocaleString()} pair possibilities (kept top ${combined.length})`);
   console.error(`  Top ${topN} by risk-adjusted return (ratio):`);
 
   const output = {

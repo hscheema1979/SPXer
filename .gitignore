@@ -56,3 +56,12 @@ scripts/autoresearch/output/cache/
 scripts/autoresearch/output/iron-trades/
 scripts/autoresearch/output/iron-trades-fresh/
 scripts/autoresearch/output/spread-trades/
+
+# termchat session artifacts (uploads, tracker) — tooling debris, not repo content
+.termchat-tracker.json
+.termchat-uploads/
+
+# generated sweep/study output (scripts/autoresearch/output alone is 29GB / 863k files)
+scripts/diag/output/
+scripts/autoresearch/output/
+/output/

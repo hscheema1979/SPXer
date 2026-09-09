@@ -28,6 +28,7 @@ import { readBarCacheFile } from '../../src/replay/bar-cache-file';
 import { resolveSymbolTarget, listDatesFor, loadDay, outPath, instrumentClass } from './sweep-symbol';
 import { shardDates, dumpResults, loadShardsInto, mergeStateFile, knownDates } from './sweep-shard';
 import { CAP_POLICIES, capDayNet, capSummary, type CapEvent } from './side-cap';
+import { parseSweepRowParams, profitFactor, accumulatePf } from './sweep-params';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -532,6 +533,7 @@ interface Stat {
   perHour: Map<number, HourBucket>;
   peakConcurrent: number;
   evictions: number;
+  gw:number; gl:number;   // gross win / gross loss (net P&L) → row `pf`
   // Trade-duration tracking (seconds). Sum across all trades; divide by n for avg.
   durationSumSec: number;
   capNets: number[];   // cumulative net under each CAP_POLICIES entry (per-side bull/bear cap scan)
@@ -551,9 +553,10 @@ function etHour(ts: number): number {
 
 function rec(sig:string,struct:string,ex:string, pnl_gross:number, date:string, credit:number, width:number, entryTs:number, maxRisk:number, durationSec:number = 0){
   const k=recK(sig,struct,ex);
-  let v=results.get(k); if(!v){v={pnl:0,pnl_gross:0,n:0,wins:0,daily:new Map(),creditSum:0,widthSum:0,perHour:new Map(),peakConcurrent:0,evictions:0,durationSumSec:0,capNets:new Array(CAP_POLICIES.length).fill(0)}; results.set(k,v);}
+  let v=results.get(k); if(!v){v={pnl:0,pnl_gross:0,n:0,wins:0,daily:new Map(),creditSum:0,widthSum:0,perHour:new Map(),peakConcurrent:0,evictions:0,gw:0,gl:0,durationSumSec:0,capNets:new Array(CAP_POLICIES.length).fill(0)}; results.set(k,v);}
   const pnl_net = pnl_gross - SLIPPAGE_PER_STRUCTURE;
   v.pnl += pnl_net; v.pnl_gross += pnl_gross; v.n++; if(pnl_net>0)v.wins++; v.daily.set(date,(v.daily.get(date)??0)+pnl_net);
+  accumulatePf(v, pnl_net);
   v.creditSum += credit; v.widthSum += width;
   v.durationSumSec += durationSec;
   // Per-hour bucket (clamped to 9..15 — anything outside is noise/wrong-day)
@@ -875,7 +878,13 @@ for(const [k,v] of results){
   const avgRiskCapacity = +(avgConcurrent * avgMaxRisk).toFixed(0);
   // Shared-pool cap scan (pool + per-side bull/bear sub-cap): baseline, best sub-cap at pool 11, best overall.
   const cap = capSummary(v.capNets, 'bull', 'bear');
-  rows.push({signal,spread,exit,pnl:v.pnl,pnl_gross:v.pnl_gross,n:v.n,wr,dd:mdd,ratio,pos,
+  // FR-002 Phase 0: structured params (preferred by the optionx promote mapper
+  // over label regex) + profit factor. Both additive keys on the row.
+  const params = parseSweepRowParams(signal, spread, exit);
+  rows.push({signal,spread,exit,
+             ...(params ? { params } : {}),
+             pf: profitFactor(v.gw, v.gl),
+             pnl:v.pnl,pnl_gross:v.pnl_gross,n:v.n,wr,dd:mdd,ratio,pos,
              ...cap,
              avgCredit:+avgCredit.toFixed(3),avgMaxRisk:+avgMaxRisk.toFixed(0),
              avgPnlPerTrade:+(v.pnl/Math.max(1,v.n)).toFixed(2),

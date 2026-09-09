@@ -47,6 +47,79 @@ module.exports = {
       merge_logs: true,
     },
 
+    // ── FR-003 Backtest Lab (:3702) ───────────────────────────────
+    // Long-lived HTTP service that spawns the diag engines (stockx-backtest,
+    // long-config-single, sweep-parallel) for the spxer-studio Backtest page.
+    // The studio proxies /spxer/backtest-lab/api/* to 127.0.0.1:3702, so the
+    // bind stays loopback-only. Scripts live in scripts/backtest-lab/; engine
+    // + spec + job artifacts land in scripts/autoresearch/output/backtest-lab/
+    // (gitignored, like the rest of autoresearch output). Restart after any
+    // edit there: pm2 restart backtest-lab.
+    {
+      name: 'backtest-lab',
+      // Direct tsx-binary invocation — `script: 'npx'` crashes under PM2 with
+      // ERR_INVALID_ARG_TYPE (npx mis-resolves cwd when PM2 execs it).
+      script: 'node_modules/.bin/tsx',
+      args: 'scripts/backtest-lab/server.ts',
+      cwd: '/home/ubuntu/SPXer',
+      autorestart: true,
+      watch: false,
+      max_memory_restart: '512M',
+      env: {
+        NODE_ENV: 'production',
+        LAB_PORT: 3702,
+      },
+      log_date_format: 'YYYY-MM-DD HH:mm:ss',
+      error_file: '/home/ubuntu/.pm2/logs/backtest-lab-error.log',
+      out_file: '/home/ubuntu/.pm2/logs/backtest-lab-out.log',
+      merge_logs: true,
+    },
+
+    // ── Backtest Studio (:3700) ───────────────────────────────────
+    // The older sweeps/spreads/ETF-longs/StockX API behind the studio's
+    // /spxer/backtest/* proxy hop. It used to be "run on demand", which meant
+    // the Spreads, ETF-Longs and StockX pages 502'd whenever nobody had
+    // remembered to start it — so it is managed here now.
+    {
+      name: 'backtest-studio',
+      // Direct tsx-binary invocation (see the backtest-lab note above).
+      script: 'node_modules/.bin/tsx',
+      args: 'scripts/autoresearch/backtest-server.ts',
+      cwd: '/home/ubuntu/SPXer',
+      autorestart: true,
+      watch: false,
+      max_memory_restart: '2G',
+      env: { NODE_ENV: 'production' },
+      log_date_format: 'YYYY-MM-DD HH:mm:ss',
+      error_file: '/home/ubuntu/.pm2/logs/backtest-studio-error.log',
+      out_file: '/home/ubuntu/.pm2/logs/backtest-studio-out.log',
+      merge_logs: true,
+    },
+
+    // ── Sweep Manager API (:3603) ─────────────────────────────────
+    // Powers the studio "Tickers" page (registry / discover / onboard /
+    // execute / jobs). These routes used to be mounted by the :3601 replay
+    // server; that server was deleted in a32fe0e1a and took the routes with
+    // it, leaving the page 404ing. src/server/sweep-mgr-server.ts hosts them
+    // standalone under the SAME /replay/api/sweep-mgr mount, and the studio
+    // proxies /spxer/replay/api/sweep-mgr/* here.
+    // cwd MUST be the repo root — the routes resolve the registry, parquet
+    // root and job dir from process.cwd().
+    {
+      name: 'sweep-mgr',
+      script: 'node_modules/.bin/tsx',
+      args: 'src/server/sweep-mgr-server.ts',
+      cwd: '/home/ubuntu/SPXer',
+      autorestart: true,
+      watch: false,
+      max_memory_restart: '512M',
+      env: { NODE_ENV: 'production', SWEEP_MGR_PORT: 3603 },
+      log_date_format: 'YYYY-MM-DD HH:mm:ss',
+      error_file: '/home/ubuntu/.pm2/logs/sweep-mgr-error.log',
+      out_file: '/home/ubuntu/.pm2/logs/sweep-mgr-out.log',
+      merge_logs: true,
+    },
+
     // ── Daily Backfill (cron) ─────────────────────────────────────
     // Runs at 4:30 PM ET (20:30 UTC in EDT, 21:30 UTC in EST). Auto-discovers
     // ALL profiles with replay data (SPX, NDX, etc.) and backfills today's
