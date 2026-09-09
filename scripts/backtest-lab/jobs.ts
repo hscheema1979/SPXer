@@ -301,7 +301,61 @@ export function cancelJob(jobId: string): LabJob | undefined {
 }
 
 /** job.result plus a spec summary for the studio result panel. */
-export function jobResultPayload(jobId: string): { job: LabJob; result?: LabJobResult; specSummary: Record<string, unknown> } | undefined {
+/** One fill, engine-agnostic — the runs page renders exactly these columns. */
+export interface TradeRow {
+  entry: string        // "2026-09-02 14:04"
+  exit: string
+  instrument: string   // OCC contract for options, the ticker for shares
+  side?: string        // C/P (options) or long/short (shares)
+  strike?: number
+  qty?: number
+  entryPx: number
+  exitPx: number
+  pnl: number
+  retPct: number
+  hold?: number        // minutes (options) / bars (shares)
+  reason: string
+}
+
+/**
+ * Read a finished run's artifact and normalise its fills. The two engines
+ * write different shapes — shares emits {entryTime,exitTime,qty,bars}, the
+ * option engine {date,entryET,exitET,symbol,strike,holdMin} — and the review
+ * page should not have to know which engine produced the row it is showing.
+ */
+function tradesFromArtifact(job: LabJob): { trades: TradeRow[]; tradesPnl: number } | undefined {
+  const file = job.result?.artifactPath
+  if (!file) return undefined
+  let raw: any
+  try { raw = JSON.parse(fs.readFileSync(file, "utf8")) } catch { return undefined }
+  const list: any[] = Array.isArray(raw?.trades) ? raw.trades : Array.isArray(raw?.tradesList) ? raw.tradesList : []
+  if (!list.length) return undefined
+  const underlying = job.spec?.underlying?.symbol ?? ""
+  const trades: TradeRow[] = list.map((t) => {
+    const isOption = typeof t.entryET === "string"
+    return {
+      entry: isOption ? `${t.date} ${t.entryET}` : String(t.entryTime ?? ""),
+      exit: isOption ? `${t.date} ${t.exitET}` : String(t.exitTime ?? ""),
+      instrument: isOption ? String(t.symbol ?? "") : underlying,
+      side: isOption ? String(t.side ?? "") : (t.qty as number) < 0 ? "short" : "long",
+      strike: isOption ? Number(t.strike) : undefined,
+      qty: isOption ? 1 : Number(t.qty ?? 0),
+      entryPx: Number(t.entryPx ?? 0),
+      exitPx: Number(t.exitPx ?? 0),
+      pnl: Number(t.pnl ?? 0),
+      retPct: Number(t.retPct ?? 0),
+      hold: isOption ? Number(t.holdMin ?? 0) : Number(t.bars ?? 0),
+      reason: String(t.reason ?? ""),
+    }
+  })
+  const tradesPnl = +trades.reduce((a, t) => a + t.pnl, 0).toFixed(2)
+  return { trades, tradesPnl }
+}
+
+export function jobResultPayload(jobId: string): {
+  job: LabJob; result?: LabJobResult; specSummary: Record<string, unknown>
+  trades?: TradeRow[]; tradesPnl?: number
+} | undefined {
   const job = jobs.get(jobId)
   if (!job) return undefined
   const specSummary = {
@@ -316,5 +370,8 @@ export function jobResultPayload(jobId: string): { job: LabJob; result?: LabJobR
     slow: job.spec.entry.slow,
     timeframe: job.spec.entry.timeframe,
   }
-  return { job, result: job.result, specSummary }
+  // The fills ride along so the review page can show WHAT a run did, and
+  // whether the fills add up to the P&L the summary claims.
+  const log = tradesFromArtifact(job)
+  return { job, result: job.result, specSummary, trades: log?.trades, tradesPnl: log?.tradesPnl }
 }
