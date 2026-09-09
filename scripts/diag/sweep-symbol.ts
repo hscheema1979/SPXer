@@ -14,7 +14,7 @@
  */
 import * as fs from 'fs';
 import * as path from 'path';
-import { readBarCacheFile } from '../../src/replay/bar-cache-file';
+import { readBarCacheFile, writeBarCacheFile } from '../../src/replay/bar-cache-file';
 import { loadBarCacheFromParquetSync } from '../../src/storage/parquet-reader-sync';
 import { buildSymbolRange } from '../../src/replay/metrics';
 
@@ -153,7 +153,7 @@ export function loadDay(t: SymbolTarget, date: string, tf: string): any {
   // Contract symbols embed the EXPIRY date. For 1DTE that's the next trading
   // day, not the trade date — build the range off the expiry.
   const range = buildSymbolRange(expiryForDate(date, t.dte), t.optionPrefix);
-  return loadBarCacheFromParquetSync({
+  const built = loadBarCacheFromParquetSync({
     profileId: t.profileId,
     date,
     underlyingSymbol: t.symbol,
@@ -163,6 +163,16 @@ export function loadDay(t: SymbolTarget, date: string, tf: string): any {
     endTs: dayEnd,
     skipContractIndicators: true,
   });
+  // Populate the cache we just missed. Measured on this box: three SPX-0DTE
+  // dates cost 20.6s from parquet and 1.1s from .brc — a backtest window over
+  // recent dates (none cached past 2026-07-20) paid that on EVERY run because
+  // nothing ever wrote the file back. The cache path is keyed by date+tf only,
+  // with no profile in it, so this is gated to the one profile the read path
+  // above is gated to; writing another profile's bars there would poison it.
+  if (built && built.spxBars?.length && t.symbol === 'SPX' && t.dte === 0) {
+    try { writeBarCacheFile(built as any, date, tf, true); } catch { /* cache is optional */ }
+  }
+  return built;
 }
 
 /** Per-symbol output path: SPX keeps the original name, ETFs get a suffix. */

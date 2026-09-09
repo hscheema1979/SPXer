@@ -139,7 +139,12 @@ export function writeBarCacheFile(
     }
   }
 
-  fs.writeFileSync(filePath, buf);
+  // Atomic: sweep-parallel runs N shard workers over disjoint date slices, but
+  // two engines started by hand can still land on the same date. A half-written
+  // .brc would be read back as a corrupt cache; tmp+rename never is.
+  const tmp = `${filePath}.tmp.${process.pid}`;
+  fs.writeFileSync(tmp, buf);
+  fs.renameSync(tmp, filePath);
 }
 
 /** Read bar cache from binary file. Returns null if cache doesn't exist. */
