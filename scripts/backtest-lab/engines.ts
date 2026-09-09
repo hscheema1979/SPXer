@@ -120,7 +120,7 @@ export function buildArgs(
       ticker: string; symbol: string; tf: number; fast: number; slow: number; offset: number
       tp?: number; sl?: number; gateStart: string; gateEnd: string
       startDate?: string; endDate?: string; lengthPreset?: LengthPreset
-      indicator?: string
+      indicator?: string; sides?: string
     }
     const dte = /-(\d+)dte$/.exec(b.ticker)?.[1]
     const args: string[] = [
@@ -134,6 +134,8 @@ export function buildArgs(
       "--ticker", String(b.ticker),
       // Without this the engine defaulted to HMA whatever the dialog said.
       "--signal", String(b.indicator ?? "hma"),
+      // both | calls | puts — filters which crosses are tradeable.
+      "--sides", String(b.sides ?? "both"),
       // Per-fill artifact: contract traded, entry/exit, P&L, exit reason.
       "--json-out", jsonOut,
     ]

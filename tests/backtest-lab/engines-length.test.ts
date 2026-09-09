@@ -96,3 +96,14 @@ describe('buildArgs — long-option indicator', () => {
     }
   });
 });
+
+describe('buildArgs — long-option sides', () => {
+  it('defaults to both and forwards calls/puts', () => {
+    for (const sides of [undefined, 'both', 'calls', 'puts'] as const) {
+      const spec = defaultSpec('long-option') as BacktestSpec;
+      if (sides) spec.entry.sides = sides;
+      const { args } = buildArgs(specToRunRequest(spec), 'job-test');
+      expect(argOf(args, '--sides')).toBe(sides ?? 'both');
+    }
+  });
+});

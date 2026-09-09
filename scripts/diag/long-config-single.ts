@@ -39,6 +39,13 @@ const SL_PCT = parseInt(argVal('--sl', '20'), 10);
 const GATE_START = argVal('--gate-start', '09:30');
 const GATE_END = argVal('--gate-end', '16:00');
 const TICKER = argVal('--ticker', 'spxhma');
+// Which side to take. A bull cross buys a CALL and a bear cross buys a PUT, so
+// this is a filter on which crosses are tradeable at all. Default 'both' — the
+// behaviour every existing row was produced with.
+const SIDES = (() => {
+  const raw = argVal('--sides', 'both').toLowerCase();
+  return raw === 'calls' || raw === 'puts' ? raw : 'both';
+})() as 'both' | 'calls' | 'puts';
 const DATES_OVR = argVal('--dates', '');
 // Moving-average kind for the cross: 'hma' (default, preserves parity with the
 // hma3m study) or 'dema'. Mirrors the optionx engine's signal.maType.
@@ -283,6 +290,8 @@ function buildContexts(target: SymbolTarget, date: string, tf: number, fast: num
     const spxEntry = optPx(s1, e.entryTs - 1);
     if (!spxEntry) continue;
     const type: 'C' | 'P' = e.dir === 'bull' ? 'C' : 'P';
+    if (SIDES === 'calls' && type !== 'C') continue;
+    if (SIDES === 'puts' && type !== 'P') continue;
     const sym = findStrikeAtSpot(c1, type, spxEntry, target.strikeInterval, offsetStrikes);
     if (!sym) continue;
     const bars = c1.contractBars.get(sym) as any[];
@@ -393,7 +402,7 @@ function main() {
   const dates = DATES_OVR
     ? DATES_OVR.split(',').map(s => s.trim()).filter(Boolean)
     : listDatesFor(TARGET);
-  process.stderr.write(`long-config-single — symbol=${TARGET.symbol} tf=${TF} ${FAST}x${SLOW} offset=${OFFSET} tp=${TP_PCT} sl=${SL_PCT} window=${GATE_START}-${GATE_END} dates=${dates.length}\n`);
+  process.stderr.write(`long-config-single — symbol=${TARGET.symbol} tf=${TF} ${FAST}x${SLOW} offset=${OFFSET} sides=${SIDES} tp=${TP_PCT} sl=${SL_PCT} window=${GATE_START}-${GATE_END} dates=${dates.length}\n`);
 
   let totalTrades = 0, totalWins = 0, totalPnl = 0, daysWithTrade = 0, profitDays = 0;
   const tradeLog: TradeLogRow[] = [];
@@ -518,7 +527,7 @@ function main() {
         symbol: TARGET.symbol,
         profileId: TARGET.profileId,
         params: {
-          tf: TF, fast: FAST, slow: SLOW, offset: OFFSET, signal: SIGNAL,
+          tf: TF, fast: FAST, slow: SLOW, offset: OFFSET, signal: SIGNAL, sides: SIDES,
           tpPct: TP_PCT, slPct: SL_PCT, gateStart: GATE_START, gateEnd: GATE_END,
           dates: dates.length, firstDate: dates[0], lastDate: dates[dates.length - 1],
         },

@@ -66,6 +66,10 @@ export interface BacktestSpec {
     slow: number
     timeframe: Timeframe
     direction: "long" | "short"
+    /** Long-option only: which crosses are tradeable. A bull cross buys a
+     *  CALL and a bear cross buys a PUT, so this selects both / calls / puts.
+     *  Absent = "both", which is what every existing spec ran as. */
+    sides?: "both" | "calls" | "puts"
     triggers: string[]
     mode: "all" | "any"
     /** ET "HH:MM" pair; engines that cannot honor it are labeled honestly. */
@@ -211,6 +215,12 @@ export function validateSpec(spec: BacktestSpec, caps?: EngineCapabilities): Val
     if (sl && sl.kind !== "pricePct") push("long-option SL must be pricePct (e.g. 20)")
   }
 
+  if (spec.entry?.sides && !["both", "calls", "puts"].includes(spec.entry.sides)) {
+    push(`entry.sides must be both|calls|puts, got ${spec.entry.sides}`)
+  }
+  if (spec.type === "shares" && spec.entry?.direction === "short") {
+    push("shares runs are long-only")
+  }
   if (spec.length?.mode === "range") {
     if (!DATE.test(spec.length.from ?? "")) push("length.from must be YYYY-MM-DD")
     if (!DATE.test(spec.length.to ?? "")) push("length.to must be YYYY-MM-DD")
@@ -345,6 +355,7 @@ export function specToRunRequest(spec: BacktestSpec): RunRequest {
         // The engine's --signal. Dropped before this, so the indicator menu
         // was decorative for option specs.
         indicator: spec.entry.indicator,
+        sides: spec.entry.sides ?? "both",
         tp: tp ? Math.round(tp.value) : undefined,
         sl: sl ? Math.round(sl.value) : undefined,
         gateStart: spec.entry.windowET.start,

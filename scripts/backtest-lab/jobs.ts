@@ -352,9 +352,122 @@ function tradesFromArtifact(job: LabJob): { trades: TradeRow[]; tradesPnl: numbe
   return { trades, tradesPnl }
 }
 
+/** Per-run analytics derived from the fills — no second source of truth. */
+export interface RunAnalytics {
+  byDay: Array<{ date: string; pnl: number; n: number; wins: number; cum: number }>
+  byHour: Array<{ hour: string; pnl: number; n: number; wins: number }>
+  byReason: Array<{ reason: string; pnl: number; n: number }>
+  bySide: Array<{ side: string; pnl: number; n: number }>
+  stats: {
+    n: number; wins: number; losses: number; wr: number
+    pnl: number; avgPnl: number; avgWin: number; avgLoss: number
+    profitFactor: number | null; expectancy: number
+    bestTrade: number; worstTrade: number
+    bestDay: number; worstDay: number; posDays: number; negDays: number
+    maxDrawdown: number      // on the fill-ordered cumulative curve (intraday)
+    maxDrawdownDaily: number // on the DAILY cumulative curve — the engine's own `dd`
+    avgHold: number
+  }
+}
+
+function analyzeTrades(trades: TradeRow[]): RunAnalytics {
+  const day = new Map<string, { pnl: number; n: number; wins: number }>()
+  const hour = new Map<string, { pnl: number; n: number; wins: number }>()
+  const reason = new Map<string, { pnl: number; n: number }>()
+  const side = new Map<string, { pnl: number; n: number }>()
+
+  let pnl = 0, wins = 0, grossWin = 0, grossLoss = 0, hold = 0
+  let best = -Infinity, worst = Infinity
+  let cum = 0, peak = 0, maxDrawdown = 0
+
+  for (const t of trades) {
+    const d = (t.entry || "").slice(0, 10)
+    const h = (t.entry || "").slice(11, 13)
+    const won = t.pnl > 0
+
+    const dd = day.get(d) ?? { pnl: 0, n: 0, wins: 0 }
+    dd.pnl += t.pnl; dd.n++; if (won) dd.wins++
+    day.set(d, dd)
+
+    if (h) {
+      const hh = hour.get(`${h}:00`) ?? { pnl: 0, n: 0, wins: 0 }
+      hh.pnl += t.pnl; hh.n++; if (won) hh.wins++
+      hour.set(`${h}:00`, hh)
+    }
+
+    const r = reason.get(t.reason || "—") ?? { pnl: 0, n: 0 }
+    r.pnl += t.pnl; r.n++
+    reason.set(t.reason || "—", r)
+
+    const sd = side.get(t.side || "—") ?? { pnl: 0, n: 0 }
+    sd.pnl += t.pnl; sd.n++
+    side.set(t.side || "—", sd)
+
+    pnl += t.pnl
+    if (won) { wins++; grossWin += t.pnl } else { grossLoss += -t.pnl }
+    hold += t.hold ?? 0
+    if (t.pnl > best) best = t.pnl
+    if (t.pnl < worst) worst = t.pnl
+
+    // Drawdown on the fill-ordered curve — the same order the run took them.
+    cum += t.pnl
+    if (cum > peak) peak = cum
+    if (peak - cum > maxDrawdown) maxDrawdown = peak - cum
+  }
+
+  const dayRows = [...day.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1))
+  let running = 0
+  const byDay = dayRows.map(([date, v]) => {
+    running += v.pnl
+    return { date, pnl: +v.pnl.toFixed(2), n: v.n, wins: v.wins, cum: +running.toFixed(2) }
+  })
+
+  // Two drawdowns, deliberately: the per-fill curve dips intraday, the daily
+  // curve is what the engine reports as `dd`. Showing only one invites a
+  // "these numbers disagree" moment that is really a definition mismatch.
+  let dPeak = 0, dCum = 0, maxDrawdownDaily = 0
+  for (const r of dayRows) {
+    dCum += r[1].pnl
+    if (dCum > dPeak) dPeak = dCum
+    if (dPeak - dCum > maxDrawdownDaily) maxDrawdownDaily = dPeak - dCum
+  }
+
+  const n = trades.length
+  const losses = n - wins
+  const r2 = (x: number) => +x.toFixed(2)
+  return {
+    byDay,
+    byHour: [...hour.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1))
+      .map(([h, v]) => ({ hour: h, pnl: r2(v.pnl), n: v.n, wins: v.wins })),
+    byReason: [...reason.entries()].sort((a, b) => b[1].n - a[1].n)
+      .map(([k, v]) => ({ reason: k, pnl: r2(v.pnl), n: v.n })),
+    bySide: [...side.entries()].sort((a, b) => b[1].n - a[1].n)
+      .map(([k, v]) => ({ side: k, pnl: r2(v.pnl), n: v.n })),
+    stats: {
+      n, wins, losses,
+      wr: n ? r2((wins / n) * 100) : 0,
+      pnl: r2(pnl),
+      avgPnl: n ? r2(pnl / n) : 0,
+      avgWin: wins ? r2(grossWin / wins) : 0,
+      avgLoss: losses ? r2(-grossLoss / losses) : 0,
+      profitFactor: grossLoss > 0 ? r2(grossWin / grossLoss) : null,
+      expectancy: n ? r2(pnl / n) : 0,
+      bestTrade: Number.isFinite(best) ? r2(best) : 0,
+      worstTrade: Number.isFinite(worst) ? r2(worst) : 0,
+      bestDay: byDay.length ? r2(Math.max(...byDay.map(d => d.pnl))) : 0,
+      worstDay: byDay.length ? r2(Math.min(...byDay.map(d => d.pnl))) : 0,
+      posDays: byDay.filter(d => d.pnl > 0).length,
+      negDays: byDay.filter(d => d.pnl < 0).length,
+      maxDrawdown: r2(maxDrawdown),
+      maxDrawdownDaily: r2(maxDrawdownDaily),
+      avgHold: n ? r2(hold / n) : 0,
+    },
+  }
+}
+
 export function jobResultPayload(jobId: string): {
   job: LabJob; result?: LabJobResult; specSummary: Record<string, unknown>
-  trades?: TradeRow[]; tradesPnl?: number
+  trades?: TradeRow[]; tradesPnl?: number; analytics?: RunAnalytics
 } | undefined {
   const job = jobs.get(jobId)
   if (!job) return undefined
@@ -373,5 +486,9 @@ export function jobResultPayload(jobId: string): {
   // The fills ride along so the review page can show WHAT a run did, and
   // whether the fills add up to the P&L the summary claims.
   const log = tradesFromArtifact(job)
-  return { job, result: job.result, specSummary, trades: log?.trades, tradesPnl: log?.tradesPnl }
+  return {
+    job, result: job.result, specSummary,
+    trades: log?.trades, tradesPnl: log?.tradesPnl,
+    analytics: log ? analyzeTrades(log.trades) : undefined,
+  }
 }
