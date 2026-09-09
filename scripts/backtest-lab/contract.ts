@@ -318,6 +318,9 @@ export function specToRunRequest(spec: BacktestSpec): RunRequest {
         sizing,
         startDate: spec.length.mode === "range" ? spec.length.from : undefined,
         endDate: spec.length.mode === "range" ? spec.length.to : undefined,
+        // Presets need the profile's last date to become a window, and that is
+        // a disk read — so the preset travels and engines.ts resolves it.
+        lengthPreset: spec.length.mode === "preset" ? spec.length.preset : undefined,
         session: "rth",
       },
     }
@@ -339,6 +342,13 @@ export function specToRunRequest(spec: BacktestSpec): RunRequest {
         sl: sl ? Math.round(sl.value) : undefined,
         gateStart: spec.entry.windowET.start,
         gateEnd: spec.entry.windowET.end,
+        // Length travels for the option engine too. long-config-single.ts has
+        // no --start/--end; it takes an explicit --dates list, which engines.ts
+        // builds from these. Before this the Length control was silently
+        // dropped and every run swept the profile's whole history.
+        startDate: spec.length.mode === "range" ? spec.length.from : undefined,
+        endDate: spec.length.mode === "range" ? spec.length.to : undefined,
+        lengthPreset: spec.length.mode === "preset" ? spec.length.preset : undefined,
       },
     }
   }

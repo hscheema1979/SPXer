@@ -7838,5 +7838,140 @@
       "trend20_below",
       "vol_low"
     ]
+  },
+  {
+    "date": "2026-09-01",
+    "gapPct": -1.3331772275614995,
+    "gapBucket": "down_large",
+    "gapDir": "down",
+    "dayRangePct": 1.0993195032735004,
+    "bodyPct": 0.38312120477329004,
+    "trendiness": 0.3485076027783099,
+    "orRangePct": 0.40578723170079317,
+    "orBreak": "up",
+    "rvol": 0.6375794606361643,
+    "rvolPctile": 0.05,
+    "trend20": "below",
+    "gapFilled": false,
+    "primary": "gap_chop",
+    "tags": [
+      "gap_down_large",
+      "or_break_up",
+      "trend20_below",
+      "vol_low",
+      "chop_day"
+    ]
+  },
+  {
+    "date": "2026-09-02",
+    "gapPct": -0.45066529065222427,
+    "gapBucket": "down_small",
+    "gapDir": "down",
+    "dayRangePct": 0.611512066581739,
+    "bodyPct": 0.224958792546762,
+    "trendiness": 0.3678730230202129,
+    "orRangePct": 0.3324819363527645,
+    "orBreak": "up",
+    "rvol": 0.7012383229308857,
+    "rvolPctile": 0.15,
+    "trend20": "below",
+    "gapFilled": false,
+    "primary": "gap_chop",
+    "tags": [
+      "gap_down_small",
+      "or_break_up",
+      "trend20_below",
+      "vol_low"
+    ]
+  },
+  {
+    "date": "2026-09-03",
+    "gapPct": 0.3003135005084235,
+    "gapBucket": "up_small",
+    "gapDir": "up",
+    "dayRangePct": 1.2982152920770482,
+    "bodyPct": 0.91707404589718,
+    "trendiness": 0.7064113722077094,
+    "orRangePct": 0.5087475545262754,
+    "orBreak": "up",
+    "rvol": 0.6275908677085729,
+    "rvolPctile": 0.03333333333333333,
+    "trend20": "below",
+    "gapFilled": false,
+    "primary": "gap_go",
+    "tags": [
+      "gap_up_small",
+      "or_break_up",
+      "trend20_below",
+      "vol_low",
+      "trend_day"
+    ]
+  },
+  {
+    "date": "2026-09-04",
+    "gapPct": 0.23016216865417946,
+    "gapBucket": "up_tiny",
+    "gapDir": "up",
+    "dayRangePct": 0.7414350274568489,
+    "bodyPct": -0.2791551621364375,
+    "trendiness": 0.37650657414170274,
+    "orRangePct": 0.24435808360166925,
+    "orBreak": "down",
+    "rvol": 0.5794054384760146,
+    "rvolPctile": 0.016666666666666666,
+    "trend20": "above",
+    "gapFilled": true,
+    "primary": "quiet_range",
+    "tags": [
+      "gap_up_tiny",
+      "gap_filled",
+      "or_break_down",
+      "trend20_above",
+      "vol_low"
+    ]
+  },
+  {
+    "date": "2026-09-07",
+    "gapPct": -0.05705995606281995,
+    "gapBucket": "flat",
+    "gapDir": "flat",
+    "dayRangePct": 0,
+    "bodyPct": 0,
+    "trendiness": 0,
+    "orRangePct": 0,
+    "orBreak": "none",
+    "rvol": 0,
+    "rvolPctile": 0,
+    "trend20": "below",
+    "gapFilled": false,
+    "primary": "quiet_range",
+    "tags": [
+      "trend20_below",
+      "vol_low",
+      "chop_day"
+    ]
+  },
+  {
+    "date": "2026-09-08",
+    "gapPct": 0.6128701717157299,
+    "gapBucket": "up_med",
+    "gapDir": "up",
+    "dayRangePct": 0.7601975163280459,
+    "bodyPct": -0.46459140396194226,
+    "trendiness": 0.6111456483126135,
+    "orRangePct": 0.6991656730988614,
+    "orBreak": "none",
+    "rvol": 0.7048874035668365,
+    "rvolPctile": 0.21666666666666667,
+    "trend20": "above",
+    "gapFilled": true,
+    "primary": "gap_fade",
+    "tags": [
+      "gap_up_med",
+      "gap_filled",
+      "trend20_above",
+      "vol_low",
+      "trend_day"
+    ]
   }
 ]

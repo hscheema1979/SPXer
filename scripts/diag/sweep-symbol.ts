@@ -27,14 +27,10 @@ export interface SymbolTarget {
   strikeInterval: number;  // $ between adjacent strikes (fallback/nominal): SPX 5, SPY/QQQ 1, NDX 10. The multi-DTE sweep derives the real grid per-expiry from listed strikes (strike-grid.ts).
 }
 
-interface SymbolBase { symbol: string; optionPrefix: string; defaultDte: number; strikeInterval: number }
-const BASES: Record<string, SymbolBase> = {
-  SPX: { symbol: 'SPX', optionPrefix: 'SPXW', defaultDte: 0, strikeInterval: 5 },
-  SPY: { symbol: 'SPY', optionPrefix: 'SPY',  defaultDte: 0, strikeInterval: 1 },
-  QQQ: { symbol: 'QQQ', optionPrefix: 'QQQ',  defaultDte: 0, strikeInterval: 1 },
-  XSP: { symbol: "XSP", optionPrefix: "XSP",  defaultDte: 0, strikeInterval: 1 },
-  NDX: { symbol: 'NDX', optionPrefix: 'NDXP', defaultDte: 0, strikeInterval: 10 },
-};
+// BASES lives in src/instruments/option-bases.ts so src/ can import it too
+// (tsconfig rootDir is src/, so the dependency may only point that way).
+export { BASES, type SymbolBase } from '../../src/instruments/option-bases';
+import { BASES } from '../../src/instruments/option-bases';
 
 /**
  * Instrument class drives the LIQUID width caps in the sweeps (ETF has a tight

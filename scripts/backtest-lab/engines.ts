@@ -12,8 +12,8 @@
 // buildSpawn returns a PLAN (argv + cwd + artifacts); jobs.ts performs the
 // actual spawn so a plan can be built and inspected without launching a child.
 import * as path from "node:path"
-import { specToRunRequest, type BacktestSpec, type RunRequest } from "./contract.ts"
-import { SPXER_ROOT } from "./capabilities.ts"
+import { specToRunRequest, type BacktestSpec, type LengthPreset, type RunRequest } from "./contract.ts"
+import { SPXER_ROOT, coverageFor, datesFor } from "./capabilities.ts"
 
 export { SPXER_ROOT }
 
@@ -35,6 +35,39 @@ const csv = (xs: string[] | undefined): string | undefined =>
   xs && xs.length ? xs.join(",") : undefined
 
 /**
+ * spec.length → a concrete [from,to] window.
+ *
+ * An explicit range is used as-is. A preset is relative to the profile's LAST
+ * available date (not today) so "3mo" means three months of data, not three
+ * months of calendar that may end in a data gap. "all" and an unknown preset
+ * resolve to no window, which every engine reads as "its own full date list".
+ */
+export function resolveWindow(
+  profileSlug: string,
+  b: { startDate?: string; endDate?: string; lengthPreset?: LengthPreset },
+): { from?: string; to?: string } {
+  if (b.startDate || b.endDate) return { from: b.startDate, to: b.endDate }
+  const preset = b.lengthPreset
+  if (!preset || preset === "all") return {}
+  const cov = coverageFor(profileSlug)
+  if (!cov) return {}
+  const to = cov.lastDate
+  if (preset === "ytd") return { from: `${to.slice(0, 4)}-01-01`, to }
+  const months = preset === "3m" ? 3 : preset === "6m" ? 6 : preset === "1y" ? 12 : 0
+  if (!months) return {}
+  const d = new Date(`${to}T00:00:00Z`)
+  d.setUTCMonth(d.getUTCMonth() - months)
+  return { from: d.toISOString().slice(0, 10), to }
+}
+
+/** Dates a profile actually has inside the window (ascending). */
+export function datesInWindow(profileSlug: string, w: { from?: string; to?: string }): string[] {
+  return datesFor(profileSlug).filter((d) => (!w.from || d >= w.from) && (!w.to || d <= w.to))
+}
+
+const csv2 = (xs: string[]): string => xs.join(",")
+
+/**
  * RunRequest → argv. The long-option dte is recovered from the ticker slug
  * (`-<n>dte` suffix) so resolveSymbolTarget's profileId always equals the
  * --ticker slug the row is written under.
@@ -49,6 +82,7 @@ export function buildArgs(
       timeframe?: string; takeProfitMultiplier?: number; stopLossMultiplier?: number
       entryTriggers?: string[]; exitTriggers?: string[]; entryMode?: string
       sizing?: { mode: string; value?: number }; startDate?: string; endDate?: string; session?: string
+      lengthPreset?: LengthPreset
     }
     const jsonOut = path.join(OUT_DIR, `${jobId}.json`)
     const args: string[] = [
@@ -72,8 +106,11 @@ export function buildArgs(
     // with sizing.mode "engine-default" sends NO sizing flag, which the engine
     // resolves to its own dollars default — the contract name says as much.
     if (b.sizing) args.push(`--${b.sizing.mode}`, String(b.sizing.value ?? 0))
-    if (b.startDate) args.push("--start", b.startDate)
-    if (b.endDate) args.push("--end", b.endDate)
+    // Length: stockx-backtest.ts filters its own continuous date list with
+    // --start/--end, so a resolved preset rides the same two flags.
+    const wShares = resolveWindow(String(b.symbol ?? "").toLowerCase(), b)
+    if (wShares.from) args.push("--start", wShares.from)
+    if (wShares.to) args.push("--end", wShares.to)
     return { script: `${DIAG}/stockx-backtest.ts`, args, outputPaths: [jsonOut] }
   }
 
@@ -81,6 +118,7 @@ export function buildArgs(
     const b = runRequest.body as {
       ticker: string; symbol: string; tf: number; fast: number; slow: number; offset: number
       tp?: number; sl?: number; gateStart: string; gateEnd: string
+      startDate?: string; endDate?: string; lengthPreset?: LengthPreset
     }
     const dte = /-(\d+)dte$/.exec(b.ticker)?.[1]
     const args: string[] = [
@@ -102,6 +140,20 @@ export function buildArgs(
     // else: omit --tp (the engine default 25 applies; the job log says so).
     if (b.sl !== undefined) args.push("--sl", String(b.sl))
     else args.push("--sl", "0") // the engine's own "no stop" encoding
+    // Length: this engine has no --start/--end — it takes an explicit --dates
+    // list (DATES_OVR) and otherwise sweeps listDatesFor(TARGET) whole. An
+    // EMPTY --dates silently falls back to "all dates", so a window that
+    // selects nothing must fail loudly instead of running 100x the work.
+    const wLong = resolveWindow(b.ticker, b)
+    if (wLong.from || wLong.to) {
+      const dates = datesInWindow(b.ticker, wLong)
+      if (!dates.length) {
+        throw new Error(
+          `no ${b.ticker} dates in ${wLong.from ?? "start"}→${wLong.to ?? "end"} — widen the length or pick another profile`,
+        )
+      }
+      args.push("--dates", csv2(dates))
+    }
     return { script: `${DIAG}/long-config-single.ts`, args, outputPaths: [] }
   }
 

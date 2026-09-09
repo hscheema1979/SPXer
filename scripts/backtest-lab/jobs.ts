@@ -148,11 +148,15 @@ function pump(engine: EngineKind): void {
   if (!job) return
   job.status = "running"
   job.startedAt = new Date().toISOString()
-  const plan = buildSpawn(specToRunRequest(job.spec), job.jobId)
   let stdout = ""
   let stderr = ""
   let child: ChildProcess
+  let plan: SpawnPlan
   try {
+    // Inside the try on purpose: buildSpawn validates the spec against what is
+    // on disk (e.g. a length window that selects no dates) and throws. Outside,
+    // that throw escaped pump() and took the service down with it.
+    plan = buildSpawn(specToRunRequest(job.spec), job.jobId)
     // detached + group kill: `npx tsx` is two processes deep, and killing only
     // the npx wrapper orphans the engine (it reparents to init and keeps
     // running — the FR-001 leak class sweep-parallel.ts guards against).

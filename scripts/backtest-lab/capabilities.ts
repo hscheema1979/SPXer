@@ -10,6 +10,7 @@
 // advertised — no registry-fantasy rows. If data/ is missing entirely (e.g. a
 // bare worktree), capabilities come back empty rather than invented.
 import * as fs from "node:fs"
+import { execFileSync } from "node:child_process"
 import * as path from "node:path"
 import { fileURLToPath } from "node:url"
 import type {
@@ -59,24 +60,104 @@ function readRegistry(): RegistryProfile[] {
 
 const DATE_FILE = /^\d{4}-\d{2}-\d{2}\.parquet$/
 
-/** Same date-listing rule as sweep-symbol.ts::listDatesFor (no SWEEP_DAYS cut). */
-export function coverageFor(profileId: string): ProfileCoverage | undefined {
+/**
+ * Every parquet date a profile has, ascending YYYY-MM-DD. Same date-listing
+ * rule as sweep-symbol.ts::listDatesFor (no SWEEP_DAYS cut). Empty when the
+ * profile has no parquet dir at all.
+ */
+export function datesFor(profileId: string): string[] {
   const dir = path.join(BARS_ROOT, profileId)
-  let names: string[]
   try {
-    names = fs.readdirSync(dir).filter((f) => DATE_FILE.test(f)).sort()
+    return fs.readdirSync(dir).filter((f) => DATE_FILE.test(f)).sort().map((f) => f.slice(0, 10))
   } catch {
-    return undefined // no parquet dir → no coverage
+    return [] // no parquet dir → no coverage
   }
-  if (!names.length) return undefined
+}
+
+export function coverageFor(profileId: string): ProfileCoverage | undefined {
+  const dates = datesFor(profileId)
+  if (!dates.length) return undefined
   return {
     profileId,
     symbol: "",
     dte: null,
-    dateCount: names.length,
-    firstDate: names[0].slice(0, 10),
-    lastDate: names[names.length - 1].slice(0, 10),
+    dateCount: dates.length,
+    firstDate: dates[0],
+    lastDate: dates[dates.length - 1],
   }
+}
+
+
+// ── What is actually IN each profile (disk truth, not a hardcoded list) ──────
+//
+// Every bars parquet has a `symbol` column. A shares profile holds exactly one
+// symbol (its own ticker); an options profile holds the underlying PLUS every
+// OCC contract captured that day (spx-0dte: 402 distinct on 2026-09-09). So
+// min(symbol) !== max(symbol) ⟺ this profile has option contracts.
+//
+// We read that from the parquet FOOTER (duckdb parquet_metadata column stats),
+// not the data — ~56ms per file, and one batched query covers every profile.
+// Memoised per (profileId, file) because a finished day never changes.
+export type ProfileKind = "option" | "shares"
+const kindMemo = new Map<string, { kind: ProfileKind; symbol: string }>()
+
+function lastParquet(profileId: string): string | undefined {
+  const dates = datesFor(profileId)
+  if (!dates.length) return undefined
+  return path.join(BARS_ROOT, profileId, `${dates[dates.length - 1]}.parquet`)
+}
+
+/** All profile dirs that hold at least one dated parquet. */
+export function diskProfiles(): string[] {
+  try {
+    return fs.readdirSync(BARS_ROOT, { withFileTypes: true })
+      .filter((e) => e.isDirectory())
+      .map((e) => e.name)
+      // .bak/.old/.tmp copies are operator scratch, never a tradeable profile
+      .filter((name) => !/\.(bak|old|tmp|orig)$/i.test(name))
+      .filter((name) => datesFor(name).length > 0)
+      .sort()
+  } catch {
+    return []
+  }
+}
+
+/** Classify every profile on disk in ONE duckdb call; memoised per file. */
+export function classifyProfiles(): Map<string, { kind: ProfileKind; symbol: string }> {
+  const out = new Map<string, { kind: ProfileKind; symbol: string }>()
+  const todo: Array<{ pid: string; file: string; key: string }> = []
+  for (const pid of diskProfiles()) {
+    const file = lastParquet(pid)
+    if (!file) continue
+    const key = `${pid}:${path.basename(file)}`
+    const hit = kindMemo.get(key)
+    if (hit) { out.set(pid, hit); continue }
+    todo.push({ pid, file, key })
+  }
+  if (todo.length) {
+    const sql = todo
+      .map((t) => `SELECT '${t.pid}' AS pid, min(stats_min) AS mn, max(stats_max) AS mx ` +
+                  `FROM parquet_metadata('${t.file.replace(/'/g, "''")}') WHERE path_in_schema='symbol'`)
+      .join(" UNION ALL ")
+    let rows: Array<{ pid: string; mn: string | null; mx: string | null }> = []
+    try {
+      const raw = execFileSync("duckdb", ["-json", "-c", sql], {
+        stdio: ["pipe", "pipe", "pipe"], timeout: 120_000, maxBuffer: 64 * 1024 * 1024,
+      }).toString().trim()
+      rows = raw && raw !== "[]" ? JSON.parse(raw) : []
+    } catch {
+      rows = [] // duckdb missing/failed → fall through, callers use the registry rule
+    }
+    const byPid = new Map(rows.map((r) => [r.pid, r]))
+    for (const t of todo) {
+      const r = byPid.get(t.pid)
+      if (!r || r.mn == null || r.mx == null) continue
+      const entry = { kind: (r.mn !== r.mx ? "option" : "shares") as ProfileKind, symbol: String(r.mn) }
+      kindMemo.set(t.key, entry)
+      out.set(t.pid, entry)
+    }
+  }
+  return out
 }
 
 /** Registry row for a profileId, so single-coverage lookups can name symbol/dte. */
@@ -198,6 +279,15 @@ function servedStrikeInterval(candidates: OptionCandidate[]): number {
  * same directory the profileId names.
  */
 export function sharesSymbols(): string[] {
+  // Disk truth first: every profile whose parquet holds a single symbol is a
+  // shares profile, and its own `symbol` column names the ticker. This is the
+  // same universe the Tickers page lists, so the two pages agree instead of
+  // the dialog showing a five-row registry subset.
+  const classified = classifyProfiles()
+  const out = new Set<string>()
+  for (const [, v] of classified) if (v.kind === "shares") out.add(v.symbol.toUpperCase())
+  if (out.size) return [...out].sort()
+  // duckdb unavailable → registry fallback (assetClass="shares" rows).
   return readRegistry()
     .filter((p) => p.assetClass === "shares")
     .map((p) => profileCoverage(p))
@@ -253,8 +343,32 @@ function optionCandidates(): OptionCandidate[] {
       strikeInterval: p.strikeInterval,
     })
   }
+  // Anything on disk that actually holds option contracts but has neither a
+  // BASES entry nor a registry row still belongs in the option menus — the
+  // data is what makes a profile tradeable, not the bookkeeping.
+  for (const [pid, v] of classifyProfiles()) {
+    if (v.kind !== "option" || byId.has(pid)) continue
+    // Only the <symbol>-<n>dte convention: profileId(symbol,dte) has to round
+    // trip, or the spec the dialog builds would name a directory that does not
+    // exist. `tsla/` holds option contracts but is not named that way, so it
+    // stays out until it is onboarded properly (Tickers page → onboard).
+    const m = /^([a-z0-9^.]+)-(\d+)dte$/.exec(pid)
+    if (!m) continue
+    const symbol = m[1].toUpperCase()
+    byId.set(pid, {
+      symbol,
+      dte: Number(m[2]),
+      profileId: pid,
+      // No declared grid for an unregistered profile: index-style symbols step
+      // $5, everything else $1. Register the ticker to override.
+      strikeInterval: INDEX_LIKE.has(symbol) ? 5 : 1,
+    })
+  }
   return [...byId.values()]
 }
+
+/** Mirrors sweep-symbol.ts INDEX_SYMBOLS — cash indices vs everything else. */
+const INDEX_LIKE = new Set(["SPX", "NDX", "RUT", "VIX", "XSP"])
 
 function optionProfiles(): ProfileCoverage[] {
   return optionCandidates()

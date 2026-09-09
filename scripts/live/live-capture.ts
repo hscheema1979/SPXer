@@ -3,8 +3,8 @@
  *
  * Polygon + ThetaData are cancelled; Tradier (live brokerage market data) is
  * the only remaining source. This daemon polls Tradier once per minute during
- * RTH for each configured instrument (SPX/NDX/XSP 0DTE, SPY/QQQ 1DTE), keeps
- * the ATM±10% strike window, and appends to TWO parquet trees:
+ * RTH for each configured instrument (SPX/NDX/XSP 0DTE, SPX/NDX/SPY/QQQ 1DTE),
+ * keeps the ATM±10% strike window, and appends to TWO parquet trees:
  *
  *   data/parquet/snapshots/{profile}/{date}.parquet   NEW — bid/ask + greeks +
  *                                                      live BS delta (the thing

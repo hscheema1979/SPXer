@@ -9,7 +9,9 @@
  *
  * `profileId` is the subdirectory under both data/parquet/snapshots/ and
  * data/parquet/bars/ — kept consistent with the existing backtest profiles
- * (spx-0dte, ndx-0dte, spy-1dte, qqq-1dte) plus a new xsp-0dte.
+ * (spx-0dte, ndx-0dte, spy-1dte, qqq-1dte) plus xsp-0dte and the 2026-09
+ * additions spx-1dte / ndx-1dte (prior-day slices of the next expiry, so
+ * MA-style indicators can continue across sessions).
  */
 
 export interface CaptureInstrument {
@@ -37,7 +39,9 @@ export interface CaptureInstrument {
  */
 export const CAPTURE_INSTRUMENTS: CaptureInstrument[] = [
   { profileId: 'spx-0dte', underlyingSymbol: 'SPX', chainSymbol: 'SPX', dte: 0, windowPct: 0.10, rthEndET: '16:15' },
+  { profileId: 'spx-1dte', underlyingSymbol: 'SPX', chainSymbol: 'SPX', dte: 1, windowPct: 0.10, rthEndET: '16:15' },
   { profileId: 'ndx-0dte', underlyingSymbol: 'NDX', chainSymbol: 'NDX', dte: 0, windowPct: 0.10, rthEndET: '16:15' },
+  { profileId: 'ndx-1dte', underlyingSymbol: 'NDX', chainSymbol: 'NDX', dte: 1, windowPct: 0.10, rthEndET: '16:15' },
   { profileId: 'xsp-0dte', underlyingSymbol: 'XSP', chainSymbol: 'XSP', dte: 0, windowPct: 0.10, rthEndET: '16:15' },
   { profileId: 'spy-1dte', underlyingSymbol: 'SPY', chainSymbol: 'SPY', dte: 1, windowPct: 0.10, rthEndET: '16:00' },
   { profileId: 'qqq-1dte', underlyingSymbol: 'QQQ', chainSymbol: 'QQQ', dte: 1, windowPct: 0.10, rthEndET: '16:00' },
