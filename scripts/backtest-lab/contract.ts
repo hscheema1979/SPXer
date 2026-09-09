@@ -97,6 +97,10 @@ export interface ProfileCoverage {
   dateCount: number
   firstDate: string // YYYY-MM-DD
   lastDate: string
+  /** $ between adjacent strikes (SPX 5, NDX 10, SPY/QQQ/XSP 1). Present on
+   *  option profiles only — it is what turns a strike offset into dollars,
+   *  which the two moneyness conventions in this app disagree about. */
+  strikeInterval?: number
 }
 
 export interface EngineCapabilities {

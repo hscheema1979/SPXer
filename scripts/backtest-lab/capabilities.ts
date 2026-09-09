@@ -374,7 +374,9 @@ function optionProfiles(): ProfileCoverage[] {
   return optionCandidates()
     .map((c): ProfileCoverage | undefined => {
       const cov = coverageFor(c.profileId)
-      return cov ? { ...cov, symbol: c.symbol, dte: c.dte } : undefined
+      // strikeInterval rides along so the dialog can show a strike offset in
+      // dollars: "10 strikes OTM" is $50 on SPX and $10 on QQQ.
+      return cov ? { ...cov, symbol: c.symbol, dte: c.dte, strikeInterval: c.strikeInterval } : undefined
     })
     .filter((c): c is ProfileCoverage => Boolean(c))
 }
