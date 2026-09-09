@@ -260,7 +260,15 @@ app.get("/api/stockx/job/:id", (req, res) => {
   res.json({ status: job.status, log: job.log.slice(-4000), startedAt: job.startedAt, endedAt: job.endedAt });
 });
 app.get("/api/stockx/result", (req, res) => {
-  const job = stockxJobs.get(String(req.query.job || ""));
+  const jobId = String(req.query.job || "").replace(/[^a-f0-9]/gi, "");
+  let job = stockxJobs.get(jobId);
+  // The map is in-memory: it is evicted 30 min after completion and cleared by
+  // any restart, which made a finished run unreadable even though its result
+  // file was still on disk. Fall back to the file — that IS the result.
+  if (!job && jobId) {
+    const onDisk = path.join(__dirname, "output", "stockx", `${jobId}.json`);
+    if (fs.existsSync(onDisk)) job = { status: "completed", log: "", jsonOut: onDisk, startedAt: 0 };
+  }
   if (!job) return res.status(404).json({ error: "job not found" });
   if (job.status !== "completed") return res.status(409).json({ error: "job not completed", status: job.status });
   if (!job.jsonOut || !fs.existsSync(job.jsonOut)) return res.status(500).json({ error: "result file missing" });
