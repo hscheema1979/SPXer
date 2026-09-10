@@ -187,3 +187,15 @@ export function knownDates(results: Map<string, any>): Set<string> {
   }
   return s;
 }
+
+/**
+ * Max of a numeric array without spreading it into a call. `Math.max(...arr)`
+ * overflows the call stack past ~1e5 elements; concurrent-distribution's
+ * flattened per-minute series crossed that on 2026-09-04 (345 samples × >300
+ * days) and its merge died with "Maximum call stack size exceeded" nightly.
+ */
+export function maxOf(arr: ArrayLike<number>): number {
+  let m = -Infinity;
+  for (let i = 0; i < arr.length; i++) if (arr[i] > m) m = arr[i];
+  return m;
+}

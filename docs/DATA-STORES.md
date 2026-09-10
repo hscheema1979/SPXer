@@ -149,6 +149,14 @@ top-level entry per line (still one JSON object) and `readStateEntries`
 parses files ≥ 256 MB line by line; smaller and legacy single-line files
 take the whole-file path. Pinned by `tests/diag/sweep-shard.test.ts`.
 
+**concurrent-distribution merge root cause (found 2026-09-10 23:00Z, fixed):**
+`Math.max(...allMinutes)` over the flattened per-minute series (345 samples ×
+every date, ~123k elements) threw `RangeError: Maximum call stack size
+exceeded` once the date count crossed the argument limit on 09-04. Replaced
+with a loop (`sweep-shard.ts::maxOf`, tested at 400k elements). Both
+`risk-analysis*.json` outputs and `{SPX,NDX}-concdist.json` states were
+regenerated 23:00-23:02Z.
+
 **Sweep state was contaminated (rebuilt 2026-09-10 night).**
 `data/sweep-state/{SPX,NDX}-{credit,iron,concdist}.json` accumulate per-config
 results across all dates; the 48 junk sessions (07-06 → 09-09) are baked into

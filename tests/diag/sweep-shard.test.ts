@@ -9,7 +9,7 @@ import { describe, it, expect } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { dumpResults, mergeStateFile, loadShardsInto, readStateEntries, knownDates } from '../../scripts/diag/sweep-shard';
+import { dumpResults, mergeStateFile, loadShardsInto, readStateEntries, knownDates, maxOf } from '../../scripts/diag/sweep-shard';
 
 function sample(): Map<string, any> {
   const m = new Map<string, any>();
@@ -85,5 +85,17 @@ describe('sweep-shard state persistence', () => {
     expect(merged.get('k').n).toBe(3);
     expect(merged.get('k').peakConcurrent).toBe(3);
     expect([...knownDates(merged)].sort()).toEqual(['2026-09-02', '2026-09-03']);
+  });
+});
+
+describe('maxOf', () => {
+  it('matches Math.max on small arrays and handles empty input', () => {
+    expect(maxOf([3, 9, 2])).toBe(9);
+    expect(maxOf([])).toBe(-Infinity);
+  });
+  it('does not overflow the stack on 400k elements (Math.max(...arr) does)', () => {
+    const arr = new Array(400_000).fill(1); arr[123_456] = 7;
+    expect(() => Math.max(...arr)).toThrow(RangeError);
+    expect(maxOf(arr)).toBe(7);
   });
 });

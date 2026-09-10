@@ -18,7 +18,7 @@ import * as dotenv from 'dotenv'; dotenv.config({ quiet: true } as any);
 import * as fs from 'fs';
 import * as path from 'path';
 import { resolveSymbolTarget, listDatesFor, loadDay, outPath } from './sweep-symbol';
-import { shardDates } from './sweep-shard';
+import { shardDates, maxOf } from './sweep-shard';
 
 // Profile resolution: --symbol SPX|SPY|QQQ|NDX [--dte 0|1].
 // SI = strike interval ($ between adjacent strikes: SPX 5, SPY/QQQ 1, NDX 10)
@@ -416,7 +416,8 @@ for (const variant of TARGETS) {
   // Distribution histogram
   const hist: Map<number, number> = new Map();
   for (const v of allMinutes) hist.set(v, (hist.get(v) || 0) + 1);
-  const maxObserved = Math.max(...allMinutes);
+  // Not Math.max(...allMinutes): ~123k args overflowed the stack (see maxOf).
+  const maxObserved = maxOf(allMinutes);
 
   console.log(`═══ ${variant.label} ═══`);
   console.log(`  Total days: ${totalDays}, total minute-samples: ${totalMinutes}`);
