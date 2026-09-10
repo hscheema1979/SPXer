@@ -221,8 +221,22 @@ export function validateSpec(spec: BacktestSpec, caps?: EngineCapabilities): Val
     if (sl && sl.kind !== "priceMult") push("shares SL must be priceMult (e.g. 0.95)")
   }
   if (spec.type === "long-option") {
-    if (tp && tp.kind !== "pricePct") push("long-option TP must be pricePct (e.g. 25)")
-    if (sl && sl.kind !== "pricePct") push("long-option SL must be pricePct (e.g. 20)")
+    // Both spellings are accepted (priceMult is preferred — it matches the
+    // shares specs and the live config), but a multiplier has to look like a
+    // multiplier: pricePct 20 and priceMult 20 are the same keystrokes for a
+    // 20% stop and a +1900% target.
+    if (tp && tp.kind !== "pricePct" && tp.kind !== "priceMult") {
+      push("long-option TP must be priceMult (e.g. 1.25) or pricePct (e.g. 25)")
+    }
+    if (sl && sl.kind !== "pricePct" && sl.kind !== "priceMult") {
+      push("long-option SL must be priceMult (e.g. 0.80) or pricePct (e.g. 20)")
+    }
+    if (tp?.kind === "priceMult" && !(tp.value > 1)) {
+      push(`TP multiplier must be > 1 (got ${tp.value}) — 1.25 is +25%`)
+    }
+    if (sl?.kind === "priceMult" && !(sl.value > 0 && sl.value < 1)) {
+      push(`SL multiplier must be between 0 and 1 (got ${sl.value}) — 0.80 is -20%`)
+    }
   }
 
   if (spec.entry?.sides && !["both", "calls", "puts"].includes(spec.entry.sides)) {
@@ -309,6 +323,29 @@ export function tfMinutes(tf: Timeframe): number {
  * pricePct 25 ↔ priceMult 1.25; long engine gets percent ints; shares engine
  * passes multipliers through.
  */
+
+/**
+ * Long-option TP/SL as the engine wants it: whole percent, TP as a gain and SL
+ * as a loss (--tp 25 --sl 20 means +25% / -20%).
+ *
+ * Accepts BOTH spellings so nothing already stored shifts meaning:
+ *   priceMult 1.25 / 0.80   (the current spelling — same convention as shares
+ *                            specs and as the live optionx config)
+ *   pricePct  25   / 20     (the legacy spelling this type used alone)
+ *
+ * The two are the same keystrokes for different intents — pricePct 20 is a 20%
+ * stop, priceMult 20 would be +1900% — which is why validateSpec bounds the
+ * multiplier form rather than trusting the number.
+ */
+export function longPctFrom(t: TpSl | undefined, side: "tp" | "sl"): number | undefined {
+  if (!t) return undefined
+  if (t.kind === "pricePct") return Math.round(t.value)
+  if (t.kind === "priceMult") {
+    return side === "tp" ? Math.round((t.value - 1) * 100) : Math.round((1 - t.value) * 100)
+  }
+  return undefined
+}
+
 export function specToRunRequest(spec: BacktestSpec): RunRequest {
   if (spec.type === "shares") {
     const exitTriggers: string[] = []
@@ -351,8 +388,8 @@ export function specToRunRequest(spec: BacktestSpec): RunRequest {
   }
 
   if (spec.type === "long-option") {
-    const tp = spec.exit.tp as { kind: "pricePct"; value: number } | undefined
-    const sl = spec.exit.sl as { kind: "pricePct"; value: number } | undefined
+    const tpPct = longPctFrom(spec.exit.tp, "tp")
+    const slPct = longPctFrom(spec.exit.sl, "sl")
     return {
       engine: "long-option",
       body: {
@@ -366,8 +403,8 @@ export function specToRunRequest(spec: BacktestSpec): RunRequest {
         // was decorative for option specs.
         indicator: spec.entry.indicator,
         sides: spec.entry.sides ?? "both",
-        tp: tp ? Math.round(tp.value) : undefined,
-        sl: sl ? Math.round(sl.value) : undefined,
+        tp: tpPct,
+        sl: slPct,
         gateStart: spec.entry.windowET.start,
         gateEnd: spec.entry.windowET.end,
         // Length travels for the option engine too. long-config-single.ts has
@@ -466,10 +503,16 @@ function typeNoun(spec: BacktestSpec): string {
   return (spec.structure as { kind: string }).kind
 }
 
+/**
+ * Always render a percent — the stored unit is an implementation detail and a
+ * multiplier is not something anyone reads at a glance. 1.25 -> +25%,
+ * 0.80 -> -20%, so the sign says which side of entry it sits on.
+ */
 function tpSlText(t: TpSl): string {
   if (t.kind === "creditFrac") return `${Math.round(t.value * 100)}%cr`
   if (t.kind === "pricePct") return `${Math.round(t.value)}%`
-  return `${t.value}x`
+  const pct = Math.round((t.value - 1) * 100)
+  return `${pct > 0 ? "+" : ""}${pct}%`
 }
 
 export function lengthText(l: BacktestSpec["length"]): string {
@@ -504,8 +547,8 @@ export function defaultSpec(type: SpecType): BacktestSpec {
       windowET: { start: "09:30", end: "16:00" },
     },
     exit: {
-      tp: type === "shares" ? { kind: "priceMult", value: 1.1 } : type === "long-option" ? { kind: "pricePct", value: 25 } : { kind: "creditFrac", value: 0.1 },
-      sl: type === "shares" ? { kind: "priceMult", value: 0.95 } : type === "long-option" ? { kind: "pricePct", value: 20 } : undefined,
+      tp: type === "shares" ? { kind: "priceMult", value: 1.1 } : type === "long-option" ? { kind: "priceMult", value: 1.25 } : { kind: "creditFrac", value: 0.1 },
+      sl: type === "shares" ? { kind: "priceMult", value: 0.95 } : type === "long-option" ? { kind: "priceMult", value: 0.8 } : undefined,
       eodCutoffET: "15:45",
       settle: type === "option-sweep",
       flip: false, // flip-on-reversal is implicit in the long-option engine; explicit opt-in elsewhere
