@@ -187,7 +187,17 @@ export function validateSpec(spec: BacktestSpec, caps?: EngineCapabilities): Val
   if (!isMaType(spec.entry?.indicator)) push(`unknown indicator: ${spec.entry?.indicator}`)
   if (!isTimeframe(spec.entry?.timeframe)) push(`unknown timeframe: ${spec.entry?.timeframe}`)
   if (!(spec.entry.fast > 0)) push("entry.fast must be > 0")
-  if (!(spec.entry.slow > spec.entry.fast)) push("entry.slow must be > entry.fast")
+  if (!(spec.entry.slow > 0)) push("entry.slow must be > 0")
+  // fast > slow is DELIBERATELY allowed: the engine compares MA(fast) to
+  // MA(slow) and calls it bull when the first is higher, so swapping the two
+  // lengths mirrors the signal — that is how you express "trade the opposite".
+  // It is a different strategy, not a sign-flipped copy: on 5 sessions 3x18
+  // and 18x3 both took 136 fills with ZERO in common. Equal lengths ARE
+  // rejected: MA(p) > MA(p) is never true, so the direction would be a
+  // constant and no cross could ever fire.
+  if (spec.entry.slow === spec.entry.fast) {
+    push("entry.fast and entry.slow must differ — equal lengths can never cross")
+  }
   // Only the shares engine has a trigger vocabulary; option engines are
   // MA-cross driven and take no triggers ([] by design — see defaultSpec).
   if (spec.type === "shares") {

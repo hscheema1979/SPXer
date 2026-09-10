@@ -643,10 +643,14 @@ if (GRID_MA || GRID_TF || GRID_FAST || GRID_SLOW || GRID_GATE) {
   const fasts = GRID_FAST ?? [FAST];
   const slows = GRID_SLOW ?? [SLOW];
   const gates = GRID_GATE ?? [GATE_START];
-  // fast must stay below slow — a cross needs two different lengths.
+  // Equal lengths can never cross, so those cells are always skipped. INVERTED
+  // pairs (fast > slow) are a real strategy — the mirror signal — and are
+  // included with --grid-invert 1.
+  const allowInverted = argVal('--grid-invert', '0') === '1';
   const cells: Array<[MaKind, number, number, number, string]> = [];
   for (const ma of mas) for (const tf of tfs) for (const f of fasts) for (const sl of slows) for (const g of gates) {
-    if (f >= sl) continue;
+    if (f === sl) continue;
+    if (!allowInverted && f > sl) continue;
     cells.push([ma, tf, f, sl, g]);
   }
   process.stderr.write(`\n=== grid: ${cells.length} cells (${mas.join('/')} x tf ${tfs.join(',')} x fast ${fasts[0]}-${fasts[fasts.length - 1]} x slow ${slows[0]}-${slows[slows.length - 1]} x gate ${gates.join(',')})\n\n`);
