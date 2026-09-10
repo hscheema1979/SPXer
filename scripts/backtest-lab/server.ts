@@ -35,6 +35,8 @@ import { initJobs, enqueueJob, listJobs, getJob, cancelJob, jobResultPayload, co
 import { listSpecs, upsertSpec, deleteSpec } from "./specs.ts"
 
 const PORT = Number.parseInt(process.env.LAB_PORT ?? "3702", 10)
+/** The live trading API. Promotion is the only thing here that talks to it. */
+const OPTIONX_API = process.env.OPTIONX_API ?? "http://127.0.0.1:3501/api"
 const HOST = "127.0.0.1"
 const BODY_CAP_BYTES = 1024 * 1024
 const BOOTED_AT = Date.now()
@@ -210,6 +212,65 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       }
     }
     return sendJson(res, 200, { preview: true, created: false, dollarsPerTrade: dollars, configs, errors })
+  }
+
+  // POST /api/promote  { jobIds:[], dollarsPerTrade, confirm:true }
+  // Creates the configs in optionx. Without confirm:true it refuses and hands
+  // back the same preview the GET gives — promotion is the one action here that
+  // spends money, so it takes a deliberate second step rather than a click.
+  if (p === "/api/promote" && method === "POST") {
+    const body = parseJsonBody(await readBody(req))
+    if (!body.ok) return sendJson(res, (body as any).status ?? 400, { error: body.error })
+    const b = body.value as { jobIds?: string[]; dollarsPerTrade?: number; confirm?: boolean }
+    const ids = Array.isArray(b.jobIds) ? b.jobIds.filter(Boolean) : []
+    const dollars = Number(b.dollarsPerTrade)
+    if (!ids.length) return sendJson(res, 400, { error: "jobIds is required" })
+    if (!Number.isFinite(dollars) || dollars <= 0) {
+      return sendJson(res, 400, { error: "dollarsPerTrade must be a positive number" })
+    }
+
+    const configs: Array<Record<string, unknown>> = []
+    const errors: Array<{ jobId: string; error: string }> = []
+    for (const jobId of ids) {
+      const job = getJob(jobId)
+      if (!job?.spec) { errors.push({ jobId, error: "unknown job" }); continue }
+      try { configs.push(specToLiveConfig(job.spec, { dollarsPerTrade: dollars, idSuffix: "live" })) }
+      catch (e) { errors.push({ jobId, error: (e as Error).message }) }
+    }
+    if (errors.length) return sendJson(res, 422, { created: false, errors, configs })
+    if (b.confirm !== true) {
+      return sendJson(res, 400, {
+        created: false,
+        error: "confirm:true is required — this creates live configs on the trading account",
+        configs,
+      })
+    }
+
+    // Refuse to clobber: an id that already exists is a config someone may be
+    // trading. The operator renames or deletes it deliberately.
+    const existing = await fetch(`${OPTIONX_API}/configs`).then((r) => r.json()).catch(() => [])
+    const taken = new Set<string>(Array.isArray(existing) ? existing.map((c: any) => c.id) : [])
+    const clashes = configs.filter((c) => taken.has(String(c.id))).map((c) => String(c.id))
+    if (clashes.length) {
+      return sendJson(res, 409, { created: false, error: `config id already exists: ${clashes.join(", ")}`, configs })
+    }
+
+    const created: string[] = []
+    for (const cfg of configs) {
+      const r = await fetch(`${OPTIONX_API}/configs`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(cfg),
+      })
+      if (!r.ok) {
+        return sendJson(res, 502, { created, error: `optionx refused ${cfg.id}: HTTP ${r.status}`, remaining: configs.length - created.length })
+      }
+      created.push(String(cfg.id))
+    }
+    return sendJson(res, 200, {
+      created: true, ids: created, disabled: true,
+      note: "created PAUSED (disabled:true). Enable each one in the Strategies page when you are ready.",
+    })
   }
 
   // ── combined results (basket of runs) ─────────────────────────────────────
