@@ -256,7 +256,27 @@ interface TradeCtx {
   strike: number;
   symbol: string;   // OCC contract actually traded — the log has to name it
 }
+/**
+ * Entry contexts are a pure function of the SIGNAL dimensions — TP and SL are
+ * applied afterwards by simulateDay, which is why a TP/SL surface costs almost
+ * nothing on top of a signal cell. Memoised so a grid can walk every TP/SL
+ * pair for one signal without rebuilding the MA series and re-picking strikes
+ * each time. Key covers everything buildContexts reads that can vary per cell.
+ */
+const ctxMemo = new Map<string, TradeCtx[]>();
+const CTX_MEMO_CAP = 400;   // ~45 sessions x a few signal cells in flight
+
 function buildContexts(target: SymbolTarget, date: string, tf: number, fast: number, slow: number, offsetStrikes: number): TradeCtx[] {
+  const key = `${target.profileId}|${date}|${tf}|${fast}|${slow}|${offsetStrikes}|${SIGNAL}|${SIDES}|${GATE_START_HHMM}|${GATE_END_HHMM}`;
+  const hit = ctxMemo.get(key);
+  if (hit) return hit;
+  const built = buildContextsUncached(target, date, tf, fast, slow, offsetStrikes);
+  if (ctxMemo.size >= CTX_MEMO_CAP) ctxMemo.delete(ctxMemo.keys().next().value as string);
+  ctxMemo.set(key, built);
+  return built;
+}
+
+function buildContextsUncached(target: SymbolTarget, date: string, tf: number, fast: number, slow: number, offsetStrikes: number): TradeCtx[] {
   const c1 = loadDay(target, date, '1m');
   if (!c1?.spxBars?.length) return [];
   const p1 = loadDay(target, prevDate(date), '1m');
@@ -648,35 +668,41 @@ const GRID_GATE = argVal('--grid-gate-start', '') ? argVal('--grid-gate-start', 
 // spot, which at 14:30 is delta 0.99 bid/ask 52.00/52.30 — a synthetic share,
 // not a long-option trade. $25 ITM to $25 OTM spans delta 0.92 down to 0.10;
 // outside that the 0DTE chain is either a 67% spread or has no gamma left.
+const GRID_TP = parseSpan(argVal('--grid-tp', ''));
+const GRID_SL = parseSpan(argVal('--grid-sl', ''));
 const GRID_OFF_D = parseSpan(argVal('--grid-offset-dollars', ''));
 const GRID_OFFSET = GRID_OFF_D
   ? [...new Set(GRID_OFF_D.map(d => Math.round(d / TARGET.strikeInterval)))].sort((a, b) => a - b)
   : parseSpan(argVal('--grid-offset', ''));
 
-if (GRID_MA || GRID_TF || GRID_FAST || GRID_SLOW || GRID_GATE || GRID_OFFSET) {
+if (GRID_MA || GRID_TF || GRID_FAST || GRID_SLOW || GRID_GATE || GRID_OFFSET || GRID_TP || GRID_SL) {
   const mas = (GRID_MA ?? [SIGNAL]) as MaKind[];
   const tfs = GRID_TF ?? [TF];
   const fasts = GRID_FAST ?? [FAST];
   const slows = GRID_SLOW ?? [SLOW];
   const gates = GRID_GATE ?? [GATE_START];
   const offsets = GRID_OFFSET ?? [OFFSET];
+  const tps = GRID_TP ?? [TP_PCT];
+  const sls = GRID_SL ?? [SL_PCT];
   // Equal lengths can never cross, so those cells are always skipped. INVERTED
   // pairs (fast > slow) are a real strategy — the mirror signal — and are
   // included with --grid-invert 1.
   const allowInverted = argVal('--grid-invert', '0') === '1';
-  const cells: Array<[MaKind, number, number, number, string, number]> = [];
-  for (const ma of mas) for (const tf of tfs) for (const f of fasts) for (const sl of slows) for (const g of gates) for (const off of offsets) {
-    if (f === sl) continue;
-    if (!allowInverted && f > sl) continue;
-    cells.push([ma, tf, f, sl, g, off]);
+  // TP/SL last so every pair for one signal cell runs back to back and reuses
+  // that cell's cached contexts — the exit rule is the cheap dimension.
+  const cells: Array<[MaKind, number, number, number, string, number, number, number]> = [];
+  for (const ma of mas) for (const tf of tfs) for (const f of fasts) for (const slw of slows) for (const g of gates) for (const off of offsets) {
+    if (f === slw) continue;
+    if (!allowInverted && f > slw) continue;
+    for (const tp of tps) for (const sl of sls) cells.push([ma, tf, f, slw, g, off, tp, sl]);
   }
-  process.stderr.write(`\n=== grid: ${cells.length} cells (${mas.join('/')} x tf ${tfs.join(',')} x fast ${fasts[0]}-${fasts[fasts.length - 1]} x slow ${slows[0]}-${slows[slows.length - 1]} x gate ${gates.join(',')} x offset ${offsets.map(o => `${o > 0 ? '+' : ''}${o}str/$${o * TARGET.strikeInterval}`).join(',')})\n\n`);
+  process.stderr.write(`\n=== grid: ${cells.length} cells (${mas.join('/')} x tf ${tfs.join(',')} x fast ${fasts[0]}-${fasts[fasts.length - 1]} x slow ${slows[0]}-${slows[slows.length - 1]} x gate ${gates.join(',')} x offset ${offsets.map(o => `${o > 0 ? '+' : ''}${o}str/$${o * TARGET.strikeInterval}`).join(',')} x tp ${tps.join('/')} x sl ${sls.join('/')})\n\n`);
   const t0 = Date.now();
   let done = 0;
-  for (const [ma, tf, f, sl, g, off] of cells) {
-    SIGNAL = ma; TF = tf; FAST = f; SLOW = sl; OFFSET = off;
+  for (const [ma, tf, f, slw, g, off, tp, sl] of cells) {
+    SIGNAL = ma; TF = tf; FAST = f; SLOW = slw; OFFSET = off; TP_PCT = tp; SL_PCT = sl;
     GATE_START = g; GATE_START_HHMM = hhmmToMin(GATE_START, 9 * 60 + 30);
-    try { main(); } catch (e: any) { process.stderr.write(`  cell ${ma} tf${tf} ${f}x${sl} @${g} off${off} FAILED: ${e.message}\n`); }
+    try { main(); } catch (e: any) { process.stderr.write(`  cell ${ma} tf${tf} ${f}x${slw} @${g} off${off} tp${tp}/sl${sl} FAILED: ${e.message}\n`); }
     done++;
     if (done % 25 === 0 || done === cells.length) {
       const per = (Date.now() - t0) / done;
