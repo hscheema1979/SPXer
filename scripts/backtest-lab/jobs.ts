@@ -270,6 +270,36 @@ export function getJob(jobId: string): LabJob | undefined {
   return jobs.get(jobId)
 }
 
+/**
+ * Remove finished jobs from history. Returns what actually happened per id so
+ * the caller can report it rather than assume success.
+ *
+ * A RUNNING job is refused, not force-killed: deleting the row while a child
+ * process still writes into it would leave an orphan writing to a job nobody
+ * can see. Cancel it first, then delete.
+ */
+export function deleteJobs(jobIds: string[]): {
+  deleted: string[]
+  refused: { jobId: string; reason: string }[]
+} {
+  const deleted: string[] = []
+  const refused: { jobId: string; reason: string }[] = []
+  for (const id of jobIds) {
+    const job = jobs.get(id)
+    if (!job) { refused.push({ jobId: id, reason: "unknown job id" }); continue }
+    if (job.status === "running") { refused.push({ jobId: id, reason: "still running — cancel it first" }); continue }
+    if (job.status === "queued") {
+      const q = queues[job.engine]
+      const i = q.indexOf(job)
+      if (i >= 0) q.splice(i, 1)
+    }
+    jobs.delete(id)
+    deleted.push(id)
+  }
+  if (deleted.length) persist()
+  return { deleted, refused }
+}
+
 /** SIGTERM a live job; queued jobs are dropped in place. Terminal jobs: no-op. */
 export function cancelJob(jobId: string): LabJob | undefined {
   const job = jobs.get(jobId)

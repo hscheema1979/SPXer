@@ -475,7 +475,17 @@ export function specToLiveConfig(spec: BacktestSpec, opts: PromoteOptions): Reco
     : spec.exit.tp?.kind === "pricePct" ? 1 + spec.exit.tp.value / 100 : undefined
   const slMult = spec.exit.sl?.kind === "priceMult" ? spec.exit.sl.value
     : spec.exit.sl?.kind === "pricePct" ? 1 - spec.exit.sl.value / 100 : undefined
-  if (tpMult === undefined || slMult === undefined) throw new Error("spec must carry both TP and SL to promote")
+  // TP is required — an OTOCO/OTO always needs an exit leg.
+  //
+  // SL is OPTIONAL. A spec with no stop promotes with stopLossMultiplier: 0,
+  // which optionx reads as "no broker stop": the entry goes out as an OTO
+  // (entry + TP limit) and the only exits are the signal reversal and the
+  // session cutoff. Forcing a made-up stop here instead would be worse than
+  // refusing — validateConfig rejects anything outside [0,1), and
+  // roundOptionTick(0) returns $0.05, so a fabricated "0 stop" would rest a
+  // real order five cents above zero.
+  if (tpMult === undefined) throw new Error("spec must carry a TP to promote")
+  const slForLive = slMult ?? 0
 
   const money = offsetStrikes === 0 ? "atm"
     : `${Math.abs(offsetStrikes) * plumb.strikeInterval}${offsetStrikes < 0 ? "itm" : "otm"}`
@@ -485,7 +495,10 @@ export function specToLiveConfig(spec: BacktestSpec, opts: PromoteOptions): Reco
     `${spec.entry.fast}x${spec.entry.slow}`,
     money,
     `tp${Math.round((tpMult - 1) * 100)}`,
-    `sl${Math.round((1 - slMult) * 100)}`,
+    // "noslI" not "sl100": slForLive===0 means NO broker stop, which is not the
+    // same as a 100% stop. Using slMult here produced "slNaN" when the spec had
+    // no SL at all.
+    slForLive > 0 ? `sl${Math.round((1 - slForLive) * 100)}` : "nosl",
     opts.idSuffix,
   ].filter(Boolean).join("-")
 
@@ -517,7 +530,7 @@ export function specToLiveConfig(spec: BacktestSpec, opts: PromoteOptions): Reco
     },
     risk: {
       takeProfitMultiplier: tpMult,
-      stopLossMultiplier: slMult,
+      stopLossMultiplier: slForLive,
       maxPositions: 1,
       cooldownSec: 0,
       // The backtest's exits are overwhelmingly reversals, not TP — this is the

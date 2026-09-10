@@ -31,7 +31,7 @@ import {
   type ProfileCoverage,
 } from "./contract.ts"
 import { SPXER_ROOT, buildCapabilities, coverageFor, optionSourceFor } from "./capabilities.ts"
-import { initJobs, enqueueJob, listJobs, getJob, cancelJob, jobResultPayload, combinedResultPayload } from "./jobs.ts"
+import { initJobs, enqueueJob, listJobs, getJob, cancelJob, deleteJobs, jobResultPayload, combinedResultPayload } from "./jobs.ts"
 import { listSpecs, upsertSpec, deleteSpec } from "./specs.ts"
 
 const PORT = Number.parseInt(process.env.LAB_PORT ?? "3702", 10)
@@ -151,6 +151,25 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
   }
 
   // ── run (validate → upsert spec → queue) ────────────────────────────────
+  // DELETE /api/jobs/:id  — remove one finished run from history.
+  const delOne = /^\/api\/jobs\/([^/]+)$/.exec(p)
+  if (delOne && method === "DELETE") {
+    const r = deleteJobs([delOne[1]])
+    if (!r.deleted.length) return sendJson(res, 409, { error: r.refused[0]?.reason ?? "not deleted", ...r })
+    return sendJson(res, 200, r)
+  }
+
+  // POST /api/jobs/delete  {jobIds:[...]}  — bulk. Partial success is reported,
+  // not swallowed: `deleted` and `refused` both come back so the UI can say
+  // which rows survived and why.
+  if (p === "/api/jobs/delete" && method === "POST") {
+    const body = parseJsonBody(await readBody(req))
+    if (!body.ok) return sendJson(res, (body as any).status ?? 400, { error: body.error })
+    const ids = (body.value as any)?.jobIds
+    if (!Array.isArray(ids) || !ids.length) return sendJson(res, 400, { error: "body must be { jobIds: string[] }" })
+    return sendJson(res, 200, deleteJobs(ids.map(String)))
+  }
+
   if (p === "/api/run" && method === "POST") {
     const body = parseJsonBody(await readBody(req))
     if (!body.ok) return sendJson(res, (body as any).status ?? 400, { error: body.error })
