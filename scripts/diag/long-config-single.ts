@@ -542,7 +542,7 @@ function main() {
 
   // Append/dedup-by-configId to long-sweep-<ticker>.json.
   const OUT_DIR = path.join(process.cwd(), 'scripts/autoresearch/output');
-  const outFile = path.join(OUT_DIR, `long-sweep-${TICKER}.json`);
+  const outFile = path.join(OUT_DIR, `long-sweep-${TICKER}${OUT_SUFFIX}.json`);
   let existing: any[] = [];
   if (fs.existsSync(outFile)) {
     try { existing = JSON.parse(fs.readFileSync(outFile, 'utf8')); } catch {}
@@ -590,7 +590,14 @@ function main() {
   // Key shape mirrors hma3m-to-dashboard.ts:354 — `long::${signal}::${money}::TP${tp}/SL${sl}`
   // (also matches variantKey() in spxer-studio components/spreads/utils.ts).
   const variantKey = `long::${dashSignal}::${money}::TP${TP_PCT}/SL${SL_PCT}`;
-  const dailyFile = path.join(OUT_DIR, `long-daily-${TICKER}.json`);
+  // The daily-series file is a read-modify-write of every variant ever run; at
+  // grid scale that is the dominant I/O and nothing in the review table needs
+  // it, so --no-daily skips it.
+  if (NO_DAILY) {
+    process.stdout.write(JSON.stringify({ configId, row }) + '\n');
+    return;
+  }
+  const dailyFile = path.join(OUT_DIR, `long-daily-${TICKER}${OUT_SUFFIX}.json`);
   let dailyBlob: { dates: string[]; series: { [k: string]: number[] } } = { dates: [], series: {} };
   if (fs.existsSync(dailyFile)) {
     try {
@@ -668,6 +675,15 @@ const GRID_GATE = argVal('--grid-gate-start', '') ? argVal('--grid-gate-start', 
 // spot, which at 14:30 is delta 0.99 bid/ask 52.00/52.30 — a synthetic share,
 // not a long-option trade. $25 ITM to $25 OTM spans delta 0.92 down to 0.10;
 // outside that the 0DTE chain is either a 67% spread or has no gamma left.
+// Sharding: 8 processes read-modify-writing ONE json would clobber each
+// other, so each shard writes its own file and a merge step folds them.
+// --shard i/N takes every Nth cell starting at i.
+const SHARD = (() => {
+  const m = /^(\d+)\/(\d+)$/.exec(argVal('--shard', ''));
+  return m ? { i: +m[1], n: +m[2] } : null;
+})();
+const OUT_SUFFIX = argVal('--out-suffix', '');
+const NO_DAILY = process.argv.includes('--no-daily');
 const GRID_TP = parseSpan(argVal('--grid-tp', ''));
 const GRID_SL = parseSpan(argVal('--grid-sl', ''));
 const GRID_OFF_D = parseSpan(argVal('--grid-offset-dollars', ''));
@@ -696,20 +712,21 @@ if (GRID_MA || GRID_TF || GRID_FAST || GRID_SLOW || GRID_GATE || GRID_OFFSET || 
     if (!allowInverted && f > slw) continue;
     for (const tp of tps) for (const sl of sls) cells.push([ma, tf, f, slw, g, off, tp, sl]);
   }
-  process.stderr.write(`\n=== grid: ${cells.length} cells (${mas.join('/')} x tf ${tfs.join(',')} x fast ${fasts[0]}-${fasts[fasts.length - 1]} x slow ${slows[0]}-${slows[slows.length - 1]} x gate ${gates.join(',')} x offset ${offsets.map(o => `${o > 0 ? '+' : ''}${o}str/$${o * TARGET.strikeInterval}`).join(',')} x tp ${tps.join('/')} x sl ${sls.join('/')})\n\n`);
+  const mine = SHARD ? cells.filter((_, ix) => ix % SHARD.n === SHARD.i) : cells;
+  process.stderr.write(`\n=== grid: ${mine.length}${SHARD ? `/${cells.length} (shard ${SHARD.i}/${SHARD.n})` : ''} cells (${mas.join('/')} x tf ${tfs.join(',')} x fast ${fasts[0]}-${fasts[fasts.length - 1]} x slow ${slows[0]}-${slows[slows.length - 1]} x gate ${gates.join(',')} x offset ${offsets.map(o => `${o > 0 ? '+' : ''}${o}str/$${o * TARGET.strikeInterval}`).join(',')} x tp ${tps.join('/')} x sl ${sls.join('/')})\n\n`);
   const t0 = Date.now();
   let done = 0;
-  for (const [ma, tf, f, slw, g, off, tp, sl] of cells) {
+  for (const [ma, tf, f, slw, g, off, tp, sl] of mine) {
     SIGNAL = ma; TF = tf; FAST = f; SLOW = slw; OFFSET = off; TP_PCT = tp; SL_PCT = sl;
     GATE_START = g; GATE_START_HHMM = hhmmToMin(GATE_START, 9 * 60 + 30);
     try { main(); } catch (e: any) { process.stderr.write(`  cell ${ma} tf${tf} ${f}x${slw} @${g} off${off} tp${tp}/sl${sl} FAILED: ${e.message}\n`); }
     done++;
-    if (done % 25 === 0 || done === cells.length) {
+    if (done % 25 === 0 || done === mine.length) {
       const per = (Date.now() - t0) / done;
-      process.stderr.write(`  ${done}/${cells.length} cells  ${(per).toFixed(0)}ms/cell  eta ${(((cells.length - done) * per) / 1000).toFixed(0)}s\n`);
+      process.stderr.write(`  ${done}/${mine.length} cells  ${(per).toFixed(0)}ms/cell  eta ${(((mine.length - done) * per) / 60000).toFixed(1)}min\n`);
     }
   }
-  process.stderr.write(`\n=== grid done: ${cells.length} cells in ${((Date.now() - t0) / 1000).toFixed(1)}s\n`);
+  process.stderr.write(`\n=== grid done: ${mine.length} cells in ${((Date.now() - t0) / 60000).toFixed(1)} min\n`);
 } else {
   main();
 }
