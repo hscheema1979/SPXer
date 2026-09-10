@@ -30,7 +30,7 @@ import {
   type ProfileCoverage,
 } from "./contract.ts"
 import { SPXER_ROOT, buildCapabilities, coverageFor, optionSourceFor } from "./capabilities.ts"
-import { initJobs, enqueueJob, listJobs, getJob, cancelJob, jobResultPayload } from "./jobs.ts"
+import { initJobs, enqueueJob, listJobs, getJob, cancelJob, jobResultPayload, combinedResultPayload } from "./jobs.ts"
 import { listSpecs, upsertSpec, deleteSpec } from "./specs.ts"
 
 const PORT = Number.parseInt(process.env.LAB_PORT ?? "3702", 10)
@@ -184,6 +184,22 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
   }
 
   // ── results ───────────────────────────────────────────────────────────────
+  // ── combined results (basket of runs) ─────────────────────────────────────
+  // GET /api/results/combine?jobIds=a,b,c[&sizeMode=&sizeValue=&slFrac=]
+  // Registered BEFORE /api/results/:jobId so "combine" is not read as an id.
+  if (p === "/api/results/combine" && method === "GET") {
+    const ids = (url.searchParams.get("jobIds") ?? "").split(",").map((x) => x.trim()).filter(Boolean)
+    if (ids.length < 2) return sendJson(res, 400, { error: "jobIds must list at least 2 job ids" })
+    if (ids.length > 8) return sendJson(res, 400, { error: "at most 8 runs can be combined" })
+    const modeRaw = url.searchParams.get("sizeMode")
+    const valueRaw = Number(url.searchParams.get("sizeValue"))
+    const sizing =
+      (modeRaw === "contracts" || modeRaw === "dollars" || modeRaw === "risk") && Number.isFinite(valueRaw) && valueRaw > 0
+        ? { mode: modeRaw, value: valueRaw, slFrac: Number(url.searchParams.get("slFrac")) || undefined }
+        : undefined
+    return sendJson(res, 200, combinedResultPayload(ids, sizing))
+  }
+
   const resultMatch = /^\/api\/results\/([^/]+)$/.exec(p)
   if (resultMatch && method === "GET") {
     // Optional sizing view: ?sizeMode=contracts|dollars|risk&sizeValue=N[&slFrac=0.2]

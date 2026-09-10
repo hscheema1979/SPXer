@@ -303,6 +303,8 @@ export function cancelJob(jobId: string): LabJob | undefined {
 /** job.result plus a spec summary for the studio result panel. */
 /** One fill, engine-agnostic — the runs page renders exactly these columns. */
 export interface TradeRow {
+  /** Which run this fill came from — set only in a combined payload. */
+  leg?: string
   entry: string        // "2026-09-02 14:04"
   exit: string
   instrument: string   // OCC contract for options, the ticker for shares
@@ -514,6 +516,62 @@ function analyzeTrades(trades: TradeRow[]): RunAnalytics {
       maxDrawdownDaily: r2(maxDrawdownDaily),
       avgHold: n ? r2(hold / n) : 0,
     },
+  }
+}
+
+/**
+ * Combine several finished runs into one basket.
+ *
+ * Trading three strikes on one signal is not three copies of the same trade:
+ * the signal is offset-independent, but the per-offset filters (strike found,
+ * the contract's own MA direction, min price, min volume) can disqualify a leg
+ * at a given signal. Measured on 5 sessions at offsets -1/0/+1: 134 entries
+ * common to all three, 3 unique to the ITM leg. So the union of the stored
+ * fills IS what the basket would have done — take whichever legs qualified —
+ * and no re-run is needed, for the same reason position sizing needs none:
+ * basket composition does not move an entry or an exit.
+ *
+ * Each fill is tagged with its leg so the breakdown can show what each strike
+ * contributed. Jobs with no artifact are reported in `missing` rather than
+ * silently dropped, because a basket short a leg is a different basket.
+ */
+export function combinedResultPayload(jobIds: string[], sizing?: SizingOverride): {
+  jobIds: string[]
+  legs: Array<{ jobId: string; label: string; n: number; pnl: number }>
+  missing: string[]
+  trades: TradeRow[]
+  tradesPnl: number
+  analytics?: RunAnalytics
+  sizing?: SizingOverride & { unaffordable: number }
+} {
+  const legs: Array<{ jobId: string; label: string; n: number; pnl: number }> = []
+  const missing: string[] = []
+  let all: TradeRow[] = []
+
+  for (const jobId of jobIds) {
+    const job = jobs.get(jobId)
+    if (!job) { missing.push(jobId); continue }
+    const log = tradesFromArtifact(job)
+    if (!log || !log.trades.length) { missing.push(jobId); continue }
+    // Short leg label: the moneyness the run traded, else the job id tail.
+    const off = (job.spec?.structure as { offset?: number } | undefined)?.offset
+    const label = off === undefined
+      ? jobId.slice(-6)
+      : off === 0 ? "ATM" : `${Math.abs(off)}${off < 0 ? "ITM" : "OTM"}`
+    const tagged = log.trades.map((t) => ({ ...t, leg: label }))
+    legs.push({ jobId, label, n: tagged.length, pnl: log.tradesPnl })
+    all = all.concat(tagged)
+  }
+
+  if (!all.length) return { jobIds, legs, missing, trades: [], tradesPnl: 0 }
+
+  const sized = sizing ? applySizing(all, sizing) : undefined
+  const trades = (sized ? sized.trades : all).sort((a, b) => (a.entry < b.entry ? -1 : a.entry > b.entry ? 1 : 0))
+  const tradesPnl = +trades.reduce((acc, t) => acc + t.pnl, 0).toFixed(2)
+  return {
+    jobIds, legs, missing, trades, tradesPnl,
+    analytics: analyzeTrades(trades),
+    sizing: sizing ? { ...sizing, unaffordable: sized!.unaffordable } : undefined,
   }
 }
 
