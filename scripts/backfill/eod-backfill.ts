@@ -28,10 +28,12 @@ import * as dotenv from 'dotenv';
 dotenv.config();
 import * as path from 'path';
 import * as fs from 'fs';
+import { MARKET_HOLIDAYS } from '../../src/config';
 import {
   fetchOptionBars, expiryForDate, type PolygonBar,
 } from './backfill-replay-options';
 import { writeDayParquet, type BarRow } from '../../src/storage/parquet-writer';
+import { isTradingDay } from '../../src/instruments/expiry-resolver';
 
 const PARQUET_ROOT = path.resolve(__dirname, '../../data/parquet/bars');
 
@@ -59,6 +61,8 @@ const ROSTER: RosterEntry[] = [
   { profileId: 'ndx-0dte', underlyingDbSymbol: 'NDX', underlyingPolygonTicker: 'I:NDX', optionPrefix: 'NDXP', strikeInterval: 10, bandHalfWidthDollars: 500, dte: 0 },
   { profileId: 'spy-1dte', underlyingDbSymbol: 'SPY', underlyingPolygonTicker: 'SPY',   optionPrefix: 'SPY',  strikeInterval: 1,  bandHalfWidthDollars: 10,  dte: 1 },
   { profileId: 'qqq-1dte', underlyingDbSymbol: 'QQQ', underlyingPolygonTicker: 'QQQ',   optionPrefix: 'QQQ',  strikeInterval: 1,  bandHalfWidthDollars: 10,  dte: 1 },
+  // XSP = SPX/10 (verified 2026-09-10: Polygon serves I:XSP and O:XSP… 1m aggs). Band mirrors SPX's ±20 strikes.
+  { profileId: 'xsp-0dte', underlyingDbSymbol: 'XSP', underlyingPolygonTicker: 'I:XSP', optionPrefix: 'XSP',  strikeInterval: 1,  bandHalfWidthDollars: 20,  dte: 0 },
 ];
 
 // ── Date helpers ──────────────────────────────────────────────────────────────
@@ -78,12 +82,19 @@ function lastWeekday(): string {
   return d.toISOString().slice(0, 10);
 }
 
-function tradingDays(from: string, to: string): string[] {
+/**
+ * Trading days in [from, to] — weekends AND market holidays excluded. Before
+ * 2026-09-10 this skipped weekends only, so on a holiday the run asked Polygon
+ * for a day that does not exist, got a soft "no underlying — skip", and still
+ * reported Done. Holidays come from src/config MARKET_HOLIDAYS (injectable
+ * for tests).
+ */
+export function tradingDays(from: string, to: string, holidays?: ReadonlySet<string>): string[] {
   const out: string[] = [];
   const s = new Date(from + 'T12:00:00Z'), e = new Date(to + 'T12:00:00Z');
   for (let d = new Date(s); d <= e; d.setDate(d.getDate() + 1)) {
-    const dow = d.getUTCDay();
-    if (dow !== 0 && dow !== 6) out.push(d.toISOString().slice(0, 10));
+    const day = d.toISOString().slice(0, 10);
+    if (isTradingDay(day, holidays)) out.push(day);
   }
   return out;
 }
@@ -147,14 +158,21 @@ async function backfillOne(entry: RosterEntry, date: string, force: boolean): Pr
   if (!force && fs.existsSync(outFp)) return `${entry.profileId} ${date}: skip (exists)`;
 
   const under = await fetchPolygonUnderlying(entry.underlyingPolygonTicker, entry.underlyingDbSymbol, date);
-  if (!under.length) return `${entry.profileId} ${date}: ⚠ no underlying (holiday/no-data) — skip`;
+  // `date` is a trading day by construction (tradingDays() is holiday-aware),
+  // so an empty underlying series is a feed problem, not a closed market.
+  if (!under.length) throw new Error(`no underlying bars from Polygon on a trading day`);
 
   // Strike band from last RTH underlying close.
   const close = Number(under[under.length - 1].close);
   const base = Math.round(close / entry.strikeInterval) * entry.strikeInterval;
   const lo = base - entry.bandHalfWidthDollars;
   const hi = base + entry.bandHalfWidthDollars;
-  const expiry = expiryForDate(date, entry.dte);
+  // Pass the holiday set. Without it nextTradingDay only skips weekends, so a
+  // Friday before a Monday holiday resolved its 1DTE expiry TO the holiday —
+  // a date with no listed options — and the day was dropped with
+  // "underlying only, no option data". 14 such entry dates exist between
+  // 2025-04 and 2026-09 (every pre-holiday session), e.g. 2026-09-04 -> Labor Day.
+  const expiry = expiryForDate(date, entry.dte, MARKET_HOLIDAYS);
 
   const rows: BarRow[] = [...under];
   let withData = 0, optBars = 0;
@@ -196,16 +214,56 @@ async function main() {
   console.log(`  ${dates.length} day(s): ${startDate} → ${endDate}${force ? '  [--force]' : ''}`);
   console.log(`${'═'.repeat(64)}\n`);
 
+  // Failures are COUNTED, not just printed. Before this, a profile that threw
+  // (e.g. "Polygon not authorized for I:SPX") was logged with a ✗ and main()
+  // still resolved, so the process exited 0 and eod-pipeline.sh's
+  // `if npx tsx ... ; then log "backfill OK"` branch fired. That combination
+  // reported "candlesticks downloaded ✓" every weekday from 2026-07-15 while
+  // writing nothing — the only SPX data landing was live-capture's flat mids.
+  // A backfill that wrote no day for a requested profile is a FAILURE.
+  const failures: string[] = [];
+
+  // An empty roster or date list means the request selected nothing — e.g. a
+  // typo'd --only=. Silently "succeeding" on zero work is the same class of
+  // bug as swallowing the throw, so refuse it.
+  if (!roster.length) {
+    console.error(`  REFUSED — --only=${onlyFlag ?? ''} matched no profile. Known: ${ROSTER.map(r => r.profileId).join(', ')}`);
+    process.exitCode = 1;
+    return;
+  }
+  if (endDate < startDate) {
+    console.error(`  REFUSED — end ${endDate} is before start ${startDate}`);
+    process.exitCode = 1;
+    return;
+  }
+  if (!dates.length) {
+    // A valid range that contains only weekends/holidays is a legitimate
+    // no-op (the nightly cron fires on holidays too), not a failure.
+    console.log(`  SKIP — no trading days in ${startDate} → ${endDate} (weekend/holiday)`);
+    return;
+  }
+
   for (const date of dates) {
     for (const entry of roster) {
       try {
         console.log('  ' + await backfillOne(entry, date, force));
       } catch (e: any) {
         console.log(`  ${entry.profileId} ${date}: ✗ ${e?.message || e}`);
+        failures.push(`${entry.profileId} ${date}: ${e?.message || e}`);
       }
     }
   }
-  console.log(`\n${'═'.repeat(64)}\n  Done.\n${'═'.repeat(64)}\n`);
+
+  console.log(`\n${'═'.repeat(64)}`);
+  if (failures.length) {
+    console.log(`  FAILED — ${failures.length}/${dates.length * roster.length} profile-days wrote nothing:`);
+    for (const f of failures.slice(0, 20)) console.log(`    ✗ ${f}`);
+    if (failures.length > 20) console.log(`    … and ${failures.length - 20} more`);
+    console.log(`${'═'.repeat(64)}\n`);
+    process.exitCode = 1;
+    return;
+  }
+  console.log(`  Done — ${dates.length * roster.length} profile-day(s) OK.\n${'═'.repeat(64)}\n`);
 }
 
 if (require.main === module) {

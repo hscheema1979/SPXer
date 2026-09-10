@@ -56,8 +56,15 @@ log "=== EOD pipeline start (ET $(TZ=America/New_York date +%H:%M) | today=$TODA
 # ─────────────────────────────────────────────────────────────────────────────
 # PHASE 1: BACKFILL (critical — candlesticks MUST be downloaded)
 # ─────────────────────────────────────────────────────────────────────────────
-log "[PHASE 1] backfill spx-0dte,ndx-0dte $TODAY"
-if npx tsx scripts/backfill/eod-backfill.ts "$TODAY" --only=spx-0dte,ndx-0dte --force >> "$LOG" 2>&1; then
+# spy-1dte/qqq-1dte were NOT in this list, so nothing backfilled them after
+# 2026-05-06 / 2026-05-14. The live-capture daemon kept writing (mids,
+# open=high=low=close, volume 0) and the profiles silently went range-less —
+# the same failure that hit spx-0dte, arrived by a different route.
+# eod-backfill now exits non-zero when a profile writes nothing, so a lapsed
+# entitlement on any of these aborts PHASE 1 loudly instead of logging OK.
+BACKFILL_PROFILES="${BACKFILL_PROFILES:-spx-0dte,ndx-0dte,spy-1dte,qqq-1dte,xsp-0dte}"
+log "[PHASE 1] backfill $BACKFILL_PROFILES $TODAY"
+if npx tsx scripts/backfill/eod-backfill.ts "$TODAY" --only="$BACKFILL_PROFILES" --force >> "$LOG" 2>&1; then
   log "[PHASE 1] backfill OK — candlesticks downloaded ✓"
 else
   log "[PHASE 1] backfill FAILED — CRITICAL, exiting"

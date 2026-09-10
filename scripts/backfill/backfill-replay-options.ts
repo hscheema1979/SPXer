@@ -27,6 +27,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as duckdb from 'duckdb';
 import { writeDayParquet, EXPORT_COLUMNS, type BarRow } from '../../src/storage/parquet-writer';
+import { nextTradingDay } from '../../src/instruments/expiry-resolver';
 
 const PARQUET_ROOT = path.resolve(__dirname, '../../data/parquet/bars');
 
@@ -206,20 +207,19 @@ function makeDbSymbol(prefix: string, expiry: string, side: 'C' | 'P', strike: n
 }
 
 /**
- * Resolve the option expiry for a trade date + DTE. Weekend-aware (skips
- * Sat/Sun). Holidays aren't modeled — a holiday expiry just yields no
- * Polygon data (skipped), acceptable for a backfill.
+ * Resolve the option expiry for a trade date + DTE: `dte` trading days ahead,
+ * skipping weekends AND market holidays (src/config MARKET_HOLIDAYS unless a
+ * set is injected). Until 2026-09-10 this skipped weekends only, so the day
+ * before every holiday resolved its 1DTE expiry TO the holiday — a date with
+ * no listed options — and was dropped as "underlying only". 14 such sessions
+ * were missing from spy-1dte/qqq-1dte (2025-04-17 … 2026-09-04).
+ * NOTE: scripts/ are not covered by `tsc` (rootDir=src), so an extra argument
+ * here is not a type error — keep the signature and the test in step.
  */
-export function expiryForDate(date: string, dte: number): string {
-  if (dte <= 0) return date;
-  const dt = new Date(date + 'T12:00:00Z');
-  let added = 0;
-  while (added < dte) {
-    dt.setUTCDate(dt.getUTCDate() + 1);
-    const dow = dt.getUTCDay();
-    if (dow !== 0 && dow !== 6) added++;
-  }
-  return dt.toISOString().slice(0, 10);
+export function expiryForDate(date: string, dte: number, holidays?: ReadonlySet<string>): string {
+  let d = date;
+  for (let i = 0; i < dte; i++) d = nextTradingDay(d, holidays);
+  return d;
 }
 
 // ── Underlying from 0DTE parquet (sets strike band + carried into the file) ────

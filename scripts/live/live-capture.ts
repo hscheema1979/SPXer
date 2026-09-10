@@ -38,6 +38,7 @@ import { CAPTURE_INSTRUMENTS, RTH_START_ET, type CaptureInstrument } from '../..
 import { bsDelta, impliedVolFromMid } from '../../src/live/bs';
 import { writeDaySnapshots, SNAPSHOT_COLUMNS, type SnapshotRow } from '../../src/storage/snapshot-writer';
 import { writeDayParquet, type BarRow } from '../../src/storage/parquet-writer';
+import { barWritesEnabled, captureSkipReason } from '../../src/live/capture-guard';
 
 const POLL_MS = 60_000;
 const FLUSH_EVERY_MS = 5 * 60_000;
@@ -219,12 +220,28 @@ async function flushProfile(db: Database.Database, profileId: string, date: stri
     });
   }
 
+  // ── BAR WRITES ARE OFF BY DEFAULT (2026-09-10) ──────────────────────────
+  // This daemon and scripts/backfill/eod-backfill.ts both targeted
+  // data/parquet/bars/{profile}/. The daemon runs all session and flushes
+  // last, so it always won for the current day: every night the EOD backfill
+  // wrote real Polygon OHLC and the next session's capture overwrote it with
+  // these rows — open=high=low=close=mid, volume 0 (Tradier is a snapshot API,
+  // not a tick feed). The backtest engine reads that profile, so it was
+  // silently fed range-less bars; TP/SL touch tests had nothing to detect.
+  // Bars are now owned solely by the EOD backfill. Snapshots (bid/ask +
+  // greeks) are this daemon's real product and still write above.
+  // The live handler is unaffected: optionx fetches its own 1-minute bars from
+  // Tradier /v1/markets/timesales over HTTP (src/shared/market-data.ts) and
+  // never reads this parquet.
+  // Set LIVE_CAPTURE_WRITE_BARS=1 to restore the old behaviour.
+  const writeBars = barWritesEnabled();
   let barRes = { rowCount: 0 };
-  if (bars.length > 0) {
+  if (writeBars && bars.length > 0) {
     barRes = await writeDayParquet({ profileId, date, rows: bars });
   }
   console.log(
-    `[flush] ${profileId}: snapshots=${snapRes.rowCount} (${(snapRes.fileSize / 1024).toFixed(0)}KB), bars=${barRes.rowCount}`
+    `[flush] ${profileId}: snapshots=${snapRes.rowCount} (${(snapRes.fileSize / 1024).toFixed(0)}KB), ` +
+    (writeBars ? `bars=${barRes.rowCount}` : `bars=SKIPPED (${bars.length} built; EOD backfill owns bars)`)
   );
 }
 
@@ -253,6 +270,15 @@ async function main() {
   const endMin = Math.max(...CAPTURE_INSTRUMENTS.map((i) => parseET(i.rthEndET)));
 
   const date = todayET();
+  // Non-trading-day guard (2026-09-10). Until now the only gate was the time
+  // of day, so on Labor Day 2026 the daemon polled a dead chain all session and
+  // wrote 154,224 flat rows (data/parquet/quarantine/). Exit before opening
+  // the spool so a holiday leaves no file behind at all.
+  const skip = captureSkipReason(date);
+  if (skip) {
+    console.log(`[capture] ${skip} — not a trading day, nothing to capture`);
+    return;
+  }
   const db = openDb(date);
   console.log(`[capture] start ${date}  instruments=${CAPTURE_INSTRUMENTS.map((i) => i.profileId).join(',')}  once=${ONCE}`);
 

@@ -17,6 +17,7 @@ import * as path from 'path';
 import { readBarCacheFile, writeBarCacheFile } from '../../src/replay/bar-cache-file';
 import { loadBarCacheFromParquetSync } from '../../src/storage/parquet-reader-sync';
 import { buildSymbolRange } from '../../src/replay/metrics';
+import { nextTradingDay } from '../../src/instruments/expiry-resolver';
 
 export interface SymbolTarget {
   symbol: string;          // 'SPX' | 'SPY' | 'QQQ'
@@ -102,14 +103,50 @@ export function resolveSymbolTarget(argv: string[]): SymbolTarget {
   return { symbol: base.symbol, dte, profileId, optionPrefix: base.optionPrefix, outSuffix, strikeInterval: base.strikeInterval };
 }
 
-/** List trading dates available in this symbol's parquet dir. */
-export function listDatesFor(t: SymbolTarget): string[] {
-  const dir = path.join(process.cwd(), 'data/parquet/bars', t.profileId);
+/** Root of the per-profile parquet tree — same env override the reader honours. */
+function barsRoot(): string {
+  return path.resolve(process.cwd(), process.env.PARQUET_ROOT || 'data/parquet/bars');
+}
+
+/**
+ * Archive profile that holds the pre-live history for a profile. spx-0dte
+ * covers 2025-03-27 → present; spx-0dte-hist is the Polygon flat-file archive
+ * for 2022-09-01 → 2025-03-26 (612 sessions, same schema). The resolver
+ * derives profileId as `${sym}-${dte}dte`, so the archive was unreachable by
+ * every sweep until this fallback (docs/DATA-STORES.md).
+ */
+export function histProfileId(profileId: string): string {
+  return `${profileId}-hist`;
+}
+
+/** Dates present in one profile dir (YYYY-MM-DD, sorted). */
+function datesInProfile(profileId: string): string[] {
+  const dir = path.join(barsRoot(), profileId);
   if (!fs.existsSync(dir)) return [];
-  const all = fs.readdirSync(dir)
+  return fs.readdirSync(dir)
     .filter(f => /^\d{4}-\d{2}-\d{2}\.parquet$/.test(f))
     .map(f => f.slice(0, 10))
     .sort();
+}
+
+/** Is the archive profile merged into the date list? Opt-in: SWEEP_HIST=1. */
+export function histEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.SWEEP_HIST === '1';
+}
+
+/**
+ * List trading dates available for this symbol.
+ *
+ * The `-hist` archive is merged ONLY when SWEEP_HIST=1. It is opt-in because
+ * the nightly incremental sweeps call this too, and silently adding 612
+ * sessions would turn a 30-second incremental run into a multi-hour full
+ * recompute. The live profile wins on a date present in both.
+ */
+export function listDatesFor(t: SymbolTarget): string[] {
+  const live = datesInProfile(t.profileId);
+  const all = histEnabled()
+    ? Array.from(new Set([...datesInProfile(histProfileId(t.profileId)), ...live])).sort()
+    : live;
   // SWEEP_DAYS=N → only the most-recent N trading days. credit-spread-sweep,
   // iron-sweep AND concurrent-distribution all import this fn, so the subset
   // stays identical across them — used to validate the whole pipeline before
@@ -124,17 +161,31 @@ export function listDatesFor(t: SymbolTarget): string[] {
  * sweeps already consume: { spxBars, contractBars, contractStrikes }.
  * `spxBars` is the underlying series regardless of symbol (legacy field name).
  */
-// Weekend-aware next-trading-day (holidays not modeled — matches backfill).
-function expiryForDate(date: string, dte: number): string {
-  if (dte <= 0) return date;
-  const dt = new Date(date + 'T12:00:00Z');
-  let added = 0;
-  while (added < dte) {
-    dt.setUTCDate(dt.getUTCDate() + 1);
-    const dow = dt.getUTCDay();
-    if (dow !== 0 && dow !== 6) added++;
+/**
+ * Expiry for a trade date: `dte` trading days ahead, skipping weekends AND
+ * market holidays. Until 2026-09-10 this skipped weekends only, so on the day
+ * before a holiday it built a symbol range for an expiry that never listed
+ * (Fri 2026-09-04 → Mon 09-07 Labor Day instead of Tue 09-08) and loaded zero
+ * contracts. Must stay in step with the backfill's expiry logic.
+ */
+export function expiryForDate(date: string, dte: number, holidays?: ReadonlySet<string>): string {
+  let d = date;
+  for (let i = 0; i < dte; i++) d = nextTradingDay(d, holidays);
+  return d;
+}
+
+/**
+ * Which profile dir holds `date` for this target: the live profile if the file
+ * exists there, else the `-hist` archive, else null. The fallback is always on
+ * (unlike listDatesFor's merge) — a caller that names an archive date
+ * explicitly gets it, and a date that exists nowhere still returns null.
+ */
+export function resolveDayFile(t: SymbolTarget, date: string): { profileId: string; fp: string } | null {
+  for (const profileId of [t.profileId, histProfileId(t.profileId)]) {
+    const fp = path.join(barsRoot(), profileId, `${date}.parquet`);
+    if (fs.existsSync(fp)) return { profileId, fp };
   }
-  return dt.toISOString().slice(0, 10);
+  return null;
 }
 
 // Process-level memo: a grid sweep asks for the same (profile,date,tf) once per
@@ -161,15 +212,15 @@ function loadDayUncached(t: SymbolTarget, date: string, tf: string): any {
     const cached = readBarCacheFile(date, tf, true) as any;
     if (cached && cached.spxBars && cached.spxBars.length) return cached;
   }
-  const fp = path.join(process.cwd(), 'data/parquet/bars', t.profileId, `${date}.parquet`);
-  if (!fs.existsSync(fp)) return null;
+  const src = resolveDayFile(t, date);
+  if (!src) return null;
   const dayStart = Math.floor(new Date(`${date}T00:00:00Z`).getTime() / 1000);
   const dayEnd = dayStart + 86400 - 1;
   // Contract symbols embed the EXPIRY date. For 1DTE that's the next trading
   // day, not the trade date — build the range off the expiry.
   const range = buildSymbolRange(expiryForDate(date, t.dte), t.optionPrefix);
   const built = loadBarCacheFromParquetSync({
-    profileId: t.profileId,
+    profileId: src.profileId,
     date,
     underlyingSymbol: t.symbol,
     symbolRange: { lo: range.lo, hi: range.hi },
