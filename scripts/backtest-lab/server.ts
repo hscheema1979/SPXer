@@ -256,6 +256,8 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     }
 
     const created: string[] = []
+    const stopped: string[] = []
+    const stillRunning: string[] = []
     for (const cfg of configs) {
       const r = await fetch(`${OPTIONX_API}/configs`, {
         method: "POST",
@@ -266,10 +268,24 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
         return sendJson(res, 502, { created, error: `optionx refused ${cfg.id}: HTTP ${r.status}`, remaining: configs.length - created.length })
       }
       created.push(String(cfg.id))
+
+      // disabled:true stops it TRADING but not RUNNING: reloadEcosystem starts
+      // the pm2 handler unconditionally and never reads the flag, so a freshly
+      // created config gets a live handler that skips every tick. Calling the
+      // pause endpoint is what actually stops the process — and because a new
+      // config has no open positions, that endpoint takes its pm2-stop branch
+      // rather than its drain branch.
+      const pr = await fetch(`${OPTIONX_API}/configs/${encodeURIComponent(String(cfg.id))}/pause`, { method: "POST" })
+        .then((x) => x.json())
+        .catch(() => null)
+      if (pr && (pr as any).stopped !== false) stopped.push(String(cfg.id))
+      else stillRunning.push(String(cfg.id))
     }
     return sendJson(res, 200, {
-      created: true, ids: created, disabled: true,
-      note: "created PAUSED (disabled:true). Enable each one in the Strategies page when you are ready.",
+      created: true, ids: created, disabled: true, stopped, stillRunning,
+      note: stillRunning.length
+        ? `created paused; ${stillRunning.join(", ")} still have a running handler — check them in the Strategies page`
+        : "created PAUSED and STOPPED. Enable each one in the Strategies page when you are ready.",
     })
   }
 
