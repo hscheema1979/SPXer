@@ -7973,5 +7973,28 @@
       "vol_low",
       "trend_day"
     ]
+  },
+  {
+    "date": "2026-09-09",
+    "gapPct": -0.24346941370978295,
+    "gapBucket": "down_tiny",
+    "gapDir": "down",
+    "dayRangePct": 0.6456688309083419,
+    "bodyPct": 0.1693044849369979,
+    "trendiness": 0.26221566975568017,
+    "orRangePct": 0.4875153240956925,
+    "orBreak": "none",
+    "rvol": 0.6883224419086504,
+    "rvolPctile": 0.16666666666666666,
+    "trend20": "below",
+    "gapFilled": true,
+    "primary": "quiet_range",
+    "tags": [
+      "gap_down_tiny",
+      "gap_filled",
+      "trend20_below",
+      "vol_low",
+      "chop_day"
+    ]
   }
 ]
