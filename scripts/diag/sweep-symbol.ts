@@ -137,7 +137,22 @@ function expiryForDate(date: string, dte: number): string {
   return dt.toISOString().slice(0, 10);
 }
 
+// Process-level memo: a grid sweep asks for the same (profile,date,tf) once per
+// combo, and re-decoding the day each time dwarfs the simulation. Keyed by the
+// three things that determine the payload; a finished day never changes.
+const dayMemo = new Map<string, any>();
+const DAY_MEMO_CAP = 8;   // a sweep walks dates in order — a tiny window is enough
+
 export function loadDay(t: SymbolTarget, date: string, tf: string): any {
+  const memoKey = `${t.profileId}|${date}|${tf}`;
+  if (dayMemo.has(memoKey)) return dayMemo.get(memoKey);
+  const built = loadDayUncached(t, date, tf);
+  if (dayMemo.size >= DAY_MEMO_CAP) dayMemo.delete(dayMemo.keys().next().value as string);
+  dayMemo.set(memoKey, built);
+  return built;
+}
+
+function loadDayUncached(t: SymbolTarget, date: string, tf: string): any {
   if (t.symbol === 'SPX' && t.dte === 0) {
     // Fast path: use the prebuilt .brc cache when present & valid. When it's
     // absent/stale/incompatible, DON'T return null — fall through to the same

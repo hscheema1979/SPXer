@@ -30,19 +30,19 @@ function argVal(flag: string, def: string): string {
   return i >= 0 && i + 1 < process.argv.length ? process.argv[i + 1] : def;
 }
 const TARGET = resolveSymbolTarget(process.argv);
-const TF = parseInt(argVal('--tf', '3'), 10);
-const FAST = parseInt(argVal('--fast', '3'), 10);
-const SLOW = parseInt(argVal('--slow', '12'), 10);
-const OFFSET = parseInt(argVal('--offset', '0'), 10);   // strikes, neg = ITM
-const TP_PCT = parseInt(argVal('--tp', '25'), 10);
-const SL_PCT = parseInt(argVal('--sl', '20'), 10);
-const GATE_START = argVal('--gate-start', '09:30');
-const GATE_END = argVal('--gate-end', '16:00');
+let TF = parseInt(argVal('--tf', '3'), 10);
+let FAST = parseInt(argVal('--fast', '3'), 10);
+let SLOW = parseInt(argVal('--slow', '12'), 10);
+let OFFSET = parseInt(argVal('--offset', '0'), 10);   // strikes, neg = ITM
+let TP_PCT = parseInt(argVal('--tp', '25'), 10);
+let SL_PCT = parseInt(argVal('--sl', '20'), 10);
+let GATE_START = argVal('--gate-start', '09:30');
+let GATE_END = argVal('--gate-end', '16:00');
 const TICKER = argVal('--ticker', 'spxhma');
 // Which side to take. A bull cross buys a CALL and a bear cross buys a PUT, so
 // this is a filter on which crosses are tradeable at all. Default 'both' — the
 // behaviour every existing row was produced with.
-const SIDES = (() => {
+let SIDES = (() => {
   const raw = argVal('--sides', 'both').toLowerCase();
   return raw === 'calls' || raw === 'puts' ? raw : 'both';
 })() as 'both' | 'calls' | 'puts';
@@ -55,7 +55,7 @@ const DATES_OVR = argVal('--dates', '');
 // silently ran HMA no matter what the dialog said.
 const MA_KINDS = ['hma', 'dema', 'ema', 'sma', 'wma'] as const;
 type MaKind = typeof MA_KINDS[number];
-const SIGNAL: MaKind = (() => {
+let SIGNAL: MaKind = (() => {
   const raw = argVal('--signal', 'hma').toLowerCase();
   return (MA_KINDS as readonly string[]).includes(raw) ? (raw as MaKind) : 'hma';
 })();
@@ -67,8 +67,8 @@ function hhmmToMin(s: string, def: number): number {
   const m = s.match(/^(\d{1,2}):(\d{2})$/); if (!m) return def;
   return Number(m[1]) * 60 + Number(m[2]);
 }
-const GATE_START_HHMM = hhmmToMin(GATE_START, 9 * 60 + 30);
-const GATE_END_HHMM = hhmmToMin(GATE_END, 16 * 60);
+let GATE_START_HHMM = hhmmToMin(GATE_START, 9 * 60 + 30);
+let GATE_END_HHMM = hhmmToMin(GATE_END, 16 * 60);
 
 // ── Helpers (verbatim) ──────────────────────────────────────────────────────
 function sessOpenTs(date: string): number {
@@ -111,17 +111,36 @@ function wma(arr: number[], end: number, p: number): number | null {
   for (let i = 0; i < p; i++) { s += arr[end - i] * (p - i); w += (p - i); }
   return s / w;
 }
-function hmaDir(closes: number[], fast: number, slow: number): 'bull' | 'bear' | null {
-  const hf = Math.floor(fast / 2), sf = Math.floor(Math.sqrt(fast));
-  const hs = Math.floor(slow / 2), ss = Math.floor(Math.sqrt(slow));
-  const rf: number[] = [], rs: number[] = [];
-  let fa: number | null = null, sa: number | null = null;
-  for (let i = 0; i < closes.length; i++) {
-    const a = wma(closes, i, hf), b = wma(closes, i, fast);
-    if (a != null && b != null) { rf.push(2 * a - b); if (rf.length >= sf) fa = wma(rf, rf.length - 1, sf); }
-    const c = wma(closes, i, hs), d = wma(closes, i, slow);
-    if (c != null && d != null) { rs.push(2 * c - d); if (rs.length >= ss) sa = wma(rs, rs.length - 1, ss); }
+/**
+ * Final HMA value for one period — the TAIL only.
+ *
+ * The straightforward form builds the whole raw series (2*wma(p/2) - wma(p))
+ * for every index and then takes wma(raw, last, sqrt(p)); every value except
+ * the last sqrt(p) is discarded. Only those are computed here. Identical
+ * arithmetic on the values that survive, and it turns an O(n*p) call into
+ * O(sqrt(p)*p) — the difference between 121ms and ~1ms per combo per day,
+ * which is what makes a parameter grid finishable.
+ *
+ * Returns null in exactly the cases the full form did: not enough bars for the
+ * raw series to reach sqrt(p) entries.
+ */
+function hmaLast(closes: number[], p: number): number | null {
+  const half = Math.floor(p / 2), sq = Math.floor(Math.sqrt(p));
+  const n = closes.length;
+  // Raw series index i is defined once wma(closes,i,p) exists, i.e. i >= p-1.
+  // It therefore has n-(p-1) entries; the smoother needs sq of them.
+  if (n - (p - 1) < sq) return null;
+  const raw: number[] = [];
+  for (let i = n - sq; i < n; i++) {
+    const a = wma(closes, i, half), b = wma(closes, i, p);
+    if (a == null || b == null) return null;
+    raw.push(2 * a - b);
   }
+  return wma(raw, raw.length - 1, sq);
+}
+function hmaDir(closes: number[], fast: number, slow: number): 'bull' | 'bear' | null {
+  const fa = hmaLast(closes, fast);
+  const sa = hmaLast(closes, slow);
   if (fa == null || sa == null) return null;
   return fa > sa ? 'bull' : 'bear';
 }
@@ -584,4 +603,66 @@ function main() {
   process.stdout.write(JSON.stringify({ configId, row }) + '\n');
 }
 
-main();
+/**
+ * Grid mode — sweep the signal dimensions without re-paying startup or the
+ * day decode.
+ *
+ *   --grid-ma  hma,ema        --grid-tf   1,2,3,5
+ *   --grid-fast 3-12          --grid-slow 12-25
+ *   --grid-gate-start 09:30,14:00
+ *
+ * Each cell reassigns the module tunables and calls main() — the SAME code
+ * path a single run takes, so a one-cell grid is byte-identical to running
+ * that config on its own (verified). Days are decoded once and served from
+ * loadDay's memo for every later cell.
+ *
+ * gate-start is a grid dimension, NOT a post-hoc filter: the streak/fired
+ * bookkeeping only starts at the gate (line ~269), so a full-day run filtered
+ * to 14:00 is provably not the same set of fills as a run gated at 14:00.
+ */
+function parseSpan(raw: string | undefined): number[] | null {
+  if (!raw) return null;
+  const out = new Set<number>();
+  for (const part of raw.split(',').map(x => x.trim()).filter(Boolean)) {
+    const m = /^(\d+)-(\d+)$/.exec(part);
+    if (m) { for (let i = +m[1]; i <= +m[2]; i++) out.add(i); }
+    else if (/^\d+$/.test(part)) out.add(+part);
+  }
+  return out.size ? [...out].sort((a, b) => a - b) : null;
+}
+
+const GRID_MA = argVal('--grid-ma', '') ? argVal('--grid-ma', '').split(',').map(x => x.trim()).filter(Boolean) : null;
+const GRID_TF = parseSpan(argVal('--grid-tf', ''));
+const GRID_FAST = parseSpan(argVal('--grid-fast', ''));
+const GRID_SLOW = parseSpan(argVal('--grid-slow', ''));
+const GRID_GATE = argVal('--grid-gate-start', '') ? argVal('--grid-gate-start', '').split(',').map(x => x.trim()).filter(Boolean) : null;
+
+if (GRID_MA || GRID_TF || GRID_FAST || GRID_SLOW || GRID_GATE) {
+  const mas = (GRID_MA ?? [SIGNAL]) as MaKind[];
+  const tfs = GRID_TF ?? [TF];
+  const fasts = GRID_FAST ?? [FAST];
+  const slows = GRID_SLOW ?? [SLOW];
+  const gates = GRID_GATE ?? [GATE_START];
+  // fast must stay below slow — a cross needs two different lengths.
+  const cells: Array<[MaKind, number, number, number, string]> = [];
+  for (const ma of mas) for (const tf of tfs) for (const f of fasts) for (const sl of slows) for (const g of gates) {
+    if (f >= sl) continue;
+    cells.push([ma, tf, f, sl, g]);
+  }
+  process.stderr.write(`\n=== grid: ${cells.length} cells (${mas.join('/')} x tf ${tfs.join(',')} x fast ${fasts[0]}-${fasts[fasts.length - 1]} x slow ${slows[0]}-${slows[slows.length - 1]} x gate ${gates.join(',')})\n\n`);
+  const t0 = Date.now();
+  let done = 0;
+  for (const [ma, tf, f, sl, g] of cells) {
+    SIGNAL = ma; TF = tf; FAST = f; SLOW = sl;
+    GATE_START = g; GATE_START_HHMM = hhmmToMin(GATE_START, 9 * 60 + 30);
+    try { main(); } catch (e: any) { process.stderr.write(`  cell ${ma} tf${tf} ${f}x${sl} @${g} FAILED: ${e.message}\n`); }
+    done++;
+    if (done % 25 === 0 || done === cells.length) {
+      const per = (Date.now() - t0) / done;
+      process.stderr.write(`  ${done}/${cells.length} cells  ${(per).toFixed(0)}ms/cell  eta ${(((cells.length - done) * per) / 1000).toFixed(0)}s\n`);
+    }
+  }
+  process.stderr.write(`\n=== grid done: ${cells.length} cells in ${((Date.now() - t0) / 1000).toFixed(1)}s\n`);
+} else {
+  main();
+}
