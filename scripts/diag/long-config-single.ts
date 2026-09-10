@@ -620,13 +620,19 @@ function main() {
  * bookkeeping only starts at the gate (line ~269), so a full-day run filtered
  * to 14:00 is provably not the same set of fills as a run gated at 14:00.
  */
+/**
+ * "3-12" or "3..12" (inclusive span), "-5..5" for signed spans, or a comma
+ * list. Negative values need the `..` form — "-5-5" is ambiguous.
+ */
 function parseSpan(raw: string | undefined): number[] | null {
   if (!raw) return null;
   const out = new Set<number>();
   for (const part of raw.split(',').map(x => x.trim()).filter(Boolean)) {
-    const m = /^(\d+)-(\d+)$/.exec(part);
-    if (m) { for (let i = +m[1]; i <= +m[2]; i++) out.add(i); }
-    else if (/^\d+$/.test(part)) out.add(+part);
+    const dots = /^(-?\d+)\.\.(-?\d+)$/.exec(part);
+    const dash = /^(\d+)-(\d+)$/.exec(part);
+    const m = dots ?? dash;
+    if (m) { const a = +m[1], b = +m[2]; for (let i = Math.min(a, b); i <= Math.max(a, b); i++) out.add(i); }
+    else if (/^-?\d+$/.test(part)) out.add(+part);
   }
   return out.size ? [...out].sort((a, b) => a - b) : null;
 }
@@ -636,30 +642,41 @@ const GRID_TF = parseSpan(argVal('--grid-tf', ''));
 const GRID_FAST = parseSpan(argVal('--grid-fast', ''));
 const GRID_SLOW = parseSpan(argVal('--grid-slow', ''));
 const GRID_GATE = argVal('--grid-gate-start', '') ? argVal('--grid-gate-start', '').split(',').map(x => x.trim()).filter(Boolean) : null;
+// Strike offset, in STRIKES (--grid-offset) or in DOLLARS from spot
+// (--grid-offset-dollars, divided by this profile's strike interval).
+// Dollars is the honest unit for a sweep: on SPX "10" strikes is $50 from
+// spot, which at 14:30 is delta 0.99 bid/ask 52.00/52.30 — a synthetic share,
+// not a long-option trade. $25 ITM to $25 OTM spans delta 0.92 down to 0.10;
+// outside that the 0DTE chain is either a 67% spread or has no gamma left.
+const GRID_OFF_D = parseSpan(argVal('--grid-offset-dollars', ''));
+const GRID_OFFSET = GRID_OFF_D
+  ? [...new Set(GRID_OFF_D.map(d => Math.round(d / TARGET.strikeInterval)))].sort((a, b) => a - b)
+  : parseSpan(argVal('--grid-offset', ''));
 
-if (GRID_MA || GRID_TF || GRID_FAST || GRID_SLOW || GRID_GATE) {
+if (GRID_MA || GRID_TF || GRID_FAST || GRID_SLOW || GRID_GATE || GRID_OFFSET) {
   const mas = (GRID_MA ?? [SIGNAL]) as MaKind[];
   const tfs = GRID_TF ?? [TF];
   const fasts = GRID_FAST ?? [FAST];
   const slows = GRID_SLOW ?? [SLOW];
   const gates = GRID_GATE ?? [GATE_START];
+  const offsets = GRID_OFFSET ?? [OFFSET];
   // Equal lengths can never cross, so those cells are always skipped. INVERTED
   // pairs (fast > slow) are a real strategy — the mirror signal — and are
   // included with --grid-invert 1.
   const allowInverted = argVal('--grid-invert', '0') === '1';
-  const cells: Array<[MaKind, number, number, number, string]> = [];
-  for (const ma of mas) for (const tf of tfs) for (const f of fasts) for (const sl of slows) for (const g of gates) {
+  const cells: Array<[MaKind, number, number, number, string, number]> = [];
+  for (const ma of mas) for (const tf of tfs) for (const f of fasts) for (const sl of slows) for (const g of gates) for (const off of offsets) {
     if (f === sl) continue;
     if (!allowInverted && f > sl) continue;
-    cells.push([ma, tf, f, sl, g]);
+    cells.push([ma, tf, f, sl, g, off]);
   }
-  process.stderr.write(`\n=== grid: ${cells.length} cells (${mas.join('/')} x tf ${tfs.join(',')} x fast ${fasts[0]}-${fasts[fasts.length - 1]} x slow ${slows[0]}-${slows[slows.length - 1]} x gate ${gates.join(',')})\n\n`);
+  process.stderr.write(`\n=== grid: ${cells.length} cells (${mas.join('/')} x tf ${tfs.join(',')} x fast ${fasts[0]}-${fasts[fasts.length - 1]} x slow ${slows[0]}-${slows[slows.length - 1]} x gate ${gates.join(',')} x offset ${offsets.map(o => `${o > 0 ? '+' : ''}${o}str/$${o * TARGET.strikeInterval}`).join(',')})\n\n`);
   const t0 = Date.now();
   let done = 0;
-  for (const [ma, tf, f, sl, g] of cells) {
-    SIGNAL = ma; TF = tf; FAST = f; SLOW = sl;
+  for (const [ma, tf, f, sl, g, off] of cells) {
+    SIGNAL = ma; TF = tf; FAST = f; SLOW = sl; OFFSET = off;
     GATE_START = g; GATE_START_HHMM = hhmmToMin(GATE_START, 9 * 60 + 30);
-    try { main(); } catch (e: any) { process.stderr.write(`  cell ${ma} tf${tf} ${f}x${sl} @${g} FAILED: ${e.message}\n`); }
+    try { main(); } catch (e: any) { process.stderr.write(`  cell ${ma} tf${tf} ${f}x${sl} @${g} off${off} FAILED: ${e.message}\n`); }
     done++;
     if (done % 25 === 0 || done === cells.length) {
       const per = (Date.now() - t0) / done;
