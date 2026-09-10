@@ -59,12 +59,78 @@ function decode(v: any): any {
   return v;
 }
 
-/** Worker: serialize the whole Stat-map to a shard file. */
+/**
+ * Worker / finalize: serialize the whole Stat-map to a file.
+ *
+ * Written ONE TOP-LEVEL ENTRY PER LINE, never as a single JSON.stringify of
+ * the whole map. The iron accumulators reached 535,937,273 bytes on
+ * 2026-09-08 — within 1 MB of V8's MAX_STRING_LENGTH (536,870,888) — and
+ * `JSON.stringify(obj)` threw RangeError in every nightly merge from then on
+ * ("iron#merge exited 1"), even on a clean bootstrap. The output is still one
+ * valid JSON object (`{` … `"k":v,` … `"k":v` … `}`), so small files stay
+ * readable by a plain JSON.parse; readStateEntries() streams the big ones.
+ */
 export function dumpResults(results: Map<string, any>, outPath: string): void {
-  const obj: Record<string, any> = {};
-  for (const [k, v] of results) obj[k] = encode(v);
   fs.mkdirSync(path.dirname(outPath), { recursive: true });
-  fs.writeFileSync(outPath, JSON.stringify(obj));
+  const fd = fs.openSync(outPath, 'w');
+  try {
+    fs.writeSync(fd, '{\n');
+    let first = true;
+    for (const [k, v] of results) {
+      fs.writeSync(fd, (first ? '' : ',\n') + JSON.stringify(k) + ':' + JSON.stringify(encode(v)));
+      first = false;
+    }
+    fs.writeSync(fd, '\n}\n');
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+/**
+ * Files at or above this size cannot be read into one JS string
+ * (fs.readFileSync(file,'utf8') throws past MAX_STRING_LENGTH), so they are
+ * parsed line by line. Anything smaller takes the whole-file fast path, which
+ * also keeps pre-2026-09-10 single-line state/shard files loadable.
+ */
+export const WHOLE_FILE_MAX_BYTES = 256 * 1024 * 1024;
+
+/** Iterate top-level (key, decoded value) entries of a state/shard file. */
+export function readStateEntries(
+  file: string,
+  onEntry: (key: string, decoded: any) => void,
+  wholeFileMaxBytes: number = WHOLE_FILE_MAX_BYTES,
+): void {
+  if (fs.statSync(file).size < wholeFileMaxBytes) {
+    const obj = JSON.parse(fs.readFileSync(file, 'utf8'));
+    for (const k of Object.keys(obj)) onEntry(k, decode(obj[k]));
+    return;
+  }
+  // Large file: must be the one-entry-per-line layout dumpResults() writes.
+  const fd = fs.openSync(file, 'r');
+  const buf = Buffer.allocUnsafe(8 * 1024 * 1024);
+  let carry = '';
+  const handleLine = (line: string) => {
+    let t = line.trim();
+    if (t === '' || t === '{' || t === '}') return;
+    if (t.endsWith(',')) t = t.slice(0, -1);
+    const one = JSON.parse('{' + t + '}');
+    for (const k of Object.keys(one)) onEntry(k, decode(one[k]));
+  };
+  try {
+    for (;;) {
+      const n = fs.readSync(fd, buf, 0, buf.length, null);
+      if (n === 0) break;
+      carry += buf.toString('utf8', 0, n);
+      let nl: number;
+      while ((nl = carry.indexOf('\n')) >= 0) {
+        handleLine(carry.slice(0, nl));
+        carry = carry.slice(nl + 1);
+      }
+    }
+    if (carry.length) handleLine(carry);
+  } finally {
+    fs.closeSync(fd);
+  }
 }
 
 // Reduce `src` into `dst` with the field rules above. `peakConcurrent` is the
@@ -92,11 +158,9 @@ export function loadShardsInto(dir: string, results: Map<string, any>): void {
   const files = fs.readdirSync(dir).filter(f => f.endsWith('.json')).sort();
   if (files.length === 0) throw new Error(`[sweep-shard] no shard dumps in ${dir}`);
   for (const f of files) {
-    const obj = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8'));
-    for (const k of Object.keys(obj)) {
-      const decoded = decode(obj[k]);
+    readStateEntries(path.join(dir, f), (k, decoded) => {
       results.set(k, results.has(k) ? reduceInto(results.get(k), decoded) : decoded);
-    }
+    });
   }
 }
 
@@ -108,11 +172,9 @@ export function loadShardsInto(dir: string, results: Map<string, any>): void {
  */
 export function mergeStateFile(file: string, results: Map<string, any>): boolean {
   if (!fs.existsSync(file)) return false;
-  const obj = JSON.parse(fs.readFileSync(file, 'utf8'));
-  for (const k of Object.keys(obj)) {
-    const decoded = decode(obj[k]);
+  readStateEntries(file, (k, decoded) => {
     results.set(k, results.has(k) ? reduceInto(results.get(k), decoded) : decoded);
-  }
+  });
   return true;
 }
 

@@ -140,7 +140,16 @@ with a Polygon indices entitlement that changed on 09-10; that is inferred
 from timing, not verified against the account. If it recurs, the probe script
 is `/tmp/polygon-eod-probe.sh` (copy it somewhere durable).
 
-**Sweep state is contaminated and the iron merge is failing (pre-existing).**
+**Iron merge root cause (found 2026-09-10 evening, fixed):** the iron
+accumulator reached 535,937,273 bytes on 09-08 — within 1 MB of V8's
+`MAX_STRING_LENGTH` (536,870,888) — so `JSON.stringify(wholeState)` in
+`sweep-shard.ts::dumpResults` threw and the merge exited 1 every night from
+then on, including on a clean bootstrap. `dumpResults` now writes one
+top-level entry per line (still one JSON object) and `readStateEntries`
+parses files ≥ 256 MB line by line; smaller and legacy single-line files
+take the whole-file path. Pinned by `tests/diag/sweep-shard.test.ts`.
+
+**Sweep state was contaminated (rebuilt 2026-09-10 night).**
 `data/sweep-state/{SPX,NDX}-{credit,iron,concdist}.json` accumulate per-config
 results across all dates; the 48 junk sessions (07-06 → 09-09) are baked into
 `pnl/n/wins/capNets/perHour`, which cannot be recomputed from the per-date map
