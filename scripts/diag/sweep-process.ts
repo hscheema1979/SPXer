@@ -52,6 +52,9 @@ export function installSignalCleanup(): void {
   process.on('SIGTERM', () => die(143));
 }
 
+/** Number of trailing stderr lines carried into a child's failure message. */
+export const ERR_TAIL_LINES = 20;
+
 export interface RunScriptOpts {
   cmd: string;                     // executable, e.g. 'nice'
   args: string[];                  // full argv (prefix + npx tsx <script> …)
@@ -73,6 +76,7 @@ export function runScript(o: RunScriptOpts): Promise<void> {
     });
     liveChildren.add(ch);
     let lastErr = '';
+    const errTail: string[] = [];
     let settled = false;
     const settle = (err?: Error) => {
       if (settled) return;
@@ -90,9 +94,18 @@ export function runScript(o: RunScriptOpts): Promise<void> {
     // Jul-31 concurrent-distribution merge hang. Deliberately not forwarded:
     // the nightly log is the orchestrator's narrative, not per-date spam.
     ch.stdout!.on('data', () => {});
+    // Keep the LAST 20 non-empty stderr lines, not just the final one. A Node
+    // fatal (heap OOM, RangeError) ends with "Node.js v22.x" — the final line
+    // alone told us nothing for a week of iron/concdist merge failures.
     ch.stderr!.on('data', d => {
       const s = d.toString();
-      lastErr = s.trim().split('\n').pop() || lastErr;
+      for (const line of s.split('\n')) {
+        const t = line.trim();
+        if (!t) continue;
+        errTail.push(t);
+        if (errTail.length > ERR_TAIL_LINES) errTail.shift();
+      }
+      lastErr = errTail.join(' | ');
       o.onErrLine?.(s);
     });
     ch.on('error', e => settle(new Error(`${o.tag} spawn error: ${e.message}`)));
