@@ -352,6 +352,58 @@ function tradesFromArtifact(job: LabJob): { trades: TradeRow[]; tradesPnl: numbe
   return { trades, tradesPnl }
 }
 
+/**
+ * Position sizing applied AFTER the fact.
+ *
+ * Quantity does not change when a trade is entered or exited — no capital,
+ * margin or liquidity constraint is modelled — so sizing is a pure function of
+ * the stored fills. Runs stay canonical at one contract and this rescales the
+ * view, which means "what would 10 contracts have done" costs no re-run.
+ *
+ *   contracts N  every fill takes N
+ *   dollars   X  spend up to $X of premium per fill: floor(X / (entryPx*100))
+ *   risk      X  risk $X per fill: floor(X / maxLoss), where maxLoss is the
+ *                stop distance when the run had one, else the whole premium
+ *
+ * A fill the budget cannot afford one unit of is DROPPED and counted — that
+ * trade could not have been taken. Shares runs already carry a real qty from
+ * their engine, so a sizing override replaces it rather than multiplying it.
+ */
+export interface SizingOverride {
+  mode: "contracts" | "dollars" | "risk"
+  value: number
+  /** Stop distance as a fraction of premium, for risk mode (0 = no stop). */
+  slFrac?: number
+}
+
+export function applySizing(
+  trades: TradeRow[],
+  sizing: SizingOverride,
+): { trades: TradeRow[]; unaffordable: number } {
+  const out: TradeRow[] = []
+  let unaffordable = 0
+  for (const t of trades) {
+    const unit = Math.abs(t.entryPx) * (t.strike != null ? 100 : 1) // options are per-100
+    let qty: number
+    if (sizing.mode === "contracts") {
+      qty = Math.max(0, Math.floor(sizing.value))
+    } else if (sizing.mode === "dollars") {
+      qty = unit > 0 ? Math.floor(sizing.value / unit) : 0
+    } else {
+      const maxLoss = sizing.slFrac && sizing.slFrac > 0 ? unit * sizing.slFrac : unit
+      qty = maxLoss > 0 ? Math.floor(sizing.value / maxLoss) : 0
+    }
+    if (qty < 1) { unaffordable++; continue }
+    // Scale the STORED pnl by the quantity ratio rather than recomputing it
+    // from entryPx/exitPx: those are rounded to cents in the log, and
+    // re-deriving 50 fills from them drifted the total by $3 against the
+    // engine's own figure. Ratio scaling is exact at any qty.
+    const baseQty = t.qty && t.qty > 0 ? t.qty : 1
+    out.push({ ...t, qty, pnl: +((t.pnl * qty) / baseQty).toFixed(2) })
+  }
+  return { trades: out, unaffordable }
+}
+
 /** Per-run analytics derived from the fills — no second source of truth. */
 export interface RunAnalytics {
   byDay: Array<{ date: string; pnl: number; n: number; wins: number; cum: number }>
@@ -465,9 +517,10 @@ function analyzeTrades(trades: TradeRow[]): RunAnalytics {
   }
 }
 
-export function jobResultPayload(jobId: string): {
+export function jobResultPayload(jobId: string, sizing?: SizingOverride): {
   job: LabJob; result?: LabJobResult; specSummary: Record<string, unknown>
   trades?: TradeRow[]; tradesPnl?: number; analytics?: RunAnalytics
+  sizing?: SizingOverride & { unaffordable: number }
 } | undefined {
   const job = jobs.get(jobId)
   if (!job) return undefined
@@ -486,9 +539,16 @@ export function jobResultPayload(jobId: string): {
   // The fills ride along so the review page can show WHAT a run did, and
   // whether the fills add up to the P&L the summary claims.
   const log = tradesFromArtifact(job)
+  if (!log) return { job, result: job.result, specSummary }
+
+  // The stored run is the baseline; a sizing override is a view over it.
+  const sized = sizing ? applySizing(log.trades, sizing) : undefined
+  const trades = sized ? sized.trades : log.trades
+  const tradesPnl = sized ? +trades.reduce((a, t) => a + t.pnl, 0).toFixed(2) : log.tradesPnl
   return {
     job, result: job.result, specSummary,
-    trades: log?.trades, tradesPnl: log?.tradesPnl,
-    analytics: log ? analyzeTrades(log.trades) : undefined,
+    trades, tradesPnl,
+    analytics: analyzeTrades(trades),
+    sizing: sizing ? { ...sizing, unaffordable: sized!.unaffordable } : undefined,
   }
 }

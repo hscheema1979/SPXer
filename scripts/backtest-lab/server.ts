@@ -186,7 +186,15 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
   // ── results ───────────────────────────────────────────────────────────────
   const resultMatch = /^\/api\/results\/([^/]+)$/.exec(p)
   if (resultMatch && method === "GET") {
-    const payload = jobResultPayload(decodeURIComponent(resultMatch[1]))
+    // Optional sizing view: ?sizeMode=contracts|dollars|risk&sizeValue=N[&slFrac=0.2]
+    // The stored run is untouched — this only rescales what comes back.
+    const modeRaw = url.searchParams.get("sizeMode")
+    const valueRaw = Number(url.searchParams.get("sizeValue"))
+    const sizing =
+      (modeRaw === "contracts" || modeRaw === "dollars" || modeRaw === "risk") && Number.isFinite(valueRaw) && valueRaw > 0
+        ? { mode: modeRaw, value: valueRaw, slFrac: Number(url.searchParams.get("slFrac")) || undefined }
+        : undefined
+    const payload = jobResultPayload(decodeURIComponent(resultMatch[1]), sizing)
     if (!payload) return sendJson(res, 404, { error: `unknown job: ${resultMatch[1]}` })
     return sendJson(res, 200, payload)
   }
