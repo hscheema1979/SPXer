@@ -24,6 +24,7 @@ import * as fs from "node:fs"
 import * as path from "node:path"
 import { URL } from "node:url"
 import {
+  specToLiveConfig,
   validateSpec,
   type BacktestSpec,
   type EngineCapabilities,
@@ -184,6 +185,33 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
   }
 
   // ── results ───────────────────────────────────────────────────────────────
+  // ── promote (backtest -> live optionx config) ─────────────────────────────
+  // GET  /api/promote?jobIds=a,b&dollarsPerTrade=2000   -> PREVIEW only.
+  // Returns the config(s) that WOULD be created and creates nothing. Actual
+  // creation is the studio POSTing these to the optionx API, so the operator
+  // sees the exact JSON first — the offset and TP/SL units both change on the
+  // way across, and a wrong one is a live position at the wrong strike.
+  if (p === "/api/promote" && method === "GET") {
+    const ids = (url.searchParams.get("jobIds") ?? "").split(",").map((x) => x.trim()).filter(Boolean)
+    if (!ids.length) return sendJson(res, 400, { error: "jobIds is required" })
+    const dollars = Number(url.searchParams.get("dollarsPerTrade"))
+    if (!Number.isFinite(dollars) || dollars <= 0) {
+      return sendJson(res, 400, { error: "dollarsPerTrade must be a positive number (legs are sized in dollars, not contracts)" })
+    }
+    const configs: unknown[] = []
+    const errors: Array<{ jobId: string; error: string }> = []
+    for (const jobId of ids) {
+      const job = getJob(jobId)
+      if (!job?.spec) { errors.push({ jobId, error: "unknown job" }); continue }
+      try {
+        configs.push(specToLiveConfig(job.spec, { dollarsPerTrade: dollars, idSuffix: "live" }))
+      } catch (e) {
+        errors.push({ jobId, error: (e as Error).message })
+      }
+    }
+    return sendJson(res, 200, { preview: true, created: false, dollarsPerTrade: dollars, configs, errors })
+  }
+
   // ── combined results (basket of runs) ─────────────────────────────────────
   // GET /api/results/combine?jobIds=a,b,c[&sizeMode=&sizeValue=&slFrac=]
   // Registered BEFORE /api/results/:jobId so "combine" is not read as an id.

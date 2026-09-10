@@ -427,6 +427,114 @@ export function specToRunRequest(spec: BacktestSpec): RunRequest {
   }
 }
 
+
+// ── Promotion: a spec becomes a live optionx config ─────────────────────────
+
+/** Per-symbol engine plumbing, mirroring the studio's strategy editor. */
+function livePlumbing(symbol: string): {
+  optionPrefix: string; strikeInterval: number; signalSymbol?: string; strikeDivisor?: number
+} {
+  const s = symbol.trim().toUpperCase()
+  if (s === "SPX") return { optionPrefix: "SPXW", strikeInterval: 5 }
+  if (s === "NDX") return { optionPrefix: "NDXP", strikeInterval: 10 }
+  // XSP has no book of its own and is exactly SPX/10: signal off SPX, then
+  // scale the spot back down for the strike grid.
+  if (s === "XSP") return { optionPrefix: "XSP", strikeInterval: 1, signalSymbol: "SPX", strikeDivisor: 10 }
+  return { optionPrefix: s, strikeInterval: 1 }
+}
+
+export interface PromoteOptions {
+  /** Dollars of premium per leg per trade. Equal dollars, not equal contracts:
+   *  a $10-ITM leg costs ~$1,830 against a $10-OTM leg's ~$740, so equal
+   *  contracts would put 71% of the capital in one leg. */
+  dollarsPerTrade: number
+  /** Live configs are created paused; the operator enables them. */
+  disabled?: boolean
+  idSuffix?: string
+}
+
+/**
+ * Lab spec -> optionx live config. This is the ONE conversion; nothing about it
+ * should ever be done by hand, because two fields change units on the way:
+ *
+ *   offset  spec is in STRIKES, the live config is in DOLLARS. Copying the
+ *           number gives $2 ITM where $10 was meant on SPX (5x too shallow),
+ *           and $20 SPX-equivalent where $10 was meant on XSP (2x too deep,
+ *           since strikeDivisor scales the spot and not the offset).
+ *   TP/SL   both are multipliers now, so these pass straight through — that is
+ *           the point of the pricePct -> priceMult migration.
+ */
+export function specToLiveConfig(spec: BacktestSpec, opts: PromoteOptions): Record<string, unknown> {
+  if (spec.type !== "long-option") {
+    throw new Error(`only long-option specs promote today (got ${spec.type})`)
+  }
+  const sym = spec.underlying.symbol.toUpperCase()
+  const plumb = livePlumbing(sym)
+  const offsetStrikes = (spec.structure as { offset: number }).offset
+  const tpMult = spec.exit.tp?.kind === "priceMult" ? spec.exit.tp.value
+    : spec.exit.tp?.kind === "pricePct" ? 1 + spec.exit.tp.value / 100 : undefined
+  const slMult = spec.exit.sl?.kind === "priceMult" ? spec.exit.sl.value
+    : spec.exit.sl?.kind === "pricePct" ? 1 - spec.exit.sl.value / 100 : undefined
+  if (tpMult === undefined || slMult === undefined) throw new Error("spec must carry both TP and SL to promote")
+
+  const money = offsetStrikes === 0 ? "atm"
+    : `${Math.abs(offsetStrikes) * plumb.strikeInterval}${offsetStrikes < 0 ? "itm" : "otm"}`
+  const id = [
+    sym.toLowerCase(),
+    `${spec.entry.indicator}${spec.entry.timeframe}`,
+    `${spec.entry.fast}x${spec.entry.slow}`,
+    money,
+    `tp${Math.round((tpMult - 1) * 100)}`,
+    `sl${Math.round((1 - slMult) * 100)}`,
+    opts.idSuffix,
+  ].filter(Boolean).join("-")
+
+  return {
+    id,
+    name: specLabel(spec),
+    // Created paused on purpose: POST /api/configs starts a handler, and the
+    // engine's tick loop skips only on disabled === true.
+    enabled: true,
+    disabled: opts.disabled !== false,
+    signal: {
+      type: "hma_cross",
+      maType: spec.entry.indicator,
+      hmaFast: spec.entry.fast,
+      hmaSlow: spec.entry.slow,
+      timeframes: [spec.entry.timeframe],
+    },
+    contract: {
+      symbol: sym,
+      optionPrefix: plumb.optionPrefix,
+      strikeInterval: plumb.strikeInterval,
+      // THE conversion: strikes -> dollars.
+      strikeOffset: offsetStrikes * plumb.strikeInterval,
+      ...(plumb.strikeDivisor ? { strikeDivisor: plumb.strikeDivisor } : {}),
+      ...(plumb.signalSymbol ? { signalSymbol: plumb.signalSymbol } : {}),
+      dte: spec.underlying.dte ?? 0,
+      minContractPrice: 0.2,
+      maxContractPrice: 99,
+    },
+    risk: {
+      takeProfitMultiplier: tpMult,
+      stopLossMultiplier: slMult,
+      maxPositions: 1,
+      cooldownSec: 0,
+      // The backtest's exits are overwhelmingly reversals, not TP — this is the
+      // setting that reproduces it.
+      useFlip: true,
+    },
+    sizing: { type: "dollars", value: opts.dollarsPerTrade },
+    active: {
+      start: spec.entry.windowET.start,
+      end: spec.entry.windowET.end,
+      timezone: "America/New_York",
+    },
+    execution: { maxSpreadForMarket: 0.75 },
+    promotedFrom: { specId: spec.id, backtestLabel: specLabel(spec) },
+  }
+}
+
 // ── Labels & keys (one encoder/decoder) ─────────────────────────────────────
 
 /** Profile id / filename slug: SPX 0DTE → "spx-0dte", TQQQ (shares) → "tqqq". */
