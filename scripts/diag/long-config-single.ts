@@ -712,7 +712,17 @@ if (GRID_MA || GRID_TF || GRID_FAST || GRID_SLOW || GRID_GATE || GRID_OFFSET || 
     if (!allowInverted && f > slw) continue;
     for (const tp of tps) for (const sl of sls) cells.push([ma, tf, f, slw, g, off, tp, sl]);
   }
-  const mine = SHARD ? cells.filter((_, ix) => ix % SHARD.n === SHARD.i) : cells;
+  // CONTIGUOUS blocks, not a stride. TP/SL is the innermost dimension and those
+  // cells share one signal build, so a stride hands each shard 20/N of every
+  // group and makes it rebuild the contexts that many more times. Measured:
+  // block (13.3 + 19*0.90)/20 = 1.52s per cell vs stride (13.3 + 3*0.90)/4 =
+  // 4.00s — 2.6x worse, which turned a 9h run into a 79h one.
+  const mine = SHARD
+    ? cells.slice(
+        Math.floor((cells.length * SHARD.i) / SHARD.n),
+        Math.floor((cells.length * (SHARD.i + 1)) / SHARD.n),
+      )
+    : cells;
   process.stderr.write(`\n=== grid: ${mine.length}${SHARD ? `/${cells.length} (shard ${SHARD.i}/${SHARD.n})` : ''} cells (${mas.join('/')} x tf ${tfs.join(',')} x fast ${fasts[0]}-${fasts[fasts.length - 1]} x slow ${slows[0]}-${slows[slows.length - 1]} x gate ${gates.join(',')} x offset ${offsets.map(o => `${o > 0 ? '+' : ''}${o}str/$${o * TARGET.strikeInterval}`).join(',')} x tp ${tps.join('/')} x sl ${sls.join('/')})\n\n`);
   const t0 = Date.now();
   let done = 0;
