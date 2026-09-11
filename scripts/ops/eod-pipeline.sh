@@ -73,6 +73,20 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
+# PHASE 1b: BACKTEST-LAB SHARE TICKERS (leveraged ETFs in sweep-registry.json,
+# assetClass=shares). Their writer, backfill-etf-shares.ts, had only ever been
+# run by hand — every lab ticker sat frozen at 2026-05-22 until 2026-09-11.
+# --force on the last few days because the script otherwise SKIPS an existing
+# file, and a file written intraday (partial session) would never be refreshed.
+# Loud but non-fatal: the index sweeps below do not depend on these profiles.
+ETF_SHARES_DAYS="${ETF_SHARES_DAYS:-3}"
+log "[PHASE 1b] backtest-lab share tickers (registry shares, last $ETF_SHARES_DAYS days, --force)"
+if npx tsx scripts/backfill/backfill-etf-shares.ts --days="$ETF_SHARES_DAYS" --force --concurrency=4 >> "$LOG" 2>&1; then
+  log "[PHASE 1b] share tickers OK ✓"
+else
+  log "[PHASE 1b] share tickers FAILED rc=$? (non-fatal — see log above; lab profiles may be stale)"
+fi
+
 # PHASE 2: SWEEPS (optional — aggregation/analysis only, independent of backfill)
 # ─────────────────────────────────────────────────────────────────────────────
 log "[PHASE 2] sweep aggregation start (independent of backfill)"

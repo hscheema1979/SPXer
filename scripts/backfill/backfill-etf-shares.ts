@@ -29,7 +29,7 @@ import { writeDayParquet, type BarRow } from '../../src/storage/parquet-writer';
 
 const POLYGON_KEY = process.env.POLYGON_API_KEY;
 const POLYGON_BASE = 'https://api.polygon.io';
-if (!POLYGON_KEY) { console.error('POLYGON_API_KEY not set in .env'); process.exit(1); }
+if (!POLYGON_KEY && require.main === module) { console.error('POLYGON_API_KEY not set in .env'); process.exit(1); }
 
 // Highest-volume leveraged ETFs (both directions) for the pilot. The profile id
 // is the lowercased ticker — that becomes the parquet subdir and the sweep
@@ -44,7 +44,25 @@ function argVal(name: string): string | undefined {
   const flag = process.argv.find(a => a.startsWith(`--${name}=`));
   return flag ? flag.split('=').slice(1).join('=') : undefined;
 }
-const TICKERS = (argVal('tickers')?.split(',').map(s => s.trim().toUpperCase()).filter(Boolean)) ?? PILOT_TICKERS;
+/**
+ * Share-class tickers from sweep-registry.json (assetClass=shares) — the exact
+ * set the backtest lab offers, so the nightly run cannot drift from the UI.
+ * Falls back to PILOT_TICKERS when the registry is unreadable or has none.
+ */
+export function sharesTickersFromRegistry(registryJson: string, fallback: string[] = PILOT_TICKERS): string[] {
+  try {
+    const reg = JSON.parse(registryJson);
+    const t = (reg.profiles || [])
+      .filter((p: any) => p.assetClass === 'shares' && typeof p.symbol === 'string')
+      .map((p: any) => String(p.symbol).toUpperCase());
+    return t.length ? Array.from(new Set(t)) as string[] : fallback;
+  } catch { return fallback; }
+}
+const REGISTRY_PATH = path.resolve(__dirname, '../diag/sweep-registry.json');
+function defaultTickers(): string[] {
+  try { return sharesTickersFromRegistry(fs.readFileSync(REGISTRY_PATH, 'utf8')); } catch { return PILOT_TICKERS; }
+}
+const TICKERS = (argVal('tickers')?.split(',').map(s => s.trim().toUpperCase()).filter(Boolean)) ?? defaultTickers();
 const FORCE = process.argv.includes('--force');
 const DAYS = parseInt(argVal('days') || '', 10);
 const CONCURRENCY = Math.max(1, parseInt(argVal('concurrency') || '8', 10));
@@ -155,14 +173,40 @@ async function backfillTicker(ticker: string, dates: string[]) {
   }
   process.stderr.write('\n');
   console.log(`✓ ${ticker}: wrote ${written}, skipped ${skipped}, empty ${empty}, errors ${errors} → ${profileDir}`);
+  return { ticker, written, skipped, empty, errors };
+}
+
+export interface TickerRunSummary { ticker: string; written: number; skipped: number; empty: number; errors: number }
+
+/**
+ * Exit-code decision (docs/DATA-STORES.md rule 2: a backfill that writes
+ * nothing is a failure). Every requested date is a real trading day (the
+ * calendar is the spx-0dte parquet dir), so an `empty` Polygon answer is a
+ * feed problem, not a closed market; `errors` are thrown fetch/write
+ * failures. Returns the list of offending tickers; empty list = success.
+ */
+export function failedTickers(runs: TickerRunSummary[]): string[] {
+  return runs.filter(r => r.errors > 0 || r.empty > 0).map(r => `${r.ticker} (empty ${r.empty}, errors ${r.errors})`);
 }
 
 // ── main ───────────────────────────────────────────────────────────────────────
-(async () => {
+async function main() {
   const dates = tradingDates();
   console.log(`[etf-backfill] ${TICKERS.length} tickers × ${dates.length} trading days (${dates[0]} → ${dates[dates.length - 1]}), concurrency=${CONCURRENCY}, force=${FORCE}`);
+  const runs: TickerRunSummary[] = [];
   for (const ticker of TICKERS) {
-    await backfillTicker(ticker, dates);
+    runs.push(await backfillTicker(ticker, dates));
+  }
+  const bad = failedTickers(runs);
+  if (bad.length) {
+    console.error(`[etf-backfill] FAILED — ${bad.length}/${runs.length} tickers wrote nothing for a trading day: ${bad.join('; ')}`);
+    process.exitCode = 1;
+    return;
   }
   console.log('[etf-backfill] done.');
-})();
+}
+
+// Guarded so tests can import the pure helpers without starting a backfill.
+if (require.main === module) {
+  main().catch(e => { console.error(e); process.exit(1); });
+}
