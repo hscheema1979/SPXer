@@ -7,7 +7,7 @@
 import { describe, it, expect } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
-import { sharesTickersFromRegistry, failedTickers, unionTickers } from '../../scripts/backfill/backfill-etf-shares';
+import { sharesTickersFromRegistry, failedTickers, thinTickers, unionTickers } from '../../scripts/backfill/backfill-etf-shares';
 
 describe('sharesTickersFromRegistry', () => {
   it('returns the assetClass=shares symbols, upper-cased and de-duplicated', () => {
@@ -27,19 +27,22 @@ describe('sharesTickersFromRegistry', () => {
   });
 });
 
-describe('failedTickers', () => {
+describe('failedTickers / thinTickers', () => {
   it('is empty when every ticker wrote or skipped only', () => {
     expect(failedTickers([{ ticker: 'TQQQ', written: 3, skipped: 249, empty: 0, errors: 0 }])).toEqual([]);
   });
-  it('flags an empty trading day and any error', () => {
-    const bad = failedTickers([
-      { ticker: 'TQQQ', written: 2, skipped: 0, empty: 1, errors: 0 },
-      { ticker: 'FAS', written: 3, skipped: 0, empty: 0, errors: 0 },
-      { ticker: 'TNA', written: 0, skipped: 0, empty: 0, errors: 3 },
-    ]);
-    expect(bad).toHaveLength(2);
-    expect(bad[0]).toMatch(/^TQQQ/);
-    expect(bad[1]).toMatch(/^TNA/);
+  it('any error fails', () => {
+    expect(failedTickers([{ ticker: 'TNA', written: 0, skipped: 0, empty: 0, errors: 3 }])).toHaveLength(1);
+  });
+  it('a fully blank run fails only while Polygon lists the ticker active (LCDL delisted → not a failure)', () => {
+    const blank = [{ ticker: 'LCDL', written: 0, skipped: 0, empty: 3, errors: 0 }];
+    expect(failedTickers(blank)).toHaveLength(1);                         // default: assume active
+    expect(failedTickers(blank, () => false)).toEqual([]);               // delisted
+  });
+  it('thin tickers (some empty days, some written) are warnings, not failures (SPOG 58/76)', () => {
+    const runs = [{ ticker: 'SPOG', written: 18, skipped: 0, empty: 58, errors: 0 }];
+    expect(failedTickers(runs)).toEqual([]);
+    expect(thinTickers(runs)).toEqual(['SPOG (58 empty of 76)']);
   });
 });
 

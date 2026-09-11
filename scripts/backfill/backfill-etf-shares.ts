@@ -201,16 +201,41 @@ export interface TickerRunSummary { ticker: string; written: number; skipped: nu
 
 /**
  * Exit-code decision (docs/DATA-STORES.md rule 2: a backfill that writes
- * nothing is a failure). Every requested date is a real trading day (the
- * calendar is the spx-0dte parquet dir), so an `empty` Polygon answer is a
- * feed problem, not a closed market; `errors` are thrown fetch/write
- * failures. Returns the list of offending tickers; empty list = success.
+ * nothing is a failure) — tuned for this universe on 2026-09-11:
+ *   - any thrown fetch/write error → failure
+ *   - a run that wrote NOTHING and saw only empty days → failure, unless the
+ *     caller's `isActive(ticker)` says Polygon no longer lists it (LCDL was
+ *     delisted 2026-07; a dead ticker must not fail the nightly forever)
+ *   - some empty days alongside written days → NOT a failure. Thin leveraged
+ *     ETFs (SPOG: 58 of 76 sessions, UPW 5, FNGG 1) legitimately have zero
+ *     1m aggregates on quiet days; they are reported as warnings.
+ * Returns the offending tickers; empty list = success.
  */
-export function failedTickers(runs: TickerRunSummary[]): string[] {
-  return runs.filter(r => r.errors > 0 || r.empty > 0).map(r => `${r.ticker} (empty ${r.empty}, errors ${r.errors})`);
+export function failedTickers(runs: TickerRunSummary[], isActive: (ticker: string) => boolean = () => true): string[] {
+  const out: string[] = [];
+  for (const r of runs) {
+    if (r.errors > 0) { out.push(`${r.ticker} (errors ${r.errors}, empty ${r.empty})`); continue; }
+    const blank = r.written === 0 && r.empty > 0;
+    if (blank && isActive(r.ticker)) out.push(`${r.ticker} (all ${r.empty} requested days empty, ticker active)`);
+  }
+  return out;
 }
 
-// ── main ───────────────────────────────────────────────────────────────────────
+/** Tickers with some (not all) empty days — thin names, reported not failed. */
+export function thinTickers(runs: TickerRunSummary[]): string[] {
+  return runs.filter(r => r.errors === 0 && r.empty > 0 && r.written > 0).map(r => `${r.ticker} (${r.empty} empty of ${r.empty + r.written})`);
+}
+
+/** Polygon reference lookup: false when the ticker is delisted or unknown. */
+async function polygonActive(ticker: string): Promise<boolean> {
+  try {
+    const res = await fetch(`${POLYGON_BASE}/v3/reference/tickers/${encodeURIComponent(ticker)}?apiKey=${POLYGON_KEY}`, { signal: AbortSignal.timeout(15000) });
+    if (!res.ok) return res.status !== 404;   // 404 = unknown → treat as inactive
+    const j: any = await res.json();
+    return j?.results?.active === true;
+  } catch { return true; }                    // lookup failure must not hide a real gap
+}
+
 async function main() {
   const dates = tradingDates();
   console.log(`[etf-backfill] ${TICKERS.length} tickers × ${dates.length} trading days (${dates[0]} → ${dates[dates.length - 1]}), concurrency=${CONCURRENCY}, force=${FORCE}`);
@@ -218,7 +243,13 @@ async function main() {
   for (const ticker of TICKERS) {
     runs.push(await backfillTicker(ticker, dates));
   }
-  const bad = failedTickers(runs);
+  const thin = thinTickers(runs);
+  if (thin.length) console.warn(`[etf-backfill] thin (empty days, not failed): ${thin.join('; ')}`);
+  // Only tickers that were fully blank need the (paid) reference lookup.
+  const active = new Map<string, boolean>();
+  for (const r of runs) if (r.written === 0 && r.empty > 0 && r.errors === 0) active.set(r.ticker, await polygonActive(r.ticker));
+  for (const [t, a] of active) if (!a) console.warn(`[etf-backfill] ${t}: Polygon lists it inactive/unknown (delisted?) — not a failure; consider removing data/parquet/bars/${t.toLowerCase()} from the lab`);
+  const bad = failedTickers(runs, t => active.get(t) ?? true);
   if (bad.length) {
     console.error(`[etf-backfill] FAILED — ${bad.length}/${runs.length} tickers wrote nothing for a trading day: ${bad.join('; ')}`);
     process.exitCode = 1;

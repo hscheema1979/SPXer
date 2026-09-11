@@ -191,6 +191,11 @@ is not a build error.
       keeps the whole lab universe current. Catch-up for all 69 run 09-11.
       `nvda`/`tsla` are option profiles (excluded by the single-symbol rule)
       and stay frozen at 05-14 / 05-06.
+      Catch-up result: 65/69 clean; `LCDL` has no Polygon reference record
+      (delisted, last bar 2026-07-14); `SPOG` (58 of 76 sessions), `UPW` (5),
+      `FNGG` (1) are thin — zero 1m aggregates on quiet days. Exit rule now:
+      errors fail; a fully blank run fails only if Polygon lists the ticker
+      active; partial empties are warnings (`thinTickers`).
 
 - [ ] `data/spxer.db` — 15,053,926,400 bytes. `bars` empty. Freelist is 35,437
       pages × 4,096 = **~145 MB**, so a `VACUUM` (which needs ~15 GB of temp
