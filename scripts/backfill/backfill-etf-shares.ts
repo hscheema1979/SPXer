@@ -26,6 +26,7 @@ dotenv.config({ quiet: true } as any);
 import * as fs from 'fs';
 import * as path from 'path';
 import { writeDayParquet, type BarRow } from '../../src/storage/parquet-writer';
+import { sharesSymbols } from '../backtest-lab/capabilities';
 
 const POLYGON_KEY = process.env.POLYGON_API_KEY;
 const POLYGON_BASE = 'https://api.polygon.io';
@@ -59,8 +60,28 @@ export function sharesTickersFromRegistry(registryJson: string, fallback: string
   } catch { return fallback; }
 }
 const REGISTRY_PATH = path.resolve(__dirname, '../diag/sweep-registry.json');
+
+/** Upper-cased, de-duplicated union preserving first-seen order. */
+export function unionTickers(...lists: string[][]): string[] {
+  const out: string[] = [];
+  for (const l of lists) for (const t of l) { const u = String(t).toUpperCase(); if (u && !out.includes(u)) out.push(u); }
+  return out;
+}
+
+/**
+ * Default ticker set = registry shares ∪ every share profile the backtest lab
+ * advertises (capabilities.ts::sharesSymbols discovers them from the parquet
+ * dirs themselves — 74 dirs on 2026-09-11, of which only 5 are in the
+ * registry). The lab is the consumer, so its own discovery rule defines what
+ * the nightly refresh must keep current; the registry alone left 69 lab
+ * tickers frozen at 2026-05-22.
+ */
 function defaultTickers(): string[] {
-  try { return sharesTickersFromRegistry(fs.readFileSync(REGISTRY_PATH, 'utf8')); } catch { return PILOT_TICKERS; }
+  let reg: string[] = PILOT_TICKERS;
+  try { reg = sharesTickersFromRegistry(fs.readFileSync(REGISTRY_PATH, 'utf8')); } catch { /* fallback above */ }
+  let lab: string[] = [];
+  try { lab = sharesSymbols(); } catch (e: any) { console.error(`[etf-backfill] lab discovery unavailable (${e?.message}); registry only`); }
+  return unionTickers(reg, lab);
 }
 const TICKERS = (argVal('tickers')?.split(',').map(s => s.trim().toUpperCase()).filter(Boolean)) ?? defaultTickers();
 const FORCE = process.argv.includes('--force');

@@ -7,7 +7,7 @@
 import { describe, it, expect } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
-import { sharesTickersFromRegistry, failedTickers } from '../../scripts/backfill/backfill-etf-shares';
+import { sharesTickersFromRegistry, failedTickers, unionTickers } from '../../scripts/backfill/backfill-etf-shares';
 
 describe('sharesTickersFromRegistry', () => {
   it('returns the assetClass=shares symbols, upper-cased and de-duplicated', () => {
@@ -40,5 +40,11 @@ describe('failedTickers', () => {
     expect(bad).toHaveLength(2);
     expect(bad[0]).toMatch(/^TQQQ/);
     expect(bad[1]).toMatch(/^TNA/);
+  });
+});
+
+describe('unionTickers', () => {
+  it('upper-cases, de-duplicates, keeps first-seen order (registry first, lab discovery second)', () => {
+    expect(unionTickers(['tqqq', 'SOXL'], ['soxl', 'ASTX', 'gdxu', ''])).toEqual(['TQQQ', 'SOXL', 'ASTX', 'GDXU']);
   });
 });

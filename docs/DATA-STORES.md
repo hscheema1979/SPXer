@@ -21,7 +21,7 @@ profile, so it silently ran on range-less bars.
 |---|---|---|---|
 | `data/parquet/bars/{profile}/{date}.parquet` | `scripts/backfill/eod-backfill.ts` **only** | 1m OHLCV per contract + underlying, `source=polygon` | backtest engine (`loadDay`), monthly reports, sweeps — 33 files reference it |
 | `data/parquet/snapshots/{profile}/{date}.parquet` | `scripts/live/live-capture.ts` | bid/ask, mid, last, greeks, IV, OI — per minute | spread/liquidity analysis. **The only place bid/ask exists.** |
-| `data/parquet/bars/{tqqq,sqqq,soxl,tna,fas}/{date}.parquet` | `scripts/backfill/backfill-etf-shares.ts` (nightly `eod-pipeline.sh` PHASE 1b since 2026-09-11; ticker list = `sweep-registry.json` `assetClass=shares`) | 1m share OHLCV, `source=polygon` | backtest lab (`scripts/backtest-lab`, :3702) — registry ∩ parquet coverage. Frozen at 2026-05-22 until 09-11 because the writer had only been run by hand. |
+| `data/parquet/bars/{share ticker}/{date}.parquet` (75 dirs) | `scripts/backfill/backfill-etf-shares.ts` (nightly `eod-pipeline.sh` PHASE 1b since 2026-09-11; ticker list = registry shares ∪ `capabilities.ts::sharesSymbols()` discovery) | 1m share OHLCV, `source=polygon` | backtest lab (`scripts/backtest-lab`, :3702) — registry ∩ parquet coverage. Frozen at 2026-05-22 until 09-11 because the writer had only been run by hand. |
 | `data/flatfile-cache/{prefix}/` | `scripts/diag/preprocess-flatfiles.ts` | extracted Polygon S3 OPRA day-files | multi-DTE sweeps (avoids re-downloading 158MB/day) |
 | `data/sweep-state/{SYM}-{engine}.json` | `scripts/diag/sweep-parallel.ts` | persisted sweep accumulators | EOD incremental sweeps |
 | `data/reports/monthly-{spx,ndx}/` | `scripts/diag/monthly-gen.ts` | per-day contract report JSON | studio monthly view |
@@ -183,12 +183,14 @@ Reminder: `tsc` covers `src/` only, so a wrong argument count in `scripts/`
 is not a build error.
 
 ## Open items
-- [ ] The other 69 leveraged-ETF study dirs (`aapb` … `yinn`, `nvda`, `tsla`,
-      `spog`, …) are NOT in `sweep-registry.json`, so the lab does not show
-      them and PHASE 1b does not refresh them. They are frozen at 2026-05-22
-      (nvda 05-14, tsla 05-06). One command catches the ETFs up:
-      `npx tsx scripts/backfill/backfill-etf-shares.ts --tickers=<list>`;
-      add them to the registry (assetClass=shares) to make it nightly.
+- [x] (2026-09-11 evening) The other 69 share dirs (`aapb` … `yinn`) ARE
+      advertised by the lab — `capabilities.ts::sharesSymbols()` discovers
+      every single-symbol parquet dir, not just the registry — and the user's
+      own runs used ASTX/GDXU/TSLL. `backfill-etf-shares.ts` now defaults to
+      registry shares ∪ that discovery (75 tickers on 09-11), so PHASE 1b
+      keeps the whole lab universe current. Catch-up for all 69 run 09-11.
+      `nvda`/`tsla` are option profiles (excluded by the single-symbol rule)
+      and stay frozen at 05-14 / 05-06.
 
 - [ ] `data/spxer.db` — 15,053,926,400 bytes. `bars` empty. Freelist is 35,437
       pages × 4,096 = **~145 MB**, so a `VACUUM` (which needs ~15 GB of temp

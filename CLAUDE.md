@@ -9,7 +9,7 @@ This file provides guidance when working with code in this repository.
 ### Build & Test Status: ✅ GREEN
 
 - `npm run build` (`tsc`) — **passes clean**, 0 errors
-- `npm run test` (`vitest run`) — **847 passing / 0 failing** across 68 files
+- `npm run test` (`vitest run`) — **848 passing / 0 failing** across 68 files
 
 > The earlier `CODE-REVIEW-2026-05-22.md` (written for the `feat/shorts-fresh-fill-study` branch) lists "15 TS errors / 27 failing tests." Those all referenced `src/server/*` files (the old `:3601` replay viewer) which were deleted in commit `a32fe0e1a` ("remove dead :3601 replay viewer + replay CLI/legacy scripts", −22,867 lines). That review is **superseded** — see `CODE-REVIEW-2026-08-09.md` for the current accurate audit.
 
@@ -50,7 +50,7 @@ Freshness is monitored by `check-data-pipeline.sh` TIER 9 + `eodFreshnessStatus(
 ```bash
 # Build & test (BOTH GREEN)
 npm run build            # tsc → dist/  (0 errors)
-npm run test             # vitest run   (847 passing)
+npm run test             # vitest run   (848 passing)
 npm run test:watch       # vitest in watch mode
 
 # End-of-day pipeline (nightly backfill + incremental sweep)
@@ -236,7 +236,7 @@ Other: `GDRIVE_REMOTE` (archival), `LOG_LEVEL`, `NODE_ENV`.
 
 ## Testing
 
-Tests mirror `src/` and `scripts/` under `tests/`. Vitest with `globals: true`, `node` environment, 10s timeout. **847 tests pass.**
+Tests mirror `src/` and `scripts/` under `tests/`. Vitest with `globals: true`, `node` environment, 10s timeout. **848 tests pass.**
 
 ```
 tests/
@@ -293,7 +293,7 @@ See `DAILY-OPS-CHECKLIST.md` and `SERVICE-ARCHITECTURE.md` (note: both predate t
 
 ### Testing Requirements
 - Unit tests for pure functions (indicators, formatters, bar builders, friction/fill math)
-- `npm run test` must stay green before commit (currently 847/847)
+- `npm run test` must stay green before commit (currently 848/848)
 - Replay/sweep validation via `npx tsx scripts/diag/<sweep>.ts` for end-to-end checks
 
 ### Common Patterns
